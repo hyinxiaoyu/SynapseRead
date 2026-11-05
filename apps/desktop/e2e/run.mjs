@@ -5,6 +5,10 @@ import { launchPage, serveDist } from './harness.mjs';
 import { pdfFlow } from './pdf.mjs';
 import { txtFlow } from './txt.mjs';
 
+// The one CSP report that does not fail a flow, and only on a browser shown to send it
+// for an inert document. The EPUB flow separately asserts that the handler never ran.
+const PARSE_TIME_REPORT = 'script-src-attr inline ';
+
 const FLOWS = { txt: txtFlow, pdf: pdfFlow, epub: epubFlow };
 
 const only = process.argv.slice(2);
@@ -16,8 +20,13 @@ for (const [name, flow] of Object.entries(FLOWS)) {
   // A fresh browser per flow: one engine's state must not hide another's bugs.
   const { page, close } = await launchPage(server.url);
   try {
+    const { product } = await page.cdp.send('Browser.getVersion');
+    const parseReports = await page.parserReportsHandlers();
+    console.log(`     ${name}: ${product}, parser reports inline handlers: ${parseReports}`);
     await flow(page);
-    const violations = await page.cspViolations();
+    const violations = (await page.cspViolations()).filter(
+      (violation) => !(parseReports && violation.startsWith(PARSE_TIME_REPORT)),
+    );
     if (violations.length > 0) throw new Error(`CSP violations: ${violations.join(', ')}`);
     if (page.errors.length > 0) throw new Error(`page errors: ${page.errors.join('\n')}`);
     console.log(`ok   ${name}`);

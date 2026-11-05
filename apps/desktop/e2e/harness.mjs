@@ -245,6 +245,26 @@ export class Page {
     await this.drag(rect.start, rect.end);
   }
 
+  /**
+   * Whether this browser reports an inline handler merely for parsing it into an inert
+   * document. Some Chrome builds do, and epub.js parses every chapter before the sanitizer
+   * sees it, so the hostile fixture causes a blocked report even though nothing can run.
+   */
+  async parserReportsHandlers() {
+    const count = await this.evaluate(`(async () => {
+      window.__cspViolations.length = 0;
+      new DOMParser().parseFromString(
+        '<img xmlns="http://www.w3.org/1999/xhtml" onerror="x"/>',
+        'application/xhtml+xml',
+      );
+      await new Promise((done) => setTimeout(done, 100));
+      const count = window.__cspViolations.length;
+      window.__cspViolations.length = 0;
+      return count;
+    })()`);
+    return count > 0;
+  }
+
   /** CSP violations recorded since the page loaded. */
   cspViolations() {
     return this.evaluate('window.__cspViolations');

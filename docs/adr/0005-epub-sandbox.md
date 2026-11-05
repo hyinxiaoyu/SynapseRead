@@ -38,6 +38,11 @@ with `script-src-elem` violations, which is why the controls remove the CSP enti
    whatever the sandbox says.
 3. The danger is real. With no CSP, the book's script reached `window.parent`.
 
+4. Some Chrome builds report `script-src-attr` as soon as a handler is parsed into an inert
+   `DOMParser` document, which epub.js does before the sanitizer runs. Nothing can execute
+   there, so it is harmless, but a hostile book can produce that console report.
+   `pnpm e2e` tolerates this one report, only on a browser it has probed for this behaviour.
+
 ## Decision
 
 Use `allowScriptedContent: true`, so that events work, and rely on two independent
