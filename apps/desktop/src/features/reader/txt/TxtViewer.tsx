@@ -210,7 +210,9 @@ export function TxtViewer({
   // ---- Selection -----------------------------------------------------------
 
   const hasSelection = useRef(false);
-  useEffect(() => {
+  // A layout effect, so the listener swaps to a new model in the same commit that
+  // renders its rows. With a passive effect, a selection in between reads an empty model.
+  useLayoutEffect(() => {
     const root = scrollRef.current;
     if (!root) return;
     const view = root.ownerDocument;
