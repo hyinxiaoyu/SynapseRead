@@ -107,6 +107,21 @@
   animation: anchor-pulse 600ms ease-in-out 2;
 }
 
+/* epub.js marks are SVG groups, where a box shadow shows nothing. */
+@keyframes anchor-pulse-svg {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+g.anchor-pulse {
+  animation-name: anchor-pulse-svg;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .anchor-pulse {
     animation-duration: 1ms;

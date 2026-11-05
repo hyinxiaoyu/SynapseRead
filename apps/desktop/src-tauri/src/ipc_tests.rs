@@ -428,6 +428,20 @@ fn shipped_security_config_matches_the_decisions() {
     }
     assert_eq!(directive("worker-src"), ["'self'"]);
 
+    // Book scripts are refused only because no directive names a way to run them:
+    // see `docs/adr/0005-epub-sandbox.md`. This must stay absent or untouched.
+    assert!(
+        !csp.contains("script-src") && !csp.contains("unsafe-eval"),
+        "script-src falls back to default-src 'self'"
+    );
+    assert_eq!(directive("default-src"), ["'self'"]);
+    for (name, source) in [("style-src", "blob:"), ("font-src", "blob:")] {
+        assert!(
+            directive(name).iter().any(|s| s == source),
+            "{name}: {source}"
+        );
+    }
+
     let capability: Value =
         serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
     assert_eq!(

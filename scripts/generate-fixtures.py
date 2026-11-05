@@ -133,7 +133,8 @@ epub:type="toc"><ol><li><a href="chapter1.xhtml">One</a></li>
 document.documentElement.setAttribute('data-book-script-ran', 'true');</script>
 <p>The quick brown fox jumps over the lazy dog.</p>
 <p>Café, 汉字, and 😀 sit in this second paragraph.</p>
-<p><img src="box.png" alt="a small box"/></p>""" + filler),
+<p><img src="box.png" alt="a small box"/></p>
+<p><img src="missing.png" alt="" onerror="document.documentElement.setAttribute('data-book-handler-ran', 'true')"/></p>""" + filler),
         "OEBPS/chapter2.xhtml": chapter("Two", """<h1>Chapter Two</h1>
 <p>The final target sentence is in the second chapter.</p>""" + filler),
         "OEBPS/style.css": "body { font-family: serif; line-height: 1.4; } h1 { color: #204080; }\n",

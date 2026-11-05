@@ -1,10 +1,11 @@
 // `pnpm e2e`: builds nothing itself; `pnpm build:web` must have produced `dist`.
 
+import { epubFlow } from './epub.mjs';
 import { launchPage, serveDist } from './harness.mjs';
 import { pdfFlow } from './pdf.mjs';
 import { txtFlow } from './txt.mjs';
 
-const FLOWS = { txt: txtFlow, pdf: pdfFlow };
+const FLOWS = { txt: txtFlow, pdf: pdfFlow, epub: epubFlow };
 
 const only = process.argv.slice(2);
 const server = await serveDist();

@@ -5,10 +5,9 @@ inspired by MarginNote. Read on one side, and excerpts become connected cards on
 infinite mind map on the other. Every card links back to the exact passage it came
 from.
 
-> **Status: Phase 2 (reader engines) in progress.** The workspace, database, and
-> Reader ↔ MindMap pipeline work. The reader engines are landing one format at a time;
-> formats without one use a placeholder viewer that emits sample selections. See the
-> [roadmap](docs/ROADMAP.md).
+> **Status: Phase 2 (reader engines) complete.** PDF, EPUB, and TXT documents can be
+> read, excerpted, and jumped back to. The desktop runtime has not yet been exercised
+> on macOS, so treat this as pre-release. See the [roadmap](docs/ROADMAP.md).
 
 ## Features
 
@@ -23,13 +22,13 @@ from.
   damaged files, jump with pulse, and reopening where you left off
 - PDF reader: pages rendered off the main thread, text selection, and rectangle
   captures saved as images
+- EPUB reader: chapters addressed by CFI, with book scripts kept from running
 - Tabs that keep their scroll position and loaded content
 - Streaming UTF-8 text pipeline with a pluggable decoder interface
 - Local SQLite storage, with no accounts and no network access
 
 **Planned**
 
-- EPUB reader engine (next)
 - Merging excerpts, collapsing subtrees, and multiple notebooks
 - Multi-encoding text and Markdown (V1.1)
 

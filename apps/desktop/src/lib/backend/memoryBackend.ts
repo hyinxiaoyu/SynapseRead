@@ -1,5 +1,6 @@
 import { DEFAULT_CHUNK_BYTES, streamUtf8Lossy } from '@/lib/backend/memoryTextStream';
 import type { StudyBackend } from '@/lib/backend/types';
+import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
 import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
 import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
 
@@ -28,7 +29,7 @@ const fetchBytes = (url: string) => async () =>
 const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample.txt': fetchBytes(sampleTxtUrl),
   '/preview/sample.pdf': fetchBytes(samplePdfUrl),
-  '/preview/sample.epub': encodePreview('In-memory preview of an EPUB\n'),
+  '/preview/sample.epub': fetchBytes(sampleEpubUrl),
   '/preview/sample.md': encodePreview('In-memory preview of a Markdown file\n'),
 };
 
