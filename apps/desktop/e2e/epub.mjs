@@ -6,14 +6,7 @@ const frameDocument = `${frame}?.contentDocument`;
 const scroller = `${visibleHost}?.querySelector('.epub-container')`;
 const excerptEnabled = `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`;
 
-const openEpub = async (page) => {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    await page.clickButton('Open');
-    await new Promise((done) => setTimeout(done, 200));
-    if (await page.evaluate(`!!${visibleHost}`)) return;
-  }
-  throw new Error('the picker never offered the EPUB');
-};
+const openEpub = (page) => page.openUntil(visibleHost, 'the EPUB');
 
 const chapterIs = (title) => `${frameDocument}?.querySelector('h1')?.textContent === '${title}'`;
 
