@@ -259,15 +259,18 @@ describe('useStudySyncStore', () => {
 
   describe('tabs', () => {
     it('does not duplicate a tab when the same file is opened again', async () => {
-      vi.spyOn(backend, 'pickDocumentPath').mockResolvedValue('/preview/a.txt');
-      await state().openDocument();
-      await state().openDocument();
-      expect(state().openDocumentIds).toHaveLength(1);
-      expect(state().documents).toHaveLength(1);
+      const single = createStudySyncStore(
+        createMemoryBackend({ library: { '/preview/a.txt': new Uint8Array() } }),
+      );
+      await single.getState().initialize();
+      await single.getState().openDocument();
+      await single.getState().openDocument();
+      expect(single.getState().openDocumentIds).toHaveLength(1);
+      expect(single.getState().documents).toHaveLength(1);
     });
 
     it('leaves state alone when the picker is cancelled', async () => {
-      vi.spyOn(backend, 'pickDocumentPath').mockResolvedValue(null);
+      vi.spyOn(backend, 'pickDocument').mockResolvedValue(null);
       await state().openDocument();
       expect(state().openDocumentIds).toEqual([]);
       expect(state().error).toBeNull();
@@ -369,7 +372,6 @@ describe('useStudySyncStore', () => {
 
   describe('cursor', () => {
     it('records the last reading position', async () => {
-      vi.spyOn(backend, 'pickDocumentPath').mockResolvedValue('/preview/a.txt');
       const documentId = await openDocument();
       state().reportCursor(documentId, txtAnchor);
       expect(state().documents[0]?.lastCursorAnchor).toEqual(txtAnchor);

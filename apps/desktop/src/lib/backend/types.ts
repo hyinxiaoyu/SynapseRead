@@ -13,6 +13,9 @@ import type {
   Viewport,
 } from '@/types/domain';
 
+/** How a reader gets a document's raw bytes. */
+export type DocumentSource = { kind: 'url'; url: string } | { kind: 'bytes'; bytes: Uint8Array };
+
 /**
  * Everything the UI needs from the host. Components and stores depend on this
  * interface only, never on `@tauri-apps/*`, so they run in tests and in a plain
@@ -22,9 +25,11 @@ export interface StudyBackend {
   /** Which implementation is active; the UI labels non-persistent sessions. */
   readonly kind: 'tauri' | 'memory';
 
-  /** Shows the OS file picker. Resolves to `null` if the user cancels. */
-  pickDocumentPath(): Promise<string | null>;
-  registerDocument(path: string): Promise<StudyDocument>;
+  /**
+   * Shows the OS file picker and registers the choice; `null` if the user cancels.
+   * The UI never handles a path: see `docs/adr/0001-path-scope.md`.
+   */
+  pickDocument(): Promise<StudyDocument | null>;
   listDocuments(): Promise<StudyDocument[]>;
   updateDocumentCursor(documentId: string, anchor: AnchorLocation): Promise<void>;
 
@@ -44,9 +49,12 @@ export interface StudyBackend {
   ): Promise<MindMapEdge>;
   deleteEdge(edgeId: string): Promise<void>;
 
-  /** Streams a text file as UTF-8 chunks; resolves to the chunk count. */
+  /** Where a PDF or EPUB reader loads a registered document's bytes from. */
+  loadDocumentSource(document: StudyDocument): Promise<DocumentSource>;
+
+  /** Streams a registered text document as UTF-8 chunks; resolves to the chunk count. */
   readTextStream(
-    path: string,
+    documentId: string,
     encoding: string | null,
     onChunk: (chunk: TextChunk) => void,
   ): Promise<number>;

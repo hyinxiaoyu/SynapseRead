@@ -160,9 +160,8 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async openDocument() {
         await guarded(async () => {
-          const path = await backend.pickDocumentPath();
-          if (path === null) return;
-          const document = await backend.registerDocument(path);
+          const document = await backend.pickDocument();
+          if (document === null) return;
           set((state) => ({
             documents: [...state.documents.filter((d) => d.id !== document.id), document],
             openDocumentIds: state.openDocumentIds.includes(document.id)

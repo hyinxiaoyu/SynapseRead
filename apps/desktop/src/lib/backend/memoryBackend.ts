@@ -10,7 +10,23 @@ import type {
   StudyNotebook,
 } from '@/types/domain';
 
-const PICKER_SEQUENCE = ['sample.pdf', 'sample.epub', 'sample.txt', 'sample.md'];
+/** A file the fake picker can offer, or a loader for one. */
+export type MemoryFile = Uint8Array | (() => Promise<Uint8Array>);
+
+const encodePreview = (text: string) => new TextEncoder().encode(text);
+
+const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
+  '/preview/sample.pdf': encodePreview('In-memory preview of a PDF\n'),
+  '/preview/sample.epub': encodePreview('In-memory preview of an EPUB\n'),
+  '/preview/sample.txt': encodePreview('In-memory preview of a text file\n'),
+  '/preview/sample.md': encodePreview('In-memory preview of a Markdown file\n'),
+};
+
+export interface MemoryBackendOptions {
+  /** Files by path. The picker offers them in order, then starts over. */
+  library?: Record<string, MemoryFile>;
+}
+
 const FORMAT_BY_EXTENSION: Record<string, DocumentFormat> = {
   pdf: 'pdf',
   epub: 'epub',
@@ -26,7 +42,10 @@ const now = () => new Date().toISOString();
  * the Rust layer that the UI can observe (referential checks, content identity)
  * but is not a second source of truth: Rust remains authoritative.
  */
-export function createMemoryBackend(): StudyBackend {
+export function createMemoryBackend({
+  library = PREVIEW_LIBRARY,
+}: MemoryBackendOptions = {}): StudyBackend {
+  const paths = Object.keys(library);
   const documents = new Map<string, StudyDocument>();
   const notebooks = new Map<string, StudyNotebook>();
   const annotations = new Map<string, Annotation>();
@@ -44,34 +63,41 @@ export function createMemoryBackend(): StudyBackend {
   const inNotebook = <T extends { notebookId: string }>(map: Map<string, T>, notebookId: string) =>
     [...map.values()].filter((value) => value.notebookId === notebookId);
 
+  const registerDocument = (path: string): StudyDocument => {
+    const existing = [...documents.values()].find((document) => document.filePath === path);
+    if (existing) return existing;
+    const fileName = path.split('/').pop() ?? path;
+    const extension = fileName.split('.').pop()?.toLowerCase() ?? '';
+    const format = FORMAT_BY_EXTENSION[extension];
+    if (!format) throw fail('unsupported_format', `unsupported document format: ${extension}`);
+    const document: StudyDocument = {
+      id: crypto.randomUUID(),
+      title: fileName.replace(/\.[^.]+$/, ''),
+      filePath: path,
+      fileHash: `memory:${path}`,
+      format,
+      encoding: 'utf-8',
+      lastCursorAnchor: null,
+      createdAt: now(),
+    };
+    documents.set(document.id, document);
+    return document;
+  };
+
+  const readFile = async (path: string): Promise<Uint8Array> => {
+    const file = library[path];
+    if (file === undefined) throw fail('io', `no such file: ${path}`);
+    return typeof file === 'function' ? file() : file;
+  };
+
   return {
     kind: 'memory',
 
-    async pickDocumentPath() {
-      const name = PICKER_SEQUENCE[picks % PICKER_SEQUENCE.length] as string;
+    async pickDocument() {
+      const path = paths[picks % paths.length];
+      if (path === undefined) return null;
       picks += 1;
-      return `/preview/${name}`;
-    },
-
-    async registerDocument(path) {
-      const existing = [...documents.values()].find((document) => document.filePath === path);
-      if (existing) return existing;
-      const fileName = path.split('/').pop() ?? path;
-      const extension = fileName.split('.').pop()?.toLowerCase() ?? '';
-      const format = FORMAT_BY_EXTENSION[extension];
-      if (!format) throw fail('unsupported_format', `unsupported document format: ${extension}`);
-      const document: StudyDocument = {
-        id: crypto.randomUUID(),
-        title: fileName.replace(/\.[^.]+$/, ''),
-        filePath: path,
-        fileHash: `memory:${path}`,
-        format,
-        encoding: 'utf-8',
-        lastCursorAnchor: null,
-        createdAt: now(),
-      };
-      documents.set(document.id, document);
-      return document;
+      return registerDocument(path);
     },
 
     listDocuments: async () => [...documents.values()],
@@ -206,15 +232,21 @@ export function createMemoryBackend(): StudyBackend {
       edges.delete(edgeId);
     },
 
-    async readTextStream(path, _encoding, onChunk) {
-      const text = `In-memory preview of ${path}\n`;
+    loadDocumentSource: async (document) => ({
+      kind: 'bytes',
+      bytes: await readFile(document.filePath),
+    }),
+
+    async readTextStream(documentId, _encoding, onChunk) {
+      const document = require(documents, documentId, 'document');
+      const bytes = await readFile(document.filePath);
       onChunk({
         seq: 0,
         encoding: 'utf-8',
         startByteOffset: 0,
-        endByteOffset: new TextEncoder().encode(text).length,
+        endByteOffset: bytes.length,
         startLineIndex: 0,
-        text,
+        text: new TextDecoder().decode(bytes),
         hadReplacements: false,
         isLast: true,
       });

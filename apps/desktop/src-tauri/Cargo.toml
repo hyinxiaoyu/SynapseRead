@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 serde.workspace = true
 synapse-core = { path = "../../../crates/synapse-core" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 
 [dev-dependencies]

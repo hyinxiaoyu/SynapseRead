@@ -1,5 +1,6 @@
 //! Tauri adapter: wires `synapse-core` to IPC commands. Keep logic in the core crate.
 
+mod access;
 mod commands;
 mod error;
 mod state;
@@ -14,7 +15,7 @@ const DATABASE_FILE: &str = "synapseread.sqlite3";
 /// the real command layer on Tauri's mock runtime, without a webview.
 fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
-        commands::db::register_document,
+        commands::db::pick_document,
         commands::db::list_documents,
         commands::db::update_document_cursor,
         commands::db::create_notebook,
@@ -36,7 +37,11 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            app.manage(AppState::open(&data_dir.join(DATABASE_FILE))?);
+            let state = AppState::open(&data_dir.join(DATABASE_FILE))?;
+            // Scopes are not persisted: earlier sessions' documents need granting again.
+            let documents = state.database()?.list_documents()?;
+            access::grant_documents(app, &documents)?;
+            app.manage(state);
             Ok(())
         })
         .run(tauri::generate_context!())

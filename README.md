@@ -5,10 +5,10 @@ inspired by MarginNote. Read on one side, and excerpts become connected cards on
 infinite mind map on the other. Every card links back to the exact passage it came
 from.
 
-> **Status: Phase 1 (foundation).** The workspace, database, and Reader ↔ MindMap
-> pipeline work, but the PDF, EPUB, and TXT reader engines are not built yet. A
-> placeholder viewer emits sample selections so the pipeline can be exercised. See
-> the [roadmap](docs/ROADMAP.md).
+> **Status: Phase 2 (reader engines) in progress.** The workspace, database, and
+> Reader ↔ MindMap pipeline work. The reader engines are landing one format at a time;
+> formats without one use a placeholder viewer that emits sample selections. See the
+> [roadmap](docs/ROADMAP.md).
 
 ## Features
 
@@ -108,7 +108,9 @@ and coding constraints.
 │   │   ├── stores/               # useStudySyncStore, the Reader <-> MindMap bus
 │   │   └── types/domain.ts       # Domain types, AnchorLocation, DocumentViewerProps
 │   └── src-tauri/                # Tauri shell
-│       └── src/commands/         # db.rs, fs_reader.rs: thin IPC adapters
+│       └── src/
+│           ├── access.rs         # Asset scope, derived from registered documents
+│           └── commands/         # db.rs, fs_reader.rs: thin IPC adapters
 ├── crates/synapse-core/          # Backend logic, free of Tauri
 │   ├── migrations/               # SQLite schema
 │   └── src/
@@ -116,7 +118,8 @@ and coding constraints.
 │       ├── domain.rs             # Domain types
 │       └── fs_reader.rs          # TextDecoderService, EncodingDetector, streaming
 ├── fixtures/contract/            # JSON checked by both Rust and TypeScript tests
-├── docs/ROADMAP.md               # Milestones and open decisions
+├── docs/ROADMAP.md               # Milestones
+├── docs/adr/                     # Decision records
 └── .github/workflows/            # CI
 ```
 
