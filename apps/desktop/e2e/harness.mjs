@@ -289,7 +289,9 @@ export async function launchPage(url, { width = 1440, height = 900 } = {}) {
   await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
     source: `window.__cspViolations = [];
       document.addEventListener('securitypolicyviolation', (event) =>
-        window.__cspViolations.push(event.effectiveDirective + ' ' + event.blockedURI));`,
+        window.__cspViolations.push([event.effectiveDirective, event.blockedURI,
+          (event.sourceFile || location.href) + ':' + event.lineNumber + ':' + event.columnNumber,
+          event.sample].join(' ')));`,
   });
   await cdp.send('Page.navigate', { url });
   await page.waitFor(`document.querySelector('[aria-label="Document reader"]')`, 'the workspace');
