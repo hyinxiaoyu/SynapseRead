@@ -1,0 +1,25 @@
+{
+  "name": "synapseread",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first reading and knowledge-synthesis desktop app.",
+  "packageManager": "pnpm@12.16.1",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @synapseread/desktop tauri dev",
+    "dev:web": "pnpm --filter @synapseread/desktop dev",
+    "build": "pnpm --filter @synapseread/desktop tauri build",
+    "build:web": "pnpm --filter @synapseread/desktop build",
+    "lint": "pnpm --filter @synapseread/desktop lint",
+    "typecheck": "pnpm --filter @synapseread/desktop typecheck",
+    "test": "pnpm --filter @synapseread/desktop test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.10"
+  }
+}

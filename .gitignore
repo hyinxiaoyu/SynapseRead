@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Frontend build output
+dist/
+dist-ssr/
+*.tsbuildinfo
+.vite/
+.eslintcache
+coverage/
+
+# Rust / Tauri build output
+# Cargo.lock IS committed: this workspace ships an application binary.
+target/
+apps/desktop/src-tauri/gen/schemas/
+*.rs.bk
+
+# Local databases (the app stores its DB in the OS app-data dir; these are dev leftovers)
+*.sqlite
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+
+# macOS signing and bundle artifacts
+*.dmg
+*.app
+*.provisionprofile
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.idea/
+*.swp
+*.swo
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Local Claude Code state (CLAUDE.md is committed)
+.claude/settings.local.json

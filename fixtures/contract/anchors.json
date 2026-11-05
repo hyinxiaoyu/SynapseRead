@@ -1,0 +1,31 @@
+[
+  {
+    "format": "pdf",
+    "pageIndex": 3,
+    "rects": [{ "x": 0.1, "y": 0.2, "width": 0.5, "height": 0.05 }]
+  },
+  {
+    "format": "pdf",
+    "pageIndex": 0,
+    "rects": [
+      { "x": 0.1, "y": 0.2, "width": 0.8, "height": 0.02 },
+      { "x": 0.1, "y": 0.22, "width": 0.3, "height": 0.02 }
+    ]
+  },
+  {
+    "format": "epub",
+    "cfiRange": "epubcfi(/6/4!/4/10,/1:0,/3:12)",
+    "chapterHref": "OEBPS/chapter2.xhtml"
+  },
+  {
+    "format": "txt",
+    "startByteOffset": 128,
+    "endByteOffset": 256,
+    "lineIndex": 4
+  },
+  {
+    "format": "md",
+    "astNodeId": "heading-3",
+    "offset": 12
+  }
+]

@@ -1,0 +1,70 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  desktop:
+    name: Clippy and test (${{ matrix.target }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # V1 ships for both architectures. An Apple Silicon runner can execute
+        # x86_64 test binaries through Rosetta only when it is installed, so the
+        # Intel target is compile-checked and tests run natively on aarch64.
+        include:
+          - target: aarch64-apple-darwin
+            run_tests: true
+          - target: x86_64-apple-darwin
+            run_tests: false
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # tauri::generate_context! requires frontendDist to exist at compile time.
+      - name: Create placeholder frontend dist
+        run: mkdir -p apps/desktop/dist
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --target ${{ matrix.target }} -- -D warnings
+
+      - name: Test
+        if: matrix.run_tests
+        run: cargo test --workspace --target ${{ matrix.target }}
+
+  core-cross-platform:
+    # Windows is a future target: keep the platform-neutral core building there.
+    name: Core tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p synapse-core
