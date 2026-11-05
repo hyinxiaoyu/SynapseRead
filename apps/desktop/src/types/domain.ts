@@ -125,7 +125,8 @@ export interface CreateExcerptInput {
   notebookId: string;
   anchor: AnchorLocation;
   excerptText: string | null;
-  excerptImagePath: string | null;
+  /** A base64 PNG. Core decides where it is stored: see ADR 0003. */
+  excerptImagePng: string | null;
   color: string;
   parentNodeId: string | null;
   posX: number;
@@ -202,7 +203,8 @@ export interface ReaderSelection {
   anchor: AnchorLocation;
   /** `null` for an image/area capture. */
   text: string | null;
-  imagePath: string | null;
+  /** A base64 PNG for an area capture, held in memory until it is excerpted. */
+  imagePng: string | null;
 }
 
 /** A request for a reader to scroll to an anchor and pulse-highlight it. */

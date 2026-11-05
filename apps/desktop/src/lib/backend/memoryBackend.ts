@@ -1,5 +1,6 @@
 import { DEFAULT_CHUNK_BYTES, streamUtf8Lossy } from '@/lib/backend/memoryTextStream';
 import type { StudyBackend } from '@/lib/backend/types';
+import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
 import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
 
 import type {
@@ -16,6 +17,9 @@ import type {
 /** A file the fake picker can offer, or a loader for one. */
 export type MemoryFile = Uint8Array | (() => Promise<Uint8Array>);
 
+/** The PNG signature, in base64. */
+const PNG_BASE64_PREFIX = 'iVBORw0KGgo';
+
 const encodePreview = (text: string) => new TextEncoder().encode(text);
 
 const fetchBytes = (url: string) => async () =>
@@ -23,7 +27,7 @@ const fetchBytes = (url: string) => async () =>
 
 const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample.txt': fetchBytes(sampleTxtUrl),
-  '/preview/sample.pdf': encodePreview('In-memory preview of a PDF\n'),
+  '/preview/sample.pdf': fetchBytes(samplePdfUrl),
   '/preview/sample.epub': encodePreview('In-memory preview of an EPUB\n'),
   '/preview/sample.md': encodePreview('In-memory preview of a Markdown file\n'),
 };
@@ -61,6 +65,7 @@ export function createMemoryBackend({
   const cards = new Map<string, NoteCard>();
   const nodes = new Map<string, MindMapNode>();
   const edges = new Map<string, MindMapEdge>();
+  const captures = new Map<string, string>();
   let picks = 0;
 
   const require = <T>(map: Map<string, T>, id: string, entity: string): T => {
@@ -152,14 +157,22 @@ export function createMemoryBackend({
         );
       }
       if (input.parentNodeId) require(nodes, input.parentNodeId, 'node');
+      if (!input.excerptText?.trim() && input.excerptImagePng === null) {
+        throw fail('invalid_anchor', 'an excerpt needs text or a captured image');
+      }
+      if (input.excerptImagePng !== null && !input.excerptImagePng.startsWith(PNG_BASE64_PREFIX)) {
+        throw fail('invalid_capture', 'the image is not a PNG');
+      }
 
+      const annotationId = crypto.randomUUID();
+      if (input.excerptImagePng !== null) captures.set(annotationId, input.excerptImagePng);
       const annotation: Annotation = {
-        id: crypto.randomUUID(),
+        id: annotationId,
         documentId: input.documentId,
         notebookId: input.notebookId,
         anchor: input.anchor,
         excerptText: input.excerptText,
-        excerptImagePath: input.excerptImagePath,
+        excerptImagePath: input.excerptImagePng === null ? null : `captures/${annotationId}.png`,
         color: input.color,
         createdAt: now(),
       };
@@ -239,6 +252,12 @@ export function createMemoryBackend({
     async deleteEdge(edgeId) {
       require(edges, edgeId, 'edge');
       edges.delete(edgeId);
+    },
+
+    async captureUrl(annotationId) {
+      require(annotations, annotationId, 'annotation');
+      const png = captures.get(annotationId);
+      return png === undefined ? null : `data:image/png;base64,${png}`;
     },
 
     loadDocumentSource: async (document) => ({

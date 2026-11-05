@@ -45,7 +45,7 @@ function FakeViewer({
             documentId: document.id,
             anchor: SAMPLE_ANCHOR[document.format],
             text: `Excerpt from ${document.title}`,
-            imagePath: null,
+            imagePng: null,
           })
         }
       >

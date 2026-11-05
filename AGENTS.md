@@ -125,7 +125,10 @@ beside the code in `#[cfg(test)]`, frontend as `*.test.ts(x)` beside the source.
 - TypeScript is pinned to `~6.0` because `typescript-eslint` does not yet support 7.
 - pnpm build scripts are denied by default. Decide on new ones in
   `allowBuilds` in `pnpm-workspace.yaml`, or `pnpm install` fails.
-- `pdfjs-dist` and `epubjs` are installed for Phase 2 and are not imported yet.
+- `epubjs` is installed for Phase 2 and is not imported yet.
+- `pdfjs-dist` is imported only from `features/reader/pdf/pdfEngine.ts`, and from its
+  `legacy` build, because the modern build needs newer WebKit than we target
+  ([ADR 0004](docs/adr/0004-pdfjs-worker-csp.md)).
 
 ## Git
 

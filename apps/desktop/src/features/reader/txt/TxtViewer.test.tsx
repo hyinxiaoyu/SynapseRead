@@ -2,12 +2,13 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend, type MemoryFile } from '@/lib/backend/memoryBackend';
 import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
 import { documentFixture } from '@/test/fixtures';
 import type { TxtAnchor } from '@/types/domain';
 
-import { PULSE_MS, ROW_ESTIMATE_PX, TxtViewer } from './TxtViewer';
+import { ROW_ESTIMATE_PX, TxtViewer } from './TxtViewer';
 
 // Matching the estimate keeps offsets exact for rows that have not been measured.
 const ROW_PX = ROW_ESTIMATE_PX;
@@ -217,7 +218,7 @@ describe('TxtViewer', () => {
             lineIndex: decoded.slice(0, start).split('\n').length - 1,
           },
           text: 'final target sentence',
-          imagePath: null,
+          imagePng: null,
         });
         await store.getState().excerptSelection();
       });

@@ -30,8 +30,8 @@ the loop can run end to end. M2 deletes it.
 | ----------------------------------------------------------- | ------ |
 | Path scope: id-based reads, native picker, asset scope, CSP | Done   |
 | TXT engine, with the span map from ADR 0002                 | Done   |
-| PDF engine                                                  | Next   |
-| EPUB engine                                                 | To do  |
+| PDF engine, with captures from ADR 0003                     | Done   |
+| EPUB engine                                                 | Next   |
 
 Each engine implements `DocumentViewerProps` and is registered in
 `features/reader/viewerRegistry.ts`.
