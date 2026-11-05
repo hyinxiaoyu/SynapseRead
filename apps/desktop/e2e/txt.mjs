@@ -79,14 +79,7 @@ export async function txtFlow(page) {
   await page.evaluate(`document.querySelector('[aria-label^="Close sample"]').click()`);
   await page.waitFor(`!${visibleScroller}`, 'the tab to close');
   // The fake picker cycles through its library back to the text file.
-  for (
-    let attempt = 0;
-    attempt < 4 && !(await page.evaluate(`!!${visibleScroller}`));
-    attempt += 1
-  ) {
-    await page.clickButton('Open');
-    await new Promise((done) => setTimeout(done, 100));
-  }
+  await page.openUntil(visibleScroller, 'the text file');
   await page.waitFor(
     `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
     'reopening at the last position',
