@@ -72,13 +72,13 @@ export async function pdfFlow(page) {
   assert(Math.abs(painted.right - expected.end.x) < 3, 'the highlight ends at the text');
   assert(Math.abs(painted.y - expected.start.y) < 4, 'the highlight is on the text line');
 
-  // A non-embedded CJK font only produces this text if the CMap files load.
+  // A non-embedded CJK font only produces this text if the CMap files load. Whether its
+  // glyphs then draw depends on the machine's fonts, so that is not asserted here.
   await scrollToPage(page, 4);
   await page.waitFor(
     `[...document.querySelectorAll('[data-page-index="4"] .textLayer span')].some((e) => e.textContent.includes('汉字'))`,
     'CJK text, which needs the CMap files',
   );
-  await page.waitFor(`${inkOn(4)} > 50`, 'CJK glyphs to draw');
 
   // Rectangle capture over the fixture's blue box on page 3.
   await scrollToPage(page, 2);
