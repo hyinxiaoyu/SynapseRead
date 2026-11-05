@@ -184,6 +184,33 @@ export class Page {
     await this.click(point);
   }
 
+  /**
+   * Clicks Open until `isTarget` holds. The fake picker cycles through its library, so
+   * this waits for each open to finish first: on a slow machine, clicking again too soon
+   * opens extra documents and leaves later steps acting on the wrong tab.
+   */
+  async openUntil(isTarget, description) {
+    const activeTab = `[...document.querySelectorAll('[role="tab"]')].findIndex(
+      (tab) => tab.getAttribute('aria-selected') === 'true')`;
+    // Whichever engine it is, the visible tab has moved past its loading message.
+    const viewerSettled = `[...document.querySelectorAll('[aria-label="Document reader"] > div:last-child > div')]
+      .some((pane) => pane.checkVisibility({ visibilityProperty: true })
+        && !pane.textContent.startsWith('Opening '))`;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const before = await this.evaluate(
+        `({ tab: ${activeTab}, count: document.querySelectorAll('[role="tab"]').length })`,
+      );
+      await this.clickButton('Open');
+      await this.waitFor(
+        `${activeTab} !== ${before.tab} || document.querySelectorAll('[role="tab"]').length !== ${before.count}`,
+        'the picked document to activate',
+      );
+      await this.waitFor(viewerSettled, 'the picked document to open');
+      if (await this.evaluate(`!!(${isTarget})`)) return;
+    }
+    throw new Error(`the picker never offered ${description}`);
+  }
+
   /** Screen rectangle of `text` inside rendered elements matching `selector`. */
   textRect(selector, text) {
     return this.evaluate(

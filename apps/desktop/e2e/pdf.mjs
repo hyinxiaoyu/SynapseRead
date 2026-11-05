@@ -14,14 +14,7 @@ const inkOn = (pageIndex) => `(() => {
   return ink;
 })()`;
 
-const openPdf = async (page) => {
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    await page.clickButton('Open');
-    await new Promise((done) => setTimeout(done, 150));
-    if (await page.evaluate(`!!${visibleScroller}`)) return;
-  }
-  throw new Error('the picker never offered the PDF');
-};
+const openPdf = (page) => page.openUntil(visibleScroller, 'the PDF');
 
 const scrollToPage = async (page, pageIndex) => {
   // The virtualizer only renders nearby pages, so aim for it, then align exactly.
