@@ -9,20 +9,21 @@ built and what is next.
 Run from the repository root. Requires Node 24+ and pnpm (`corepack enable`), plus
 Rust stable.
 
-| Task                   | Command                                                 |
-| ---------------------- | ------------------------------------------------------- |
-| Install                | `pnpm install`                                          |
-| Desktop app            | `pnpm dev`                                              |
-| Browser preview        | `pnpm dev:web` (in-memory backend, nothing is saved)    |
-| All frontend checks    | `pnpm check`                                            |
-| Format                 | `pnpm format`                                           |
-| Lint / types / tests   | `pnpm lint` / `pnpm typecheck` / `pnpm test`            |
-| One frontend test file | `pnpm --filter @synapseread/desktop test <path>`        |
-| Rust format            | `cargo fmt --all`                                       |
-| Rust lint              | `cargo clippy --workspace --all-targets -- -D warnings` |
-| Rust tests             | `cargo test --workspace`                                |
-| Core tests only        | `cargo test -p synapse-core` (no webview libraries)     |
-| Release bundle         | `pnpm build`                                            |
+| Task                       | Command                                                 |
+| -------------------------- | ------------------------------------------------------- |
+| Install                    | `pnpm install`                                          |
+| Desktop app                | `pnpm dev`                                              |
+| Browser preview            | `pnpm dev:web` (in-memory backend, nothing is saved)    |
+| All frontend checks        | `pnpm check`                                            |
+| Format                     | `pnpm format`                                           |
+| Lint / types / tests       | `pnpm lint` / `pnpm typecheck` / `pnpm test`            |
+| One frontend test file     | `pnpm --filter @synapseread/desktop test <path>`        |
+| Reader engines, end to end | `pnpm e2e` (real Chromium, memory backend, app CSP)     |
+| Rust format                | `cargo fmt --all`                                       |
+| Rust lint                  | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Rust tests                 | `cargo test --workspace`                                |
+| Core tests only            | `cargo test -p synapse-core` (no webview libraries)     |
+| Release bundle             | `pnpm build`                                            |
 
 `apps/desktop/dist` must exist before compiling the desktop crate because
 `tauri::generate_context!` reads it. Run `pnpm build:web` or
@@ -34,6 +35,7 @@ Run the checks CI enforces and fix every failure:
 
 ```sh
 pnpm check
+pnpm e2e
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -69,7 +71,14 @@ the store or the database directly.
 writes use one transaction. The memory backend mimics observable behaviour only.
 
 **TXT offsets address source-file bytes**, never decoded text, so anchors survive
-re-chunking and future encodings.
+re-chunking and future encodings. Decoders report every place their output differs
+from the source as a `SourceSpan`, and `TxtTextModel` is the only frontend code that
+converts between text positions and bytes
+([ADR 0002](docs/adr/0002-txt-anchor-drift.md)).
+
+**The webview never names a path.** Commands take document ids, files enter through
+the native picker, and the asset scope is derived from the `documents` table
+([ADR 0001](docs/adr/0001-path-scope.md)).
 
 **Text encodings plug in; the pipeline does not change.** New character sets are
 `TextDecoderService` / `EncodingDetector` implementations registered in
@@ -93,7 +102,8 @@ A change to a command or a domain type must be made together in:
 2. `apps/desktop/src/types/domain.ts` (TypeScript types and `isAnchorLocation`)
 3. `apps/desktop/src/lib/backend/` (`types.ts`, `tauriBackend.ts`, `memoryBackend.ts`)
 4. `apps/desktop/src-tauri/src/ipc_tests.rs` (the JSON the frontend actually sends)
-5. `fixtures/contract/anchors.json` when anchors change; both languages test it
+5. `fixtures/contract/anchors.json` when anchors change, and
+   `fixtures/contract/text-chunks.json` when text chunks change; both languages test them
 
 Tauri maps camelCase JS argument names to snake_case Rust parameters.
 
@@ -115,8 +125,7 @@ beside the code in `#[cfg(test)]`, frontend as `*.test.ts(x)` beside the source.
 - TypeScript is pinned to `~6.0` because `typescript-eslint` does not yet support 7.
 - pnpm build scripts are denied by default. Decide on new ones in
   `allowBuilds` in `pnpm-workspace.yaml`, or `pnpm install` fails.
-- `pdfjs-dist`, `epubjs`, and `@tanstack/react-virtual` are installed for Phase 2
-  and are not imported yet.
+- `pdfjs-dist` and `epubjs` are installed for Phase 2 and are not imported yet.
 
 ## Git
 

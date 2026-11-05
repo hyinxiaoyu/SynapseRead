@@ -1,0 +1,94 @@
+import { assert } from './harness.mjs';
+
+const SEGMENT = '[data-testid="txt-scroll"] [data-unit]';
+const scrollTop = `document.querySelector('[data-testid="txt-scroll"]').scrollTop`;
+const visibleScroller = `[...document.querySelectorAll('[data-testid="txt-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+
+export async function txtFlow(page) {
+  await page.clickButton('Open');
+  await page.waitFor(
+    `[...document.querySelectorAll(${JSON.stringify(SEGMENT)})].some((e) => e.textContent.includes('SynapseRead sample text'))`,
+    'the sample text to render',
+  );
+
+  // selection -> anchor -> persist, with a real mouse drag and a real click.
+  await page.selectText(SEGMENT, 'quick brown fox');
+  await page.waitFor(
+    `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`,
+    'a real drag to enable excerpting',
+  );
+  await page.clickButton('Excerpt to MindMap');
+  await page.waitFor(
+    `[...document.querySelectorAll('[data-annotation-id]')].some((e) => e.textContent === 'quick brown fox')`,
+    'the excerpt to paint exactly the selected text',
+  );
+  await page.waitFor(
+    `document.querySelector('[aria-label="Jump to source of quick brown fox"]')`,
+    'a card for the excerpt',
+  );
+
+  // Multibyte: the highlight must land on the same characters that were selected.
+  await page.selectText(SEGMENT, 'café and € and 😀');
+  await page.waitFor(
+    `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`,
+    'a second selection',
+  );
+  await page.clickButton('Excerpt to MindMap');
+  await page.waitFor(
+    `[...document.querySelectorAll('[data-annotation-id]')].some((e) => e.textContent === 'café and € and 😀')`,
+    'a multibyte excerpt to paint exactly',
+  );
+
+  // Scroll far down, so a jump has somewhere to come back from.
+  await page.evaluate(`${visibleScroller}.scrollTop = 2600`);
+  await page.waitFor(`${visibleScroller}.scrollTop === 2600`, 'scrolling');
+  await page.waitFor(
+    `![...document.querySelectorAll(${JSON.stringify(SEGMENT)})].some((e) => e.textContent.includes('quick brown fox') && e.getBoundingClientRect().bottom > 0 && e.getBoundingClientRect().top < innerHeight)`,
+    'the excerpt to leave the viewport',
+  );
+
+  // Jump round trip: scrolled back, pulsed, then completed.
+  await page.clickButton('Jump to source of quick brown fox');
+  const inView = await page.waitFor(
+    `(() => {
+      const hit = [...document.querySelectorAll('.anchor-pulse')].find((e) => e.textContent === 'quick brown fox');
+      if (!hit) return null;
+      const r = hit.getBoundingClientRect();
+      return r.top >= 0 && r.bottom <= innerHeight;
+    })()`,
+    'the jump to pulse the excerpt in view',
+  );
+  assert(inView, 'the pulsed excerpt is in the viewport');
+  await page.waitFor(`!document.querySelector('.anchor-pulse')`, 'the pulse to end');
+
+  // Per-tab state: another tab must not disturb this one.
+  await page.evaluate(`${visibleScroller}.scrollTop = 1500`);
+  await page.waitFor(`${visibleScroller}.scrollTop === 1500`, 'scrolling');
+  // Longer than the cursor debounce, so reopening below has a position to restore.
+  await new Promise((done) => setTimeout(done, 600));
+  const tabs = () => `[...document.querySelectorAll('[role="tab"]')]`;
+  await page.clickButton('Open');
+  await page.waitFor(`${tabs()}.length === 2`, 'a second tab');
+  await page.waitFor(`!${visibleScroller}`, 'the text tab to be hidden');
+  await page.evaluate(`${tabs()}[0].click()`);
+  await page.waitFor(`${visibleScroller}?.scrollTop === 1500`, 'the scroll position to survive');
+
+  // Reopen: close the tab and open the file again, from a clean mount.
+  const before = await page.evaluate(scrollTop);
+  assert(before === 1500, `scroll position before closing: ${before}`);
+  await page.evaluate(`document.querySelector('[aria-label^="Close sample"]').click()`);
+  await page.waitFor(`!${visibleScroller}`, 'the tab to close');
+  // The fake picker cycles through its library back to the text file.
+  for (
+    let attempt = 0;
+    attempt < 4 && !(await page.evaluate(`!!${visibleScroller}`));
+    attempt += 1
+  ) {
+    await page.clickButton('Open');
+    await new Promise((done) => setTimeout(done, 100));
+  }
+  await page.waitFor(
+    `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
+    'reopening at the last position',
+  );
+}

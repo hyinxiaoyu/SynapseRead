@@ -1,6 +1,6 @@
 //! SQLite persistence: migrations and every query the app runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
@@ -96,6 +96,21 @@ impl Database {
         Ok(statement
             .query_map([], map_document)?
             .collect::<Result<_, _>>()?)
+    }
+
+    /// Where a registered document lives. This is the only way a document id
+    /// becomes a path: callers outside core never choose what gets read.
+    pub fn document_path(&self, document_id: &str) -> CoreResult<PathBuf> {
+        let path: String = self
+            .conn
+            .query_row(
+                "SELECT file_path FROM documents WHERE id = ?1",
+                [document_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found("document", document_id))?;
+        Ok(PathBuf::from(path))
     }
 
     pub fn update_document_cursor(
@@ -772,6 +787,20 @@ mod tests {
         assert_eq!(moved.file_path, second.to_string_lossy());
         assert_eq!(moved.title, "a", "title is kept across moves");
         assert_eq!(db.list_documents().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn document_path_resolves_only_registered_documents() {
+        let f = fixture();
+        let path = f.db.document_path(&f.document_id).unwrap();
+        assert_eq!(path, f._dir.path().join("book.txt"));
+        assert!(matches!(
+            f.db.document_path("/etc/passwd"),
+            Err(CoreError::NotFound {
+                entity: "document",
+                ..
+            })
+        ));
     }
 
     #[test]

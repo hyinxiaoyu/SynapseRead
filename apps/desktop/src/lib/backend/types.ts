@@ -3,13 +3,13 @@ import type {
   CardPatch,
   CreatedExcerpt,
   CreateExcerptInput,
+  DocumentContentReader,
   MindMapEdge,
   NodeLayoutPatch,
   NoteCard,
   NotebookGraph,
   StudyDocument,
   StudyNotebook,
-  TextChunk,
   Viewport,
 } from '@/types/domain';
 
@@ -18,13 +18,15 @@ import type {
  * interface only, never on `@tauri-apps/*`, so they run in tests and in a plain
  * browser against `createMemoryBackend`.
  */
-export interface StudyBackend {
+export interface StudyBackend extends DocumentContentReader {
   /** Which implementation is active; the UI labels non-persistent sessions. */
   readonly kind: 'tauri' | 'memory';
 
-  /** Shows the OS file picker. Resolves to `null` if the user cancels. */
-  pickDocumentPath(): Promise<string | null>;
-  registerDocument(path: string): Promise<StudyDocument>;
+  /**
+   * Shows the OS file picker and registers the choice; `null` if the user cancels.
+   * The UI never handles a path: see `docs/adr/0001-path-scope.md`.
+   */
+  pickDocument(): Promise<StudyDocument | null>;
   listDocuments(): Promise<StudyDocument[]>;
   updateDocumentCursor(documentId: string, anchor: AnchorLocation): Promise<void>;
 
@@ -43,11 +45,4 @@ export interface StudyBackend {
     label: string | null,
   ): Promise<MindMapEdge>;
   deleteEdge(edgeId: string): Promise<void>;
-
-  /** Streams a text file as UTF-8 chunks; resolves to the chunk count. */
-  readTextStream(
-    path: string,
-    encoding: string | null,
-    onChunk: (chunk: TextChunk) => void,
-  ): Promise<number>;
 }

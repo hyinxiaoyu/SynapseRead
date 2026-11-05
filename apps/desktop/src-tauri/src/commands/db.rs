@@ -1,19 +1,40 @@
 //! Persistence commands. Each one is a thin adapter over `synapse_core::db`.
 
-use std::path::Path;
-
+use synapse_core::domain::DocumentFormat;
 use synapse_core::domain::{
     AnchorLocation, CardPatch, CreateExcerptInput, CreatedExcerpt, Document, MindMapEdge,
     NodeLayoutPatch, NoteCard, NotebookGraph, StudyNotebook, Viewport,
 };
-use tauri::State;
+use tauri::{AppHandle, Runtime, State};
+use tauri_plugin_dialog::DialogExt;
 
-use crate::error::IpcResult;
+use crate::access::register_and_grant;
+use crate::error::{IpcError, IpcResult};
 use crate::state::AppState;
 
+/// Shows the native picker and registers the chosen file, resolving to `None`
+/// on cancel. The webview cannot name a path: see `docs/adr/0001-path-scope.md`.
+///
+/// The dialog blocks and hashing a large file is slow, so neither may run on
+/// the main thread or a runtime worker.
 #[tauri::command]
-pub fn register_document(path: String, state: State<'_, AppState>) -> IpcResult<Document> {
-    Ok(state.database()?.register_document(Path::new(&path))?)
+pub async fn pick_document<R: Runtime>(app: AppHandle<R>) -> IpcResult<Option<Document>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let picked = app
+            .dialog()
+            .file()
+            .add_filter("Documents", DocumentFormat::EXTENSIONS)
+            .blocking_pick_file();
+        let Some(picked) = picked else {
+            return Ok(None);
+        };
+        let path = picked
+            .into_path()
+            .map_err(|error| IpcError::internal(error.to_string()))?;
+        register_and_grant(&app, &path).map(Some)
+    })
+    .await
+    .map_err(|error| IpcError::internal(error.to_string()))?
 }
 
 #[tauri::command]

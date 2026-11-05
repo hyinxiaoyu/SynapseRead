@@ -5,10 +5,10 @@ inspired by MarginNote. Read on one side, and excerpts become connected cards on
 infinite mind map on the other. Every card links back to the exact passage it came
 from.
 
-> **Status: Phase 1 (foundation).** The workspace, database, and Reader ↔ MindMap
-> pipeline work, but the PDF, EPUB, and TXT reader engines are not built yet. A
-> placeholder viewer emits sample selections so the pipeline can be exercised. See
-> the [roadmap](docs/ROADMAP.md).
+> **Status: Phase 2 (reader engines) in progress.** The workspace, database, and
+> Reader ↔ MindMap pipeline work. The reader engines are landing one format at a time;
+> formats without one use a placeholder viewer that emits sample selections. See the
+> [roadmap](docs/ROADMAP.md).
 
 ## Features
 
@@ -19,12 +19,15 @@ from.
 - Jump from any card back to its source, with a pulse highlight
 - Draggable nodes, parent-child nesting, and cross-link edges, with layout saved
 - Format-agnostic anchors covering PDF, EPUB, TXT, and (reserved) Markdown
+- TXT reader: virtualized rendering, highlights that stay on the right bytes even in
+  damaged files, jump with pulse, and reopening where you left off
+- Tabs that keep their scroll position and loaded content
 - Streaming UTF-8 text pipeline with a pluggable decoder interface
 - Local SQLite storage, with no accounts and no network access
 
 **Planned**
 
-- PDF, EPUB, and TXT reader engines (next)
+- PDF and EPUB reader engines (next)
 - Merging excerpts, collapsing subtrees, and multiple notebooks
 - Multi-encoding text and Markdown (V1.1)
 
@@ -79,6 +82,7 @@ macOS.
 
 ```sh
 pnpm check                # format check, lint, typecheck, frontend tests
+pnpm e2e                  # reader engines in real Chromium; set CHROME_PATH if needed
 
 mkdir -p apps/desktop/dist   # needed once before compiling the desktop crate
 cargo fmt --all --check
@@ -108,7 +112,9 @@ and coding constraints.
 │   │   ├── stores/               # useStudySyncStore, the Reader <-> MindMap bus
 │   │   └── types/domain.ts       # Domain types, AnchorLocation, DocumentViewerProps
 │   └── src-tauri/                # Tauri shell
-│       └── src/commands/         # db.rs, fs_reader.rs: thin IPC adapters
+│       └── src/
+│           ├── access.rs         # Asset scope, derived from registered documents
+│           └── commands/         # db.rs, fs_reader.rs: thin IPC adapters
 ├── crates/synapse-core/          # Backend logic, free of Tauri
 │   ├── migrations/               # SQLite schema
 │   └── src/
@@ -116,7 +122,9 @@ and coding constraints.
 │       ├── domain.rs             # Domain types
 │       └── fs_reader.rs          # TextDecoderService, EncodingDetector, streaming
 ├── fixtures/contract/            # JSON checked by both Rust and TypeScript tests
-├── docs/ROADMAP.md               # Milestones and open decisions
+├── fixtures/documents/           # Small sample documents for tests and the preview
+├── docs/ROADMAP.md               # Milestones
+├── docs/adr/                     # Decision records
 └── .github/workflows/            # CI
 ```
 

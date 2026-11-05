@@ -1,0 +1,561 @@
+[
+  {
+    "name": "clean multibyte across a small chunk size",
+    "sourceHex": "61e282ac62f09f988063e6b189e5ad970a64",
+    "chunkBytes": 5,
+    "chunks": [
+      {
+        "seq": 0,
+        "encoding": "utf-8",
+        "startByteOffset": 0,
+        "endByteOffset": 5,
+        "startLineIndex": 0,
+        "text": "a€b",
+        "hadReplacements": false,
+        "sourceSpans": [],
+        "isLast": false
+      },
+      {
+        "seq": 1,
+        "encoding": "utf-8",
+        "startByteOffset": 5,
+        "endByteOffset": 10,
+        "startLineIndex": 0,
+        "text": "😀c",
+        "hadReplacements": false,
+        "sourceSpans": [],
+        "isLast": false
+      },
+      {
+        "seq": 2,
+        "encoding": "utf-8",
+        "startByteOffset": 10,
+        "endByteOffset": 13,
+        "startLineIndex": 0,
+        "text": "汉",
+        "hadReplacements": false,
+        "sourceSpans": [],
+        "isLast": false
+      },
+      {
+        "seq": 3,
+        "encoding": "utf-8",
+        "startByteOffset": 13,
+        "endByteOffset": 18,
+        "startLineIndex": 0,
+        "text": "字\nd",
+        "hadReplacements": false,
+        "sourceSpans": [],
+        "isLast": true
+      }
+    ],
+    "positions": [
+      {
+        "unit": 0,
+        "byte": 0
+      },
+      {
+        "unit": 1,
+        "byte": 1
+      },
+      {
+        "unit": 2,
+        "byte": 4
+      },
+      {
+        "unit": 3,
+        "byte": 5
+      },
+      {
+        "unit": 5,
+        "byte": 9
+      },
+      {
+        "unit": 6,
+        "byte": 10
+      },
+      {
+        "unit": 7,
+        "byte": 13
+      },
+      {
+        "unit": 8,
+        "byte": 16
+      },
+      {
+        "unit": 9,
+        "byte": 17
+      },
+      {
+        "unit": 10,
+        "byte": 18
+      }
+    ]
+  },
+  {
+    "name": "BOM with no replacements",
+    "sourceHex": "efbbbf68656c6c6f0a776f726c64",
+    "chunkBytes": 64,
+    "chunks": [
+      {
+        "seq": 0,
+        "encoding": "utf-8",
+        "startByteOffset": 0,
+        "endByteOffset": 14,
+        "startLineIndex": 0,
+        "text": "hello\nworld",
+        "hadReplacements": false,
+        "sourceSpans": [
+          {
+            "textOffset": 0,
+            "textLen": 0,
+            "sourceLen": 3
+          }
+        ],
+        "isLast": true
+      }
+    ],
+    "positions": [
+      {
+        "unit": 0,
+        "byte": 3
+      },
+      {
+        "unit": 1,
+        "byte": 4
+      },
+      {
+        "unit": 2,
+        "byte": 5
+      },
+      {
+        "unit": 3,
+        "byte": 6
+      },
+      {
+        "unit": 4,
+        "byte": 7
+      },
+      {
+        "unit": 5,
+        "byte": 8
+      },
+      {
+        "unit": 6,
+        "byte": 9
+      },
+      {
+        "unit": 7,
+        "byte": 10
+      },
+      {
+        "unit": 8,
+        "byte": 11
+      },
+      {
+        "unit": 9,
+        "byte": 12
+      },
+      {
+        "unit": 10,
+        "byte": 13
+      },
+      {
+        "unit": 11,
+        "byte": 14
+      }
+    ]
+  },
+  {
+    "name": "replacements of different source lengths",
+    "sourceHex": "6f6b20fffe20e28220656e64",
+    "chunkBytes": 64,
+    "chunks": [
+      {
+        "seq": 0,
+        "encoding": "utf-8",
+        "startByteOffset": 0,
+        "endByteOffset": 12,
+        "startLineIndex": 0,
+        "text": "ok �� � end",
+        "hadReplacements": true,
+        "sourceSpans": [
+          {
+            "textOffset": 3,
+            "textLen": 3,
+            "sourceLen": 1
+          },
+          {
+            "textOffset": 6,
+            "textLen": 3,
+            "sourceLen": 1
+          },
+          {
+            "textOffset": 10,
+            "textLen": 3,
+            "sourceLen": 2
+          }
+        ],
+        "isLast": true
+      }
+    ],
+    "positions": [
+      {
+        "unit": 0,
+        "byte": 0
+      },
+      {
+        "unit": 1,
+        "byte": 1
+      },
+      {
+        "unit": 2,
+        "byte": 2
+      },
+      {
+        "unit": 3,
+        "byte": 3
+      },
+      {
+        "unit": 4,
+        "byte": 4
+      },
+      {
+        "unit": 5,
+        "byte": 5
+      },
+      {
+        "unit": 6,
+        "byte": 6
+      },
+      {
+        "unit": 7,
+        "byte": 8
+      },
+      {
+        "unit": 8,
+        "byte": 9
+      },
+      {
+        "unit": 9,
+        "byte": 10
+      },
+      {
+        "unit": 10,
+        "byte": 11
+      },
+      {
+        "unit": 11,
+        "byte": 12
+      }
+    ]
+  },
+  {
+    "name": "literal U+FFFD next to a replacement",
+    "sourceHex": "efbfbd7cff7c",
+    "chunkBytes": 64,
+    "chunks": [
+      {
+        "seq": 0,
+        "encoding": "utf-8",
+        "startByteOffset": 0,
+        "endByteOffset": 6,
+        "startLineIndex": 0,
+        "text": "�|�|",
+        "hadReplacements": true,
+        "sourceSpans": [
+          {
+            "textOffset": 4,
+            "textLen": 3,
+            "sourceLen": 1
+          }
+        ],
+        "isLast": true
+      }
+    ],
+    "positions": [
+      {
+        "unit": 0,
+        "byte": 0
+      },
+      {
+        "unit": 1,
+        "byte": 3
+      },
+      {
+        "unit": 2,
+        "byte": 4
+      },
+      {
+        "unit": 3,
+        "byte": 5
+      },
+      {
+        "unit": 4,
+        "byte": 6
+      }
+    ]
+  },
+  {
+    "name": "truncated sequence at end of file",
+    "sourceHex": "636f737420e282",
+    "chunkBytes": 64,
+    "chunks": [
+      {
+        "seq": 0,
+        "encoding": "utf-8",
+        "startByteOffset": 0,
+        "endByteOffset": 7,
+        "startLineIndex": 0,
+        "text": "cost �",
+        "hadReplacements": true,
+        "sourceSpans": [
+          {
+            "textOffset": 5,
+            "textLen": 3,
+            "sourceLen": 2
+          }
+        ],
+        "isLast": true
+      }
+    ],
+    "positions": [
+      {
+        "unit": 0,
+        "byte": 0
+      },
+      {
+        "unit": 1,
+        "byte": 1
+      },
+      {
+        "unit": 2,
+        "byte": 2
+      },
+      {
+        "unit": 3,
+        "byte": 3
+      },
+      {
+        "unit": 4,
+        "byte": 4
+      },
+      {
+        "unit": 5,
+        "byte": 5
+      },
+      {
+        "unit": 6,
+        "byte": 7
+      }
+    ]
+  },
+  {
+    "name": "sequence split across chunks then broken",
+    "sourceHex": "6162e282586364f09f988065",
+    "chunkBytes": 4,
+    "chunks": [
+      {
+        "seq": 0,
+        "encoding": "utf-8",
+        "startByteOffset": 0,
+        "endByteOffset": 2,
+        "startLineIndex": 0,
+        "text": "ab",
+        "hadReplacements": false,
+        "sourceSpans": [],
+        "isLast": false
+      },
+      {
+        "seq": 1,
+        "encoding": "utf-8",
+        "startByteOffset": 2,
+        "endByteOffset": 7,
+        "startLineIndex": 0,
+        "text": "�Xcd",
+        "hadReplacements": true,
+        "sourceSpans": [
+          {
+            "textOffset": 0,
+            "textLen": 3,
+            "sourceLen": 2
+          }
+        ],
+        "isLast": false
+      },
+      {
+        "seq": 2,
+        "encoding": "utf-8",
+        "startByteOffset": 7,
+        "endByteOffset": 12,
+        "startLineIndex": 0,
+        "text": "😀e",
+        "hadReplacements": false,
+        "sourceSpans": [],
+        "isLast": true
+      }
+    ],
+    "positions": [
+      {
+        "unit": 0,
+        "byte": 0
+      },
+      {
+        "unit": 1,
+        "byte": 1
+      },
+      {
+        "unit": 2,
+        "byte": 2
+      },
+      {
+        "unit": 3,
+        "byte": 4
+      },
+      {
+        "unit": 4,
+        "byte": 5
+      },
+      {
+        "unit": 5,
+        "byte": 6
+      },
+      {
+        "unit": 6,
+        "byte": 7
+      },
+      {
+        "unit": 8,
+        "byte": 11
+      },
+      {
+        "unit": 9,
+        "byte": 12
+      }
+    ]
+  },
+  {
+    "name": "BOM and replacement in a split stream",
+    "sourceHex": "efbbbf61ff620d0a63ff640a",
+    "chunkBytes": 4,
+    "chunks": [
+      {
+        "seq": 0,
+        "encoding": "utf-8",
+        "startByteOffset": 0,
+        "endByteOffset": 4,
+        "startLineIndex": 0,
+        "text": "a",
+        "hadReplacements": false,
+        "sourceSpans": [
+          {
+            "textOffset": 0,
+            "textLen": 0,
+            "sourceLen": 3
+          }
+        ],
+        "isLast": false
+      },
+      {
+        "seq": 1,
+        "encoding": "utf-8",
+        "startByteOffset": 4,
+        "endByteOffset": 8,
+        "startLineIndex": 0,
+        "text": "�b\r\n",
+        "hadReplacements": true,
+        "sourceSpans": [
+          {
+            "textOffset": 0,
+            "textLen": 3,
+            "sourceLen": 1
+          }
+        ],
+        "isLast": false
+      },
+      {
+        "seq": 2,
+        "encoding": "utf-8",
+        "startByteOffset": 8,
+        "endByteOffset": 12,
+        "startLineIndex": 1,
+        "text": "c�d\n",
+        "hadReplacements": true,
+        "sourceSpans": [
+          {
+            "textOffset": 1,
+            "textLen": 3,
+            "sourceLen": 1
+          }
+        ],
+        "isLast": true
+      }
+    ],
+    "positions": [
+      {
+        "unit": 0,
+        "byte": 3
+      },
+      {
+        "unit": 1,
+        "byte": 4
+      },
+      {
+        "unit": 2,
+        "byte": 5
+      },
+      {
+        "unit": 3,
+        "byte": 6
+      },
+      {
+        "unit": 4,
+        "byte": 7
+      },
+      {
+        "unit": 5,
+        "byte": 8
+      },
+      {
+        "unit": 6,
+        "byte": 9
+      },
+      {
+        "unit": 7,
+        "byte": 10
+      },
+      {
+        "unit": 8,
+        "byte": 11
+      },
+      {
+        "unit": 9,
+        "byte": 12
+      }
+    ]
+  },
+  {
+    "name": "empty file",
+    "sourceHex": "",
+    "chunkBytes": 64,
+    "chunks": [
+      {
+        "seq": 0,
+        "encoding": "utf-8",
+        "startByteOffset": 0,
+        "endByteOffset": 0,
+        "startLineIndex": 0,
+        "text": "",
+        "hadReplacements": false,
+        "sourceSpans": [],
+        "isLast": true
+      }
+    ],
+    "positions": [
+      {
+        "unit": 0,
+        "byte": 0
+      }
+    ]
+  }
+]

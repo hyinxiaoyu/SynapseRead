@@ -43,3 +43,7 @@ jobs:
 
       - name: Build
         run: pnpm build:web
+
+      # Real engines in real Chromium, under the app's CSP. ubuntu-latest ships Chrome.
+      - name: End-to-end
+        run: pnpm --filter @synapseread/desktop exec node e2e/run.mjs

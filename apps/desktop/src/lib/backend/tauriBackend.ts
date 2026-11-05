@@ -1,5 +1,4 @@
-import { Channel, invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
+import { Channel, convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 import type { StudyBackend } from '@/lib/backend/types';
 import type {
@@ -12,21 +11,11 @@ import type {
   TextChunk,
 } from '@/types/domain';
 
-const DOCUMENT_EXTENSIONS = ['pdf', 'epub', 'txt', 'text', 'log', 'md', 'markdown'];
-
 export function createTauriBackend(): StudyBackend {
   return {
     kind: 'tauri',
 
-    async pickDocumentPath() {
-      const selected = await open({
-        multiple: false,
-        directory: false,
-        filters: [{ name: 'Documents', extensions: DOCUMENT_EXTENSIONS }],
-      });
-      return selected;
-    },
-    registerDocument: (path) => invoke<StudyDocument>('register_document', { path }),
+    pickDocument: () => invoke<StudyDocument | null>('pick_document'),
     listDocuments: () => invoke<StudyDocument[]>('list_documents'),
     updateDocumentCursor: (documentId, anchor) =>
       invoke('update_document_cursor', { documentId, anchor }),
@@ -44,10 +33,16 @@ export function createTauriBackend(): StudyBackend {
       invoke<MindMapEdge>('create_edge', { notebookId, sourceNodeId, targetNodeId, label }),
     deleteEdge: (edgeId) => invoke('delete_edge', { edgeId }),
 
-    readTextStream(path, encoding, onChunk) {
+    // The asset protocol enforces its scope in Rust, whatever this URL names.
+    loadDocumentSource: async (document) => ({
+      kind: 'url',
+      url: convertFileSrc(document.filePath),
+    }),
+
+    readTextStream(documentId, encoding, onChunk) {
       const channel = new Channel<TextChunk>();
       channel.onmessage = onChunk;
-      return invoke<number>('read_text_stream', { path, encoding, onChunk: channel });
+      return invoke<number>('read_text_stream', { documentId, encoding, onChunk: channel });
     },
   };
 }

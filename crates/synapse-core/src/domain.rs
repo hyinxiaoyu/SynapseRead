@@ -18,6 +18,9 @@ pub enum DocumentFormat {
 }
 
 impl DocumentFormat {
+    /// Every file extension [`Self::from_extension`] accepts, for the file picker.
+    pub const EXTENSIONS: &[&str] = &["pdf", "epub", "txt", "text", "log", "md", "markdown"];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pdf => "pdf",
@@ -346,5 +349,12 @@ mod tests {
             DocumentFormat::Md
         );
         assert!(DocumentFormat::from_extension("docx").is_err());
+    }
+
+    #[test]
+    fn every_picker_extension_is_a_known_format() {
+        for extension in DocumentFormat::EXTENSIONS {
+            DocumentFormat::from_extension(extension).unwrap();
+        }
     }
 }

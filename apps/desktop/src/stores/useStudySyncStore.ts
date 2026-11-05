@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 
 import { createDefaultBackend, type StudyBackend } from '@/lib/backend';
+import { describeError } from '@/lib/utils';
 import type {
   Annotation,
   CardPatch,
+  DocumentContentReader,
   JumpRequest,
   MindMapEdge,
   MindMapNode,
@@ -30,6 +32,8 @@ export interface StudySyncState {
   /** Latest failure, shown to the user until dismissed. */
   error: string | null;
   backendKind: StudyBackend['kind'];
+  /** What readers load documents through; they get nothing else from the backend. */
+  content: DocumentContentReader;
 
   documents: StudyDocument[];
   openDocumentIds: string[];
@@ -71,15 +75,6 @@ export interface StudySyncState {
   updateCard(cardId: string, patch: CardPatch): Promise<void>;
   saveViewport(viewport: Viewport): Promise<void>;
 }
-
-const describeError = (error: unknown): string => {
-  if (typeof error === 'string') return error;
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'object' && error !== null && 'message' in error) {
-    return String(error.message);
-  }
-  return 'Something went wrong';
-};
 
 /** Children stack to the right of their parent; roots cascade from the origin. */
 export function nextNodePosition(
@@ -127,6 +122,11 @@ export function createStudySyncStore(backend: StudyBackend) {
       status: 'idle',
       error: null,
       backendKind: backend.kind,
+      content: {
+        loadDocumentSource: (document) => backend.loadDocumentSource(document),
+        readTextStream: (documentId, encoding, onChunk) =>
+          backend.readTextStream(documentId, encoding, onChunk),
+      },
       documents: [],
       openDocumentIds: [],
       activeDocumentId: null,
@@ -160,9 +160,8 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async openDocument() {
         await guarded(async () => {
-          const path = await backend.pickDocumentPath();
-          if (path === null) return;
-          const document = await backend.registerDocument(path);
+          const document = await backend.pickDocument();
+          if (document === null) return;
           set((state) => ({
             documents: [...state.documents.filter((d) => d.id !== document.id), document],
             openDocumentIds: state.openDocumentIds.includes(document.id)

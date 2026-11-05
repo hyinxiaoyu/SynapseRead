@@ -24,7 +24,14 @@ macOS only (`aarch64-apple-darwin`, `x86_64-apple-darwin`).
 `EnginePendingViewer` stands in for the real engines and emits sample anchors so
 the loop can run end to end. M2 deletes it.
 
-## M2: Reader engines (Phase 2), next
+## M2: Reader engines (Phase 2), in progress
+
+| Task                                                        | Status |
+| ----------------------------------------------------------- | ------ |
+| Path scope: id-based reads, native picker, asset scope, CSP | Done   |
+| TXT engine, with the span map from ADR 0002                 | Done   |
+| PDF engine                                                  | Next   |
+| EPUB engine                                                 | To do  |
 
 Each engine implements `DocumentViewerProps` and is registered in
 `features/reader/viewerRegistry.ts`.

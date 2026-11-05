@@ -1,6 +1,5 @@
 //! Text streaming command.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use synapse_core::CoreError;
@@ -11,7 +10,7 @@ use tauri::ipc::Channel;
 use crate::error::{IpcError, IpcResult};
 use crate::state::AppState;
 
-/// Streams a text file to the frontend as UTF-8 chunks, resolving to the number
+/// Streams a registered document to the frontend as UTF-8 chunks, resolving to the number
 /// of chunks delivered. `encoding` of `None` means auto-detect, which in V1
 /// always selects UTF-8 with lossy fallback.
 ///
@@ -19,13 +18,13 @@ use crate::state::AppState;
 /// closed channel (reader tab closed) ends the read early without an error.
 #[tauri::command]
 pub async fn read_text_stream(
-    path: String,
+    document_id: String,
     encoding: Option<String>,
     on_chunk: Channel<TextChunk>,
     state: State<'_, AppState>,
 ) -> IpcResult<u64> {
     let decoders = Arc::clone(&state.decoders);
-    let path = PathBuf::from(path);
+    let path = state.database()?.document_path(&document_id)?;
     let delivered = tauri::async_runtime::spawn_blocking(move || {
         stream_text_file(&path, encoding.as_deref(), &decoders, |chunk| {
             on_chunk.send(chunk).map_err(|_| CoreError::StreamCancelled)

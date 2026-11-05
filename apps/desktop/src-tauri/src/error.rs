@@ -17,6 +17,14 @@ impl From<CoreError> for IpcError {
     }
 }
 
+impl std::fmt::Display for IpcError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for IpcError {}
+
 impl IpcError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self {

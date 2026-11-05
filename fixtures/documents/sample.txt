@@ -1,0 +1,133 @@
+SynapseRead sample text
+
+This fixture exercises the TXT reader end to end. It is small on purpose.
+The second paragraph mixes scripts: 汉字 and 日本語 and café and € and 😀.
+
+The quick brown fox jumps over the lazy dog.
+Pack my box with five dozen liquor jugs.
+How vexingly quick daft zebras jump!
+
+The last line of the first section is here.
+
+Filler line 001 keeps the document long enough to scroll through.
+Filler line 002 keeps the document long enough to scroll through.
+Filler line 003 keeps the document long enough to scroll through.
+Filler line 004 keeps the document long enough to scroll through.
+Filler line 005 keeps the document long enough to scroll through.
+Filler line 006 keeps the document long enough to scroll through.
+Filler line 007 keeps the document long enough to scroll through.
+Filler line 008 keeps the document long enough to scroll through.
+Filler line 009 keeps the document long enough to scroll through.
+Filler line 010 keeps the document long enough to scroll through.
+Filler line 011 keeps the document long enough to scroll through.
+Filler line 012 keeps the document long enough to scroll through.
+Filler line 013 keeps the document long enough to scroll through.
+Filler line 014 keeps the document long enough to scroll through.
+Filler line 015 keeps the document long enough to scroll through.
+Filler line 016 keeps the document long enough to scroll through.
+Filler line 017 keeps the document long enough to scroll through.
+Filler line 018 keeps the document long enough to scroll through.
+Filler line 019 keeps the document long enough to scroll through.
+Filler line 020 keeps the document long enough to scroll through.
+Filler line 021 keeps the document long enough to scroll through.
+Filler line 022 keeps the document long enough to scroll through.
+Filler line 023 keeps the document long enough to scroll through.
+Filler line 024 keeps the document long enough to scroll through.
+Filler line 025 keeps the document long enough to scroll through.
+Filler line 026 keeps the document long enough to scroll through.
+Filler line 027 keeps the document long enough to scroll through.
+Filler line 028 keeps the document long enough to scroll through.
+Filler line 029 keeps the document long enough to scroll through.
+Filler line 030 keeps the document long enough to scroll through.
+Filler line 031 keeps the document long enough to scroll through.
+Filler line 032 keeps the document long enough to scroll through.
+Filler line 033 keeps the document long enough to scroll through.
+Filler line 034 keeps the document long enough to scroll through.
+Filler line 035 keeps the document long enough to scroll through.
+Filler line 036 keeps the document long enough to scroll through.
+Filler line 037 keeps the document long enough to scroll through.
+Filler line 038 keeps the document long enough to scroll through.
+Filler line 039 keeps the document long enough to scroll through.
+Filler line 040 keeps the document long enough to scroll through.
+Filler line 041 keeps the document long enough to scroll through.
+Filler line 042 keeps the document long enough to scroll through.
+Filler line 043 keeps the document long enough to scroll through.
+Filler line 044 keeps the document long enough to scroll through.
+Filler line 045 keeps the document long enough to scroll through.
+Filler line 046 keeps the document long enough to scroll through.
+Filler line 047 keeps the document long enough to scroll through.
+Filler line 048 keeps the document long enough to scroll through.
+Filler line 049 keeps the document long enough to scroll through.
+Filler line 050 keeps the document long enough to scroll through.
+Filler line 051 keeps the document long enough to scroll through.
+Filler line 052 keeps the document long enough to scroll through.
+Filler line 053 keeps the document long enough to scroll through.
+Filler line 054 keeps the document long enough to scroll through.
+Filler line 055 keeps the document long enough to scroll through.
+Filler line 056 keeps the document long enough to scroll through.
+Filler line 057 keeps the document long enough to scroll through.
+Filler line 058 keeps the document long enough to scroll through.
+Filler line 059 keeps the document long enough to scroll through.
+Filler line 060 keeps the document long enough to scroll through.
+Filler line 061 keeps the document long enough to scroll through.
+Filler line 062 keeps the document long enough to scroll through.
+Filler line 063 keeps the document long enough to scroll through.
+Filler line 064 keeps the document long enough to scroll through.
+Filler line 065 keeps the document long enough to scroll through.
+Filler line 066 keeps the document long enough to scroll through.
+Filler line 067 keeps the document long enough to scroll through.
+Filler line 068 keeps the document long enough to scroll through.
+Filler line 069 keeps the document long enough to scroll through.
+Filler line 070 keeps the document long enough to scroll through.
+Filler line 071 keeps the document long enough to scroll through.
+Filler line 072 keeps the document long enough to scroll through.
+Filler line 073 keeps the document long enough to scroll through.
+Filler line 074 keeps the document long enough to scroll through.
+Filler line 075 keeps the document long enough to scroll through.
+Filler line 076 keeps the document long enough to scroll through.
+Filler line 077 keeps the document long enough to scroll through.
+Filler line 078 keeps the document long enough to scroll through.
+Filler line 079 keeps the document long enough to scroll through.
+Filler line 080 keeps the document long enough to scroll through.
+Filler line 081 keeps the document long enough to scroll through.
+Filler line 082 keeps the document long enough to scroll through.
+Filler line 083 keeps the document long enough to scroll through.
+Filler line 084 keeps the document long enough to scroll through.
+Filler line 085 keeps the document long enough to scroll through.
+Filler line 086 keeps the document long enough to scroll through.
+Filler line 087 keeps the document long enough to scroll through.
+Filler line 088 keeps the document long enough to scroll through.
+Filler line 089 keeps the document long enough to scroll through.
+Filler line 090 keeps the document long enough to scroll through.
+Filler line 091 keeps the document long enough to scroll through.
+Filler line 092 keeps the document long enough to scroll through.
+Filler line 093 keeps the document long enough to scroll through.
+Filler line 094 keeps the document long enough to scroll through.
+Filler line 095 keeps the document long enough to scroll through.
+Filler line 096 keeps the document long enough to scroll through.
+Filler line 097 keeps the document long enough to scroll through.
+Filler line 098 keeps the document long enough to scroll through.
+Filler line 099 keeps the document long enough to scroll through.
+Filler line 100 keeps the document long enough to scroll through.
+Filler line 101 keeps the document long enough to scroll through.
+Filler line 102 keeps the document long enough to scroll through.
+Filler line 103 keeps the document long enough to scroll through.
+Filler line 104 keeps the document long enough to scroll through.
+Filler line 105 keeps the document long enough to scroll through.
+Filler line 106 keeps the document long enough to scroll through.
+Filler line 107 keeps the document long enough to scroll through.
+Filler line 108 keeps the document long enough to scroll through.
+Filler line 109 keeps the document long enough to scroll through.
+Filler line 110 keeps the document long enough to scroll through.
+Filler line 111 keeps the document long enough to scroll through.
+Filler line 112 keeps the document long enough to scroll through.
+Filler line 113 keeps the document long enough to scroll through.
+Filler line 114 keeps the document long enough to scroll through.
+Filler line 115 keeps the document long enough to scroll through.
+Filler line 116 keeps the document long enough to scroll through.
+Filler line 117 keeps the document long enough to scroll through.
+Filler line 118 keeps the document long enough to scroll through.
+Filler line 119 keeps the document long enough to scroll through.
+Filler line 120 keeps the document long enough to scroll through.
+
+The final target sentence sits at the very end of the file.
