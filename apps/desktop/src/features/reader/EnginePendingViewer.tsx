@@ -73,7 +73,7 @@ export function EnginePendingViewer({
               documentId: document.id,
               anchor: SAMPLE_ANCHOR[document.format],
               text: `Sample excerpt ${highlights.length + 1} from ${document.title}`,
-              imagePath: null,
+              imagePng: null,
             })
           }
         >

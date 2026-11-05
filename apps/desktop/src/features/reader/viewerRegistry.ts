@@ -1,6 +1,7 @@
 import type { ComponentType } from 'react';
 
 import { EnginePendingViewer } from '@/features/reader/EnginePendingViewer';
+import { PdfViewer } from '@/features/reader/pdf/PdfViewer';
 import { TxtViewer } from '@/features/reader/txt/TxtViewer';
 import type { DocumentFormat, DocumentViewerProps } from '@/types/domain';
 
@@ -15,7 +16,7 @@ const pending = <F extends DocumentFormat>() =>
 export const viewerRegistry: {
   [F in DocumentFormat]: ComponentType<DocumentViewerProps<F>>;
 } = {
-  pdf: pending(),
+  pdf: PdfViewer,
   epub: pending(),
   txt: TxtViewer,
   md: pending(),

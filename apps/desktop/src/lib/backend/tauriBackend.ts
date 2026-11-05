@@ -33,6 +33,11 @@ export function createTauriBackend(): StudyBackend {
       invoke<MindMapEdge>('create_edge', { notebookId, sourceNodeId, targetNodeId, label }),
     deleteEdge: (edgeId) => invoke('delete_edge', { edgeId }),
 
+    async captureUrl(annotationId) {
+      const path = await invoke<string | null>('capture_path', { annotationId });
+      return path === null ? null : convertFileSrc(path);
+    },
+
     // The asset protocol enforces its scope in Rust, whatever this URL names.
     loadDocumentSource: async (document) => ({
       kind: 'url',

@@ -12,7 +12,7 @@ use tauri::test::{
 use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, WebviewWindow, WebviewWindowBuilder};
 
-use crate::access::{grant_documents, register_and_grant};
+use crate::access::{grant_all, register_and_grant};
 use crate::state::AppState;
 
 /// Where bundled app content is served from on the mock runtime.
@@ -87,7 +87,7 @@ impl Harness {
                 "notebookId": notebook["id"],
                 "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 5, "lineIndex": 0 },
                 "excerptText": "hello",
-                "excerptImagePath": null,
+                "excerptImagePng": null,
                 "color": "#fde047",
                 "parentNodeId": parent.map(|node| node["id"].clone()),
                 "posX": 1.5,
@@ -306,15 +306,97 @@ fn asset_scope_is_rebuilt_from_the_database_on_the_next_launch() {
     let book = next.dir.path().join("book.pdf");
     assert!(!next.asset_allowed(&book), "scopes do not persist");
 
-    let documents = next
-        .app
-        .state::<AppState>()
-        .database()
-        .unwrap()
-        .list_documents()
-        .unwrap();
-    grant_documents(next.app.handle(), &documents).unwrap();
+    grant_all(next.app.handle(), &next.app.state::<AppState>()).unwrap();
     assert!(next.asset_allowed(&book));
+}
+
+const PNG_BASE64: &str = "iVBORw0KGgo=";
+
+impl Harness {
+    fn capture(&self, document: &Value, notebook: &Value, extra: Value) -> Result<Value, Value> {
+        let mut input = json!({
+            "documentId": document["id"],
+            "notebookId": notebook["id"],
+            "anchor": { "format": "pdf", "pageIndex": 0,
+                "rects": [{ "x": 0.1, "y": 0.1, "width": 0.5, "height": 0.5 }] },
+            "excerptText": null,
+            "excerptImagePng": PNG_BASE64,
+            "color": "#fde047",
+            "parentNodeId": null,
+            "posX": 0.0,
+            "posY": 0.0,
+        });
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        self.call("create_excerpt", json!({ "input": input }))
+    }
+}
+
+#[test]
+fn a_capture_round_trips_and_is_loadable() {
+    let h = Harness::new();
+    let document = h.register("book.pdf", "pdf bytes");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+    let created = h.capture(&document, &notebook, json!({})).unwrap();
+
+    let annotation = &created["annotation"];
+    let id = annotation["id"].as_str().unwrap();
+    assert_eq!(annotation["excerptImagePath"], format!("captures/{id}.png"));
+
+    let path = h.ok("capture_path", json!({ "annotationId": id }));
+    let path = std::path::PathBuf::from(path.as_str().unwrap());
+    assert!(path.exists());
+
+    grant_all(h.app.handle(), &h.app.state::<AppState>()).unwrap();
+    assert!(h.asset_allowed(&path));
+    // The grant covers captures only, not the data directory they sit in.
+    assert!(!h.asset_allowed(&h.dir.path().join("test.sqlite3")));
+    let nested = path.parent().unwrap().join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(nested.join("x.png"), "x").unwrap();
+    assert!(!h.asset_allowed(&nested.join("x.png")));
+}
+
+#[test]
+fn a_capture_needs_a_real_png() {
+    let h = Harness::new();
+    let document = h.register("book.pdf", "pdf bytes");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+    let error = h
+        .capture(
+            &document,
+            &notebook,
+            json!({ "excerptImagePng": "R0lGODlh" }),
+        )
+        .unwrap_err();
+    assert_eq!(error["code"], "invalid_capture");
+}
+
+/// A webview must not be able to point an annotation at a file of its choosing.
+#[test]
+fn the_webview_cannot_set_a_capture_path() {
+    let h = Harness::new();
+    let document = h.register("book.pdf", "pdf bytes");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+    let created = h
+        .capture(
+            &document,
+            &notebook,
+            json!({
+                "excerptImagePng": null,
+                "excerptText": "text",
+                "excerptImagePath": "/etc/passwd",
+            }),
+        )
+        .unwrap();
+    assert_eq!(created["annotation"]["excerptImagePath"], Value::Null);
+    let id = &created["annotation"]["id"];
+    assert_eq!(
+        h.ok("capture_path", json!({ "annotationId": id })),
+        Value::Null
+    );
 }
 
 /// The CSP is compile-time configuration that no other test executes. Its values

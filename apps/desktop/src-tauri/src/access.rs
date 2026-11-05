@@ -24,6 +24,24 @@ pub fn grant_documents<R: Runtime>(app: &impl Manager<R>, documents: &[Document]
     Ok(())
 }
 
+/// Grants everything the database says the webview may load: every registered
+/// document, plus the capture directory. Scopes are not persisted between
+/// launches, so this runs at every startup.
+pub fn grant_all<R: Runtime>(app: &impl Manager<R>, state: &AppState) -> IpcResult<()> {
+    let database = state.database()?;
+    grant_documents(app, &database.list_documents()?)?;
+    if let Some(captures) = database.captures_directory() {
+        // Not recursive, and the glob skips dotfiles such as in-progress writes.
+        // The database beside this directory stays out of scope.
+        std::fs::create_dir_all(&captures)
+            .map_err(|error| IpcError::internal(error.to_string()))?;
+        app.asset_protocol_scope()
+            .allow_directory(&captures, false)
+            .map_err(|error| IpcError::internal(error.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Registers a path that came from a native source, then makes it loadable.
 pub fn register_and_grant<R: Runtime>(app: &impl Manager<R>, path: &Path) -> IpcResult<Document> {
     let document = app

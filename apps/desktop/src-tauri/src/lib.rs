@@ -23,6 +23,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::save_notebook_viewport,
         commands::db::load_notebook_graph,
         commands::db::create_excerpt,
+        commands::db::capture_path,
         commands::db::update_card,
         commands::db::update_node_layout,
         commands::db::create_edge,
@@ -38,9 +39,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let state = AppState::open(&data_dir.join(DATABASE_FILE))?;
-            // Scopes are not persisted: earlier sessions' documents need granting again.
-            let documents = state.database()?.list_documents()?;
-            access::grant_documents(app, &documents)?;
+            access::grant_all(app, &state)?;
             app.manage(state);
             Ok(())
         })

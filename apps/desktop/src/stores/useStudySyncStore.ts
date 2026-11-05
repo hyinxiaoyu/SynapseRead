@@ -60,6 +60,9 @@ export interface StudySyncState {
   closeDocument(documentId: string): void;
   reportCursor(documentId: string, anchor: StudyDocument['lastCursorAnchor']): void;
 
+  /** A loadable URL for an annotation's capture, or `null` if it has no image. */
+  captureUrl(annotationId: string): Promise<string | null>;
+
   setSelection(selection: ReaderSelection | null): void;
   excerptSelection(): Promise<void>;
   jumpToNode(nodeId: string, annotationId?: string): void;
@@ -206,6 +209,8 @@ export function createStudySyncStore(backend: StudyBackend) {
         void guarded(() => backend.updateDocumentCursor(documentId, anchor));
       },
 
+      captureUrl: (annotationId) => backend.captureUrl(annotationId),
+
       setSelection: (selection) => set({ selection }),
 
       async excerptSelection() {
@@ -220,7 +225,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             notebookId: notebook.id,
             anchor: selection.anchor,
             excerptText: selection.text,
-            excerptImagePath: selection.imagePath,
+            excerptImagePng: selection.imagePng,
             color: DEFAULT_EXCERPT_COLOR,
             parentNodeId: selectedNodeId,
             posX: position.x,

@@ -45,4 +45,7 @@ export interface StudyBackend extends DocumentContentReader {
     label: string | null,
   ): Promise<MindMapEdge>;
   deleteEdge(edgeId: string): Promise<void>;
+
+  /** A loadable URL for an annotation's capture, or `null` if it has no image. */
+  captureUrl(annotationId: string): Promise<string | null>;
 }

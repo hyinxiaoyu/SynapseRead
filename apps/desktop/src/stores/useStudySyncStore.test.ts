@@ -31,7 +31,7 @@ describe('useStudySyncStore', () => {
       documentId,
       anchor: pdfAnchor as ReaderSelection['anchor'],
       text,
-      imagePath: null,
+      imagePng: null,
     };
     state().setSelection(selection);
     return selection;

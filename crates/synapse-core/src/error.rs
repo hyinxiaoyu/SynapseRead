@@ -22,6 +22,9 @@ pub enum CoreError {
     #[error("invalid anchor: {0}")]
     InvalidAnchor(String),
 
+    #[error("invalid capture: {0}")]
+    InvalidCapture(String),
+
     #[error("invalid graph operation: {0}")]
     InvalidGraph(String),
 
@@ -43,6 +46,7 @@ impl CoreError {
             Self::UnsupportedEncoding(_) => "unsupported_encoding",
             Self::UnsupportedFormat(_) => "unsupported_format",
             Self::InvalidAnchor(_) => "invalid_anchor",
+            Self::InvalidCapture(_) => "invalid_capture",
             Self::InvalidGraph(_) => "invalid_graph",
             Self::NotFound { .. } => "not_found",
             Self::StreamCancelled => "stream_cancelled",

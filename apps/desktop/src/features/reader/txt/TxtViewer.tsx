@@ -11,7 +11,8 @@ import {
   type UIEvent,
 } from 'react';
 
-import { describeError, cn } from '@/lib/utils';
+import { PULSE_MS } from '@/features/reader/pulse';
+import { cn, describeError } from '@/lib/utils';
 import type {
   DocumentContentReader,
   DocumentViewerProps,
@@ -22,7 +23,6 @@ import type {
 import { UNIT_ATTRIBUTE, unitAtBoundary } from './selectionMapping';
 import { TxtTextModel } from './textModel';
 
-export const PULSE_MS = 1200;
 export const ROW_ESTIMATE_PX = 26;
 const OVERSCAN_ROWS = 12;
 const CURSOR_DEBOUNCE_MS = 400;
@@ -257,7 +257,7 @@ export function TxtViewer({
         documentId,
         anchor: selected.anchor,
         text: selected.text,
-        imagePath: null,
+        imagePng: null,
       });
     };
     view.addEventListener('selectionchange', onChange);

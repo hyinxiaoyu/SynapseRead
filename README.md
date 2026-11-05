@@ -21,13 +21,15 @@ from.
 - Format-agnostic anchors covering PDF, EPUB, TXT, and (reserved) Markdown
 - TXT reader: virtualized rendering, highlights that stay on the right bytes even in
   damaged files, jump with pulse, and reopening where you left off
+- PDF reader: pages rendered off the main thread, text selection, and rectangle
+  captures saved as images
 - Tabs that keep their scroll position and loaded content
 - Streaming UTF-8 text pipeline with a pluggable decoder interface
 - Local SQLite storage, with no accounts and no network access
 
 **Planned**
 
-- PDF and EPUB reader engines (next)
+- EPUB reader engine (next)
 - Merging excerpts, collapsing subtrees, and multiple notebooks
 - Multi-encoding text and Markdown (V1.1)
 
@@ -118,6 +120,7 @@ and coding constraints.
 ├── crates/synapse-core/          # Backend logic, free of Tauri
 │   ├── migrations/               # SQLite schema
 │   └── src/
+│       ├── captures.rs           # Rectangle captures on disk
 │       ├── db.rs                 # Migrations and queries
 │       ├── domain.rs             # Domain types
 │       └── fs_reader.rs          # TextDecoderService, EncodingDetector, streaming

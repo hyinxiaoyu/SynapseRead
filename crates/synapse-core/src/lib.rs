@@ -4,6 +4,7 @@
 //! pipeline build and test on any host without a webview. The desktop crate
 //! only adapts these APIs to Tauri commands.
 
+pub mod captures;
 pub mod db;
 pub mod domain;
 pub mod error;

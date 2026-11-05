@@ -242,7 +242,9 @@ pub struct CreateExcerptInput {
     pub notebook_id: String,
     pub anchor: AnchorLocation,
     pub excerpt_text: Option<String>,
-    pub excerpt_image_path: Option<String>,
+    /// A base64 PNG. Core chooses where it goes: the webview never supplies a
+    /// path, so this cannot be used to point an annotation at an arbitrary file.
+    pub excerpt_image_png: Option<String>,
     pub color: String,
     pub parent_node_id: Option<String>,
     pub pos_x: f64,

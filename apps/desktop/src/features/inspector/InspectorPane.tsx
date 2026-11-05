@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
-import type { CardPatch, NoteCard } from '@/types/domain';
+import type { Annotation, CardPatch, NoteCard } from '@/types/domain';
 
 export function InspectorPane() {
   const selectedNodeId = useStudySyncStore((state) => state.selectedNodeId);
@@ -25,6 +25,29 @@ export function InspectorPane() {
         <p className="p-4 text-sm text-muted-foreground">Select a card to edit it.</p>
       )}
     </section>
+  );
+}
+
+function ExcerptImage({ annotation }: { annotation: Annotation }) {
+  const captureUrl = useStudySyncStore((state) => state.captureUrl);
+  const [url, setUrl] = useState<string | null>(null);
+  const annotationId = annotation.id;
+  useEffect(() => {
+    let cancelled = false;
+    captureUrl(annotationId)
+      .then((resolved) => {
+        if (!cancelled) setUrl(resolved);
+      })
+      // The card still works without its picture, which may have been removed from disk.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [captureUrl, annotationId]);
+  return url ? (
+    <img src={url} alt="Captured area" className="min-w-0 flex-1 rounded border bg-white" />
+  ) : (
+    <p className="min-w-0 flex-1 text-xs">Image excerpt</p>
   );
 }
 
@@ -107,7 +130,11 @@ function CardEditor({ card, nodeId }: { card: NoteCard; nodeId: string }) {
         <h3 className="text-sm font-medium">Excerpts</h3>
         {excerpts.map((annotation) => (
           <div key={annotation.id} className="flex items-start gap-1 rounded-md bg-muted p-2">
-            <p className="min-w-0 flex-1 text-xs">{annotation.excerptText ?? 'Image excerpt'}</p>
+            {annotation.excerptImagePath ? (
+              <ExcerptImage annotation={annotation} />
+            ) : (
+              <p className="min-w-0 flex-1 text-xs">{annotation.excerptText}</p>
+            )}
             <Button
               variant="ghost"
               size="icon"

@@ -1,6 +1,8 @@
 //! Persistence commands. Each one is a thin adapter over `synapse_core::db`.
 
+use std::path::PathBuf;
 use synapse_core::domain::DocumentFormat;
+
 use synapse_core::domain::{
     AnchorLocation, CardPatch, CreateExcerptInput, CreatedExcerpt, Document, MindMapEdge,
     NodeLayoutPatch, NoteCard, NotebookGraph, StudyNotebook, Viewport,
@@ -88,6 +90,15 @@ pub fn create_excerpt(
     state: State<'_, AppState>,
 ) -> IpcResult<CreatedExcerpt> {
     Ok(state.database()?.create_excerpt(&input)?)
+}
+
+/// Where an annotation's capture lives, for the asset protocol to load.
+#[tauri::command]
+pub fn capture_path(
+    annotation_id: String,
+    state: State<'_, AppState>,
+) -> IpcResult<Option<PathBuf>> {
+    Ok(state.database()?.capture_path(&annotation_id)?)
 }
 
 #[tauri::command]

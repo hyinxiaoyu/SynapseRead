@@ -33,14 +33,18 @@ with no `wasm-unsafe-eval`, and an `asset://` file outside the scope returned 40
    it through CORS, so pdf.js falls back to reading the whole file. Range requests do
    work (206, with a readable `Content-Range`).
 
+5. `pdfjs-dist` 6.5 removed `isEvalSupported`, so there is no switch to set (the spike
+   passed it, and it was ignored). The only `Function(` left is a core-js global lookup
+   in the legacy build, reached only if `globalThis` is missing. The CSP blocks `eval` on
+   the main thread regardless; the worker has no CSP of its own in this setup.
+
 ## Decision
 
 - CSP: add `asset: http://asset.localhost` to `connect-src` and `img-src`, and narrow
   `worker-src` to `'self'`. The Windows form of the protocol is included now so a later
   port does not silently fail.
 - Load `pdfjs-dist/legacy/build` and its worker through a Vite `?url` import.
-- Set `isEvalSupported: false`, so untrusted PDFs never reach `new Function`.
-- Ship `cmaps/`, `standard_fonts/`, and `wasm/` as same-origin static files.
+- Ship `cmaps/`, `standard_fonts/`, `wasm/`, and `iccs/` as same-origin static files.
 - A Rust test pins the CSP directives, and a browser test asserts a real worker.
 
 ## Tradeoffs

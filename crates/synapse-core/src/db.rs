@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
+use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
     AnchorLocation, Annotation, CardPatch, CreateExcerptInput, CreatedExcerpt, Document,
     DocumentFormat, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph,
@@ -23,26 +24,34 @@ const CARD_TITLE_MAX_CHARS: usize = 80;
 /// Owns the single SQLite connection.
 pub struct Database {
     conn: Connection,
+    /// `None` only for a purely in-memory database, which has no data directory.
+    captures: Option<CaptureStore>,
 }
 
 impl Database {
     /// Opens (or creates) the database at `path` and brings its schema up to date.
+    /// Captures are stored next to the database file.
     pub fn open(path: &Path) -> CoreResult<Self> {
-        Self::init(Connection::open(path)?)
+        let captures = path.parent().map(CaptureStore::new);
+        Self::init(Connection::open(path)?, captures)
     }
 
     pub fn open_in_memory() -> CoreResult<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, None)
     }
 
-    fn init(mut conn: Connection) -> CoreResult<Self> {
+    fn init(mut conn: Connection, captures: Option<CaptureStore>) -> CoreResult<Self> {
         // foreign_keys is per-connection and off by default in SQLite.
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut conn)?;
-        Ok(Self { conn })
+        Ok(Self { conn, captures })
+    }
+
+    pub fn captures_directory(&self) -> Option<PathBuf> {
+        self.captures.as_ref().map(CaptureStore::directory)
     }
 
     pub fn schema_version(&self) -> CoreResult<u32> {
@@ -213,18 +222,51 @@ impl Database {
 
     /// The "Excerpt to MindMap" write: annotation, card, join row, node and
     /// optional parent edge commit atomically, so a failure leaves no orphans.
+    /// A capture is written first, under the new annotation's id, and removed
+    /// again if the transaction does not commit.
     pub fn create_excerpt(&mut self, input: &CreateExcerptInput) -> CoreResult<CreatedExcerpt> {
         input.anchor.validate()?;
         let has_text = input
             .excerpt_text
             .as_deref()
             .is_some_and(|text| !text.trim().is_empty());
-        if !has_text && input.excerpt_image_path.is_none() {
+        if !has_text && input.excerpt_image_png.is_none() {
             return Err(CoreError::InvalidAnchor(
                 "an excerpt needs text or a captured image".to_owned(),
             ));
         }
+        let capture = input
+            .excerpt_image_png
+            .as_deref()
+            .map(decode_capture)
+            .transpose()?;
 
+        let annotation_id = new_id();
+        let image_path = match (&capture, &self.captures) {
+            (Some(png), Some(store)) => Some(store.write(&annotation_id, png)?),
+            (Some(_), None) => {
+                return Err(CoreError::InvalidCapture(
+                    "this database has no directory for captures".to_owned(),
+                ));
+            }
+            (None, _) => None,
+        };
+
+        let result = self.insert_excerpt(input, &annotation_id, image_path.as_deref());
+        if result.is_err()
+            && let (Some(path), Some(store)) = (&image_path, &self.captures)
+        {
+            store.remove(path);
+        }
+        result
+    }
+
+    fn insert_excerpt(
+        &mut self,
+        input: &CreateExcerptInput,
+        annotation_id: &str,
+        image_path: Option<&str>,
+    ) -> CoreResult<CreatedExcerpt> {
         let tx = self.conn.transaction()?;
         check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
         if let Some(parent_id) = &input.parent_node_id {
@@ -232,7 +274,6 @@ impl Database {
         }
 
         let anchor_type = input.anchor.format().as_str();
-        let annotation_id = new_id();
         tx.execute(
             "INSERT INTO annotations (id, document_id, notebook_id, anchor_type,
                  anchor_payload_json, excerpt_text, excerpt_image_path, color)
@@ -244,7 +285,7 @@ impl Database {
                 anchor_type,
                 serde_json::to_string(&input.anchor)?,
                 input.excerpt_text,
-                input.excerpt_image_path,
+                image_path,
                 input.color,
             ],
         )?;
@@ -290,7 +331,7 @@ impl Database {
 
         let annotation = tx.query_row(
             &format!("{ANNOTATION_SELECT} WHERE id = ?1"),
-            [&annotation_id],
+            [annotation_id],
             map_annotation,
         )?;
         let mut card = tx.query_row(
@@ -298,7 +339,7 @@ impl Database {
             [&card_id],
             map_card,
         )?;
-        card.annotation_ids = vec![annotation_id];
+        card.annotation_ids = vec![annotation_id.to_owned()];
         let node = tx.query_row(
             &format!("{NODE_SELECT} WHERE id = ?1"),
             [&node_id],
@@ -311,6 +352,23 @@ impl Database {
             card,
             node,
             edge,
+        })
+    }
+
+    /// Absolute path of an annotation's capture, or `None` if it has no image.
+    pub fn capture_path(&self, annotation_id: &str) -> CoreResult<Option<PathBuf>> {
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT excerpt_image_path FROM annotations WHERE id = ?1",
+                [annotation_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found("annotation", annotation_id))?;
+        Ok(match (stored, &self.captures) {
+            (Some(path), Some(store)) => Some(store.resolve(&path)),
+            _ => None,
         })
     }
 
@@ -646,7 +704,7 @@ mod tests {
             notebook_id: f.notebook_id.clone(),
             anchor: txt_anchor(),
             excerpt_text: Some("some".to_owned()),
-            excerpt_image_path: None,
+            excerpt_image_png: None,
             color: "#fde047".to_owned(),
             parent_node_id,
             pos_x: 10.0,
@@ -951,11 +1009,144 @@ mod tests {
         let mut input = excerpt(&f, None);
         input.excerpt_text = Some("   ".to_owned());
         assert!(f.db.create_excerpt(&input).is_err());
+    }
 
-        input.excerpt_text = None;
-        input.excerpt_image_path = Some("captures/a.png".to_owned());
-        let created = f.db.create_excerpt(&input).unwrap();
+    /// A file-backed database, as the app uses, so captures have somewhere to go.
+    struct OnDisk {
+        db: Database,
+        notebook_id: String,
+        document_id: String,
+        dir: tempfile::TempDir,
+    }
+
+    fn on_disk() -> OnDisk {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("app.sqlite3")).unwrap();
+        let path = dir.path().join("book.pdf");
+        std::fs::write(&path, "pdf").unwrap();
+        OnDisk {
+            document_id: db.register_document(&path).unwrap().id,
+            notebook_id: db.create_notebook("Study").unwrap().id,
+            db,
+            dir,
+        }
+    }
+
+    fn capture_input(f: &OnDisk, png: Option<&str>) -> CreateExcerptInput {
+        CreateExcerptInput {
+            document_id: f.document_id.clone(),
+            notebook_id: f.notebook_id.clone(),
+            anchor: AnchorLocation::Pdf {
+                page_index: 0,
+                rects: vec![NormalizedRect {
+                    x: 0.1,
+                    y: 0.1,
+                    width: 0.5,
+                    height: 0.5,
+                }],
+            },
+            excerpt_text: None,
+            excerpt_image_png: png.map(str::to_owned),
+            color: "#fde047".to_owned(),
+            parent_node_id: None,
+            pos_x: 0.0,
+            pos_y: 0.0,
+        }
+    }
+
+    /// A PNG signature in base64 is all core checks.
+    const PNG_BASE64: &str = "iVBORw0KGgo=";
+
+    fn capture_files(f: &OnDisk) -> usize {
+        std::fs::read_dir(f.dir.path().join("captures")).map_or(0, Iterator::count)
+    }
+
+    #[test]
+    fn a_capture_is_stored_under_its_annotation_id() {
+        let mut f = on_disk();
+        let created =
+            f.db.create_excerpt(&capture_input(&f, Some(PNG_BASE64)))
+                .unwrap();
+        let id = &created.annotation.id;
+
+        assert_eq!(
+            created.annotation.excerpt_image_path.as_deref(),
+            Some(format!("captures/{id}.png").as_str()),
+            "stored relative, so the data directory can move"
+        );
         assert_eq!(created.card.title, "Image excerpt");
+        let path = f.db.capture_path(id).unwrap().unwrap();
+        assert_eq!(
+            path,
+            f.dir.path().join("captures").join(format!("{id}.png"))
+        );
+        assert!(std::fs::read(path).unwrap().starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn an_invalid_capture_writes_nothing() {
+        let mut f = on_disk();
+        let input = capture_input(&f, Some("R0lGODlh"));
+        assert!(matches!(
+            f.db.create_excerpt(&input),
+            Err(CoreError::InvalidCapture(_))
+        ));
+        assert_eq!(capture_files(&f), 0);
+        assert_eq!(count(&f.db, "annotations"), 0);
+    }
+
+    #[test]
+    fn a_failed_transaction_removes_the_capture() {
+        let mut f = on_disk();
+        f.db.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_node BEFORE INSERT ON mindmap_nodes
+                 BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+            )
+            .unwrap();
+        let input = capture_input(&f, Some(PNG_BASE64));
+        assert!(matches!(
+            f.db.create_excerpt(&input),
+            Err(CoreError::Database(_))
+        ));
+        assert_eq!(capture_files(&f), 0);
+        assert_eq!(count(&f.db, "annotations"), 0);
+    }
+
+    #[test]
+    fn a_rejected_anchor_writes_no_capture() {
+        let mut f = on_disk();
+        let mut input = capture_input(&f, Some(PNG_BASE64));
+        input.document_id = "missing".to_owned();
+        assert!(matches!(
+            f.db.create_excerpt(&input),
+            Err(CoreError::NotFound { .. })
+        ));
+        assert_eq!(capture_files(&f), 0);
+    }
+
+    #[test]
+    fn capture_path_distinguishes_no_image_from_no_annotation() {
+        let mut f = on_disk();
+        let mut input = capture_input(&f, None);
+        input.excerpt_text = Some("text only".to_owned());
+        let created = f.db.create_excerpt(&input).unwrap();
+        assert_eq!(f.db.capture_path(&created.annotation.id).unwrap(), None);
+        assert!(matches!(
+            f.db.capture_path("missing"),
+            Err(CoreError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn an_in_memory_database_refuses_captures() {
+        let mut f = fixture();
+        let mut input = excerpt(&f, None);
+        input.excerpt_image_png = Some(PNG_BASE64.to_owned());
+        assert!(matches!(
+            f.db.create_excerpt(&input),
+            Err(CoreError::InvalidCapture(_))
+        ));
     }
 
     #[test]
