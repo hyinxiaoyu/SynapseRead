@@ -1,4 +1,7 @@
+import { DEFAULT_CHUNK_BYTES, streamUtf8Lossy } from '@/lib/backend/memoryTextStream';
 import type { StudyBackend } from '@/lib/backend/types';
+import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
+
 import type {
   Annotation,
   DocumentFormat,
@@ -15,16 +18,21 @@ export type MemoryFile = Uint8Array | (() => Promise<Uint8Array>);
 
 const encodePreview = (text: string) => new TextEncoder().encode(text);
 
+const fetchBytes = (url: string) => async () =>
+  new Uint8Array(await (await fetch(url)).arrayBuffer());
+
 const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
+  '/preview/sample.txt': fetchBytes(sampleTxtUrl),
   '/preview/sample.pdf': encodePreview('In-memory preview of a PDF\n'),
   '/preview/sample.epub': encodePreview('In-memory preview of an EPUB\n'),
-  '/preview/sample.txt': encodePreview('In-memory preview of a text file\n'),
   '/preview/sample.md': encodePreview('In-memory preview of a Markdown file\n'),
 };
 
 export interface MemoryBackendOptions {
   /** Files by path. The picker offers them in order, then starts over. */
   library?: Record<string, MemoryFile>;
+  /** Text stream chunk size, so tests can vary where chunks split. */
+  chunkBytes?: number;
 }
 
 const FORMAT_BY_EXTENSION: Record<string, DocumentFormat> = {
@@ -44,6 +52,7 @@ const now = () => new Date().toISOString();
  */
 export function createMemoryBackend({
   library = PREVIEW_LIBRARY,
+  chunkBytes = DEFAULT_CHUNK_BYTES,
 }: MemoryBackendOptions = {}): StudyBackend {
   const paths = Object.keys(library);
   const documents = new Map<string, StudyDocument>();
@@ -237,20 +246,12 @@ export function createMemoryBackend({
       bytes: await readFile(document.filePath),
     }),
 
-    async readTextStream(documentId, _encoding, onChunk) {
+    async readTextStream(documentId, encoding, onChunk) {
       const document = require(documents, documentId, 'document');
-      const bytes = await readFile(document.filePath);
-      onChunk({
-        seq: 0,
-        encoding: 'utf-8',
-        startByteOffset: 0,
-        endByteOffset: bytes.length,
-        startLineIndex: 0,
-        text: new TextDecoder().decode(bytes),
-        hadReplacements: false,
-        isLast: true,
-      });
-      return 1;
+      if (encoding !== null && !/^\s*utf-?8\s*$/i.test(encoding)) {
+        throw fail('unsupported_encoding', `unsupported text encoding: ${encoding}`);
+      }
+      return streamUtf8Lossy(await readFile(document.filePath), chunkBytes, onChunk);
     },
   };
 }

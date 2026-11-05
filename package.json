@@ -15,6 +15,7 @@
     "lint": "pnpm --filter @synapseread/desktop lint",
     "typecheck": "pnpm --filter @synapseread/desktop typecheck",
     "test": "pnpm --filter @synapseread/desktop test",
+    "e2e": "pnpm --filter @synapseread/desktop e2e",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test"

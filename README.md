@@ -19,12 +19,15 @@ from.
 - Jump from any card back to its source, with a pulse highlight
 - Draggable nodes, parent-child nesting, and cross-link edges, with layout saved
 - Format-agnostic anchors covering PDF, EPUB, TXT, and (reserved) Markdown
+- TXT reader: virtualized rendering, highlights that stay on the right bytes even in
+  damaged files, jump with pulse, and reopening where you left off
+- Tabs that keep their scroll position and loaded content
 - Streaming UTF-8 text pipeline with a pluggable decoder interface
 - Local SQLite storage, with no accounts and no network access
 
 **Planned**
 
-- PDF, EPUB, and TXT reader engines (next)
+- PDF and EPUB reader engines (next)
 - Merging excerpts, collapsing subtrees, and multiple notebooks
 - Multi-encoding text and Markdown (V1.1)
 
@@ -79,6 +82,7 @@ macOS.
 
 ```sh
 pnpm check                # format check, lint, typecheck, frontend tests
+pnpm e2e                  # reader engines in real Chromium; set CHROME_PATH if needed
 
 mkdir -p apps/desktop/dist   # needed once before compiling the desktop crate
 cargo fmt --all --check
@@ -118,6 +122,7 @@ and coding constraints.
 │       ├── domain.rs             # Domain types
 │       └── fs_reader.rs          # TextDecoderService, EncodingDetector, streaming
 ├── fixtures/contract/            # JSON checked by both Rust and TypeScript tests
+├── fixtures/documents/           # Small sample documents for tests and the preview
 ├── docs/ROADMAP.md               # Milestones
 ├── docs/adr/                     # Decision records
 └── .github/workflows/            # CI

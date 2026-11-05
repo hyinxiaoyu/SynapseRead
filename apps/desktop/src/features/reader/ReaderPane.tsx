@@ -1,11 +1,11 @@
 import { FolderOpen, Quote, X } from 'lucide-react';
-import { useCallback, useMemo } from 'react';
+import { type ComponentType, useCallback, useMemo } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn } from '@/lib/utils';
 import { selectHighlights, useStudySyncStore } from '@/stores/useStudySyncStore';
-import type { AnchorLocation, StudyDocument } from '@/types/domain';
+import type { AnchorLocation, DocumentViewerProps, StudyDocument } from '@/types/domain';
 
 export function ReaderPane() {
   const documents = useStudySyncStore((state) => state.documents);
@@ -73,6 +73,8 @@ export function ReaderPane() {
         <Button
           size="sm"
           disabled={!selection || isExcerpting}
+          // Keeps the reader's text selection alive through the click in every engine.
+          onMouseDown={(event) => event.preventDefault()}
           onClick={() => void excerptSelection()}
         >
           <Quote />
@@ -80,10 +82,26 @@ export function ReaderPane() {
         </Button>
       </header>
 
-      <div className="min-h-0 flex-1">
-        {activeDocument ? (
-          <ActiveViewer key={activeDocument.id} document={activeDocument} />
-        ) : (
+      <div className="relative min-h-0 flex-1">
+        {/*
+          Every open tab stays mounted so it keeps its scroll position, loaded text,
+          and parsed document. `visibility` rather than `display: none` keeps layout
+          alive; a box with no layout loses its scroll offset.
+        */}
+        {openDocuments.map((document) => {
+          const isActive = document.id === activeDocumentId;
+          return (
+            <div
+              key={document.id}
+              className="absolute inset-0"
+              style={{ visibility: isActive ? 'visible' : 'hidden' }}
+              inert={!isActive}
+            >
+              <DocumentTab document={document} isActive={isActive} />
+            </div>
+          );
+        })}
+        {!activeDocument && (
           <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
             Open a PDF, EPUB, or TXT file to start reading.
           </div>
@@ -93,7 +111,8 @@ export function ReaderPane() {
   );
 }
 
-function ActiveViewer({ document }: { document: StudyDocument }) {
+function DocumentTab({ document, isActive }: { document: StudyDocument; isActive: boolean }) {
+  const content = useStudySyncStore((state) => state.content);
   const annotations = useStudySyncStore((state) => state.annotations);
   const jumpRequest = useStudySyncStore((state) =>
     state.jumpRequest?.documentId === document.id ? state.jumpRequest : null,
@@ -111,10 +130,13 @@ function ActiveViewer({ document }: { document: StudyDocument }) {
     [reportCursor, document.id],
   );
 
-  const Viewer = viewerRegistry[document.format];
+  // Safe: the entry is looked up by this document's own format.
+  const Viewer = viewerRegistry[document.format] as ComponentType<DocumentViewerProps>;
   return (
     <Viewer
       document={document}
+      isActive={isActive}
+      content={content}
       highlights={highlights}
       jumpRequest={jumpRequest}
       onSelectionChange={setSelection}

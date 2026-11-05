@@ -1,0 +1,4 @@
+ï»¿Lossy sample
+before ÿþ bad â‚ middle target after
+literal ï¿½ stays literal, æ±‰å­— target two
+end â‚

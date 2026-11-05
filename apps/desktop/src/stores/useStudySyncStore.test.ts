@@ -38,7 +38,11 @@ describe('useStudySyncStore', () => {
   };
 
   beforeEach(async () => {
-    backend = createMemoryBackend();
+    backend = createMemoryBackend({
+      library: Object.fromEntries(
+        ['a.pdf', 'b.epub', 'c.txt', 'd.md'].map((name) => [`/test/${name}`, new Uint8Array()]),
+      ),
+    });
     store = createStudySyncStore(backend);
     await state().initialize();
   });

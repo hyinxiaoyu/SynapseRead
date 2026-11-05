@@ -15,6 +15,8 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     watch: { ignored: ['**/src-tauri/**'] },
+    // The browser preview loads its sample documents from `fixtures/`.
+    fs: { allow: ['../..'] },
   },
   build: {
     target: 'safari16',

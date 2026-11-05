@@ -29,8 +29,8 @@ the loop can run end to end. M2 deletes it.
 | Task                                                        | Status |
 | ----------------------------------------------------------- | ------ |
 | Path scope: id-based reads, native picker, asset scope, CSP | Done   |
-| TXT engine                                                  | Next   |
-| PDF engine                                                  | To do  |
+| TXT engine, with the span map from ADR 0002                 | Done   |
+| PDF engine                                                  | Next   |
 | EPUB engine                                                 | To do  |
 
 Each engine implements `DocumentViewerProps` and is registered in

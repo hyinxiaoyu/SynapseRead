@@ -3,25 +3,22 @@ import type {
   CardPatch,
   CreatedExcerpt,
   CreateExcerptInput,
+  DocumentContentReader,
   MindMapEdge,
   NodeLayoutPatch,
   NoteCard,
   NotebookGraph,
   StudyDocument,
   StudyNotebook,
-  TextChunk,
   Viewport,
 } from '@/types/domain';
-
-/** How a reader gets a document's raw bytes. */
-export type DocumentSource = { kind: 'url'; url: string } | { kind: 'bytes'; bytes: Uint8Array };
 
 /**
  * Everything the UI needs from the host. Components and stores depend on this
  * interface only, never on `@tauri-apps/*`, so they run in tests and in a plain
  * browser against `createMemoryBackend`.
  */
-export interface StudyBackend {
+export interface StudyBackend extends DocumentContentReader {
   /** Which implementation is active; the UI labels non-persistent sessions. */
   readonly kind: 'tauri' | 'memory';
 
@@ -48,14 +45,4 @@ export interface StudyBackend {
     label: string | null,
   ): Promise<MindMapEdge>;
   deleteEdge(edgeId: string): Promise<void>;
-
-  /** Where a PDF or EPUB reader loads a registered document's bytes from. */
-  loadDocumentSource(document: StudyDocument): Promise<DocumentSource>;
-
-  /** Streams a registered text document as UTF-8 chunks; resolves to the chunk count. */
-  readTextStream(
-    documentId: string,
-    encoding: string | null,
-    onChunk: (chunk: TextChunk) => void,
-  ): Promise<number>;
 }

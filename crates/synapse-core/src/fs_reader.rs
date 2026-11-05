@@ -24,6 +24,20 @@ pub const UTF8_LABEL: &str = "utf-8";
 pub const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
 
+/// A place where decoded text is not byte-identical to the source file. Text
+/// outside every span is, so a span list fully maps text positions to source
+/// offsets: see `docs/adr/0002-txt-anchor-drift.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSpan {
+    /// UTF-8 bytes into the chunk's text where the span begins.
+    pub text_offset: usize,
+    /// Decoded UTF-8 bytes in the span; zero for a stripped BOM.
+    pub text_len: usize,
+    /// Source bytes those decoded bytes stand for.
+    pub source_len: usize,
+}
+
 /// Stateful decoder for one stream; it owns any bytes split across reads.
 pub trait StreamDecoder: Send {
     /// Decodes `input`. With `is_last` set, trailing incomplete sequences are
@@ -38,6 +52,9 @@ pub struct DecodedText {
     pub consumed_bytes: usize,
     /// True when malformed input was replaced with U+FFFD.
     pub had_replacements: bool,
+    /// Ascending and non-overlapping. Every decoder must report each place its
+    /// output differs from its input, or anchors drift.
+    pub source_spans: Vec<SourceSpan>,
 }
 
 /// Factory for stream decoders of one encoding.
@@ -99,12 +116,26 @@ impl StreamDecoder for Utf8LossyStream {
             self.pending = bytes.split_off(held_from);
         }
 
-        let text = String::from_utf8_lossy(&bytes);
-        let had_replacements = matches!(text, std::borrow::Cow::Owned(_));
+        // Equivalent to `String::from_utf8_lossy`, which walks the same chunks,
+        // but this keeps what each replacement stood for.
+        let mut text = String::with_capacity(bytes.len());
+        let mut source_spans = Vec::new();
+        for chunk in bytes.utf8_chunks() {
+            text.push_str(chunk.valid());
+            if !chunk.invalid().is_empty() {
+                source_spans.push(SourceSpan {
+                    text_offset: text.len(),
+                    text_len: char::REPLACEMENT_CHARACTER.len_utf8(),
+                    source_len: chunk.invalid().len(),
+                });
+                text.push(char::REPLACEMENT_CHARACTER);
+            }
+        }
         DecodedText {
-            text: text.into_owned(),
+            text,
             consumed_bytes: bytes.len(),
-            had_replacements,
+            had_replacements: !source_spans.is_empty(),
+            source_spans,
         }
     }
 }
@@ -184,6 +215,9 @@ pub struct TextChunk {
     pub start_line_index: u64,
     pub text: String,
     pub had_replacements: bool,
+    /// Where `text` differs from the source. The frontend's offset arithmetic
+    /// is only correct with these applied.
+    pub source_spans: Vec<SourceSpan>,
     pub is_last: bool,
 }
 
@@ -233,7 +267,19 @@ where
             at_start = false;
             if encoding == UTF8_LABEL && buffer[..filled].starts_with(UTF8_BOM) {
                 // The offsets still count the BOM: they address the source file.
-                decoded.text.drain(.."\u{FEFF}".len());
+                let bom_len = "\u{FEFF}".len();
+                decoded.text.drain(..bom_len);
+                for span in &mut decoded.source_spans {
+                    span.text_offset -= bom_len;
+                }
+                decoded.source_spans.insert(
+                    0,
+                    SourceSpan {
+                        text_offset: 0,
+                        text_len: 0,
+                        source_len: bom_len,
+                    },
+                );
             }
         }
 
@@ -248,6 +294,7 @@ where
             start_line_index,
             text: decoded.text,
             had_replacements: decoded.had_replacements,
+            source_spans: decoded.source_spans,
             is_last,
         };
         // A chunk of only held-back bytes carries nothing; the empty last chunk
@@ -505,10 +552,24 @@ mod tests {
         struct Latin1Stream;
         impl StreamDecoder for Latin1Stream {
             fn decode(&mut self, input: &[u8], _is_last: bool) -> DecodedText {
+                let mut text = String::new();
+                let mut source_spans = Vec::new();
+                for byte in input {
+                    let decoded = char::from(*byte);
+                    if decoded.len_utf8() != 1 {
+                        source_spans.push(SourceSpan {
+                            text_offset: text.len(),
+                            text_len: decoded.len_utf8(),
+                            source_len: 1,
+                        });
+                    }
+                    text.push(decoded);
+                }
                 DecodedText {
-                    text: input.iter().map(|byte| char::from(*byte)).collect(),
+                    text,
                     consumed_bytes: input.len(),
                     had_replacements: false,
+                    source_spans,
                 }
             }
         }
@@ -539,6 +600,154 @@ mod tests {
         .unwrap();
         assert_eq!(joined(&chunks), "café");
         assert_eq!(chunks[0].encoding, "iso-8859-1");
+        assert_reconciles(&chunks);
+    }
+
+    /// ADR 0002 invariant 1: what the frontend's offset arithmetic depends on.
+    fn assert_reconciles(chunks: &[TextChunk]) {
+        for chunk in chunks {
+            let adjustment: i64 = chunk
+                .source_spans
+                .iter()
+                .map(|span| span.source_len as i64 - span.text_len as i64)
+                .sum();
+            assert_eq!(
+                chunk.start_byte_offset as i64 + chunk.text.len() as i64 + adjustment,
+                chunk.end_byte_offset as i64,
+                "{chunk:?}"
+            );
+            for pair in chunk.source_spans.windows(2) {
+                assert!(pair[0].text_offset + pair[0].text_len <= pair[1].text_offset);
+            }
+        }
+    }
+
+    #[test]
+    fn spans_reconcile_at_every_chunk_size() {
+        let mut source =
+            b"\xEF\xBB\xBFok \xFF\xFE \xE2\x82 mid \xF0\x9F\x98 caf\xC3\xA9\r\n".to_vec();
+        source.extend_from_slice("literal \u{FFFD} here 😀\n".as_bytes());
+        source.extend_from_slice(b"tail \xE2\x82");
+        for chunk_bytes in 4..=40 {
+            let chunks = collect(&source, chunk_bytes);
+            assert_reconciles(&chunks);
+            assert_eq!(
+                chunks.last().unwrap().end_byte_offset as usize,
+                source.len()
+            );
+        }
+    }
+
+    #[test]
+    fn spans_identify_only_what_was_replaced() {
+        // The literal U+FFFD is valid UTF-8 in the source: scanning the text for
+        // U+FFFD could not tell these two apart.
+        let chunks = collect(b"\xEF\xBF\xBD|\xFF|", 64);
+        assert_eq!(joined(&chunks), "\u{FFFD}|\u{FFFD}|");
+        assert_eq!(
+            chunks[0].source_spans,
+            [SourceSpan {
+                text_offset: 4,
+                text_len: 3,
+                source_len: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn a_bom_is_a_span_even_though_nothing_was_replaced() {
+        let chunks = collect(b"\xEF\xBB\xBFa\xFFb", 64);
+        assert_eq!(
+            chunks[0].source_spans,
+            [
+                SourceSpan {
+                    text_offset: 0,
+                    text_len: 0,
+                    source_len: 3
+                },
+                SourceSpan {
+                    text_offset: 1,
+                    text_len: 3,
+                    source_len: 1
+                },
+            ]
+        );
+        let clean = collect(b"\xEF\xBB\xBFabc", 64);
+        assert!(!clean[0].had_replacements);
+        assert_eq!(clean[0].source_spans.len(), 1);
+    }
+
+    #[test]
+    fn clean_text_has_no_spans() {
+        let chunks = collect("héllo 😀\n".as_bytes(), 64);
+        assert!(chunks[0].source_spans.is_empty());
+    }
+
+    /// The fixture is checked by TypeScript too, so both sides share one truth.
+    #[test]
+    fn contract_fixture_matches_the_pipeline() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/contract/text-chunks.json"))
+                .unwrap();
+        for case in cases.as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let source = decode_hex(case["sourceHex"].as_str().unwrap());
+            let chunk_bytes = case["chunkBytes"].as_u64().unwrap() as usize;
+            let chunks = collect(&source, chunk_bytes);
+            assert_eq!(
+                serde_json::to_value(&chunks).unwrap(),
+                case["chunks"],
+                "{name}"
+            );
+
+            let text = joined(&chunks);
+            for position in case["positions"].as_array().unwrap() {
+                let unit = position["unit"].as_u64().unwrap() as usize;
+                let expected = position["byte"].as_u64().unwrap();
+                assert_eq!(
+                    source_offset_at(&chunks, &text, unit),
+                    expected,
+                    "{name} at unit {unit}"
+                );
+            }
+        }
+    }
+
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Test-only reference for the mapping the frontend performs on UTF-16 units.
+    fn source_offset_at(chunks: &[TextChunk], text: &str, unit: usize) -> u64 {
+        let mut decoded = 0;
+        let mut units = 0;
+        for character in text.chars() {
+            if units >= unit {
+                break;
+            }
+            units += character.len_utf16();
+            decoded += character.len_utf8();
+        }
+        let mut chunk_start = 0;
+        let mut found = None;
+        for chunk in chunks {
+            if chunk_start <= decoded {
+                found = Some((chunk, chunk_start));
+            }
+            chunk_start += chunk.text.len();
+        }
+        let (chunk, start) = found.unwrap();
+        let prefix = decoded - start;
+        let adjustment: i64 = chunk
+            .source_spans
+            .iter()
+            .filter(|span| span.text_offset + span.text_len <= prefix)
+            .map(|span| span.source_len as i64 - span.text_len as i64)
+            .sum();
+        (chunk.start_byte_offset as i64 + prefix as i64 + adjustment) as u64
     }
 
     #[test]

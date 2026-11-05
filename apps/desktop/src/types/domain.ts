@@ -151,6 +151,19 @@ export interface NodeLayoutPatch {
   isCollapsed: boolean;
 }
 
+/**
+ * Where decoded text is not byte-identical to the source file. Text outside
+ * every span is. See `docs/adr/0002-txt-anchor-drift.md`.
+ */
+export interface SourceSpan {
+  /** UTF-8 bytes into the chunk's text where the span begins. */
+  textOffset: number;
+  /** Decoded UTF-8 bytes in the span; 0 for a stripped BOM. */
+  textLen: number;
+  /** Source bytes those decoded bytes stand for. */
+  sourceLen: number;
+}
+
 /** One decoded piece of a text file, as sent by `read_text_stream`. */
 export interface TextChunk {
   seq: number;
@@ -160,7 +173,21 @@ export interface TextChunk {
   startLineIndex: number;
   text: string;
   hadReplacements: boolean;
+  sourceSpans: SourceSpan[];
   isLast: boolean;
+}
+
+/** How a reader gets a document's raw bytes. */
+export type DocumentSource = { kind: 'url'; url: string } | { kind: 'bytes'; bytes: Uint8Array };
+
+/** The read-only document access a reader is given. It cannot write anything. */
+export interface DocumentContentReader {
+  loadDocumentSource(document: StudyDocument): Promise<DocumentSource>;
+  readTextStream(
+    documentId: string,
+    encoding: string | null,
+    onChunk: (chunk: TextChunk) => void,
+  ): Promise<number>;
 }
 
 /** Rejection shape of every Tauri command. */
@@ -201,6 +228,9 @@ export interface ReaderHighlight {
  */
 export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> {
   document: StudyDocument & { format: F };
+  /** False while another tab is showing. The viewer stays mounted to keep its state. */
+  isActive: boolean;
+  content: DocumentContentReader;
   highlights: ReaderHighlight[];
   /** Set while a jump is outstanding for this document. */
   jumpRequest: JumpRequest | null;
