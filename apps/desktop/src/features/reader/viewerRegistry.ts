@@ -1,23 +1,20 @@
 import type { ComponentType } from 'react';
 
-import { EnginePendingViewer } from '@/features/reader/EnginePendingViewer';
+import { EpubViewer } from '@/features/reader/epub/EpubViewer';
 import { PdfViewer } from '@/features/reader/pdf/PdfViewer';
 import { TxtViewer } from '@/features/reader/txt/TxtViewer';
+import { UnsupportedFormatViewer } from '@/features/reader/UnsupportedFormatViewer';
 import type { DocumentFormat, DocumentViewerProps } from '@/types/domain';
 
 /**
  * Maps each format to its engine; this is the only place readers are wired in.
- * The remaining pending entries are replaced as their engines land. Markdown
- * stays reserved until V1.1.
+ * Markdown stays reserved until V1.1.
  */
-const pending = <F extends DocumentFormat>() =>
-  EnginePendingViewer as unknown as ComponentType<DocumentViewerProps<F>>;
-
 export const viewerRegistry: {
   [F in DocumentFormat]: ComponentType<DocumentViewerProps<F>>;
 } = {
   pdf: PdfViewer,
-  epub: pending(),
+  epub: EpubViewer,
   txt: TxtViewer,
-  md: pending(),
+  md: UnsupportedFormatViewer,
 };

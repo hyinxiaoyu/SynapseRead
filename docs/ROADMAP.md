@@ -21,33 +21,22 @@ macOS only (`aarch64-apple-darwin`, `x86_64-apple-darwin`).
 | Inspector: edit title, notes, and tags                                          | Done   |
 | CI, agent guidelines, documentation                                             | Done   |
 
-`EnginePendingViewer` stands in for the real engines and emits sample anchors so
-the loop can run end to end. M2 deletes it.
-
-## M2: Reader engines (Phase 2), in progress
+## M2: Reader engines (Phase 2), complete
 
 | Task                                                        | Status |
 | ----------------------------------------------------------- | ------ |
 | Path scope: id-based reads, native picker, asset scope, CSP | Done   |
 | TXT engine, with the span map from ADR 0002                 | Done   |
 | PDF engine, with captures from ADR 0003                     | Done   |
-| EPUB engine                                                 | Next   |
+| EPUB engine, with the content rules from ADR 0005           | Done   |
 
 Each engine implements `DocumentViewerProps` and is registered in
-`features/reader/viewerRegistry.ts`.
-
-- **TXT:** virtualized line renderer (`@tanstack/react-virtual`) fed by
-  `read_text_stream`; map DOM selections to `TxtAnchor`; paint highlights; jump
-  and pulse.
-- **PDF:** `pdfjs-dist` canvas and text layer; text selection to normalized
-  rects; rectangle drag capture saved to `excerpt_image_path`.
-- **EPUB:** `epubjs` rendition; CFI selection to `EpubAnchor`; jump via
-  `rendition.display(cfi)`.
-- **All:** reopen at `lastCursorAnchor`; multi-document tabs keep their state.
+`features/reader/viewerRegistry.ts`. `pnpm e2e` drives all three in real Chromium.
 
 **Decisions for M2**
 
-Settled before implementation. Each record states its tradeoffs and what would reverse it.
+Each record states its tradeoffs and what would reverse it. The first four were settled
+before implementation; the fifth came up while building the EPUB engine.
 
 1. [Path scope and the asset protocol](adr/0001-path-scope.md): the webview never names
    a path; the `documents` table is the only scope for commands and asset loading alike.
@@ -56,7 +45,19 @@ Settled before implementation. Each record states its tradeoffs and what would r
 3. [Rectangle captures](adr/0003-rectangle-captures.md): core writes
    `<app-data>/captures/<annotation-id>.png` inside `create_excerpt`.
 4. [pdf.js worker under the CSP](adr/0004-pdfjs-worker-csp.md): proven by a spike on
-   WebKitGTK. It must be re-run on macOS WKWebView before release.
+   WebKitGTK.
+5. [EPUB content and the iframe sandbox](adr/0005-epub-sandbox.md): `allow-scripts` is
+   required on WebKit, so the CSP and a sanitizing hook keep book scripts from running.
+
+**Carried into M4**
+
+- Run the [whole-app self-test](adr/0004-pdfjs-worker-csp.md#whole-app-check) on macOS
+  WKWebView. It passes on WebKitGTK, but nothing has run on macOS yet.
+- Click through the native file picker. `pick_document` is the one command no test runs.
+- Large files: TXT holds the whole file in memory, a closed tab does not stop the Rust
+  read, and PDFs load whole rather than by range.
+- A file edited in place still opens, and its anchors can drift, because `file_hash` is
+  not re-checked on open.
 
 ## M3: Card operations
 

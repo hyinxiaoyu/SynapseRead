@@ -61,7 +61,40 @@ with no `wasm-unsafe-eval`, and an `asset://` file outside the scope returned 40
   there, fall back to feeding bytes over IPC under the same scope.
 - A raised minimum macOS version could drop the legacy build.
 
-## Reproducing
+## Whole-app check
+
+After all three engines landed, the real application ran inside the real Tauri binary on
+WebKitGTK 2.54, under the shipped CSP, with the real Rust backend. A self-driving script
+([`whole-app-self-test.patch`](whole-app-self-test.patch)) only replaces the native picker
+and uses scripted selections instead of a mouse.
+
+| Checked                                                  | Result                   |
+| -------------------------------------------------------- | ------------------------ |
+| TXT streamed from Rust, including BOM and malformed file | highlights exact text    |
+| PDF worker                                               | real `Worker`            |
+| PDF highlight against its text                           | 0 px off                 |
+| CJK page with a non-embedded font                        | text and glyphs present  |
+| Capture written by core, read back over `asset:`         | center pixel is correct  |
+| EPUB selection (the ADR 0005 risk)                       | works                    |
+| EPUB hostile script and handler                          | inert, and removed       |
+| CSP violations, console errors                           | none                     |
+| Second launch, same data directory                       | 6 cards, position, marks |
+
+**This is the check to repeat on a Mac before release:**
+
+```sh
+git apply docs/adr/whole-app-self-test.patch
+pnpm build:web
+cargo build -p synapseread-desktop
+SPIKE_FILES=/abs/sample.txt:/abs/sample.pdf:/abs/sample.epub:/abs/sample-lossy.txt \
+  target/debug/synapseread-desktop               # add SPIKE_MODE=second for a second launch
+```
+
+It prints a JSON report and exits. Every engine should report `"ok": true`, with empty
+`violations` and `errors`. Use a throwaway user or data directory, as it writes real
+annotations. On Linux, run it under `xvfb-run -a` with `WEBKIT_DISABLE_COMPOSITING_MODE=1`.
+
+## Reproducing the spike
 
 ```sh
 # The patch applies to commit 380baaa.
