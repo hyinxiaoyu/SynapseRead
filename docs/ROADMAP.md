@@ -38,20 +38,18 @@ Each engine implements `DocumentViewerProps` and is registered in
   `rendition.display(cfi)`.
 - **All:** reopen at `lastCursorAnchor`; multi-document tabs keep their state.
 
-**Open decisions for M2**
+**Decisions for M2**
 
-1. **TXT offsets in lossy chunks.** `TextChunk` offsets are exact at chunk
-   boundaries. Inside a chunk, the frontend derives offsets from the UTF-8 length
-   of the decoded text, which drifts when `hadReplacements` is true, since U+FFFD
-   is not the same length as the malformed bytes it replaced. Either send a
-   replacement map or anchor such chunks to their boundaries.
-2. **Asset access and path scope.** Enable Tauri's asset protocol with a scope
-   limited to registered documents. `read_text_stream` currently accepts any path
-   the webview supplies; restrict it to registered documents before release.
-3. **Image captures.** Decide where rectangle captures live on disk (proposed:
-   under the app-data directory, keyed by annotation id).
-4. **pdf.js and Node.** `pdfjs-dist` declares Node ≥ 22.13 only for tooling; it
-   runs in the webview. Confirm its worker loads under the app CSP.
+Settled before implementation. Each record states its tradeoffs and what would reverse it.
+
+1. [Path scope and the asset protocol](adr/0001-path-scope.md): the webview never names
+   a path; the `documents` table is the only scope for commands and asset loading alike.
+2. [TXT anchors in lossy chunks](adr/0002-txt-anchor-drift.md): each chunk carries a map
+   of its non-identity spans, which also covers the BOM.
+3. [Rectangle captures](adr/0003-rectangle-captures.md): core writes
+   `<app-data>/captures/<annotation-id>.png` inside `create_excerpt`.
+4. [pdf.js worker under the CSP](adr/0004-pdfjs-worker-csp.md): proven by a spike on
+   WebKitGTK. It must be re-run on macOS WKWebView before release.
 
 ## M3: Card operations
 
