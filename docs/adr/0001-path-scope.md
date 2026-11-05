@@ -29,8 +29,8 @@ definition of what is readable.
    (`assetProtocol: { enable: true, scope: [] }`). One adapter function grants a
    document's exact file with `allow_file`, which escapes glob characters. It is
    called for every document at startup and after each registration.
-4. PDF and EPUB load through that scope via `StudyBackend.loadDocumentSource`. No other
-   code calls `convertFileSrc`.
+4. PDF and EPUB load through that scope via `StudyBackend.loadDocumentSource`. Only
+   `tauriBackend.ts` calls `convertFileSrc`.
 
 ## Tradeoffs
 

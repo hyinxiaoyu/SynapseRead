@@ -1,0 +1,297 @@
+diff --git a/apps/desktop/index.html b/apps/desktop/index.html
+index 84d7797..56f4a79 100644
+--- a/apps/desktop/index.html
++++ b/apps/desktop/index.html
+@@ -7,6 +7,6 @@
+   </head>
+   <body>
+     <div id="root"></div>
+-    <script type="module" src="/src/main.tsx"></script>
++    <script type="module" src="/webkit-check/main.tsx"></script>
+   </body>
+ </html>
+diff --git a/apps/desktop/src-tauri/Cargo.toml b/apps/desktop/src-tauri/Cargo.toml
+index 9947c6a..74f0ea3 100644
+--- a/apps/desktop/src-tauri/Cargo.toml
++++ b/apps/desktop/src-tauri/Cargo.toml
+@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
+ [dependencies]
+ serde.workspace = true
+ synapse-core = { path = "../../../crates/synapse-core" }
+-tauri = { version = "2", features = ["protocol-asset"] }
++tauri = { version = "2", features = ["protocol-asset", "custom-protocol"] }
+ tauri-plugin-dialog = "2"
+ 
+ [dev-dependencies]
+diff --git a/apps/desktop/src-tauri/src/lib.rs b/apps/desktop/src-tauri/src/lib.rs
+index 7c1f1fe..f31d3b0 100644
+--- a/apps/desktop/src-tauri/src/lib.rs
++++ b/apps/desktop/src-tauri/src/lib.rs
+@@ -28,10 +28,24 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
+         commands::db::update_node_layout,
+         commands::db::create_edge,
+         commands::db::delete_edge,
+-        commands::fs_reader::read_text_stream,
++        commands::fs_reader::read_text_stream, spike_report, spike_progress, spike_pick, spike_mode,
+     ])
+ }
+ 
++static PICKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++#[tauri::command]
++fn spike_mode() -> String { std::env::var("SPIKE_MODE").unwrap_or_default() }
++#[tauri::command]
++fn spike_pick<R: Runtime>(app: tauri::AppHandle<R>) -> error::IpcResult<Option<synapse_core::domain::Document>> {
++    let names: Vec<String> = std::env::var("SPIKE_FILES").unwrap().split(':').map(str::to_owned).collect();
++    let index = PICKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % names.len();
++    access::register_and_grant(&app, std::path::Path::new(&names[index])).map(Some)
++}
++#[tauri::command]
++fn spike_progress(step: String) { println!("STEP {step}"); }
++#[tauri::command]
++fn spike_report(report: String) { println!("SPIKE_REPORT_BEGIN\n{report}\nSPIKE_REPORT_END"); std::process::exit(0); }
++
+ #[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
+     with_commands(Builder::default().plugin(tauri_plugin_dialog::init()))
+diff --git a/apps/desktop/src/lib/backend/index.ts b/apps/desktop/src/lib/backend/index.ts
+index 0e45bbe..20acd01 100644
+--- a/apps/desktop/src/lib/backend/index.ts
++++ b/apps/desktop/src/lib/backend/index.ts
+@@ -5,7 +5,7 @@ import { createTauriBackend } from '@/lib/backend/tauriBackend';
+ import type { StudyBackend } from '@/lib/backend/types';
+ 
+ export function createDefaultBackend(): StudyBackend {
+-  return isTauri() ? createTauriBackend() : createMemoryBackend();
++  void isTauri; void createMemoryBackend; return createTauriBackend();
+ }
+ 
+ export type { StudyBackend };
+diff --git a/apps/desktop/src/lib/backend/tauriBackend.ts b/apps/desktop/src/lib/backend/tauriBackend.ts
+index 2a7bfed..0c415ee 100644
+--- a/apps/desktop/src/lib/backend/tauriBackend.ts
++++ b/apps/desktop/src/lib/backend/tauriBackend.ts
+@@ -15,7 +15,7 @@ export function createTauriBackend(): StudyBackend {
+   return {
+     kind: 'tauri',
+ 
+-    pickDocument: () => invoke<StudyDocument | null>('pick_document'),
++    pickDocument: () => invoke<StudyDocument | null>('spike_pick'),
+     listDocuments: () => invoke<StudyDocument[]>('list_documents'),
+     updateDocumentCursor: (documentId, anchor) =>
+       invoke('update_document_cursor', { documentId, anchor }),
+diff --git a/apps/desktop/webkit-check/main.tsx b/apps/desktop/webkit-check/main.tsx
+new file mode 100644
+index 0000000..1b72ed8
+--- /dev/null
++++ b/apps/desktop/webkit-check/main.tsx
+@@ -0,0 +1,210 @@
++import { invoke } from '@tauri-apps/api/core';
++// Keep IPC for reporting, but run the app on the memory backend: the native picker cannot be clicked here.
++invoke('spike_progress', { step: 'boot' }).catch((e) => document.title = String(e));
++Element.prototype.setPointerCapture = () => undefined; // synthetic pointers have no capture target
++
++const results: Record<string, unknown> = { ua: navigator.userAgent, location: location.href };
++const violations: string[] = [];
++const watch = (d: Document, where: string) => d.addEventListener('securitypolicyviolation', (e) => violations.push(`${where}: ${e.effectiveDirective} ${(e.blockedURI || '').slice(0, 50)}`));
++watch(document, 'app');
++const errors: string[] = [];
++const origError = console.error; console.error = (...a) => { errors.push(a.map(String).join(' ').slice(0, 300)); origError(...a); };
++window.addEventListener('error', (e) => { errors.push('error: ' + e.message); void invoke('spike_progress', { step: 'ERROR ' + e.message }); });
++window.addEventListener('unhandledrejection', (e) => errors.push('rejection: ' + String(e.reason?.message ?? e.reason).slice(0, 300)));
++
++const sleep = (ms: number) => new Promise((d) => setTimeout(d, ms));
++const step = (what: string) => void invoke('spike_progress', { step: what });
++async function until<T>(what: string, fn: () => T | Promise<T>, ms = 15000): Promise<NonNullable<T>> {
++  step(what);
++  const end = performance.now() + ms;
++  for (;;) { const v = await fn(); if (v) return v as NonNullable<T>; if (performance.now() > end) throw new Error('timed out: ' + what); await sleep(40); }
++}
++const check = (ok: unknown, what: string) => { if (!ok) throw new Error('failed: ' + what); };
++const button = (name: string) => [...document.querySelectorAll('button')].findLast((b) => (b.getAttribute('aria-label') ?? b.textContent ?? '').trim() === name && !b.disabled && getComputedStyle(b).visibility === 'visible');
++const click = async (name: string) => (await until('button ' + name, () => button(name))).click();
++const excerptReady = () => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent?.includes('Excerpt to MindMap')); return b && !b.disabled; };
++const isVisible = (e: Element) => getComputedStyle(e).visibility === 'visible';
++const selectIn = (d: Document, node: Text, a: number, b: number) => { const s = d.defaultView!.getSelection()!; s.removeAllRanges(); const r = d.createRange(); r.setStart(node, a); r.setEnd(node, b); s.addRange(r); };
++const findText = (root: Element, text: string) => { const w = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT); for (let n = w.nextNode() as Text | null; n; n = w.nextNode() as Text | null) { const i = n.data.indexOf(text); if (i >= 0) return { node: n, index: i }; } return null; };
++
++async function txt() {
++  const r: Record<string, unknown> = {};
++  await click('Open');
++  const scroller = await until('txt scroller', () => [...document.querySelectorAll('[data-testid="txt-scroll"]')].find(isVisible));
++  await until('txt text', () => findText(scroller, 'quick brown fox'));
++  const hit = findText(scroller, 'quick brown fox')!;
++  selectIn(document, hit.node, hit.index, hit.index + 'quick brown fox'.length);
++  await until('txt selection enables excerpt', excerptReady, 3000);
++  await click('Excerpt to MindMap');
++  const mark = await until('txt highlight', () => [...scroller.querySelectorAll('[data-annotation-id]')].find((e) => e.textContent === 'quick brown fox'));
++  r.highlightText = mark.textContent;
++  const multi = findText(scroller, 'café and € and 😀')!;
++  selectIn(document, multi.node, multi.index, multi.index + 'café and € and 😀'.length);
++  await until('txt multibyte selection', excerptReady, 3000);
++  await click('Excerpt to MindMap');
++  await until('txt multibyte highlight', () => [...scroller.querySelectorAll('[data-annotation-id]')].find((e) => e.textContent === 'café and € and 😀'));
++  scroller.scrollTop = 2600; await sleep(100);
++  await click('Jump to source of quick brown fox');
++  await until('txt pulse', () => scroller.querySelector('.anchor-pulse'));
++  await until('txt pulse end', () => !scroller.querySelector('.anchor-pulse'));
++  r.scrollAfterJump = scroller.scrollTop;
++  scroller.scrollTop = 1500; await sleep(600);
++  r.tabScrollBefore = scroller.scrollTop;
++  return { r, scroller };
++}
++
++async function pdf(txtScroller: Element) {
++  const r: Record<string, unknown> = {};
++  await click('Open');
++  const viewer = await until('pdf viewer', () => [...document.querySelectorAll('[data-testid="pdf-viewer"]')].find(isVisible));
++  r.worker = (viewer as HTMLElement).dataset.pdfWorker;
++  check(r.worker === 'worker', 'real pdf.js worker, got ' + r.worker);
++  r.txtScrollWhileHidden = txtScroller.scrollTop;
++  const scroller = viewer.querySelector('[data-testid="pdf-scroll"]')!;
++  await until('pdf text', () => findText(viewer, 'quick brown fox'));
++  const ink = (i: number) => { const c = viewer.querySelector<HTMLCanvasElement>(`[data-page-index="${i}"] canvas`); if (!c || !c.width) return 0; const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data; let n = 0; for (let k = 0; k < d.length; k += 4) if (d[k]! < 128 && d[k + 3]! > 0) n++; return n; };
++  await until('pdf ink', () => ink(0) > 100);
++  r.page0Ink = ink(0);
++  const hit = findText(viewer, 'quick brown fox')!;
++  selectIn(document, hit.node, hit.index, hit.index + 15);
++  const textBox = (() => { const q = document.createRange(); q.setStart(hit.node, hit.index); q.setEnd(hit.node, hit.index + 15); const b = q.getBoundingClientRect(); return { left: b.left, right: b.right, top: b.top, bottom: b.bottom }; })();
++  await until('pdf selection', excerptReady, 3000);
++  await click('Excerpt to MindMap');
++  const hl = await until('pdf highlight', () => viewer.querySelector('[data-page-index="0"] [data-annotation-id]'));
++  const hb = hl.getBoundingClientRect();
++  r.highlightOffsetPx = { left: +(hb.left - textBox.left).toFixed(1), right: +(hb.right - textBox.right).toFixed(1), top: +(hb.top - textBox.top).toFixed(1) };
++  check(Math.abs(hb.left - textBox.left) < 3 && Math.abs(hb.right - textBox.right) < 3, 'highlight on text');
++  const toPage = async (i: number) => until('pdf page ' + i, () => { const t = viewer.querySelector(`[data-page-index="${i}"]`); if (t) { t.scrollIntoView({ block: 'start' }); return t; } scroller.scrollTop = (scroller.scrollHeight * i) / 5; return null; });
++  await toPage(4);
++  await until('pdf CJK text', () => findText(viewer.querySelector('[data-page-index="4"]')!, '汉字'));
++  r.cjkInk = await until('pdf CJK ink', () => ink(4) > 50);
++  await toPage(2);
++  await until('pdf blue box', () => ink(2) > 1000);
++  await click('Capture area');
++  const surface = await until('capture surface', () => viewer.querySelector('[data-page-index="2"] [data-testid="pdf-capture-surface"]'));
++  const s = surface.getBoundingClientRect();
++  const pt = (x: number, y: number) => ({ clientX: s.left + s.width * (x / 612), clientY: s.top + s.height * ((792 - y) / 792), pointerId: 1, bubbles: true, isPrimary: true });
++  surface.dispatchEvent(new PointerEvent('pointerdown', pt(170, 530)));
++  surface.dispatchEvent(new PointerEvent('pointermove', pt(330, 420)));
++  await sleep(50);
++  surface.dispatchEvent(new PointerEvent('pointerup', pt(330, 420)));
++  await until('capture selection', excerptReady, 3000);
++  await click('Excerpt to MindMap');
++  const img = await until('capture image', () => document.querySelector<HTMLImageElement>('img[alt="Captured area"]'));
++  r.captureSrcScheme = img.src.split(':')[0];
++  const bitmap = await createImageBitmap(await (await fetch(img.src)).blob());
++  const c = document.createElement('canvas'); c.width = bitmap.width; c.height = bitmap.height; const g = c.getContext('2d')!; g.drawImage(bitmap, 0, 0);
++  const px = [...g.getImageData(c.width >> 1, c.height >> 1, 1, 1).data];
++  r.capture = { size: [c.width, c.height], center: px };
++  check(Math.abs(px[0]! - 26) < 14 && Math.abs(px[2]! - 204) < 14, 'capture pixels are the blue box, got ' + px);
++  await click('Jump to source of quick brown fox');
++  await until('pdf pulse', () => viewer.querySelector('[data-page-index="0"] .anchor-pulse'));
++  await until('pdf pulse end', () => !viewer.querySelector('.anchor-pulse'));
++  return r;
++}
++
++async function lossy() {
++  const r: Record<string, unknown> = {};
++  await click('Open');
++  const scroller = await until('lossy scroller', () => [...document.querySelectorAll('[data-testid="txt-scroll"]')].filter(isVisible).at(-1));
++  await until('lossy text', () => findText(scroller, 'middle target'));
++  r.notice = document.querySelector('[role="status"]')?.textContent?.slice(0, 40);
++  const hit = findText(scroller, 'middle target')!;
++  selectIn(document, hit.node, hit.index, hit.index + 13);
++  await until('lossy selection', excerptReady, 3000);
++  await click('Excerpt to MindMap');
++  const mark = await until('lossy highlight', () => [...scroller.querySelectorAll('[data-annotation-id]')].find((e) => e.textContent === 'middle target'));
++  r.highlight = mark.textContent;
++  return r;
++}
++
++async function secondLaunch() {
++  const r: Record<string, unknown> = {};
++  await until('restored cards', () => document.querySelector('[aria-label="Jump to source of quick brown fox"]'));
++  r.cardsRestored = document.querySelectorAll('[aria-label^="Jump to source of"]').length;
++  await click('Open');
++  const scroller = await until('txt reopen', () => [...document.querySelectorAll('[data-testid="txt-scroll"]')].find(isVisible));
++  await until('txt scroll restored from sqlite', () => Math.abs(scroller.scrollTop - 1500) < 60);
++  r.txtScroll = scroller.scrollTop;
++  scroller.scrollTop = 0; await sleep(150);
++  const mark = await until('txt highlight from sqlite', () => [...scroller.querySelectorAll('[data-annotation-id]')].find((e) => e.textContent === 'quick brown fox'));
++  r.txtHighlight = mark.textContent;
++  await click('Open');
++  const viewer = await until('pdf reopen', () => [...document.querySelectorAll('[data-testid="pdf-viewer"]')].find(isVisible));
++  r.worker = (viewer as HTMLElement).dataset.pdfWorker;
++  await until('pdf highlight from sqlite', () => viewer.querySelector('[data-annotation-id]'));
++  return r;
++}
++
++async function epub() {
++  const r: Record<string, unknown> = {};
++  await click('Open');
++  const host = await until('epub host', () => [...document.querySelectorAll('[data-testid="epub-host"]')].find(isVisible));
++  const frame = () => host.querySelector('iframe');
++  const doc = () => frame()?.contentDocument;
++  const chapter = (t: string) => doc()?.querySelector('h1')?.textContent === t;
++  await until('epub chapter', () => chapter('Chapter One'));
++  watch(doc()!, 'book');
++  const d = doc()!;
++  r.security = { sandbox: frame()!.getAttribute('sandbox'), parent: (window as { __bookScriptRan?: unknown }).__bookScriptRan ?? null, script: d.documentElement.getAttribute('data-book-script-ran'), handler: d.documentElement.getAttribute('data-book-handler-ran'), scriptTags: d.querySelectorAll('script').length, handlers: d.querySelectorAll('[onerror]').length };
++  const sec = r.security as Record<string, unknown>;
++  check(sec.parent === null && sec.script === null && sec.handler === null, 'book scripts inert');
++  check(sec.scriptTags === 0 && sec.handlers === 0, 'sanitized');
++  await until('epub image', () => d.querySelector<HTMLImageElement>('img[alt="a small box"]')?.naturalWidth === 8);
++  r.h1Color = getComputedStyle(d.querySelector('h1')!).color;
++  const hit = findText(d.body, 'quick brown fox')!;
++  selectIn(d, hit.node, hit.index, hit.index + 15);
++  await until('epub selection reaches the app (the WebKit risk)', excerptReady, 4000);
++  r.selectionWorks = true;
++  await click('Excerpt to MindMap');
++  await until('epub card', () => button('Jump to source of quick brown fox'));
++  const mark = await until('epub highlight', () => host.querySelector('g[data-annotation-id] rect'));
++  const q = d.createRange(); q.setStart(hit.node, hit.index); q.setEnd(hit.node, hit.index + 15);
++  const f = frame()!.getBoundingClientRect(); const tb = q.getBoundingClientRect(); const mb = mark.getBoundingClientRect();
++  r.highlightOffsetPx = { left: +(mb.left - (f.left + tb.left)).toFixed(1), top: +(mb.top - (f.top + tb.top)).toFixed(1) };
++  check(Math.abs(mb.left - (f.left + tb.left)) < 4, 'epub highlight on text');
++  for (let i = 0; i < 40 && !chapter('Chapter Two'); i++) { await click('Next'); await sleep(120); }
++  await until('epub chapter two', () => chapter('Chapter Two'));
++  await click('Jump to source of quick brown fox');
++  await until('epub jump across chapters', () => chapter('Chapter One'));
++  await until('epub pulse', () => host.querySelector('g.anchor-pulse'));
++  await until('epub pulse end', () => !host.querySelector('g.anchor-pulse'));
++  return r;
++}
++
++(async () => {
++  void invoke('spike_progress', { step: 'importing react' });
++  const { StrictMode, createElement } = await import('react');
++  const { createRoot } = await import('react-dom/client');
++  void invoke('spike_progress', { step: 'importing css' });
++  await import('../src/index.css');
++  void invoke('spike_progress', { step: 'importing app' });
++  const { StudyWorkspace } = await import('@/features/workspace/StudyWorkspace');
++  createRoot(document.getElementById('root')!).render(createElement(StrictMode, null, createElement(StudyWorkspace)));
++  await until('workspace', () => document.querySelector('[aria-label="Document reader"]'));
++  let txtScroller: Element | null = null;
++  const mode = await invoke<string>('spike_mode');
++  results.mode = mode;
++  if (mode === 'second') {
++    try { results.second = { ok: true, ...(await secondLaunch()) }; } catch (e) { results.second = { ok: false, error: String((e as Error).message) }; }
++    results.violations = [...new Set(violations)]; results.errors = errors;
++    await invoke('spike_report', { report: JSON.stringify(results, null, 1) });
++    return;
++  }
++  for (const [name, run] of [
++    ['txt', async () => { const { r, scroller } = await txt(); txtScroller = scroller; return r; }],
++    ['pdf', () => pdf(txtScroller ?? document.body)],
++    ['epub', epub],
++    ['lossy', lossy],
++  ] as const) {
++    try { results[name] = { ok: true, ...(await run()) }; } catch (e) { results[name] = { ok: false, error: String((e as Error).message) }; }
++  }
++  const tab0 = document.querySelectorAll<HTMLElement>('[role="tab"]')[0];
++  tab0?.click(); await sleep(150);
++  await sleep(700); // the debounced cursor
++  results.txtScrollAfterTabReturn = txtScroller ? (txtScroller as Element).scrollTop : null;
++  results.backendLabel = document.body.textContent?.includes('nothing is saved');
++  results.violations = [...new Set(violations)];
++  results.errors = errors;
++  await invoke('spike_report', { report: JSON.stringify(results, null, 1) });
++})().catch((e) => invoke('spike_report', { report: 'FATAL ' + (e?.stack ?? e) }));

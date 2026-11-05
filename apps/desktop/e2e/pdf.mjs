@@ -175,8 +175,7 @@ export async function pdfFlow(page) {
   await page.waitFor(`${visibleScroller}?.scrollTop === 1500`, 'the scroll position to survive');
   assert(await page.evaluate(`${marker}.dataset.sameInstance === 'yes'`), 'the tab stayed mounted');
 
-  // Reopen from a clean mount. pdf.js takes ownership of bytes it is given, so this
-  // also fails if the source was not copied.
+  // Reopen from a clean mount.
   await page.evaluate(
     `[...document.querySelectorAll('[aria-label^="Close sample"]')].at(-1).click()`,
   );

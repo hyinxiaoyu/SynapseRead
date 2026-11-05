@@ -6,7 +6,7 @@ infinite mind map on the other. Every card links back to the exact passage it ca
 from.
 
 > **Status: Phase 2 (reader engines) complete.** PDF, EPUB, and TXT documents can be
-> read, excerpted, and jumped back to. The desktop runtime has not yet been exercised
+> read, excerpted, and jumped back to. It has been tested on Linux WebKit but not yet
 > on macOS, so treat this as pre-release. See the [roadmap](docs/ROADMAP.md).
 
 ## Features

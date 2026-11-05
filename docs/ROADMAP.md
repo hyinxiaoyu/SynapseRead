@@ -51,8 +51,9 @@ before implementation; the fifth came up while building the EPUB engine.
 
 **Carried into M4**
 
-- Re-run the spikes from ADR 0004 and ADR 0005 on macOS WKWebView. They have only run
-  on WebKitGTK, and the desktop runtime has not been exercised on macOS at all.
+- Run the [whole-app self-test](adr/0004-pdfjs-worker-csp.md#whole-app-check) on macOS
+  WKWebView. It passes on WebKitGTK, but nothing has run on macOS yet.
+- Click through the native file picker. `pick_document` is the one command no test runs.
 - Large files: TXT holds the whole file in memory, a closed tab does not stop the Rust
   read, and PDFs load whole rather than by range.
 - A file edited in place still opens, and its anchors can drift, because `file_hash` is
