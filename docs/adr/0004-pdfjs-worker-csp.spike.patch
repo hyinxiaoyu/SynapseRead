@@ -1,0 +1,144 @@
+diff --git a/apps/desktop/spike/index.html b/apps/desktop/spike/index.html
+new file mode 100644
+index 0000000..4da12bb
+--- /dev/null
++++ b/apps/desktop/spike/index.html
+@@ -0,0 +1 @@
++<!doctype html><html><head><meta charset="UTF-8"/><title>spike</title></head><body><canvas id="c"></canvas><div id="t" style="position:relative"></div><script type="module" src="./main.js"></script></body></html>
+diff --git a/apps/desktop/spike/main.js b/apps/desktop/spike/main.js
+new file mode 100644
+index 0000000..2237751
+--- /dev/null
++++ b/apps/desktop/spike/main.js
+@@ -0,0 +1,66 @@
++import { convertFileSrc, invoke } from '@tauri-apps/api/core';
++import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
++import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
++
++const violations = [];
++document.addEventListener('securitypolicyviolation', (e) => violations.push({ directive: e.effectiveDirective, blocked: e.blockedURI, source: e.sourceFile }));
++const logs = [];
++for (const k of ['warn','error']) { const o = console[k]; console[k] = (...a) => { logs.push(a.join(' ').slice(0,300)); o(...a); }; }
++const r = { location: location.href, userAgent: navigator.userAgent };
++const attempt = async (name, fn) => { try { r[name] = await fn(); } catch (e) { r[name] = 'ERROR: ' + (e?.message ?? e); } };
++const timeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout '+label)), ms))]);
++
++(async () => {
++  const cfg = await invoke('spike_config');
++  r.cfg = cfg;
++  pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
++  r.workerUrl = workerUrl;
++
++  await attempt('rawModuleWorker', () => timeout(new Promise((res, rej) => {
++    const w = new Worker(workerUrl, { type: 'module' });
++    w.onerror = (e) => rej(new Error('worker error: ' + (e.message || 'blocked')));
++    w.onmessage = (m) => { res('loaded, first message: ' + JSON.stringify(m.data).slice(0,60)); w.terminate(); };
++  }), 6000, 'rawModuleWorker'));
++
++  await attempt('wasmInWorker', () => timeout(new Promise((res, rej) => {
++    const w = new Worker(new URL('./wasm-worker.js', import.meta.url), { type: 'module' });
++    w.onerror = (e) => rej(new Error(e.message || 'blocked'));
++    w.onmessage = (m) => { res(m.data); w.terminate(); };
++  }), 6000, 'wasmInWorker'));
++
++  const worker = new pdfjs.PDFWorker({ name: 'spike' });
++  await attempt('pdfWorkerReady', () => timeout(worker.promise.then(() => 'ready'), 15000, 'pdfWorker'));
++  r.pdfWorkerIsRealWorker = typeof Worker !== 'undefined' && worker.port instanceof Worker;
++
++  const url = convertFileSrc(cfg.allowedPdf);
++  r.assetUrl = url;
++  await attempt('fetchAllowed', async () => { const x = await fetch(url); const b = await x.arrayBuffer(); return { status: x.status, bytes: b.byteLength, acceptRanges: x.headers.get('accept-ranges'), contentLength: x.headers.get('content-length') }; });
++  await attempt('fetchRange', async () => { const x = await fetch(url, { headers: { Range: 'bytes=0-9' } }); const b = await x.arrayBuffer(); return { status: x.status, bytes: b.byteLength, acceptRanges: x.headers.get('accept-ranges'), contentRange: x.headers.get('content-range') }; });
++  await attempt('fetchUnlisted', async () => { const x = await fetch(convertFileSrc(cfg.unlistedFile)); return { status: x.status, bytes: (await x.arrayBuffer()).byteLength }; });
++
++  const base = './pdfjs/';
++  await attempt('render', async () => {
++    const task = pdfjs.getDocument({ url, worker, isEvalSupported: false, disableFontFace: false,
++      cMapUrl: new URL(base+'cmaps/', location.href).href, cMapPacked: true,
++      standardFontDataUrl: new URL(base+'standard_fonts/', location.href).href,
++      wasmUrl: new URL(base+'wasm/', location.href).href });
++    const doc = await timeout(task.promise, 20000, 'getDocument');
++    const page = await doc.getPage(1);
++    const viewport = page.getViewport({ scale: 1.5 });
++    const canvas = document.getElementById('c');
++    canvas.width = Math.floor(viewport.width); canvas.height = Math.floor(viewport.height);
++    await timeout(page.render({ canvas, viewport }).promise, 20000, 'render');
++    const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
++    let dark = 0; for (let i = 0; i < data.length; i += 4) if (data[i] < 128 && data[i+3] > 0) dark++;
++    const content = await page.getTextContent();
++    const tl = new pdfjs.TextLayer({ textContentSource: content, container: document.getElementById('t'), viewport });
++    await tl.render();
++    return { numPages: doc.numPages, canvas: [canvas.width, canvas.height], darkPixels: dark,
++      text: content.items.map((i) => i.str).join(' ').slice(0, 90), textLayerSpans: document.querySelectorAll('#t span').length,
++      fontsLoaded: document.fonts.size };
++  });
++  await attempt('standardFontFetch', async () => { const x = await fetch(base + 'standard_fonts/LiberationSans-Regular.ttf'); return { status: x.status, bytes: (await x.arrayBuffer()).byteLength }; });
++
++  r.violations = violations; r.consoleWarnings = logs;
++  await invoke('spike_report', { report: JSON.stringify(r, null, 1) });
++})().catch((e) => invoke('spike_report', { report: 'FATAL ' + e }));
+diff --git a/apps/desktop/spike/vite.config.js b/apps/desktop/spike/vite.config.js
+new file mode 100644
+index 0000000..3dd4f5c
+--- /dev/null
++++ b/apps/desktop/spike/vite.config.js
+@@ -0,0 +1,3 @@
++import { defineConfig } from 'vite';
++import { resolve } from 'node:path';
++export default defineConfig({ root: resolve(import.meta.dirname), base: './', build: { target: 'safari16', outDir: resolve(import.meta.dirname, '../dist'), emptyOutDir: true, assetsInlineLimit: 0 } });
+diff --git a/apps/desktop/spike/wasm-worker.js b/apps/desktop/spike/wasm-worker.js
+new file mode 100644
+index 0000000..86874a6
+--- /dev/null
++++ b/apps/desktop/spike/wasm-worker.js
+@@ -0,0 +1,2 @@
++const bytes = new Uint8Array([0,97,115,109,1,0,0,0]);
++WebAssembly.compile(bytes).then(()=>postMessage('ok')).catch(e=>postMessage('fail:'+e.message));
+diff --git a/apps/desktop/src-tauri/Cargo.toml b/apps/desktop/src-tauri/Cargo.toml
+index a7b1bae..bab8438 100644
+--- a/apps/desktop/src-tauri/Cargo.toml
++++ b/apps/desktop/src-tauri/Cargo.toml
+@@ -17,11 +17,12 @@ tauri-build = { version = "2", features = [] }
+ [dependencies]
+ serde.workspace = true
+ synapse-core = { path = "../../../crates/synapse-core" }
+-tauri = { version = "2", features = [] }
++tauri = { version = "2", features = ["protocol-asset", "custom-protocol"] }
+ tauri-plugin-dialog = "2"
+ 
+-[dev-dependencies]
+ serde_json.workspace = true
++
++[dev-dependencies]
+ tauri = { version = "2", features = ["test"] }
+ tempfile.workspace = true
+ 
+diff --git a/apps/desktop/src-tauri/src/lib.rs b/apps/desktop/src-tauri/src/lib.rs
+index e472b8f..5f4fd35 100644
+--- a/apps/desktop/src-tauri/src/lib.rs
++++ b/apps/desktop/src-tauri/src/lib.rs
+@@ -26,10 +26,15 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
+         commands::db::update_node_layout,
+         commands::db::create_edge,
+         commands::db::delete_edge,
+-        commands::fs_reader::read_text_stream,
++        commands::fs_reader::read_text_stream, spike_config, spike_report,
+     ])
+ }
+ 
++#[tauri::command]
++fn spike_config() -> serde_json::Value { serde_json::json!({"allowedPdf": std::env::var("SPIKE_PDF").unwrap(), "unlistedFile": std::env::var("SPIKE_UNLISTED").unwrap()}) }
++#[tauri::command]
++fn spike_report(report: String) { println!("SPIKE_REPORT_BEGIN\n{report}\nSPIKE_REPORT_END"); std::process::exit(0); }
++
+ #[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
+     with_commands(Builder::default().plugin(tauri_plugin_dialog::init()))
+@@ -37,6 +42,7 @@ pub fn run() {
+             let data_dir = app.path().app_data_dir()?;
+             std::fs::create_dir_all(&data_dir)?;
+             app.manage(AppState::open(&data_dir.join(DATABASE_FILE))?);
++            app.asset_protocol_scope().allow_file(std::env::var("SPIKE_PDF").unwrap())?;
+             Ok(())
+         })
+         .run(tauri::generate_context!())
