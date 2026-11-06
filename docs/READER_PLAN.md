@@ -1,6 +1,6 @@
 # Reader experience implementation plan
 
-Planning baseline: 2026-11-06. All tasks below are planned, not implemented.
+Planning baseline: 2026-11-06. Status on `main`: R01–R12 complete (see [GitHub tracking](#github-tracking)).
 
 ## Outcome and scope
 
