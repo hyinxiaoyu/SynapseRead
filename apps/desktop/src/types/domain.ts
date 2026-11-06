@@ -241,9 +241,23 @@ export function defaultBookmarkLabel(anchor: AnchorLocation): string {
   }
 }
 
-export type ReadingTheme = 'light' | 'sepia' | 'dark';
-export type ReadingFontFamily = 'serif' | 'sans' | 'mono';
-export type ReadingWidth = 'narrow' | 'medium' | 'wide' | 'full';
+/** `auto` follows the system's light or dark appearance. */
+export type ReadingTheme = 'auto' | 'light' | 'sepia' | 'dark';
+/** A theme with `auto` settled against the system appearance. */
+export type ResolvedReadingTheme = Exclude<ReadingTheme, 'auto'>;
+/** `original` keeps the publisher's fonts (EPUB) or the default serif (TXT). */
+export type ReadingFontFamily =
+  | 'original'
+  | 'charter'
+  | 'iowan'
+  | 'palatino'
+  | 'athelas'
+  | 'new-york'
+  | 'seravek'
+  | 'sf-pro'
+  | 'mono';
+/** Page padding; the text column is capped by the reading measure instead. */
+export type ReadingMargins = 'narrow' | 'normal' | 'wide';
 export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
 
 export interface ReadingPreferences {
@@ -253,16 +267,22 @@ export interface ReadingPreferences {
   fontSize: number;
   /** Line height multiplier (`1.2..=2.4`). */
   lineSpacing: number;
-  readingWidth: ReadingWidth;
+  margins: ReadingMargins;
+  /** Justified text, hyphenated in the document's language. */
+  justify: boolean;
+  /** Dims images in the Dark theme. */
+  dimImages: boolean;
   epubReadingMode: EpubReadingMode;
 }
 
 export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
-  theme: 'light',
-  fontFamily: 'serif',
+  theme: 'auto',
+  fontFamily: 'original',
   fontSize: 100,
   lineSpacing: 1.75,
-  readingWidth: 'medium',
+  margins: 'normal',
+  justify: true,
+  dimImages: false,
   epubReadingMode: 'spread',
 };
 

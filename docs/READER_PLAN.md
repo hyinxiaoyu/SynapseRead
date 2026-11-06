@@ -152,6 +152,40 @@ recorded. Existing card-management work remains a separate milestone. Signing,
 notarization, universal packaging, and release automation remain release work;
 they are not included in the reader estimate.
 
+## Reader UX acceptance notes
+
+Follow-up issues to the reader milestone: #21 ("Aa" typography popover), #22 (reading
+measure and margins), #29 (whole-window themes and system appearance), and #32
+(contrast, selected states, hit targets).
+
+Automated evidence (Chromium, `pnpm e2e`; jsdom, `pnpm test`):
+
+- Characters per line stay within 45–75 (78 allowing for the gap between the canvas
+  measure and the page's own) at 1280, 1728, and 2560 px in EPUB two-page mode and in
+  TXT. Two pages show only where each column holds 45 characters; the spine gutter is
+  at least 48 px.
+- Text in the toolbar, tabs, sidebar, and the appearance popover meets 4.5:1 against
+  what is painted beneath it in Light, Sepia, and Dark (EPUB) and Dark (TXT). Unit tests
+  check every page and chrome token pair in all three themes, including the system
+  tokens in `index.css` in both appearances, and focus rings at 3:1.
+- Selected toggles use a solid fill with an inset outline and `aria-pressed`; segmented
+  controls, swatches, and choices are radio groups with `aria-checked`; highlight
+  swatches show a check mark. Interactive targets are at least 24 × 24 px; highlight
+  swatches are 20 px inside a 28 px target. Icon-only buttons show their accessible
+  name as a tooltip.
+
+VoiceOver (macOS): **not yet run.** These changes were built and tested on Linux. Before
+closing #32, run VoiceOver on macOS and record the results here:
+
+- [ ] Toolbar: every control announces its name, its state (pressed, expanded, or
+      checked), and its shortcut tooltip; the "Aa" button announces a dialog popup.
+- [ ] Appearance popover: theme, font, and choice radio groups announce their group
+      label and the checked option; Justify announces as a switch with its description.
+- [ ] Sidebar: tabs announce position and selection; outline rows announce level and
+      expansion.
+- [ ] Page: the EPUB frame and the TXT document are reachable and read their text.
+- [ ] Footer and notices: status messages are announced when they appear.
+
 ## GitHub tracking
 
 Tracking issue: https://github.com/hyinxiaoyu/SynapseRead/issues/7

@@ -1,4 +1,4 @@
-import { Highlighter, Link2, MessageSquare, Pencil, StickyNote, Undo2 } from 'lucide-react';
+import { Check, Highlighter, Link2, MessageSquare, Pencil, StickyNote, Undo2 } from 'lucide-react';
 import { Fragment, type KeyboardEvent as ReactKeyboardEvent, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -194,6 +194,26 @@ export function useAnnotationsController({
  * The markup group: highlight colors, Highlight, and Add note. Colors fold into
  * the `»` menu's width budget first; the two actions stay.
  */
+/** A 28 px target around a 20 px swatch (WCAG 2.2 target size, HIG minimum). */
+const COLOR_TARGET_CLASS =
+  'flex size-7 shrink-0 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring';
+
+/** A highlight color swatch; the check mark shows the choice without relying on hue. */
+function ColorDot({ color, selected }: { color: string; selected: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        'flex size-5 items-center justify-center rounded-full border border-black/25 text-black/75',
+        selected && 'ring-2 ring-foreground ring-offset-1 ring-offset-background',
+      )}
+      style={{ backgroundColor: color }}
+    >
+      {selected && <Check className="size-3" strokeWidth={3} />}
+    </span>
+  );
+}
+
 export function SelectionAnnotationControls({
   hasSelection,
   disabled = false,
@@ -208,7 +228,7 @@ export function SelectionAnnotationControls({
       <div
         role="group"
         aria-label="Highlight color"
-        className={cn('flex items-center gap-1 px-1', collapseClass('lg'))}
+        className={cn('flex items-center px-0.5', collapseClass('lg'))}
         data-testid="annotation-color-picker"
       >
         {ANNOTATION_COLORS.map(({ label, value }) => {
@@ -224,12 +244,10 @@ export function SelectionAnnotationControls({
               disabled={disabled}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => controller.setActiveColor(value)}
-              className={cn(
-                'size-3.5 rounded-full border border-black/25 transition-transform outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                selected && 'scale-115 ring-2 ring-foreground',
-              )}
-              style={{ backgroundColor: value }}
-            />
+              className={COLOR_TARGET_CLASS}
+            >
+              <ColorDot color={value} selected={selected} />
+            </button>
           );
         })}
       </div>
@@ -448,7 +466,7 @@ function AnnotationRow({
       </div>
       {editing && (
         <div className="mb-1 ml-6 flex items-center gap-1.5 pr-1">
-          <div role="group" aria-label="Change highlight color" className="flex items-center gap-1">
+          <div role="group" aria-label="Change highlight color" className="flex items-center">
             {ANNOTATION_COLORS.map(({ label, value }) => {
               const active = annotation.color === value;
               return (
@@ -459,12 +477,10 @@ function AnnotationRow({
                   aria-pressed={active}
                   data-testid={`annotation-item-color-${label.toLowerCase()}`}
                   onClick={() => onUpdate({ note: null, color: value })}
-                  className={cn(
-                    'size-3.5 rounded-full border border-black/25 outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                    active && 'ring-1 ring-foreground',
-                  )}
-                  style={{ backgroundColor: value }}
-                />
+                  className={COLOR_TARGET_CLASS}
+                >
+                  <ColorDot color={value} selected={active} />
+                </button>
               );
             })}
           </div>
@@ -540,7 +556,7 @@ export function AnnotationsList({
         <Button
           variant="ghost"
           size="sm"
-          className="h-5 px-1.5 text-[11px]"
+          className="h-6 px-1.5 text-[11px]"
           aria-label="Undo annotation deletion"
           title={`Undo annotation deletion (${shortcutOf('edit.undoDelete')})`}
           data-testid="undo-delete-annotation-button"

@@ -246,8 +246,8 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
               className={cn(
                 'flex h-6 flex-1 items-center justify-center rounded-[5px] text-muted-foreground transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-3.5',
                 selected
-                  ? 'bg-background text-foreground shadow-xs'
-                  : 'hover:bg-background/50 hover:text-foreground',
+                  ? 'bg-primary text-primary-foreground shadow-xs'
+                  : 'hover:bg-background/60 hover:text-foreground',
               )}
             >
               <Icon aria-hidden="true" />

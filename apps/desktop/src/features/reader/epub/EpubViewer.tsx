@@ -20,6 +20,20 @@ import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
 import { indexOutline, type OutlineNode } from '@/features/reader/navigator/OutlineTree';
 import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
+import { AppearanceMenu, useAppearancePanel } from '@/features/reader/appearance/AppearancePopover';
+import {
+  computeReadingLayout,
+  EPUB_BASE_FONT_REM,
+  measureCharWidth,
+  rootFontSizePx,
+} from '@/features/reader/appearance/measure';
+import {
+  DEFAULT_SERIF_STACK,
+  fontStack,
+  PAGE_PALETTES,
+  pageSurfaceStyle,
+} from '@/features/reader/appearance/themes';
+import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
   HistoryButtons,
   ReaderPopoverLayer,
@@ -28,13 +42,6 @@ import {
   ToolbarSeparator,
   ToolbarTitle,
 } from '@/features/reader/ReaderToolbar';
-import {
-  READING_WIDTH_CLASSES,
-  ReadingPreferencesBar,
-  ReadingPreferencesToggleButton,
-  THEME_SURFACE_CLASSES,
-  useReadingPreferencesPanel,
-} from '@/features/reader/ReadingPreferencesBar';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { useJumpHistory } from '@/features/reader/useJumpHistory';
 import { cn, describeError } from '@/lib/utils';
@@ -163,7 +170,41 @@ export function EpubViewer({
   );
   const effectivePreferences = preferences ?? localPreferences;
   const readingMode = effectivePreferences.epubReadingMode;
-  const preferencesPanel = useReadingPreferencesPanel();
+  const preferencesPanel = useAppearancePanel();
+  const theme = useResolvedReadingTheme(effectivePreferences.theme);
+  // The engine paints the page; it gets the theme already settled against the system.
+  const enginePreferences = useMemo(
+    () => ({ ...effectivePreferences, theme }),
+    [effectivePreferences, theme],
+  );
+
+  // ---- Reading measure: column count and page width -------------------------
+
+  const areaRef = useRef<HTMLDivElement>(null);
+  const [availableWidth, setAvailableWidth] = useState(0);
+  useLayoutEffect(() => {
+    const area = areaRef.current;
+    if (!area) return;
+    setAvailableWidth(area.clientWidth);
+    const observer = new ResizeObserver(() => setAvailableWidth(area.clientWidth));
+    observer.observe(area);
+    return () => observer.disconnect();
+  }, []);
+  const charWidth = measureCharWidth(
+    fontStack(effectivePreferences.fontFamily) ?? DEFAULT_SERIF_STACK,
+    (rootFontSizePx() * EPUB_BASE_FONT_REM * effectivePreferences.fontSize) / 100,
+  );
+  const layout = computeReadingLayout({
+    availableWidth,
+    charWidth,
+    margins: effectivePreferences.margins,
+    spread: readingMode === 'spread',
+  });
+  // Read when the book opens, so the first render already has the right pages.
+  const columnsRef = useRef(layout.columns);
+  useEffect(() => {
+    columnsRef.current = layout.columns;
+  });
   const navigator = useNavigator('epub', ['contents', 'notes', 'bookmarks']);
 
   const updatePreferences = (patch: Partial<ReadingPreferences>) => {
@@ -228,7 +269,8 @@ export function EpubViewer({
           source,
           host,
           effectivePreferences.epubReadingMode,
-          effectivePreferences,
+          enginePreferences,
+          columnsRef.current,
         );
         if (cancelled) {
           engine.destroy();
@@ -637,8 +679,12 @@ export function EpubViewer({
 
   useEffect(() => {
     if (!handle) return;
-    handle.setPreferences(effectivePreferences);
-  }, [handle, effectivePreferences]);
+    handle.setPreferences(enginePreferences);
+  }, [handle, enginePreferences]);
+
+  useEffect(() => {
+    handle?.setColumns(layout.columns);
+  }, [handle, layout.columns]);
 
   useLayoutEffect(() => {
     if (!handle || !isActive) return;
@@ -678,7 +724,7 @@ export function EpubViewer({
       window.clearTimeout(timer);
       observer.disconnect();
     };
-  }, [handle, readingMode, effectivePreferences.readingWidth]);
+  }, [handle, readingMode]);
 
   const outlineItems = useMemo(() => toOutlineNodes(handle?.toc ?? []), [handle]);
 
@@ -796,7 +842,9 @@ export function EpubViewer({
       data-testid="epub-viewer"
       data-reading-mode={readingMode}
       data-reading-theme={effectivePreferences.theme}
-      data-reading-width={effectivePreferences.readingWidth}
+      data-resolved-theme={theme}
+      data-reading-margins={effectivePreferences.margins}
+      data-columns={layout.columns}
       data-chrome-hidden={chromeHidden || undefined}
     >
       <ReaderToolbar
@@ -849,10 +897,14 @@ export function EpubViewer({
         }
         trailing={
           <>
-            <ReadingPreferencesToggleButton
+            <AppearanceMenu
               open={preferencesPanel.open}
-              disabled={!handle}
               onToggle={preferencesPanel.toggle}
+              onClose={preferencesPanel.close}
+              preferences={effectivePreferences}
+              onChange={updatePreferences}
+              format="epub"
+              disabled={!handle}
             />
             {markup.visible && (
               <SelectionAnnotationControls
@@ -895,13 +947,6 @@ export function EpubViewer({
         {/* Notices float over the page column only, never over the sidebar. */}
         <div className="relative flex min-h-0 min-w-0 flex-1">
           <ReaderPopoverLayer>
-            {preferencesPanel.open && (
-              <ReadingPreferencesBar
-                preferences={effectivePreferences}
-                disabled={!handle}
-                onChange={updatePreferences}
-              />
-            )}
             <SelectionNoteComposer
               hasSelection={activeSelection !== null}
               controller={annotationsController}
@@ -912,30 +957,34 @@ export function EpubViewer({
               </p>
             )}
           </ReaderPopoverLayer>
+          {/*
+            The page's color fills the margins too, so the page never sits in a
+            frame of bright chrome, and nothing flashes while a chapter loads.
+          */}
           <div
-            className={cn(
-              'relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden px-2 pt-1.5 pb-3',
-              // In focus mode the whole reading area takes the page's theme color.
-              chromeHidden ? THEME_SURFACE_CLASSES[effectivePreferences.theme] : 'bg-muted/30',
-            )}
+            ref={areaRef}
+            data-testid="epub-page-area"
+            className="relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5 pb-3"
+            style={pageSurfaceStyle(theme)}
           >
             <div
               ref={hostRef}
               tabIndex={-1}
               data-testid="epub-host"
-              className={cn(
-                'relative h-full w-full overflow-hidden rounded-sm',
-                !chromeHidden && 'shadow-sm ring-1 ring-black/5',
-                THEME_SURFACE_CLASSES[effectivePreferences.theme],
-                readingMode === 'spread'
-                  ? 'max-w-none'
-                  : READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
-              )}
+              className={cn('relative h-full overflow-hidden', availableWidth === 0 && 'w-full')}
+              style={{
+                ...pageSurfaceStyle(theme),
+                ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
+              }}
             />
-            {readingMode === 'spread' && (
+            {readingMode === 'spread' && layout.columns === 2 && (
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-y-3 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
+                data-testid="epub-spine"
+                className="pointer-events-none absolute inset-y-3 left-1/2 w-12 -translate-x-1/2"
+                style={{
+                  background: `linear-gradient(to right, transparent, ${PAGE_PALETTES[theme].spine} 50%, transparent)`,
+                }}
               />
             )}
           </div>

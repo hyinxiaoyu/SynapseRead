@@ -1,6 +1,6 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildSearchSnippet,
@@ -16,12 +16,13 @@ import {
   selectHighlights,
 } from '@/stores/useStudySyncStore';
 
-import type {
-  EpubLocation,
-  EpubReadingMode,
-  EpubSearchMatch,
-  EpubSelection,
-  EpubTocItem,
+import {
+  type EpubLocation,
+  type EpubReadingMode,
+  type EpubSearchMatch,
+  type EpubSelection,
+  type EpubTocItem,
+  openEpubDocument,
 } from './epubEngine';
 import { EpubViewer } from './EpubViewer';
 
@@ -58,6 +59,7 @@ const engine = vi.hoisted(() => ({
   previous: vi.fn(async () => undefined),
   setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
   setPreferences: vi.fn(),
+  setColumns: vi.fn<(columns: 1 | 2) => void>(),
 }));
 
 vi.mock('./epubEngine', () => ({
@@ -96,6 +98,7 @@ vi.mock('./epubEngine', () => ({
     previous: engine.previous,
     setReadingMode: engine.setReadingMode,
     setPreferences: engine.setPreferences,
+    setColumns: engine.setColumns,
     highlight: (annotationId: string, cfiRange: string) =>
       void engine.highlighted.set(annotationId, cfiRange),
     removeHighlight: (cfiRange: string) => void engine.removed.push(cfiRange),
@@ -198,6 +201,14 @@ const opened = () =>
 const select = (cfiRange = CFI, text = 'quick brown fox') =>
   act(() => engine.emitSelection({ cfiRange, chapterHref: 'OEBPS/chapter1.xhtml', text }));
 
+/**
+ * At 1440 px, with the fallback character width (0.5em of 16.8 px = 8.4 px) and
+ * normal margins (16 px): two columns of 75ch = 630 px, each page 630 + 64 px.
+ */
+let pageAreaWidth = 1440;
+const TWO_PAGE_WIDTH = '1388px';
+const ONE_PAGE_WIDTH = '694px';
+
 describe('EpubViewer', () => {
   beforeEach(() => {
     engine.toc = [
@@ -222,6 +233,18 @@ describe('EpubViewer', () => {
     engine.previous.mockClear();
     engine.setReadingMode.mockClear();
     engine.setPreferences.mockClear();
+    engine.setColumns.mockClear();
+    // jsdom has no layout: give the page area a width, so the measure has room to work.
+    pageAreaWidth = 1440;
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.dataset.testid === 'epub-page-area' ? pageAreaWidth : 0;
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('runs selection -> CFI anchor -> persist -> reopen', async () => {
@@ -417,7 +440,9 @@ describe('EpubViewer', () => {
     const viewer = screen.getByTestId('epub-viewer');
     const host = screen.getByTestId('epub-host');
     expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
-    expect(host).toHaveClass('max-w-none');
+    expect(viewer).toHaveAttribute('data-columns', '2');
+    expect(host.style.width).toBe(TWO_PAGE_WIDTH);
+    expect(screen.getByTestId('epub-spine')).toBeInTheDocument();
     expect(screen.getByRole('radiogroup', { name: 'Reading mode' })).toBeInTheDocument();
     expect(screen.getByRole('radio', { name: 'Two pages' })).toHaveAttribute(
       'aria-checked',
@@ -426,12 +451,14 @@ describe('EpubViewer', () => {
 
     fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'paged');
-    expect(host).toHaveClass('max-w-6xl');
+    expect(viewer).toHaveAttribute('data-columns', '1');
+    expect(host.style.width).toBe(ONE_PAGE_WIDTH);
+    expect(screen.queryByTestId('epub-spine')).not.toBeInTheDocument();
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('paged');
 
     fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
-    expect(host).toHaveClass('max-w-6xl');
+    expect(host.style.width).toBe(ONE_PAGE_WIDTH);
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('scroll');
 
     // The segmented control is one tab stop; arrow keys move and select, wrapping,
@@ -457,31 +484,40 @@ describe('EpubViewer', () => {
 
     fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
     fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Sepia' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Sans' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Sepia' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'San Francisco' }));
     fireEvent.click(screen.getByRole('button', { name: 'Increase font size' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Wide' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    const margins = screen.getByRole('radiogroup', { name: 'Margins' });
+    fireEvent.click(within(margins).getByRole('radio', { name: 'Wide' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Justify' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Dim images in Dark theme' }));
 
     await waitFor(() =>
       expect(store.getState().readingPreferences).toEqual({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 110,
         lineSpacing: 1.75,
-        readingWidth: 'wide',
+        margins: 'wide',
+        justify: false,
+        dimImages: true,
         epubReadingMode: 'paged',
       }),
     );
     expect(engine.setPreferences).toHaveBeenLastCalledWith(
       expect.objectContaining({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 110,
-        readingWidth: 'wide',
+        margins: 'wide',
+        justify: false,
       }),
     );
     expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-theme', 'sepia');
-    expect(screen.getByTestId('epub-host')).toHaveClass('max-w-7xl');
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-margins', 'wide');
+    // The page's color fills the margins around it.
+    expect(screen.getByTestId('epub-page-area').style.backgroundColor).toBe('rgb(244, 236, 216)');
     view.unmount();
 
     const reopened = await reopen(backend);
@@ -489,7 +525,68 @@ describe('EpubViewer', () => {
     await opened();
     expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-mode', 'paged');
     expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-theme', 'sepia');
-    expect(screen.getByTestId('epub-host')).toHaveClass('max-w-7xl');
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-margins', 'wide');
+  });
+
+  it('shows two pages only where each column holds the minimum measure', async () => {
+    // 900 px: two columns would be (868 / 2 - 64) = 370 px, under 45ch (378 px).
+    pageAreaWidth = 900;
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    const viewer = screen.getByTestId('epub-viewer');
+    expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
+    expect(viewer).toHaveAttribute('data-columns', '1');
+    expect(screen.queryByTestId('epub-spine')).not.toBeInTheDocument();
+    expect(vi.mocked(openEpubDocument).mock.lastCall?.[4]).toBe(1);
+    view.unmount();
+
+    pageAreaWidth = 2560;
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-columns', '2');
+    // Capped at 75ch per column: the pages stay 1388 px and center in the window.
+    expect(screen.getByTestId('epub-host').style.width).toBe(TWO_PAGE_WIDTH);
+    expect(vi.mocked(openEpubDocument).mock.lastCall?.[4]).toBe(2);
+  });
+
+  it('settles the Auto theme against the system appearance', async () => {
+    const listeners = new Set<() => void>();
+    let dark = true;
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({
+        get matches() {
+          return dark;
+        },
+        addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+        removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+      })),
+    );
+    try {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      const viewer = screen.getByTestId('epub-viewer');
+      expect(viewer).toHaveAttribute('data-reading-theme', 'auto');
+      expect(viewer).toHaveAttribute('data-resolved-theme', 'dark');
+      expect(engine.setPreferences).toHaveBeenLastCalledWith(
+        expect.objectContaining({ theme: 'dark' }),
+      );
+
+      dark = false;
+      act(() => {
+        for (const listener of listeners) listener();
+      });
+      expect(viewer).toHaveAttribute('data-resolved-theme', 'light');
+      expect(engine.setPreferences).toHaveBeenLastCalledWith(
+        expect.objectContaining({ theme: 'light' }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('distinguishes chapter-local pages from whole-book progress', async () => {

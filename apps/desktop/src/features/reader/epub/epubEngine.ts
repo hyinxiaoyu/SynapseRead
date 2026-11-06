@@ -1,5 +1,12 @@
 import ePub, { type Contents, type Location, type NavItem } from 'epubjs';
 
+import { PAGE_GUTTER_PX } from '@/features/reader/appearance/measure';
+import {
+  DEFAULT_SERIF_STACK,
+  fontStack,
+  PAGE_PALETTES,
+  resolveReadingTheme,
+} from '@/features/reader/appearance/themes';
 import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
@@ -9,9 +16,7 @@ import {
   DEFAULT_READING_PREFERENCES,
   type DocumentSource,
   type EpubReadingMode,
-  type ReadingFontFamily,
   type ReadingPreferences,
-  type ReadingTheme,
 } from '@/types/domain';
 
 import { sanitizeChapter } from './sanitizeChapter';
@@ -63,6 +68,12 @@ export interface EpubHandle {
   next(): Promise<void>;
   previous(): Promise<void>;
   setReadingMode(mode: EpubReadingMode): Promise<void>;
+  /**
+   * How many pages Two pages shows. The viewer decides from the reading measure;
+   * other modes always show one.
+   */
+  setColumns(columns: 1 | 2): void;
+  /** `theme` must already be resolved: `auto` renders as Light. */
   setPreferences(preferences: ReadingPreferences): void;
   highlight(annotationId: string, cfiRange: string, color: string): void;
   removeHighlight(cfiRange: string): void;
@@ -76,37 +87,23 @@ export interface EpubHandle {
   destroy(): void;
 }
 
-const MIN_SPREAD_WIDTH = 640;
 /**
- * Default column/page gutter in pixels for paginated EPUB layouts.
- * epub.js otherwise defaults to `Math.floor(width / 12)` (~150px+ on wide viewports),
- * which wastes horizontal screen space in full-screen reading.
+ * The gap epub.js leaves between paginated pages, half of it on each outer edge.
+ * Its default, `width / 12`, wastes wide screens; this is the spine gutter.
  */
-const PAGINATED_GAP_PX = 48;
-/** Horizontal padding inside scrolled chapters (epub.js defaults to `width / 12` per side). */
-const SCROLLED_HORIZONTAL_PADDING = 'clamp(24px, 4vw, 56px)';
+const PAGINATED_GAP_PX = PAGE_GUTTER_PX;
+/** Scrolled chapters get the same side padding a paginated page has. */
+const SCROLLED_HORIZONTAL_PADDING = `${PAGE_GUTTER_PX / 2}px`;
 
-const MODE_LAYOUT: Record<
-  EpubReadingMode,
-  { flow: 'paginated' | 'scrolled-doc'; spread: 'auto' | 'none' }
-> = {
-  spread: { flow: 'paginated', spread: 'auto' },
-  paged: { flow: 'paginated', spread: 'none' },
-  scroll: { flow: 'scrolled-doc', spread: 'none' },
+const MODE_FLOW: Record<EpubReadingMode, 'paginated' | 'scrolled-doc'> = {
+  spread: 'paginated',
+  paged: 'paginated',
+  scroll: 'scrolled-doc',
 };
 
-const THEME_COLORS: Record<ReadingTheme, { background: string; text: string; border: string }> = {
-  light: { background: '#fbfaf7', text: '#1c1917', border: 'rgba(28, 25, 23, 0.2)' },
-  sepia: { background: '#f4ecd8', text: '#433422', border: 'rgba(67, 52, 34, 0.25)' },
-  dark: { background: '#18181b', text: '#e4e4e7', border: 'rgba(228, 228, 231, 0.25)' },
-};
-
-const FONT_STACKS: Record<ReadingFontFamily, string> = {
-  serif:
-    "Charter, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Songti SC', 'PingFang SC', serif",
-  sans: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Helvetica Neue', sans-serif",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'PingFang SC', monospace",
-};
+/** epub.js shows two pages when spread is `auto` and the width reaches the minimum. */
+const spreadFor = (mode: EpubReadingMode, columns: 1 | 2): 'auto' | 'none' =>
+  mode === 'spread' && columns === 2 ? 'auto' : 'none';
 
 const BOOK_TYPOGRAPHY_CSS = `
 html {
@@ -118,7 +115,7 @@ body.epubjs-scrolled {
 }
 body {
   color: #1c1917;
-  font-family: Charter, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Songti SC', 'PingFang SC', serif;
+  font-family: ${DEFAULT_SERIF_STACK};
   font-size: 1.05rem;
   line-height: 1.75;
   letter-spacing: 0.01em;
@@ -177,38 +174,68 @@ pre {
  *    font/line-spacing overrides so fixed coordinates and page geometry stay intact.
  */
 function buildPreferencesCss(preferences: ReadingPreferences, isFixedLayout: boolean): string {
-  const palette = THEME_COLORS[preferences.theme];
+  const theme = resolveReadingTheme(preferences.theme, false);
+  const palette = PAGE_PALETTES[theme];
+  // Sepia: white figure backgrounds take the paper color. Dark: optionally dimmed.
+  const imageRule =
+    theme === 'sepia'
+      ? 'img, svg image { mix-blend-mode: multiply; }'
+      : theme === 'dark' && preferences.dimImages
+        ? 'img, svg, video { filter: brightness(0.85); }'
+        : '';
   if (isFixedLayout) {
     return `
 html, body {
   background-color: ${palette.background};
 }
+${imageRule}
 `;
   }
-  const fontStack = FONT_STACKS[preferences.fontFamily];
+  const stack = fontStack(preferences.fontFamily);
   const fontRem = ((1.05 * preferences.fontSize) / 100).toFixed(3);
   const lineSpacing = preferences.lineSpacing.toFixed(2);
+  // Justified text needs hyphenation, or word spacing turns uneven. Ragged text
+  // overrides the book; justified defers to a book that aligns its own paragraphs.
+  const alignment = preferences.justify
+    ? 'p { text-align: justify; hyphens: auto; -webkit-hyphens: auto; }'
+    : 'p { text-align: start !important; hyphens: manual !important; -webkit-hyphens: manual !important; }';
   return `
+html {
+  color-scheme: ${palette.colorScheme};
+}
 html, body {
   background-color: ${palette.background} !important;
   color: ${palette.text} !important;
 }
 body {
-  font-family: ${fontStack} !important;
+  ${stack ? `font-family: ${stack} !important;` : ''}
   font-size: ${fontRem}rem !important;
   line-height: ${lineSpacing} !important;
 }
 p, li, dd, dt, blockquote {
-  font-family: inherit !important;
+  ${stack ? 'font-family: inherit !important;' : ''}
   line-height: ${lineSpacing} !important;
 }
+${alignment}
 a {
   color: inherit;
 }
 blockquote {
   border-left-color: ${palette.border} !important;
 }
+${imageRule}
 `;
+}
+
+/**
+ * Hyphenation needs the text's language. A chapter that does not declare one
+ * takes the book's.
+ */
+function applyLanguage(chapter: Document, language: string | undefined): void {
+  const root = chapter.documentElement;
+  if (!root || !language) return;
+  if (root.getAttribute('lang') || root.getAttribute('xml:lang')) return;
+  root.setAttribute('lang', language);
 }
 
 /**
@@ -288,18 +315,23 @@ export async function openEpubDocument(
   element: HTMLElement,
   initialMode: EpubReadingMode = 'spread',
   initialPreferences: ReadingPreferences = DEFAULT_READING_PREFERENCES,
+  initialColumns: 1 | 2 = 2,
 ): Promise<EpubHandle> {
   const book = ePub(await toBuffer(source));
   await book.ready;
   const metadataLayout = (
     book.packaging as unknown as { metadata?: { layout?: string } } | undefined
   )?.metadata?.layout;
+  const language = (
+    book.packaging as unknown as { metadata?: { language?: string } } | undefined
+  )?.metadata?.language?.trim();
   const isFixedLayout = metadataLayout === 'pre-paginated';
   let currentPreferences: ReadingPreferences = { ...initialPreferences };
 
   book.spine.hooks.content.register(sanitizeChapter);
   if (!isFixedLayout) {
     book.spine.hooks.content.register(applyBookTypography);
+    book.spine.hooks.content.register((chapter: Document) => applyLanguage(chapter, language));
   }
   book.spine.hooks.content.register((chapter: Document) => {
     applyUserPreferencesToDocument(chapter, currentPreferences, isFixedLayout);
@@ -326,15 +358,16 @@ export async function openEpubDocument(
   };
 
   let currentMode: EpubReadingMode = initialMode;
+  let currentColumns: 1 | 2 = initialColumns;
   let currentCfi: string | undefined;
-  const initialLayout = MODE_LAYOUT[currentMode];
 
   const rendition = book.renderTo(element, {
-    flow: initialLayout.flow,
+    flow: MODE_FLOW[currentMode],
     width: '100%',
     height: '100%',
-    spread: initialLayout.spread,
-    minSpreadWidth: MIN_SPREAD_WIDTH,
+    spread: spreadFor(currentMode, currentColumns),
+    // The viewer chooses the column count from the reading measure.
+    minSpreadWidth: 0,
     gap: PAGINATED_GAP_PX,
     // Without this, WebKit never fires the listeners epub.js needs: see
     // `docs/adr/0005-epub-sandbox.md`, which also covers why it is safe here.
@@ -507,22 +540,39 @@ export async function openEpubDocument(
     async setReadingMode(mode) {
       if (mode === currentMode) return;
       currentMode = mode;
-      const layout = MODE_LAYOUT[mode];
       const target = currentCfi;
       Reflect.set(rendition, 'location', undefined);
-      rendition.flow(layout.flow);
-      rendition.spread(layout.spread, MIN_SPREAD_WIDTH);
+      rendition.flow(MODE_FLOW[mode]);
+      rendition.spread(spreadFor(mode, currentColumns), 0);
       rendition.clear();
       await (rendition.display(target) as unknown as Promise<void>).catch(
         () => rendition.display() as unknown as Promise<void>,
       );
     },
 
+    setColumns(columns) {
+      if (columns === currentColumns) return;
+      const before = spreadFor(currentMode, currentColumns);
+      currentColumns = columns;
+      const after = spreadFor(currentMode, columns);
+      if (before === after) return;
+      // epub.js re-lays out on resize and returns to the current location then.
+      rendition.spread(after, 0);
+      if (element.clientWidth > 0 && element.clientHeight > 0) {
+        rendition.resize(element.clientWidth, element.clientHeight);
+      }
+      const target = currentCfi;
+      if (target) {
+        void (rendition.display(target) as unknown as Promise<void>).catch(() => undefined);
+      }
+    },
+
     setPreferences(preferences) {
       const typographyChanged =
         preferences.fontFamily !== currentPreferences.fontFamily ||
         preferences.fontSize !== currentPreferences.fontSize ||
-        preferences.lineSpacing !== currentPreferences.lineSpacing;
+        preferences.lineSpacing !== currentPreferences.lineSpacing ||
+        preferences.justify !== currentPreferences.justify;
       currentPreferences = { ...preferences };
       for (const contents of contentsList()) {
         applyUserPreferencesToDocument(contents.document, currentPreferences, isFixedLayout);

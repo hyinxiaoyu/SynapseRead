@@ -13,6 +13,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
 import { useCommands } from '@/features/commands/registry';
+import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn, describeError } from '@/lib/utils';
 import {
@@ -92,6 +93,7 @@ export function ReaderPane() {
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
   const immersive = useStudySyncStore((state) => state.immersive);
   const [recentMenuOpen, setRecentMenuOpen] = useState(false);
+  const chromeTheme = useReaderChromeTheme();
 
   const openDocuments = useMemo(
     () =>
@@ -163,7 +165,12 @@ export function ReaderPane() {
   );
 
   return (
-    <section aria-label="Document reader" className="flex h-full flex-col">
+    <section
+      aria-label="Document reader"
+      data-reading-theme={chromeTheme.theme ?? undefined}
+      className="flex h-full flex-col bg-background text-foreground"
+      style={chromeTheme.style}
+    >
       {/* Focus mode hides the tabs; Esc or the toolbar brings them back. */}
       <header
         className={cn(
@@ -202,7 +209,8 @@ export function ReaderPane() {
                 <button
                   type="button"
                   aria-label={`Close ${document.title}`}
-                  className="mr-1 rounded p-0.5 outline-none hover:bg-background focus-visible:ring-2 focus-visible:ring-ring"
+                  title={`Close ${document.title}`}
+                  className="mr-0.5 flex size-6 shrink-0 items-center justify-center rounded outline-none hover:bg-background focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => closeDocument(document.id)}
                 >
                   <X className="size-3.5" />
@@ -213,7 +221,7 @@ export function ReaderPane() {
         </div>
         {recentDocuments.length > 0 && (
           <Button
-            variant={recentMenuOpen ? 'secondary' : 'ghost'}
+            variant={recentMenuOpen ? 'selected' : 'ghost'}
             size="sm"
             aria-label="Recent documents"
             aria-pressed={recentMenuOpen}

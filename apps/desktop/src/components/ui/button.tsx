@@ -13,6 +13,10 @@ const buttonVariants = cva(
         secondary: 'bg-secondary text-secondary-foreground hover:bg-secondary/80',
         outline: 'border bg-background hover:bg-accent hover:text-accent-foreground',
         ghost: 'hover:bg-accent hover:text-accent-foreground',
+        // A pressed toggle: a solid fill plus an inset outline, so it reads as
+        // selected without relying on the fill color alone.
+        selected:
+          'bg-foreground/15 text-foreground shadow-[inset_0_0_0_1px_color-mix(in_oklab,var(--foreground)_35%,transparent)] hover:bg-foreground/20',
       },
       size: {
         default: 'h-9 px-4 py-2',
@@ -29,6 +33,7 @@ export function Button({
   variant,
   size,
   asChild = false,
+  title,
   ...props
 }: ComponentProps<'button'> & VariantProps<typeof buttonVariants> & { asChild?: boolean }) {
   const Comp = asChild ? Slot : 'button';
@@ -37,6 +42,8 @@ export function Button({
       data-slot="button"
       type={asChild ? undefined : 'button'}
       className={cn(buttonVariants({ variant, size, className }))}
+      // An icon-only button shows its accessible name as a tooltip.
+      title={title ?? (size === 'icon' ? props['aria-label'] : undefined)}
       {...props}
     />
   );

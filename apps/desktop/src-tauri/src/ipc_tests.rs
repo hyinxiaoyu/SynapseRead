@@ -527,21 +527,25 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
     assert_eq!(
         initial,
         json!({
-            "theme": "light",
-            "fontFamily": "serif",
+            "theme": "auto",
+            "fontFamily": "original",
             "fontSize": 100,
             "lineSpacing": 1.75,
-            "readingWidth": "medium",
+            "margins": "normal",
+            "justify": true,
+            "dimImages": false,
             "epubReadingMode": "spread",
         })
     );
 
     let updated = json!({
         "theme": "dark",
-        "fontFamily": "sans",
+        "fontFamily": "new-york",
         "fontSize": 125,
         "lineSpacing": 1.9,
-        "readingWidth": "wide",
+        "margins": "wide",
+        "justify": false,
+        "dimImages": true,
         "epubReadingMode": "paged",
     });
     let saved = h.ok(
@@ -557,10 +561,12 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
             json!({
                 "preferences": {
                     "theme": "dark",
-                    "fontFamily": "sans",
+                    "fontFamily": "sf-pro",
                     "fontSize": 40,
                     "lineSpacing": 1.9,
-                    "readingWidth": "wide",
+                    "margins": "wide",
+                    "justify": true,
+                    "dimImages": false,
                     "epubReadingMode": "paged",
                 }
             }),

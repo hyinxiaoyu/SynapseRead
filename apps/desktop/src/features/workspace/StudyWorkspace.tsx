@@ -16,9 +16,10 @@ import {
   ToolbarSeparator,
   ToolbarSlotsContext,
 } from '@/features/reader/ReaderToolbar';
-import { THEME_SURFACE_CLASSES } from '@/features/reader/ReadingPreferencesBar';
+import { pageSurfaceStyle } from '@/features/reader/appearance/themes';
+import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
+import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import { UnifiedToolbar } from '@/features/workspace/UnifiedToolbar';
-import { cn } from '@/lib/utils';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 
 const EMPTY_SLOTS: ToolbarSlots = { leading: null, center: null, trailing: null };
@@ -44,7 +45,10 @@ export function StudyWorkspace() {
   const chromeStyle = useStudySyncStore((state) => state.chromeStyle);
   const hasActiveDocument = useStudySyncStore((state) => state.activeDocumentId !== null);
   const hasReaderSelection = useStudySyncStore((state) => state.selection !== null);
-  const readingTheme = useStudySyncStore((state) => state.readingPreferences.theme);
+  const readingTheme = useResolvedReadingTheme(
+    useStudySyncStore((state) => state.readingPreferences.theme),
+  );
+  const readerChrome = useReaderChromeTheme();
   const onMenuCommand = useStudySyncStore((state) => state.onMenuCommand);
   const setMenuItemStates = useStudySyncStore((state) => state.setMenuItemStates);
 
@@ -188,11 +192,9 @@ export function StudyWorkspace() {
   return (
     <ToolbarSlotsContext.Provider value={slots}>
       <main
-        className={cn(
-          'relative flex h-full flex-col',
-          // Focus mode: the whole window takes the page's theme color.
-          immersive && THEME_SURFACE_CLASSES[readingTheme],
-        )}
+        className="relative flex h-full flex-col"
+        // Focus mode: the whole window takes the page's theme color.
+        style={immersive ? pageSurfaceStyle(readingTheme) : undefined}
         data-immersive={immersive || undefined}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -210,6 +212,8 @@ export function StudyWorkspace() {
         )}
         <UnifiedToolbar
           chromeStyle={chromeStyle}
+          themeStyle={readerChrome.style}
+          readingTheme={readerChrome.theme}
           fullscreen={fullscreen}
           immersive={immersive}
           hasReaderSelection={hasReaderSelection}

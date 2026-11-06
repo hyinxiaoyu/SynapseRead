@@ -1,9 +1,18 @@
-import { type ReactNode, type RefObject, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  type CSSProperties,
+  type ReactNode,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 
 import { onCommandRun } from '@/features/commands/registry';
 import type { ToolbarSlots } from '@/features/reader/ReaderToolbar';
 import type { WindowChromeStyle } from '@/lib/backend/types';
 import { cn } from '@/lib/utils';
+import type { ResolvedReadingTheme } from '@/types/domain';
 
 /** Immersive mode hides the toolbar after this long without pointer or key activity. */
 export const AUTO_HIDE_DELAY_MS = 3000;
@@ -92,6 +101,8 @@ export function useAutoHideToolbar(
  */
 export function UnifiedToolbar({
   chromeStyle,
+  themeStyle,
+  readingTheme = null,
   fullscreen,
   immersive,
   hasReaderSelection,
@@ -101,6 +112,9 @@ export function UnifiedToolbar({
   onSlotsChange,
 }: {
   chromeStyle: WindowChromeStyle;
+  /** The active reader's theme tokens; the toolbar is reader chrome, as in Books. */
+  themeStyle?: CSSProperties | undefined;
+  readingTheme?: ResolvedReadingTheme | null;
   fullscreen: boolean;
   immersive: boolean;
   hasReaderSelection: boolean;
@@ -140,6 +154,7 @@ export function UnifiedToolbar({
         data-testid="unified-toolbar"
         data-immersive={immersive || undefined}
         data-hidden={hidden || undefined}
+        data-reading-theme={readingTheme ?? undefined}
         inert={hidden}
         aria-label="Toolbar"
         {...dragRegion}
@@ -149,7 +164,10 @@ export function UnifiedToolbar({
           hidden && 'pointer-events-none -translate-y-full opacity-0',
           'motion-safe:transition-[opacity,translate] motion-safe:duration-200',
         )}
-        style={insetForWindowControls ? { paddingLeft: TRAFFIC_LIGHTS_INSET_PX } : undefined}
+        style={{
+          ...themeStyle,
+          ...(insetForWindowControls ? { paddingLeft: TRAFFIC_LIGHTS_INSET_PX } : undefined),
+        }}
       >
         <div
           ref={setLeading}

@@ -315,29 +315,39 @@ describe('TxtViewer', () => {
       await act(async () => {
         screen.getByRole('button', { name: 'Reading appearance' }).click();
       });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Dark' }).click();
-      });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Mono' }).click();
-      });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Increase font size' }).click();
-      });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Relaxed' }).click();
-      });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Narrow' }).click();
-      });
+      // TXT has no publisher fonts, so Original reads as the default face.
+      expect(screen.getByRole('radio', { name: 'Default' })).toHaveAttribute(
+        'aria-checked',
+        'true',
+      );
+      for (const [role, name] of [
+        ['radio', 'Dark'],
+        ['radio', 'Monospace'],
+        ['button', 'Increase font size'],
+        ['button', 'Customize'],
+        ['radio', 'Relaxed'],
+        ['radio', 'Narrow'],
+        ['switch', 'Justify'],
+      ] as const) {
+        await act(async () => {
+          screen.getByRole(role, { name }).click();
+        });
+      }
+      // Image dimming only applies to formats with images.
+      expect(screen.queryByRole('switch', { name: /Dim images/ })).not.toBeInTheDocument();
 
       const viewer = screen.getByTestId('txt-viewer');
       expect(viewer).toHaveAttribute('data-reading-theme', 'dark');
-      expect(viewer).toHaveAttribute('data-reading-width', 'narrow');
+      expect(viewer).toHaveAttribute('data-reading-margins', 'narrow');
       expect(scroller().scrollTop).toBe(40 * ROW_PX);
+      expect(scroller().style.backgroundColor).toBe('rgb(24, 24, 27)');
       const docEl = screen.getByRole('document');
       expect(docEl.style.fontSize).toBe('1.1rem');
       expect(docEl.style.lineHeight).toBe('2.1');
+      // Capped at 75ch (fallback 0.5em of 17.6 px) plus 32 px a side at narrow margins.
+      expect(docEl.style.maxWidth).toBe(`${75 * 8.8 + 64}px`);
+      const row = docEl.querySelector<HTMLElement>('[data-index]');
+      expect(row?.style.textAlign).toBe('start');
       first.unmount();
 
       const reopened = createStudySyncStore(backend);
@@ -346,7 +356,7 @@ describe('TxtViewer', () => {
       render(<Harness store={reopened} documentId={documentId} />);
       await waitFor(() => expect(scroller().scrollTop).toBe(40 * ROW_PX));
       expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-theme', 'dark');
-      expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-width', 'narrow');
+      expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-margins', 'narrow');
     });
   });
 

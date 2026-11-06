@@ -80,8 +80,8 @@ export function SegmentedControl<T extends string>({
             className={cn(
               'flex h-6 w-7 items-center justify-center rounded-[5px] text-muted-foreground transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50 [&_svg]:size-3.5',
               checked
-                ? 'bg-background text-foreground shadow-xs'
-                : 'hover:text-foreground hover:bg-background/50',
+                ? 'bg-primary text-primary-foreground shadow-xs'
+                : 'hover:bg-background/60 hover:text-foreground',
             )}
           >
             <Icon aria-hidden="true" />

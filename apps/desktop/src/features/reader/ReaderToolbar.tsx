@@ -102,6 +102,9 @@ export interface ToolbarButtonProps {
   /** Keeps the reader's text selection alive through the click. */
   preserveSelection?: boolean;
   className?: string;
+  /** For a button that opens a popover. */
+  ariaHasPopup?: 'dialog' | 'menu';
+  ariaExpanded?: boolean;
 }
 
 /** An icon-only toolbar control: tooltip with its shortcut, and an accessible name. */
@@ -118,14 +121,19 @@ export function ToolbarButton({
   collapse,
   preserveSelection = false,
   className,
+  ariaHasPopup,
+  ariaExpanded,
 }: ToolbarButtonProps) {
   return (
     <Button
-      variant={pressed ? 'secondary' : 'ghost'}
+      variant={pressed ? 'selected' : 'ghost'}
       size="icon"
       className={cn('relative size-7', collapseClass(collapse), className)}
       aria-label={label}
-      aria-pressed={pressed}
+      // A popover trigger reports open or closed, not pressed.
+      aria-pressed={ariaExpanded === undefined ? pressed : undefined}
+      aria-haspopup={ariaHasPopup}
+      aria-expanded={ariaExpanded}
       title={command ? commandTooltip(label, command) : label}
       data-testid={testId}
       disabled={disabled}
@@ -187,7 +195,7 @@ export function ToolbarOverflowMenu({ items }: { items: readonly OverflowItem[] 
   return (
     <div ref={rootRef} className={cn('relative', SHOW_WHEN_NARROW[widest])}>
       <Button
-        variant={open ? 'secondary' : 'ghost'}
+        variant={open ? 'selected' : 'ghost'}
         size="icon"
         className="size-7"
         aria-label="More toolbar items"
@@ -252,7 +260,7 @@ export function ToolbarTitle({ title, subtitle }: { title: string; subtitle?: Re
 }
 
 /**
- * Find, Appearance, Bookmarks, and Annotations float over the page as popovers
+ * Notices and the note composer float over the page as popovers
  * instead of stacking strips above it, so the reading area never jumps.
  */
 export function ReaderPopoverLayer({ children }: { children: ReactNode }) {

@@ -426,29 +426,41 @@ pub struct CreateBookmarkInput {
     pub label: Option<String>,
 }
 
+/// The page palette. `Auto` follows the system's light or dark appearance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReadingTheme {
+    Auto,
     Light,
     Sepia,
     Dark,
 }
 
+/// A reading face. `Original` keeps the publisher's fonts (EPUB) or the default
+/// serif (TXT); the frontend maps every other face to a stack with fallbacks for
+/// platforms that lack it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum ReadingFontFamily {
-    Serif,
-    Sans,
+    Original,
+    Charter,
+    Iowan,
+    Palatino,
+    Athelas,
+    NewYork,
+    Seravek,
+    SfPro,
     Mono,
 }
 
+/// Page padding around the text column. The column itself is capped by the
+/// reading measure, not by this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ReadingWidth {
+pub enum ReadingMargins {
     Narrow,
-    Medium,
+    Normal,
     Wide,
-    Full,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,18 +481,24 @@ pub struct ReadingPreferences {
     pub font_size: u32,
     /// Line height multiplier (`1.2..=2.4`).
     pub line_spacing: f64,
-    pub reading_width: ReadingWidth,
+    pub margins: ReadingMargins,
+    /// Justified text, hyphenated in the document's language.
+    pub justify: bool,
+    /// Dims images in the Dark theme.
+    pub dim_images: bool,
     pub epub_reading_mode: EpubReadingMode,
 }
 
 impl Default for ReadingPreferences {
     fn default() -> Self {
         Self {
-            theme: ReadingTheme::Light,
-            font_family: ReadingFontFamily::Serif,
+            theme: ReadingTheme::Auto,
+            font_family: ReadingFontFamily::Original,
             font_size: 100,
             line_spacing: 1.75,
-            reading_width: ReadingWidth::Medium,
+            margins: ReadingMargins::Normal,
+            justify: true,
+            dim_images: false,
             epub_reading_mode: EpubReadingMode::Spread,
         }
     }

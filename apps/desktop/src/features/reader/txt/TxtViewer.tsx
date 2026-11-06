@@ -36,14 +36,18 @@ import {
   ToolbarSeparator,
   ToolbarTitle,
 } from '@/features/reader/ReaderToolbar';
+import { AppearanceMenu, useAppearancePanel } from '@/features/reader/appearance/AppearancePopover';
 import {
-  FONT_FAMILY_CSS,
-  READING_WIDTH_CLASSES,
-  ReadingPreferencesBar,
-  ReadingPreferencesToggleButton,
-  THEME_SURFACE_CLASSES,
-  useReadingPreferencesPanel,
-} from '@/features/reader/ReadingPreferencesBar';
+  measureCharWidth,
+  rootFontSizePx,
+  singleColumnPage,
+} from '@/features/reader/appearance/measure';
+import {
+  DEFAULT_SERIF_STACK,
+  fontStack,
+  pageSurfaceStyle,
+} from '@/features/reader/appearance/themes';
+import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import { useJumpHistory } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
@@ -251,7 +255,13 @@ export function TxtViewer({
     () => preferences ?? DEFAULT_READING_PREFERENCES,
   );
   const effectivePreferences = preferences ?? localPreferences;
-  const preferencesPanel = useReadingPreferencesPanel();
+  const preferencesPanel = useAppearancePanel();
+  const theme = useResolvedReadingTheme(effectivePreferences.theme);
+  const fontFamily = fontStack(effectivePreferences.fontFamily) ?? DEFAULT_SERIF_STACK;
+  const page = singleColumnPage(
+    measureCharWidth(fontFamily, (rootFontSizePx() * effectivePreferences.fontSize) / 100),
+    effectivePreferences.margins,
+  );
 
   const updatePreferences = (patch: Partial<ReadingPreferences>) => {
     setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
@@ -372,7 +382,8 @@ export function TxtViewer({
     fontFamily: effectivePreferences.fontFamily,
     fontSize: effectivePreferences.fontSize,
     lineSpacing: effectivePreferences.lineSpacing,
-    readingWidth: effectivePreferences.readingWidth,
+    margins: effectivePreferences.margins,
+    justify: effectivePreferences.justify,
   });
 
   useLayoutEffect(() => {
@@ -381,13 +392,15 @@ export function TxtViewer({
       prev.fontFamily !== effectivePreferences.fontFamily ||
       prev.fontSize !== effectivePreferences.fontSize ||
       prev.lineSpacing !== effectivePreferences.lineSpacing ||
-      prev.readingWidth !== effectivePreferences.readingWidth;
+      prev.margins !== effectivePreferences.margins ||
+      prev.justify !== effectivePreferences.justify;
     if (!changed) return;
     layoutSnapshot.current = {
       fontFamily: effectivePreferences.fontFamily,
       fontSize: effectivePreferences.fontSize,
       lineSpacing: effectivePreferences.lineSpacing,
-      readingWidth: effectivePreferences.readingWidth,
+      margins: effectivePreferences.margins,
+      justify: effectivePreferences.justify,
     };
     const anchorRow = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
     const frame = window.requestAnimationFrame(() => {
@@ -401,7 +414,8 @@ export function TxtViewer({
     effectivePreferences.fontFamily,
     effectivePreferences.fontSize,
     effectivePreferences.lineSpacing,
-    effectivePreferences.readingWidth,
+    effectivePreferences.margins,
+    effectivePreferences.justify,
     virtualizer,
   ]);
   const reportCursor = useCallback(() => {
@@ -755,13 +769,11 @@ export function TxtViewer({
 
   return (
     <div
-      className={cn(
-        'relative flex h-full flex-col',
-        THEME_SURFACE_CLASSES[effectivePreferences.theme],
-      )}
+      className="relative flex h-full flex-col bg-background text-foreground"
       data-testid="txt-viewer"
       data-reading-theme={effectivePreferences.theme}
-      data-reading-width={effectivePreferences.readingWidth}
+      data-resolved-theme={theme}
+      data-reading-margins={effectivePreferences.margins}
     >
       <ReaderToolbar
         isActive={isActive}
@@ -797,9 +809,13 @@ export function TxtViewer({
         }
         trailing={
           <>
-            <ReadingPreferencesToggleButton
+            <AppearanceMenu
               open={preferencesPanel.open}
               onToggle={preferencesPanel.toggle}
+              onClose={preferencesPanel.close}
+              preferences={effectivePreferences}
+              onChange={updatePreferences}
+              format="txt"
             />
             {markup.visible && (
               <SelectionAnnotationControls
@@ -834,12 +850,6 @@ export function TxtViewer({
         )}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           <ReaderPopoverLayer>
-            {preferencesPanel.open && (
-              <ReadingPreferencesBar
-                preferences={effectivePreferences}
-                onChange={updatePreferences}
-              />
-            )}
             <SelectionNoteComposer
               hasSelection={activeSelection !== null}
               controller={annotationsController}
@@ -858,17 +868,18 @@ export function TxtViewer({
             tabIndex={-1}
             data-testid="txt-scroll"
             className="min-h-0 flex-1 overflow-auto outline-none"
+            style={pageSurfaceStyle(theme)}
           >
             <div
               role="document"
               aria-label={document.title}
-              className={cn(
-                'relative mx-auto w-full',
-                READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
-              )}
+              // Hyphenation needs a language; a text file declares none.
+              lang={window.navigator.language || undefined}
+              className="relative mx-auto w-full"
               style={{
                 height: virtualizer.getTotalSize(),
-                fontFamily: FONT_FAMILY_CSS[effectivePreferences.fontFamily],
+                maxWidth: page.maxWidth,
+                fontFamily,
                 fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
                 lineHeight:
                   effectivePreferences.lineSpacing === 1.75
@@ -881,8 +892,14 @@ export function TxtViewer({
                   key={item.key}
                   data-index={item.index}
                   ref={virtualizer.measureElement}
-                  className="absolute top-0 left-0 min-h-[1lh] w-full px-6 break-words whitespace-pre-wrap"
-                  style={{ transform: `translateY(${item.start}px)` }}
+                  className="absolute top-0 left-0 min-h-[1lh] w-full break-words whitespace-pre-wrap"
+                  style={{
+                    transform: `translateY(${item.start}px)`,
+                    paddingInline: page.sidePadding,
+                    ...(effectivePreferences.justify
+                      ? { textAlign: 'justify', hyphens: 'auto' }
+                      : { textAlign: 'start', hyphens: 'manual' }),
+                  }}
                 >
                   <TxtRow
                     segments={segmentRow(

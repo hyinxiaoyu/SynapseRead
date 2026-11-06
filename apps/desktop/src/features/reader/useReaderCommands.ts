@@ -8,7 +8,7 @@ import type {
   DocumentSearchResultItem,
 } from '@/features/reader/DocumentSearch';
 import type { NavigatorController, NavigatorTab } from '@/features/reader/navigator/useNavigator';
-import { DEFAULT_FONT_SIZE, steppedFontSize } from '@/features/reader/ReadingPreferencesBar';
+import { DEFAULT_FONT_SIZE, steppedFontSize } from '@/features/reader/appearance/AppearancePopover';
 import type { ReadingPreferences } from '@/types/domain';
 
 /** The markup group (colors, Highlight, Add note) can be put away with ⇧⌘A. */
@@ -68,7 +68,7 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   /** The current selection's text, or null with nothing selected. */
   selectionText: string | null;
   markup: MarkupToolbar;
-  /** Text size and the Appearance panel, for formats that reflow. */
+  /** Text size and the Appearance popover, for formats that reflow. */
   reflowable?: ReflowableOptions;
   extra?: CommandHandlers;
 }) {

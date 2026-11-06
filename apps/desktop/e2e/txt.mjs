@@ -1,5 +1,9 @@
 import { assert } from './harness.mjs';
 
+/** The text `measureCharWidth` samples; see `appearance/measure.ts`. */
+const MEASURE_SAMPLE =
+  'The quick brown fox jumps over the lazy dog, and then reads a chapter or two of a good book.';
+
 const SEGMENT = '[data-testid="txt-scroll"] [data-unit]';
 const scrollTop = `document.querySelector('[data-testid="txt-scroll"]').scrollTop`;
 const visibleScroller = `[...document.querySelectorAll('[data-testid="txt-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
@@ -164,13 +168,22 @@ export async function txtFlow(page) {
   // Reading appearance controls in TXT viewer.
   await page.clickButton('Reading appearance');
   await page.waitFor(
-    `${visibleTxtViewer}.querySelector('[data-testid="reading-preferences-bar"]')`,
-    'TXT reading preferences bar',
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'TXT appearance popover',
   );
   await page.clickButton('Dark');
   await page.waitFor(`${visibleTxtViewer}.dataset.readingTheme === 'dark'`, 'TXT dark theme');
+  await page.assertContrast(
+    '[data-testid="unified-toolbar"], [aria-label="Document reader"]',
+    'TXT Dark chrome',
+  );
   await page.clickButton('Light');
   await page.waitFor(`${visibleTxtViewer}.dataset.readingTheme === 'light'`, 'TXT light theme');
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'Esc closes the TXT appearance popover',
+  );
 
   // Independent highlights & notes in TXT viewer: highlight dropped file text without creating a MindMap card, delete, and undo.
   await page.selectText(SEGMENT, 'Dropped E2E');
@@ -200,4 +213,32 @@ export async function txtFlow(page) {
     'undoing TXT highlight deletion',
   );
   await page.hideSidebar();
+
+  // Last, because resizing reflows the text and moves every scroll offset above.
+  // TXT keeps the same reading measure as EPUB at every window width.
+  for (const width of [1280, 1728, 2560]) {
+    await page.setViewport(width);
+    const perLine = await page.waitFor(
+      `(() => {
+        const row = ${visibleTxtViewer}?.querySelector('[role="document"] [data-index]');
+        if (!row || row.closest('[role="document"]').getBoundingClientRect().width > ${width}) {
+          return null;
+        }
+        const style = getComputedStyle(row);
+        const column =
+          row.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        const probe = document.createElement('span');
+        probe.textContent = ${JSON.stringify(MEASURE_SAMPLE)};
+        probe.style.cssText = 'position: absolute; visibility: hidden; white-space: nowrap';
+        row.appendChild(probe);
+        const advance = probe.getBoundingClientRect().width / probe.textContent.length;
+        probe.remove();
+        const perLine = column / advance;
+        return perLine >= 45 && perLine <= 78 ? perLine : null;
+      })()`,
+      `TXT 45–78 characters per line at ${width} px`,
+    );
+    console.log(`     txt: ${width} px, ${perLine.toFixed(1)} characters per line`);
+  }
+  await page.cdp.send('Emulation.clearDeviceMetricsOverride');
 }

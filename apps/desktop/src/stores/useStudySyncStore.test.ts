@@ -460,14 +460,20 @@ describe('useStudySyncStore', () => {
     it('persists reading preferences and rolls back on validation failure', async () => {
       await state().updateReadingPreferences({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 120,
+        margins: 'wide',
+        justify: false,
+        dimImages: true,
         epubReadingMode: 'paged',
       });
       expect(state().readingPreferences).toMatchObject({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 120,
+        margins: 'wide',
+        justify: false,
+        dimImages: true,
         epubReadingMode: 'paged',
       });
 
@@ -475,8 +481,11 @@ describe('useStudySyncStore', () => {
       await reopened.getState().initialize();
       expect(reopened.getState().readingPreferences).toMatchObject({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 120,
+        margins: 'wide',
+        justify: false,
+        dimImages: true,
         epubReadingMode: 'paged',
       });
 

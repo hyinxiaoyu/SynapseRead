@@ -6,6 +6,13 @@ const frameDocument = `${frame}?.contentDocument`;
 const scroller = `${visibleHost}?.querySelector('.epub-container')`;
 const excerptEnabled = `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`;
 
+/** The text `measureCharWidth` samples; see `appearance/measure.ts`. */
+const MEASURE_SAMPLE =
+  'The quick brown fox jumps over the lazy dog, and then reads a chapter or two of a good book.';
+// 45–75ch, with room for the gap between the canvas measure and the page's own.
+const MIN_PER_LINE = 45;
+const MAX_PER_LINE = 78;
+
 const openEpub = (page) => page.openUntil(visibleHost, 'the EPUB');
 
 const chapterIs = (title) => `${frameDocument}?.querySelector('h1')?.textContent === '${title}'`;
@@ -223,19 +230,88 @@ export async function epubFlow(page) {
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'scroll mode');
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in scroll mode');
 
-  // Reading appearance preferences: theme, font family, font size, line spacing, and reading width.
+  // Reading appearance: the "Aa" popover, and a theme that tints the whole reader window.
   await page.clickButton('Reading appearance');
   await page.waitFor(
-    `${visibleViewer}.querySelector('[data-testid="reading-preferences-bar"]')`,
-    'EPUB reading preferences bar',
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'EPUB appearance popover',
   );
   await page.clickButton('Sepia');
   await page.waitFor(`${visibleViewer}.dataset.readingTheme === 'sepia'`, 'sepia theme');
   const sepiaBg = await page.evaluate(`getComputedStyle(${frameDocument}.body).backgroundColor`);
   assert(sepiaBg === 'rgb(244, 236, 216)', `EPUB frame body applies sepia background: ${sepiaBg}`);
-  await page.clickButton('Light');
-  await page.waitFor(`${visibleViewer}.dataset.readingTheme === 'light'`, 'restore light theme');
-  await page.clickButton('Reading appearance');
+  const sepiaChrome = await page.evaluate(
+    `getComputedStyle(document.querySelector('[data-testid="unified-toolbar"]')).backgroundColor`,
+  );
+  assert(sepiaChrome === 'rgb(239, 230, 209)', `the toolbar takes sepia chrome: ${sepiaChrome}`);
+
+  // Chrome text meets WCAG AA in every theme, popover included.
+  for (const theme of ['Light', 'Sepia', 'Dark']) {
+    await page.clickButton(theme);
+    await page.waitFor(
+      `${visibleViewer}.dataset.resolvedTheme === '${theme.toLowerCase()}'`,
+      `${theme} theme`,
+    );
+    await page.assertContrast(
+      '[data-testid="unified-toolbar"], [aria-label="Document reader"]',
+      `EPUB ${theme} chrome`,
+    );
+  }
+  await page.clickButton('Auto');
+  await page.waitFor(
+    `${visibleViewer}.dataset.resolvedTheme === 'light'`,
+    'Auto follows the system',
+  );
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'Esc closes the appearance popover',
+  );
+  assert(
+    await page.evaluate(
+      `document.activeElement?.getAttribute('aria-label') === 'Reading appearance'`,
+    ),
+    'focus returns to the Aa button',
+  );
+
+  // The reading measure holds from a laptop to a large display.
+  await page.clickButton('Two pages');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'spread'`, 'two-page mode');
+  for (const width of [1280, 1728, 2560]) {
+    await page.setViewport(width);
+    const measure = await page.waitFor(
+      `(() => {
+        // A paginated frame is as wide as all its pages; the paragraph is one column.
+        const paragraph = ${frame}?.contentDocument?.querySelector('p');
+        if (!paragraph) return null;
+        const probe = paragraph.ownerDocument.createElement('span');
+        probe.textContent = ${JSON.stringify(MEASURE_SAMPLE)};
+        probe.style.cssText = 'position: absolute; visibility: hidden; white-space: nowrap';
+        paragraph.appendChild(probe);
+        const advance = probe.getBoundingClientRect().width / probe.textContent.length;
+        probe.remove();
+        const perLine = paragraph.getBoundingClientRect().width / advance;
+        if (perLine < ${MIN_PER_LINE} || perLine > ${MAX_PER_LINE}) return null;
+        const spine = document.querySelector('[data-testid="epub-spine"]');
+        return {
+          perLine,
+          columns: Number(${visibleViewer}.dataset.columns),
+          spine: spine ? spine.getBoundingClientRect().width : 0,
+        };
+      })()`,
+      `${MIN_PER_LINE}–${MAX_PER_LINE} characters per line at ${width} px`,
+    );
+    console.log(
+      `     epub: ${width} px, ${measure.columns} pages, ${measure.perLine.toFixed(1)} characters per line`,
+    );
+    if (width >= 1728) {
+      assert(measure.columns === 2, `two pages at ${width} px`);
+      assert(measure.spine >= 48, `a spine gutter of 48 px at ${width} px: ${measure.spine}`);
+    }
+  }
+  await page.cdp.send('Emulation.clearDeviceMetricsOverride');
+  await page.clickButton('Scroll');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'back to scroll mode');
 
   // In-document search across unrendered EPUB chapters, CFI highlight, and return.
   await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');

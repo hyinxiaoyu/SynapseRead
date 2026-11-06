@@ -26,6 +26,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0004_independent_annotations.sql"),
     include_str!("../migrations/0005_workspace_session.sql"),
     include_str!("../migrations/0006_workspace_immersive.sql"),
+    include_str!("../migrations/0007_reading_appearance.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -1799,10 +1800,12 @@ mod tests {
 
         let updated = ReadingPreferences {
             theme: crate::domain::ReadingTheme::Sepia,
-            font_family: crate::domain::ReadingFontFamily::Sans,
+            font_family: crate::domain::ReadingFontFamily::NewYork,
             font_size: 125,
             line_spacing: 1.9,
-            reading_width: crate::domain::ReadingWidth::Wide,
+            margins: crate::domain::ReadingMargins::Wide,
+            justify: false,
+            dim_images: true,
             epub_reading_mode: crate::domain::EpubReadingMode::Scroll,
         };
         let saved = db.save_reading_preferences(&updated).unwrap();
@@ -1815,6 +1818,73 @@ mod tests {
             db.save_reading_preferences(&invalid),
             Err(CoreError::InvalidPreferences(_))
         ));
+    }
+
+    #[test]
+    fn appearance_migration_rewrites_stored_preferences() {
+        use crate::domain::{EpubReadingMode, ReadingFontFamily, ReadingMargins, ReadingTheme};
+
+        let cases = [
+            (
+                r#"{"theme":"sepia","fontFamily":"serif","fontSize":110,"lineSpacing":1.4,"readingWidth":"narrow","epubReadingMode":"paged"}"#,
+                ReadingTheme::Sepia,
+                ReadingFontFamily::Charter,
+                ReadingMargins::Wide,
+            ),
+            (
+                r#"{"theme":"light","fontFamily":"sans","fontSize":100,"lineSpacing":1.75,"readingWidth":"medium","epubReadingMode":"spread"}"#,
+                ReadingTheme::Light,
+                ReadingFontFamily::SfPro,
+                ReadingMargins::Normal,
+            ),
+            (
+                r#"{"theme":"dark","fontFamily":"mono","fontSize":100,"lineSpacing":1.75,"readingWidth":"full","epubReadingMode":"spread"}"#,
+                ReadingTheme::Dark,
+                ReadingFontFamily::Mono,
+                ReadingMargins::Narrow,
+            ),
+        ];
+        for (stored, theme, font_family, margins) in cases {
+            let mut conn = Connection::open_in_memory().unwrap();
+            // Bring the database to version 6, as a released build left it.
+            for (version, sql) in (1_u32..).zip(&MIGRATIONS[..6]) {
+                conn.execute_batch(sql).unwrap();
+                conn.pragma_update(None, "user_version", version).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)",
+                params![stored],
+            )
+            .unwrap();
+            migrate(&mut conn).unwrap();
+            let db = Database {
+                conn,
+                captures: None,
+            };
+
+            let prefs = db.get_reading_preferences().unwrap();
+            assert_eq!(prefs.theme, theme);
+            assert_eq!(prefs.font_family, font_family);
+            assert_eq!(prefs.margins, margins);
+            assert!(prefs.justify);
+            assert!(!prefs.dim_images);
+            assert!(prefs.validate().is_ok());
+            if theme == ReadingTheme::Sepia {
+                assert_eq!(prefs.font_size, 110);
+                assert_eq!(prefs.epub_reading_mode, EpubReadingMode::Paged);
+            }
+        }
+    }
+
+    #[test]
+    fn new_installs_default_to_the_auto_theme_and_publisher_fonts() {
+        let db = Database::open_in_memory().unwrap();
+        let prefs = db.get_reading_preferences().unwrap();
+        assert_eq!(prefs.theme, crate::domain::ReadingTheme::Auto);
+        assert_eq!(
+            prefs.font_family,
+            crate::domain::ReadingFontFamily::Original
+        );
     }
 
     #[test]
