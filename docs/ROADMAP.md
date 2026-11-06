@@ -59,7 +59,27 @@ before implementation; the fifth came up while building the EPUB engine.
 - A file edited in place still opens, and its anchors can drift, because `file_hash` is
   not re-checked on open.
 
-## M3: Card operations
+## Reader experience: next priority
+
+Complete the principal local reading workflows before expanding card operations:
+EPUB targets Apple Books, PDF targets macOS Preview, and TXT shares applicable
+controls. See [the reader implementation plan](READER_PLAN.md) for task IDs,
+dependencies, acceptance criteria, and estimates.
+
+- Daily reading core (R01–R07): native baseline, navigation/progress, preferences,
+  PDF zoom, document search, bookmarks, and independent annotations.
+- Desktop parity and hardening (R08–R12): PDF thumbnails/display modes/links,
+  recent documents/session restoration, source recovery, resource limits, and
+  native acceptance.
+- Planning estimate: 17–23 implementation sessions, 18–33 engineer days; reserve
+  approximately 5–9 working weeks including contingency. Re-estimate after the
+  native baseline, search, and annotation milestones. Release packaging is extra.
+
+These tasks are planned, not complete. Relevant M2 carryovers and M4 recovery,
+performance, and accessibility work are executed here and should not be counted
+twice. Optional scope such as additional TXT encodings is estimated separately.
+
+## M3: Card operations (after reader experience)
 
 - Hierarchical nesting: re-parent by drag, collapse and expand subtrees
   (`is_collapsed` is stored; there is no UI yet).
