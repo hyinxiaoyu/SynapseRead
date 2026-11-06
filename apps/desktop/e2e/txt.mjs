@@ -5,6 +5,7 @@ const scrollTop = `document.querySelector('[data-testid="txt-scroll"]').scrollTo
 const visibleScroller = `[...document.querySelectorAll('[data-testid="txt-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
 
 export async function txtFlow(page) {
+  await page.clickButton('Show MindMap');
   await page.clickButton('Open');
   await page.waitFor(
     `[...document.querySelectorAll(${JSON.stringify(SEGMENT)})].some((e) => e.textContent.includes('SynapseRead sample text'))`,

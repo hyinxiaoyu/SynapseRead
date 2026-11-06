@@ -488,6 +488,44 @@ function PdfPages({
     [],
   );
 
+  useEffect(() => {
+    if (!isActive) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        event.shiftKey
+      ) {
+        return;
+      }
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+          return;
+        }
+        if (
+          target.closest(
+            '[contenteditable="true"], [role="textbox"], [role="slider"], [role="separator"], [role="tablist"], .react-flow',
+          )
+        ) {
+          return;
+        }
+      }
+      const currentPage = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
+      if (event.key === 'ArrowRight' && currentPage + 1 < engine.pageCount) {
+        event.preventDefault();
+        virtualizer.scrollToOffset(offsetWithin(currentPage + 1, 0));
+      } else if (event.key === 'ArrowLeft' && currentPage > 0) {
+        event.preventDefault();
+        virtualizer.scrollToOffset(offsetWithin(currentPage - 1, 0));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isActive, engine.pageCount, offsetWithin, virtualizer]);
   // ---- Jumping -------------------------------------------------------------
 
   const jumpAnchor = asPdfAnchor(jumpRequest?.anchor);

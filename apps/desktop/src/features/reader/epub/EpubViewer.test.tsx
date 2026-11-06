@@ -6,7 +6,7 @@ import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
 
-import type { EpubLocation, EpubSelection } from './epubEngine';
+import type { EpubLocation, EpubReadingMode, EpubSelection } from './epubEngine';
 import { EpubViewer } from './EpubViewer';
 
 // jsdom has no layout for epub.js to render into: this replaces only the engine seam,
@@ -21,8 +21,10 @@ const engine = vi.hoisted(() => ({
   failCfi: null as string | null,
   emitSelection: (() => undefined) as (selection: unknown) => void,
   emitLocation: (() => undefined) as (location: unknown) => void,
+  emitKeyDown: (() => undefined) as (event: KeyboardEvent) => void,
   next: vi.fn(async () => undefined),
   previous: vi.fn(async () => undefined),
+  setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
 }));
 
 vi.mock('./epubEngine', () => ({
@@ -33,6 +35,7 @@ vi.mock('./epubEngine', () => ({
     },
     next: engine.next,
     previous: engine.previous,
+    setReadingMode: engine.setReadingMode,
     highlight: (annotationId: string, cfiRange: string) =>
       void engine.highlighted.set(annotationId, cfiRange),
     removeHighlight: (cfiRange: string) => void engine.removed.push(cfiRange),
@@ -50,6 +53,9 @@ vi.mock('./epubEngine', () => ({
     },
     onLocation(listener: (location: EpubLocation) => void) {
       engine.emitLocation = listener as (location: unknown) => void;
+    },
+    onKeyDown(listener: (event: KeyboardEvent) => void) {
+      engine.emitKeyDown = listener;
     },
     destroy() {
       engine.destroyed += 1;
@@ -124,6 +130,7 @@ describe('EpubViewer', () => {
     engine.failCfi = null;
     engine.next.mockClear();
     engine.previous.mockClear();
+    engine.setReadingMode.mockClear();
   });
 
   it('runs selection -> CFI anchor -> persist -> reopen', async () => {
@@ -287,14 +294,49 @@ describe('EpubViewer', () => {
     expect(engine.destroyed).toBe(1);
   });
 
-  it('moves through the book with its controls', async () => {
+  it('moves through the book with its controls and Left/Right arrow keys', async () => {
     const { store, documentId } = await setup();
-    render(<Harness store={store} documentId={documentId} />);
+    const view = render(<Harness store={store} documentId={documentId} />);
     await opened();
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
     expect(engine.next).toHaveBeenCalledOnce();
     expect(engine.previous).toHaveBeenCalledOnce();
+
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    fireEvent.keyDown(window, { key: 'ArrowLeft' });
+    expect(engine.next).toHaveBeenCalledTimes(2);
+    expect(engine.previous).toHaveBeenCalledTimes(2);
+
+    act(() => engine.emitKeyDown(new KeyboardEvent('keydown', { key: 'ArrowRight' })));
+    act(() => engine.emitKeyDown(new KeyboardEvent('keydown', { key: 'ArrowLeft' })));
+    expect(engine.next).toHaveBeenCalledTimes(3);
+    expect(engine.previous).toHaveBeenCalledTimes(3);
+
+    view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+    fireEvent.keyDown(window, { key: 'ArrowRight' });
+    expect(engine.next).toHaveBeenCalledTimes(3);
+  });
+
+  it('defaults to two-page spread mode and switches between reading modes', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    const viewer = screen.getByTestId('epub-viewer');
+    expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
+    expect(screen.getByRole('button', { name: 'Two pages' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Single page' }));
+    expect(viewer).toHaveAttribute('data-reading-mode', 'paged');
+    expect(engine.setReadingMode).toHaveBeenLastCalledWith('paged');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Scroll' }));
+    expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
+    expect(engine.setReadingMode).toHaveBeenLastCalledWith('scroll');
   });
 
   it('shows why a book could not open', async () => {

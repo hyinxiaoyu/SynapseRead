@@ -51,9 +51,25 @@ const excerpt = async (page, text) => {
 };
 
 export async function epubFlow(page) {
+  // MindMap and inspector start collapsed so the reader opens full-screen.
+  const initialPanes = await page.evaluate(`({
+    reader: document.getElementById('reader').getBoundingClientRect().width,
+    mindmap: document.getElementById('mindmap').getBoundingClientRect().width,
+    inspector: document.getElementById('inspector').getBoundingClientRect().width,
+    viewport: window.innerWidth,
+  })`);
+  assert(
+    initialPanes.mindmap === 0 && initialPanes.inspector === 0,
+    `MindMap and inspector must start hidden: ${JSON.stringify(initialPanes)}`,
+  );
+  assert(
+    initialPanes.reader >= initialPanes.viewport - 4,
+    `reader must start full-screen: ${JSON.stringify(initialPanes)}`,
+  );
+
+  await page.clickButton('Show MindMap');
   await openEpub(page);
   await page.waitFor(chapterIs('Chapter One'), 'the first chapter to render');
-
   // The hostile content in the fixture must not have run, or even survived.
   const security = await page.evaluate(`(() => {
     const book = ${frameDocument};
@@ -81,7 +97,10 @@ export async function epubFlow(page) {
     `getComputedStyle(${frameDocument}.querySelector('h1')).color`,
   );
   assert(heading === 'rgb(32, 64, 128)', `the book's stylesheet applies: ${heading}`);
-
+  const hasTypography = await page.evaluate(
+    `Boolean(${frameDocument}.querySelector('style[data-synapse-typography]'))`,
+  );
+  assert(hasTypography, 'iBooks-like typography defaults are injected');
   // selection -> CFI -> persist, with a real drag inside the frame.
   const points = await excerpt(page, 'quick brown fox');
 
@@ -101,7 +120,11 @@ export async function epubFlow(page) {
   // Multibyte text in another paragraph.
   await excerpt(page, '汉字');
 
-  // Move to the second chapter, and take an excerpt there too.
+  // Move to the second chapter using the Right arrow key and Next control.
+  await page.evaluate(
+    `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`,
+  );
+  await new Promise((done) => setTimeout(done, 150));
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (await page.evaluate(chapterIs('Chapter Two'))) break;
     await page.clickButton('Next');
@@ -146,4 +169,17 @@ export async function epubFlow(page) {
     'the reopened chapter to repaint its highlight',
   );
   assert(await page.evaluate(`!!${scroller}`), 'the book scrolls inside its container');
+
+  // Reading modes: defaults to two-page spread, and switches to single-page and scroll.
+  const visibleViewer = `[...document.querySelectorAll('[data-testid="epub-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  assert(
+    (await page.evaluate(`${visibleViewer}.dataset.readingMode`)) === 'spread',
+    'defaults to two-page spread mode',
+  );
+  await page.clickButton('Single page');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'paged'`, 'single-page mode');
+  await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in single-page mode');
+  await page.clickButton('Scroll');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'scroll mode');
+  await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in scroll mode');
 }

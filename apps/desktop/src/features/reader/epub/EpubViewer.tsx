@@ -1,12 +1,17 @@
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { BookOpen, ChevronLeft, ChevronRight, FileText, ScrollText } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { PULSE_MS } from '@/features/reader/pulse';
-import { describeError } from '@/lib/utils';
+import { cn, describeError } from '@/lib/utils';
 import type { DocumentViewerProps, EpubAnchor } from '@/types/domain';
 
-import { type EpubHandle, type EpubLocation, openEpubDocument } from './epubEngine';
+import {
+  type EpubHandle,
+  type EpubLocation,
+  type EpubReadingMode,
+  openEpubDocument,
+} from './epubEngine';
 
 const CURSOR_DEBOUNCE_MS = 400;
 const FALLBACK_HIGHLIGHT = '#fde047';
@@ -14,9 +19,35 @@ const FALLBACK_HIGHLIGHT = '#fde047';
 const MARK_WAIT_MS = 2000;
 const MARK_POLL_MS = 50;
 
+const READING_MODES: readonly {
+  mode: EpubReadingMode;
+  label: string;
+  icon: typeof BookOpen;
+}[] = [
+  { mode: 'spread', label: 'Two pages', icon: BookOpen },
+  { mode: 'paged', label: 'Single page', icon: FileText },
+  { mode: 'scroll', label: 'Scroll', icon: ScrollText },
+];
+
 const asEpubAnchor = (anchor: { format: string } | null | undefined): EpubAnchor | null =>
   anchor?.format === 'epub' ? (anchor as EpubAnchor) : null;
 
+function shouldIgnoreKeyEvent(event: KeyboardEvent): boolean {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+    return true;
+  }
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (!target) return false;
+  const tag = target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+    return true;
+  }
+  return (
+    target.closest(
+      '[contenteditable="true"], [role="textbox"], [role="slider"], [role="separator"], [role="tablist"], .react-flow',
+    ) !== null
+  );
+}
 /** EPUB reader: epub.js renders each chapter in an iframe, addressed by CFI. */
 export function EpubViewer({
   document,
@@ -31,9 +62,10 @@ export function EpubViewer({
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
+  const [readingMode, setReadingMode] = useState<EpubReadingMode>('spread');
+  const [pageInfo, setPageInfo] = useState<{ page: number; totalPages: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [missedJump, setMissedJump] = useState(false);
-
   // Taken once: the store feeds every cursor report back through this prop.
   const [initialCursor] = useState(() => asEpubAnchor(document.lastCursorAnchor));
   const [initialJump] = useState(jumpRequest);
@@ -101,13 +133,15 @@ export function EpubViewer({
           });
         });
         engine.onLocation((location) => {
+          if (location.page !== undefined && location.totalPages !== undefined) {
+            setPageInfo({ page: location.page, totalPages: location.totalPages });
+          }
           // Layout during opening reports positions the reader never chose.
           if (!restored.current) return;
           pendingLocation.current = location;
           window.clearTimeout(cursorTimer.current);
           cursorTimer.current = window.setTimeout(flushCursor, CURSOR_DEBOUNCE_MS);
         });
-
         const target = initialJump ? undefined : initialCursor?.cfiRange;
         // An unusable saved position must not stop the book from opening.
         await engine.display(target).catch(() => engine.display());
@@ -212,7 +246,32 @@ export function EpubViewer({
     };
   }, [handle, jumpRequest, onJumpHandled]);
 
-  // ---- Tab and pane changes ------------------------------------------------
+  // ---- Reading mode, keyboard navigation, and pane changes -----------------
+
+  useEffect(() => {
+    if (!handle) return;
+    void handle.setReadingMode(readingMode);
+  }, [handle, readingMode]);
+
+  useEffect(() => {
+    if (!handle || !isActive) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (shouldIgnoreKeyEvent(event)) return;
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        void handle.next();
+      } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        void handle.previous();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    handle.onKeyDown(onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      handle.onKeyDown(() => undefined);
+    };
+  }, [handle, isActive]);
 
   useEffect(() => {
     // The store drops the selection on a tab switch; keep the frame in step.
@@ -238,7 +297,7 @@ export function EpubViewer({
       window.clearTimeout(timer);
       observer.disconnect();
     };
-  }, [handle]);
+  }, [handle, readingMode]);
 
   if (error) {
     return (
@@ -249,28 +308,70 @@ export function EpubViewer({
   }
 
   return (
-    <div className="flex h-full flex-col" data-testid="epub-viewer">
-      <div className="flex h-9 shrink-0 items-center justify-end gap-1 border-b px-3">
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={!handle}
-          onClick={() => void handle?.previous()}
-        >
-          <ChevronLeft />
-          Previous
-        </Button>
-        <Button variant="ghost" size="sm" disabled={!handle} onClick={() => void handle?.next()}>
-          Next
-          <ChevronRight />
-        </Button>
+    <div className="flex h-full flex-col" data-testid="epub-viewer" data-reading-mode={readingMode}>
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b px-3">
+        <div role="group" aria-label="Reading mode" className="flex items-center gap-0.5">
+          {READING_MODES.map(({ mode, label, icon: Icon }) => {
+            const active = readingMode === mode;
+            return (
+              <Button
+                key={mode}
+                variant={active ? 'secondary' : 'ghost'}
+                size="sm"
+                aria-pressed={active}
+                disabled={!handle}
+                onClick={() => setReadingMode(mode)}
+              >
+                <Icon />
+                {label}
+              </Button>
+            );
+          })}
+        </div>
+        {readingMode !== 'scroll' && pageInfo && (
+          <span className="text-xs text-muted-foreground tabular-nums">
+            Page {pageInfo.page} of {pageInfo.totalPages}
+          </span>
+        )}
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!handle}
+            onClick={() => void handle?.previous()}
+          >
+            <ChevronLeft />
+            Previous
+          </Button>
+          <Button variant="ghost" size="sm" disabled={!handle} onClick={() => void handle?.next()}>
+            Next
+            <ChevronRight />
+          </Button>
+        </div>
       </div>
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt could not be found in this book. The file may have changed.
         </p>
       )}
-      <div ref={hostRef} data-testid="epub-host" className="min-h-0 flex-1 overflow-hidden" />
+      <div className="relative flex min-h-0 flex-1 justify-center overflow-hidden bg-muted/40 px-4 py-3">
+        <div
+          ref={hostRef}
+          data-testid="epub-host"
+          className={cn(
+            'relative h-full w-full overflow-hidden rounded-sm bg-[#fbfaf7] shadow-sm ring-1 ring-black/5',
+            readingMode === 'spread' && 'max-w-6xl',
+            readingMode === 'paged' && 'max-w-3xl',
+            readingMode === 'scroll' && 'max-w-4xl',
+          )}
+        />
+        {readingMode === 'spread' && (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-5 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
+          />
+        )}
+      </div>
     </div>
   );
 }

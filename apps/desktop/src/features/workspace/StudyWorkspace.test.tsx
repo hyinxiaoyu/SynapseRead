@@ -82,10 +82,27 @@ describe('StudyWorkspace', () => {
     return screen.findByRole('region', { name: 'Document reader' });
   };
 
-  it('renders all three panes once loaded', async () => {
+  it('starts with MindMap and inspector hidden for full-screen reading, and toggles them', async () => {
     await renderReady();
     expect(screen.getByRole('region', { name: 'MindMap canvas' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Card inspector' })).toBeInTheDocument();
+
+    const showMindMap = screen.getByRole('button', { name: 'Show MindMap' });
+    const showInspector = screen.getByRole('button', { name: 'Show inspector' });
+    expect(showMindMap).toHaveAttribute('aria-pressed', 'false');
+    expect(showInspector).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(showMindMap);
+    expect(screen.getByRole('button', { name: 'Hide MindMap' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    fireEvent.click(showInspector);
+    expect(screen.getByRole('button', { name: 'Hide inspector' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 
   it('labels a session that will not be saved', async () => {

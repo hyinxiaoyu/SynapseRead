@@ -1,4 +1,4 @@
-import { PanelRight, X } from 'lucide-react';
+import { Network, PanelRight, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { usePanelRef } from 'react-resizable-panels';
 
@@ -9,7 +9,7 @@ import { MindMapPane } from '@/features/mindmap/MindMapPane';
 import { ReaderPane } from '@/features/reader/ReaderPane';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 
-/** Reader | MindMap | Inspector. The inspector collapses for a 2-pane layout. */
+/** Reader | MindMap | Inspector. MindMap and Inspector start collapsed for full-screen reading. */
 export function StudyWorkspace() {
   const status = useStudySyncStore((state) => state.status);
   const error = useStudySyncStore((state) => state.error);
@@ -18,18 +18,37 @@ export function StudyWorkspace() {
   const initialize = useStudySyncStore((state) => state.initialize);
   const dismissError = useStudySyncStore((state) => state.dismissError);
 
+  const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [mindMapOpen, setMindMapOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
   useEffect(() => {
     void initialize();
   }, [initialize]);
 
+  const toggleMindMap = () => {
+    const panel = mindMapRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) {
+      panel.expand();
+      setMindMapOpen(true);
+    } else {
+      panel.collapse();
+      setMindMapOpen(false);
+    }
+  };
+
   const toggleInspector = () => {
     const panel = inspectorRef.current;
     if (!panel) return;
-    if (panel.isCollapsed()) panel.expand();
-    else panel.collapse();
+    if (panel.isCollapsed()) {
+      panel.expand();
+      setInspectorOpen(true);
+    } else {
+      panel.collapse();
+      setInspectorOpen(false);
+    }
   };
 
   return (
@@ -42,16 +61,26 @@ export function StudyWorkspace() {
             Browser preview: nothing is saved
           </span>
         )}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="ml-auto"
-          aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'}
-          aria-pressed={inspectorOpen}
-          onClick={toggleInspector}
-        >
-          <PanelRight />
-        </Button>
+        <div className="ml-auto flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={mindMapOpen ? 'Hide MindMap' : 'Show MindMap'}
+            aria-pressed={mindMapOpen}
+            onClick={toggleMindMap}
+          >
+            <Network />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'}
+            aria-pressed={inspectorOpen}
+            onClick={toggleInspector}
+          >
+            <PanelRight />
+          </Button>
+        </div>
       </header>
 
       {error && (
@@ -74,22 +103,36 @@ export function StudyWorkspace() {
 
       <div className="min-h-0 flex-1">
         {status === 'ready' ? (
-          <ResizablePanelGroup orientation="horizontal">
-            <ResizablePanel id="reader" defaultSize="45%" minSize="20%">
+          <ResizablePanelGroup
+            orientation="horizontal"
+            defaultLayout={{ reader: 100, mindmap: 0, inspector: 0 }}
+          >
+            <ResizablePanel id="reader" defaultSize="100%" minSize="20%">
               <ReaderPane />
             </ResizablePanel>
             <ResizableHandle />
-            <ResizablePanel id="mindmap" defaultSize="35%" minSize="20%">
+            <ResizablePanel
+              id="mindmap"
+              panelRef={mindMapRef}
+              defaultSize="0%"
+              minSize="35%"
+              collapsible
+              onResize={(size) => {
+                if (!Number.isNaN(size.asPercentage)) setMindMapOpen(size.asPercentage > 0);
+              }}
+            >
               <MindMapPane />
             </ResizablePanel>
             <ResizableHandle />
             <ResizablePanel
               id="inspector"
               panelRef={inspectorRef}
-              defaultSize="20%"
-              minSize="15%"
+              defaultSize="0%"
+              minSize="20%"
               collapsible
-              onResize={(size) => setInspectorOpen(size.asPercentage > 0)}
+              onResize={(size) => {
+                if (!Number.isNaN(size.asPercentage)) setInspectorOpen(size.asPercentage > 0);
+              }}
             >
               <InspectorPane />
             </ResizablePanel>

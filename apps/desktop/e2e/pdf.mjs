@@ -32,6 +32,8 @@ const scrollToPage = async (page, pageIndex) => {
 };
 
 export async function pdfFlow(page) {
+  await page.clickButton('Show MindMap');
+  await page.clickButton('Show inspector');
   await openPdf(page);
 
   // The worker: a rendered page does not prove this, as pdf.js falls back silently.
