@@ -1,6 +1,6 @@
 # ADR 0004: pdf.js worker under the app CSP
 
-**Status:** Accepted for M2. Proven on WebKitGTK, **not yet on macOS WKWebView**.
+**Status:** Accepted for M2. Proven on WebKitGTK 2.54 and macOS 15.6.1 WKWebView (`AppleWebKit/605.1.15`).
 
 ## Spike
 
@@ -64,29 +64,35 @@ with no `wasm-unsafe-eval`, and an `asset://` file outside the scope returned 40
 ## Whole-app check
 
 After all three engines landed, the real application ran inside the real Tauri binary on
-WebKitGTK 2.54, under the shipped CSP, with the real Rust backend. A self-driving script
-([`whole-app-self-test.patch`](whole-app-self-test.patch)) only replaces the native picker
-and uses scripted selections instead of a mouse.
+WebKitGTK 2.54 and on macOS 15.6.1 (`arm64`, WKWebView `AppleWebKit/605.1.15`, `dpr: 2`),
+under the shipped CSP, with the real Rust backend. A self-driving script
+([`whole-app-self-test.patch`](whole-app-self-test.patch)) replaces the native picker/drop
+with deterministic file injection and uses scripted selections instead of a mouse.
 
-| Checked                                                  | Result                   |
-| -------------------------------------------------------- | ------------------------ |
-| TXT streamed from Rust, including BOM and malformed file | highlights exact text    |
-| PDF worker                                               | real `Worker`            |
-| PDF highlight against its text                           | 0 px off                 |
-| CJK page with a non-embedded font                        | text and glyphs present  |
-| Capture written by core, read back over `asset:`         | center pixel is correct  |
-| EPUB selection (the ADR 0005 risk)                       | works                    |
-| EPUB hostile script and handler                          | inert, and removed       |
-| CSP violations, console errors                           | none                     |
-| Second launch, same data directory                       | 6 cards, position, marks |
+| Checked                                                  | Result                                   |
+| -------------------------------------------------------- | ---------------------------------------- |
+| TXT streamed from Rust, including BOM and malformed file | highlights exact text                    |
+| PDF worker                                               | real `Worker`                            |
+| PDF highlight against its text                           | 0 px off                                 |
+| CJK page with a non-embedded font                        | text and glyphs present                  |
+| Capture written by core, read back over `asset:`         | center pixel is correct                  |
+| EPUB selection (the ADR 0005 risk)                       | works                                    |
+| EPUB hostile script and handler                          | inert, and removed                       |
+| EPUB reading modes (`spread`, `paged`, `scroll`)         | switches cleanly, preserves book content |
+| Native file drop event (`synapse://documents-dropped`)   | opens and renders dropped document       |
+| CSP violations, console errors                           | none                                     |
+| Second launch, same data directory                       | 6 cards, TXT/PDF/EPUB position, marks    |
 
-**This is the check to repeat on a Mac before release:**
+**Running the check on macOS or Linux:**
 
 ```sh
 git apply docs/adr/whole-app-self-test.patch
 pnpm build:web
 cargo build -p synapseread-desktop
-SPIKE_FILES=/abs/sample.txt:/abs/sample.pdf:/abs/sample.epub:/abs/sample-lossy.txt \
+TMP=$(mktemp -d /tmp/synapseread-wkwebview-XXXXXX)
+trap 'rm -rf "$TMP"' EXIT
+SPIKE_DATA_DIR="$TMP" \
+  SPIKE_FILES=/abs/sample.txt:/abs/sample.pdf:/abs/sample.epub:/abs/sample-lossy.txt \
   target/debug/synapseread-desktop               # add SPIKE_MODE=second for a second launch
 ```
 

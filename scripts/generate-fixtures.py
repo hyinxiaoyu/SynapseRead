@@ -44,7 +44,7 @@ def build_pdf():
     ]
 
     objects = {}
-    objects[1] = b"<</Type/Catalog/Pages 2 0 R>>"
+    objects[1] = b"<</Type/Catalog/Pages 2 0 R/Outlines 17 0 R>>"
     objects[3] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>"
     objects[4] = (b"<</Type/Font/Subtype/Type0/BaseFont/STSong-Light/Encoding/UniGB-UCS2-H"
                   b"/DescendantFonts[5 0 R]>>")
@@ -67,6 +67,14 @@ def build_pdf():
         data = content.encode("latin-1")
         objects[content_id] = b"<</Length %d>>\nstream\n%s\nendstream" % (len(data), data)
     objects[2] = f"<</Type/Pages/Kids[{' '.join(kids)}]/Count {len(pages)}>>".encode()
+    # Embedded outline tree with a nested entry (Pages 1, 3, and 4 are objects 7, 11, and 13).
+    objects[17] = b"<</Type/Outlines/First 18 0 R/Last 20 0 R/Count 3>>"
+    objects[18] = (
+        b"<</Title(Part One)/Parent 17 0 R/Next 20 0 R"
+        b"/First 19 0 R/Last 19 0 R/Count 1/Dest[7 0 R /XYZ 0 792 null]>>"
+    )
+    objects[19] = b"<</Title(Blue Box Section)/Parent 18 0 R/Dest[11 0 R /XYZ 0 792 null]>>"
+    objects[20] = b"<</Title(Part Two)/Parent 17 0 R/Prev 18 0 R/Dest[13 0 R /XYZ 0 595 null]>>"
 
     out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
     offsets = {}
@@ -125,7 +133,7 @@ def build_epub():
 </package>
 """,
         "OEBPS/nav.xhtml": chapter("Contents", """<nav xmlns:epub="http://www.idpf.org/2007/ops"
-epub:type="toc"><ol><li><a href="chapter1.xhtml">One</a></li>
+epub:type="toc"><ol><li><a href="chapter1.xhtml">One</a><ol><li><a href="chapter1.xhtml#section-1-1">Section 1.1</a></li></ol></li>
 <li><a href="chapter2.xhtml">Two</a></li></ol></nav>"""),
         # The script stands in for a hostile book: it must never run.
         "OEBPS/chapter1.xhtml": chapter("One", """<h1>Chapter One</h1>
@@ -134,7 +142,7 @@ document.documentElement.setAttribute('data-book-script-ran', 'true');</script>
 <p>The quick brown fox jumps over the lazy dog.</p>
 <p>Café, 汉字, and 😀 sit in this second paragraph.</p>
 <p><img src="box.png" alt="a small box"/></p>
-<p><img src="missing.png" alt="" onerror="document.documentElement.setAttribute('data-book-handler-ran', 'true')"/></p>""" + filler),
+<p><img src="missing.png" alt="" onerror="document.documentElement.setAttribute('data-book-handler-ran', 'true')"/></p>""" + filler + """<h2 id="section-1-1">Section 1.1</h2>"""),
         "OEBPS/chapter2.xhtml": chapter("Two", """<h1>Chapter Two</h1>
 <p>The final target sentence is in the second chapter.</p>""" + filler),
         "OEBPS/style.css": "body { font-family: serif; line-height: 1.4; } h1 { color: #204080; }\n",

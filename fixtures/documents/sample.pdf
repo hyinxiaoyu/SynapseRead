@@ -1,7 +1,7 @@
 %PDF-1.7
 %‚„œ”
 1 0 obj
-<</Type/Catalog/Pages 2 0 R>>
+<</Type/Catalog/Pages 2 0 R/Outlines 17 0 R>>
 endobj
 2 0 obj
 <</Type/Pages/Kids[7 0 R 9 0 R 11 0 R 13 0 R 15 0 R]/Count 5>>
@@ -160,27 +160,43 @@ BT
 ET
 endstream
 endobj
+17 0 obj
+<</Type/Outlines/First 18 0 R/Last 20 0 R/Count 3>>
+endobj
+18 0 obj
+<</Title(Part One)/Parent 17 0 R/Next 20 0 R/First 19 0 R/Last 19 0 R/Count 1/Dest[7 0 R /XYZ 0 792 null]>>
+endobj
+19 0 obj
+<</Title(Blue Box Section)/Parent 18 0 R/Dest[11 0 R /XYZ 0 792 null]>>
+endobj
+20 0 obj
+<</Title(Part Two)/Parent 17 0 R/Prev 18 0 R/Dest[13 0 R /XYZ 0 595 null]>>
+endobj
 xref
-0 17
+0 21
 0000000000 65535 f 
 0000000015 00000 n 
-0000000060 00000 n 
-0000000138 00000 n 
-0000000226 00000 n 
-0000000337 00000 n 
-0000000492 00000 n 
-0000000651 00000 n 
-0000000772 00000 n 
-0000001040 00000 n 
-0000001162 00000 n 
-0000002482 00000 n 
-0000002605 00000 n 
-0000002777 00000 n 
-0000002900 00000 n 
-0000003047 00000 n 
-0000003170 00000 n 
+0000000076 00000 n 
+0000000154 00000 n 
+0000000242 00000 n 
+0000000353 00000 n 
+0000000508 00000 n 
+0000000667 00000 n 
+0000000788 00000 n 
+0000001056 00000 n 
+0000001178 00000 n 
+0000002498 00000 n 
+0000002621 00000 n 
+0000002793 00000 n 
+0000002916 00000 n 
+0000003063 00000 n 
+0000003186 00000 n 
+0000003284 00000 n 
+0000003352 00000 n 
+0000003476 00000 n 
+0000003564 00000 n 
 trailer
-<</Size 17/Root 1 0 R>>
+<</Size 21/Root 1 0 R>>
 startxref
-3268
+3656
 %%EOF

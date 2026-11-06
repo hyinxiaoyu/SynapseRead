@@ -1,6 +1,6 @@
 # ADR 0005: EPUB content and the iframe sandbox
 
-**Status:** Accepted for M2. Proven on WebKitGTK, **not yet on macOS WKWebView**.
+**Status:** Accepted for M2. Proven on WebKitGTK 2.54 and macOS 15.6.1 WKWebView (`AppleWebKit/605.1.15`).
 
 This was not one of the four planned decisions. It came up while building the engine,
 and it changes how the app is secured.
