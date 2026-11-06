@@ -165,4 +165,32 @@ export async function txtFlow(page) {
   await page.waitFor(`${visibleTxtViewer}.dataset.readingTheme === 'dark'`, 'TXT dark theme');
   await page.clickButton('Light');
   await page.waitFor(`${visibleTxtViewer}.dataset.readingTheme === 'light'`, 'TXT light theme');
+
+  // Independent highlights & notes in TXT viewer: highlight dropped file text without creating a MindMap card, delete, and undo.
+  await page.selectText(SEGMENT, 'Dropped E2E');
+  await page.clickButton('Highlight selection');
+  await page.waitFor(
+    `${visibleTxtViewer}?.querySelector('[data-testid="annotations-count"]')?.textContent === '1'`,
+    'TXT independent highlight count',
+  );
+  await page.clickButton('Annotations');
+  await page.waitFor(
+    `${visibleTxtViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 1`,
+    'TXT annotation item in list',
+  );
+  await page.evaluate(
+    `${visibleTxtViewer}.querySelector('[data-testid="annotation-delete-button"]').click()`,
+  );
+  await page.waitFor(
+    `${visibleTxtViewer}?.querySelector('[data-testid="annotations-empty"]')`,
+    'deleting TXT independent highlight',
+  );
+  await page.evaluate(
+    `${visibleTxtViewer}.querySelector('[data-testid="undo-delete-annotation-button"]').click()`,
+  );
+  await page.waitFor(
+    `${visibleTxtViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 1`,
+    'undoing TXT highlight deletion',
+  );
+  await page.clickButton('Annotations');
 }

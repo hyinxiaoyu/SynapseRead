@@ -3,6 +3,7 @@ import { listen, TauriEvent, type UnlistenFn } from '@tauri-apps/api/event';
 
 import type { DroppedDocumentsPayload, StudyBackend } from '@/lib/backend/types';
 import type {
+  Annotation,
   Bookmark,
   CreatedExcerpt,
   MindMapEdge,
@@ -62,6 +63,10 @@ export function createTauriBackend(): StudyBackend {
     loadNotebookGraph: (notebookId) => invoke<NotebookGraph>('load_notebook_graph', { notebookId }),
 
     createExcerpt: (input) => invoke<CreatedExcerpt>('create_excerpt', { input }),
+    createAnnotation: (input) => invoke<Annotation>('create_annotation', { input }),
+    updateAnnotation: (annotationId, patch) =>
+      invoke<Annotation>('update_annotation', { annotationId, patch }),
+    deleteAnnotation: (annotationId) => invoke('delete_annotation', { annotationId }),
     updateCard: (cardId, patch) => invoke<NoteCard>('update_card', { cardId, patch }),
     updateNodeLayout: (nodeId, patch) => invoke('update_node_layout', { nodeId, patch }),
     createEdge: (notebookId, sourceNodeId, targetNodeId, label) =>

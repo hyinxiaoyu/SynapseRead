@@ -8,6 +8,7 @@ import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import {
   createStudySyncStore,
   selectBookmarks,
+  selectDocumentAnnotations,
   selectHighlights,
 } from '@/stores/useStudySyncStore';
 import type { PdfAnchor } from '@/types/domain';
@@ -108,6 +109,10 @@ function Harness({
     () => selectBookmarks(state.bookmarks, documentId),
     [state.bookmarks, documentId],
   );
+  const annotations = useMemo(
+    () => selectDocumentAnnotations(state.annotations, documentId),
+    [state.annotations, documentId],
+  );
   if (document?.format !== 'pdf') throw new Error('expected a pdf document');
   return (
     <PdfViewer
@@ -122,6 +127,12 @@ function Harness({
       bookmarks={bookmarks}
       onAddBookmark={(anchor, label) => void state.addBookmark(documentId, anchor, label)}
       onRemoveBookmark={(id) => void state.removeBookmark(id)}
+      annotations={annotations}
+      onCreateAnnotation={(options) => void state.createAnnotationFromSelection(options)}
+      onUpdateAnnotation={(id, patch) => void state.updateAnnotation(id, patch)}
+      onDeleteAnnotation={(id) => void state.removeAnnotation(id)}
+      canUndoAnnotationDelete={state.deletedAnnotationHistory.length > 0}
+      onUndoAnnotationDelete={() => void state.undoRemoveAnnotation()}
     />
   );
 }
@@ -261,7 +272,7 @@ describe('PdfViewer', () => {
     expect((selection?.anchor as PdfAnchor).rects).toHaveLength(2);
   });
 
-  it('keeps the first page of a selection that crosses pages', async () => {
+  it('captures a selection that crosses pages with pageSpans and renders highlights across both pages', async () => {
     const { store, documentId } = await setup();
     render(<Harness store={store} documentId={documentId} />);
     const first = await pageElement(0);
@@ -269,8 +280,17 @@ describe('PdfViewer', () => {
 
     select([textNode(first, 1), 0], [textNode(second, 0), 5]);
     const selection = store.getState().selection;
-    expect((selection?.anchor as PdfAnchor).pageIndex).toBe(0);
-    expect(selection?.text).toBe('Second line of page 0');
+    const anchor = selection?.anchor as PdfAnchor;
+    expect(anchor.pageIndex).toBe(0);
+    expect(anchor.pageSpans).toHaveLength(2);
+    expect(anchor.pageSpans?.[0]?.pageIndex).toBe(0);
+    expect(anchor.pageSpans?.[1]?.pageIndex).toBe(1);
+    expect(selection?.text).toBe('Second line of page 0\nFirst');
+
+    await act(() => store.getState().createAnnotationFromSelection());
+    const annotationId = store.getState().annotations[0]?.id as string;
+    expect(first.querySelector(`[data-annotation-id="${annotationId}"]`)).not.toBeNull();
+    expect(second.querySelector(`[data-annotation-id="${annotationId}"]`)).not.toBeNull();
   });
 
   it('clears the selection when the browser selection collapses', async () => {
@@ -810,5 +830,66 @@ describe('PdfViewer', () => {
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
     fireEvent.click(removeButtons[0] as HTMLElement);
     await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
+  });
+
+  it('creates, lists, jumps to, edits, deletes, and undoes independent highlights and notes without creating MindMap cards', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    const page0 = await pageElement(0);
+    const node = textNode(page0, 0);
+
+    // Select text, pick Green highlight color, and add a note via SelectionNoteComposer.
+    select([node, 0], [node, 10]);
+    fireEvent.click(screen.getByTestId('annotation-color-green'));
+    fireEvent.click(screen.getByTestId('add-note-selection-button'));
+    const noteComposerInput = await screen.findByTestId('selection-note-input');
+    fireEvent.change(noteComposerInput, { target: { value: 'Margin note on page 1' } });
+    fireEvent.click(screen.getByTestId('save-selection-note-button'));
+
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().cards).toEqual([]);
+    expect(store.getState().nodes).toEqual([]);
+    expect(store.getState().annotations[0]).toMatchObject({
+      excerptText: 'First line',
+      color: '#86efac',
+      note: 'Margin note on page 1',
+    });
+
+    // Open annotations panel, edit note & color, jump to annotation, delete, and undo delete.
+    fireEvent.click(screen.getByTestId('annotations-toggle-button'));
+    const item = await screen.findByTestId('annotation-item');
+    expect(item).toHaveTextContent('Page 1');
+    expect(item).toHaveTextContent('First line');
+
+    const editNoteInput = screen.getByTestId('annotation-note-input') as HTMLInputElement;
+    expect(editNoteInput).toHaveValue('Margin note on page 1');
+    fireEvent.change(editNoteInput, { target: { value: 'Revised margin note' } });
+    fireEvent.blur(editNoteInput);
+    await waitFor(() => expect(store.getState().annotations[0]?.note).toBe('Revised margin note'));
+
+    fireEvent.click(screen.getByTestId('annotation-item-color-blue'));
+    await waitFor(() => expect(store.getState().annotations[0]?.color).toBe('#93c5fd'));
+
+    // Navigate away to Page 3, then jump back via annotation list.
+    const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+    fireEvent.change(pageInput, { target: { value: '3' } });
+    fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+    expect(pageInput).toHaveValue('3');
+
+    fireEvent.click(screen.getByTestId('annotation-jump-button'));
+    expect(pageInput).toHaveValue('1');
+
+    // Delete annotation and undo within the current session.
+    fireEvent.click(screen.getByTestId('annotation-delete-button'));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(0));
+    expect(screen.getByTestId('annotations-empty')).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByTestId('undo-delete-annotation-button'));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]).toMatchObject({
+      excerptText: 'First line',
+      color: '#93c5fd',
+      note: 'Revised margin note',
+    });
   });
 });

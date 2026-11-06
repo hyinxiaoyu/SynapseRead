@@ -311,4 +311,47 @@ export async function pdfFlow(page) {
     'removing PDF bookmark',
   );
   await page.clickButton('Bookmarks');
+
+  // Independent highlights & notes in PDF: highlight on page 4 without creating a MindMap node, delete, and undo.
+  await page.waitFor(
+    `[...document.querySelectorAll('[data-page-index="3"] .textLayer span')].some((e) => e.textContent.includes('final target sentence'))`,
+    'page 4 text layer before independent highlight',
+  );
+  const cardCountBefore = await page.evaluate(
+    `document.querySelectorAll('[aria-label^="Jump to source of "]').length`,
+  );
+  await page.selectText('[data-page-index="3"] .textLayer span', 'final target sentence');
+  await page.waitFor(excerptEnabled, 'selecting text on page 4 for independent highlight');
+  await page.clickButton('Highlight selection');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="annotations-count"]')?.textContent === '3'`,
+    'PDF independent highlight count (2 existing excerpts + 1 independent)',
+  );
+  const cardCountAfter = await page.evaluate(
+    `document.querySelectorAll('[aria-label^="Jump to source of "]').length`,
+  );
+  assert(
+    cardCountAfter === cardCountBefore,
+    'independent PDF highlight must not create a MindMap card',
+  );
+  await page.clickButton('Annotations');
+  await page.waitFor(
+    `document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="annotation-item"]').length === 3`,
+    'PDF annotations list items',
+  );
+  await page.evaluate(
+    `[...document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="annotation-delete-button"]')].at(-1).click()`,
+  );
+  await page.waitFor(
+    `document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="annotation-item"]').length === 2`,
+    'deleting PDF independent highlight',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="undo-delete-annotation-button"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="annotation-item"]').length === 3`,
+    'undoing PDF highlight deletion',
+  );
+  await page.clickButton('Annotations');
 }

@@ -623,3 +623,77 @@ fn bookmarks_round_trip_deduplicate_and_persist_across_relaunch() {
         .unwrap_err();
     assert_eq!(missing["code"], "not_found");
 }
+
+#[test]
+fn independent_annotations_round_trip_and_preserve_shared_cards() {
+    let h = Harness::new();
+    let document = h.register("book.pdf", "pdf bytes");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+
+    // Cross-page PDF anchor on an independent annotation.
+    let cross_page_anchor = json!({
+        "format": "pdf",
+        "pageIndex": 0,
+        "rects": [{ "x": 0.1, "y": 0.85, "width": 0.8, "height": 0.08 }],
+        "pageSpans": [
+            {
+                "pageIndex": 0,
+                "rects": [{ "x": 0.1, "y": 0.85, "width": 0.8, "height": 0.08 }]
+            },
+            {
+                "pageIndex": 1,
+                "rects": [{ "x": 0.1, "y": 0.05, "width": 0.7, "height": 0.06 }]
+            }
+        ]
+    });
+
+    let created = h.ok(
+        "create_annotation",
+        json!({
+            "input": {
+                "documentId": document["id"],
+                "notebookId": notebook["id"],
+                "anchor": cross_page_anchor,
+                "excerptText": "cross page text",
+                "excerptImagePng": null,
+                "note": "inline commentary",
+                "color": "#fde047",
+            }
+        }),
+    );
+    assert_eq!(created["excerptText"], "cross page text");
+    assert_eq!(created["note"], "inline commentary");
+    assert_eq!(created["color"], "#fde047");
+    assert_eq!(created["anchor"], cross_page_anchor);
+
+    let updated = h.ok(
+        "update_annotation",
+        json!({
+            "annotationId": created["id"],
+            "patch": {
+                "note": "edited commentary",
+                "color": "#93c5fd",
+            }
+        }),
+    );
+    assert_eq!(updated["note"], "edited commentary");
+    assert_eq!(updated["color"], "#93c5fd");
+
+    let graph = h.ok(
+        "load_notebook_graph",
+        json!({ "notebookId": notebook["id"] }),
+    );
+    assert_eq!(graph["annotations"].as_array().unwrap().len(), 1);
+    assert_eq!(graph["cards"].as_array().unwrap().len(), 0);
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 0);
+
+    h.ok(
+        "delete_annotation",
+        json!({ "annotationId": created["id"] }),
+    );
+    let graph_after = h.ok(
+        "load_notebook_graph",
+        json!({ "notebookId": notebook["id"] }),
+    );
+    assert_eq!(graph_after["annotations"].as_array().unwrap().len(), 0);
+}

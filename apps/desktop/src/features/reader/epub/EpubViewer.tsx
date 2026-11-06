@@ -11,6 +11,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { Button } from '@/components/ui/button';
 import {
+  AnnotationsListToggleButton,
+  AnnotationsPanel,
+  SelectionAnnotationControls,
+  SelectionNoteComposer,
+  useAnnotationsController,
+} from '@/features/reader/AnnotationsPanel';
+import {
   BookmarksListToggleButton,
   BookmarksPanel,
   BookmarkToggleButton,
@@ -34,10 +41,12 @@ import {
 } from '@/features/reader/ReadingPreferencesBar';
 import { cn, describeError } from '@/lib/utils';
 import {
+  type Annotation,
   type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentViewerProps,
   type EpubAnchor,
+  type ReaderSelection,
   type ReadingPreferences,
 } from '@/types/domain';
 
@@ -128,10 +137,20 @@ export function EpubViewer({
   bookmarks,
   onAddBookmark,
   onRemoveBookmark,
+  annotations,
+  onCreateAnnotation,
+  onUpdateAnnotation,
+  onDeleteAnnotation,
+  canUndoAnnotationDelete,
+  onUndoAnnotationDelete,
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
+  const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
+  const [staleAnnotationIds, setStaleAnnotationIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [localPreferences, setLocalPreferences] = useState<ReadingPreferences>(
     () => preferences ?? DEFAULT_READING_PREFERENCES,
   );
@@ -212,12 +231,15 @@ export function EpubViewer({
         engine.onSelection((selection) => {
           if (!latest.current.isActive) return;
           if (!selection) {
-            if (hasSelection) latest.current.onSelectionChange(null);
+            if (hasSelection) {
+              setActiveSelection(null);
+              latest.current.onSelectionChange(null);
+            }
             hasSelection = false;
             return;
           }
           hasSelection = true;
-          latest.current.onSelectionChange({
+          const nextSelection: ReaderSelection = {
             documentId,
             anchor: {
               format: 'epub',
@@ -226,7 +248,9 @@ export function EpubViewer({
             },
             text: selection.text,
             imagePng: null,
-          });
+          };
+          setActiveSelection(nextSelection);
+          latest.current.onSelectionChange(nextSelection);
         });
         engine.onLocation((location) => {
           currentLocationRef.current = location;
@@ -279,7 +303,7 @@ export function EpubViewer({
 
   // ---- Highlights ----------------------------------------------------------
 
-  const painted = useRef(new Map<string, string>());
+  const painted = useRef(new Map<string, { cfiRange: string; color: string }>());
   const searchPulseCleanupRef = useRef<(() => void) | null>(null);
 
   const navigateToSearchMatch = useCallback(
@@ -298,14 +322,17 @@ export function EpubViewer({
         handle.setPulse(SEARCH_HIGHLIGHT_ID, false);
       };
 
-      const existingSearchCfi = painted.current.get(SEARCH_HIGHLIGHT_ID);
-      if (existingSearchCfi && existingSearchCfi !== match.cfiRange) {
-        handle.removeHighlight(existingSearchCfi);
+      const existingSearch = painted.current.get(SEARCH_HIGHLIGHT_ID);
+      if (existingSearch && existingSearch.cfiRange !== match.cfiRange) {
+        handle.removeHighlight(existingSearch.cfiRange);
         painted.current.delete(SEARCH_HIGHLIGHT_ID);
       }
       if (!painted.current.has(SEARCH_HIGHLIGHT_ID)) {
         handle.highlight(SEARCH_HIGHLIGHT_ID, match.cfiRange, SEARCH_HIGHLIGHT_COLOR);
-        painted.current.set(SEARCH_HIGHLIGHT_ID, match.cfiRange);
+        painted.current.set(SEARCH_HIGHLIGHT_ID, {
+          cfiRange: match.cfiRange,
+          color: SEARCH_HIGHLIGHT_COLOR,
+        });
       }
 
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
@@ -434,10 +461,75 @@ export function EpubViewer({
     onSelectBookmark: navigateToBookmark,
   });
 
+  const navigateToAnnotation = useCallback(
+    (annotation: Annotation) => {
+      if (!handle) return;
+      const epubAnchor = asEpubAnchor(annotation.anchor);
+      if (!epubAnchor) {
+        setMissedJump(true);
+        return;
+      }
+      const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+      void handle
+        .display(epubAnchor.cfiRange)
+        .then(() => {
+          setMissedJump(false);
+          if (previous && previous !== epubAnchor.cfiRange) {
+            setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+          }
+          handle.setPulse(annotation.id, true);
+          window.setTimeout(() => {
+            handle.setPulse(annotation.id, false);
+          }, PULSE_MS);
+        })
+        .catch(() => {
+          setStaleAnnotationIds((prev) => new Set(prev).add(annotation.id));
+          setMissedJump(true);
+        });
+    },
+    [handle],
+  );
+
+  const clearSelectionAfterAnnotate = useCallback(() => {
+    handle?.clearSelection();
+    setActiveSelection(null);
+    onSelectionChange(null);
+  }, [handle, onSelectionChange]);
+
+  const annotationsController = useAnnotationsController({
+    documentId,
+    selection: activeSelection,
+    annotations,
+    onCreateAnnotation: onCreateAnnotation
+      ? (options) => {
+          onCreateAnnotation(options);
+          clearSelectionAfterAnnotate();
+        }
+      : undefined,
+    onUpdateAnnotation,
+    onDeleteAnnotation,
+    canUndoAnnotationDelete,
+    onUndoAnnotationDelete,
+    isStaleAnnotation: (annotation) => staleAnnotationIds.has(annotation.id),
+    onSelectAnnotation: navigateToAnnotation,
+  });
+
+  const effectiveHighlights = useMemo(() => {
+    if (annotations !== undefined) return highlights;
+    return [
+      ...highlights,
+      ...annotationsController.annotations.map(({ id, anchor, color }) => ({
+        annotationId: id,
+        anchor,
+        color,
+      })),
+    ];
+  }, [annotations, annotationsController.annotations, highlights]);
+
   useEffect(() => {
     if (!handle) return;
     const wanted = new Map<string, { cfiRange: string; color: string }>();
-    for (const { annotationId, anchor, color } of highlights) {
+    for (const { annotationId, anchor, color } of effectiveHighlights) {
       const epubAnchor = asEpubAnchor(anchor);
       if (epubAnchor) wanted.set(annotationId, { cfiRange: epubAnchor.cfiRange, color });
     }
@@ -456,20 +548,20 @@ export function EpubViewer({
       });
     }
 
-    for (const [annotationId, cfiRange] of painted.current) {
+    for (const [annotationId, existing] of painted.current) {
       const next = wanted.get(annotationId);
-      if (!next || next.cfiRange !== cfiRange) {
-        handle.removeHighlight(cfiRange);
+      if (!next || next.cfiRange !== existing.cfiRange || next.color !== existing.color) {
+        handle.removeHighlight(existing.cfiRange);
         painted.current.delete(annotationId);
       }
     }
     for (const [annotationId, { cfiRange, color }] of wanted) {
       if (!painted.current.has(annotationId)) {
         handle.highlight(annotationId, cfiRange, color);
-        painted.current.set(annotationId, cfiRange);
+        painted.current.set(annotationId, { cfiRange, color });
       }
     }
-  }, [handle, highlights, jumpRequest, activeSearchMatch]);
+  }, [handle, effectiveHighlights, jumpRequest, activeSearchMatch]);
 
   // ---- Jumping -------------------------------------------------------------
 
@@ -700,6 +792,17 @@ export function EpubViewer({
             disabled={!handle}
             onToggle={bookmarksController.togglePanel}
           />
+          <AnnotationsListToggleButton
+            open={annotationsController.open}
+            count={annotationsController.annotations.length}
+            disabled={!handle}
+            onToggle={annotationsController.togglePanel}
+          />
+          <SelectionAnnotationControls
+            hasSelection={activeSelection !== null}
+            controller={annotationsController}
+            disabled={!handle}
+          />
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
           {readingMode !== 'scroll' && pageInfo && (
@@ -745,6 +848,11 @@ export function EpubViewer({
       )}
       <DocumentSearchBar search={search} />
       <BookmarksPanel controller={bookmarksController} />
+      <SelectionNoteComposer
+        hasSelection={activeSelection !== null}
+        controller={annotationsController}
+      />
+      <AnnotationsPanel controller={annotationsController} />
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt could not be found in this book. The file may have changed.

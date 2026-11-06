@@ -14,6 +14,13 @@ import {
 
 import { Button } from '@/components/ui/button';
 import {
+  AnnotationsListToggleButton,
+  AnnotationsPanel,
+  SelectionAnnotationControls,
+  SelectionNoteComposer,
+  useAnnotationsController,
+} from '@/features/reader/AnnotationsPanel';
+import {
   BookmarksListToggleButton,
   BookmarksPanel,
   BookmarkToggleButton,
@@ -37,11 +44,13 @@ import {
 } from '@/features/reader/ReadingPreferencesBar';
 import { cn, describeError } from '@/lib/utils';
 import {
+  type Annotation,
   type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
   type DocumentViewerProps,
   type ReaderHighlight,
+  type ReaderSelection,
   type ReadingPreferences,
   type TxtAnchor,
 } from '@/types/domain';
@@ -214,6 +223,12 @@ export function TxtViewer({
   bookmarks,
   onAddBookmark,
   onRemoveBookmark,
+  annotations,
+  onCreateAnnotation,
+  onUpdateAnnotation,
+  onDeleteAnnotation,
+  canUndoAnnotationDelete,
+  onUndoAnnotationDelete,
 }: DocumentViewerProps<'txt'>) {
   const load = useTextStream(content, document.id, document.encoding);
   const { model, rowCount, complete } = load;
@@ -234,9 +249,12 @@ export function TxtViewer({
   // Rows holding the selection's ends stay rendered: if the browser's selection
   // endpoints left the DOM, scrolling away would silently destroy the selection.
   const [pinnedRows, setPinnedRows] = useState<readonly number[]>([]);
+  const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [missedJump, setMissedJump] = useState(false);
   const [returnStack, setReturnStack] = useState<number[]>([]);
   const [currentRow, setCurrentRow] = useState(0);
+  const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
+  const annotationPulseTimerRef = useRef<number | null>(null);
 
   // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
   const virtualizer = useVirtualizer({
@@ -266,6 +284,7 @@ export function TxtViewer({
       // The store drops the selection on a tab switch; keep the DOM in step.
       if (selection?.anchorNode && root.contains(selection.anchorNode)) selection.removeAllRanges();
       hasSelection.current = false;
+      setActiveSelection(null);
       return;
     }
 
@@ -273,6 +292,7 @@ export function TxtViewer({
       if (!hasSelection.current) return;
       hasSelection.current = false;
       setPinnedRows([]);
+      setActiveSelection(null);
       onSelectionChange(null);
     };
     const onChange = () => {
@@ -297,12 +317,14 @@ export function TxtViewer({
       }
       hasSelection.current = true;
       setPinnedRows([model.rowAtUnit(startUnit), model.rowAtUnit(endUnit)]);
-      onSelectionChange({
+      const nextSelection: ReaderSelection = {
         documentId,
         anchor: selected.anchor,
         text: selected.text,
         imagePng: null,
-      });
+      };
+      setActiveSelection(nextSelection);
+      onSelectionChange(nextSelection);
     };
     view.addEventListener('selectionchange', onChange);
     return () => view.removeEventListener('selectionchange', onChange);
@@ -437,6 +459,8 @@ export function TxtViewer({
   useEffect(
     () => () => {
       if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
+      if (annotationPulseTimerRef.current !== null)
+        window.clearTimeout(annotationPulseTimerRef.current);
     },
     [],
   );
@@ -510,6 +534,73 @@ export function TxtViewer({
     onSelectBookmark: handleSelectBookmark,
   });
 
+  const handleSelectAnnotation = useCallback(
+    (annotation: Annotation) => {
+      const txtAnchor = asTxtAnchor(annotation.anchor);
+      const range = txtAnchor ? model.rangeFor(txtAnchor) : null;
+      if (!range) {
+        if (complete) setMissedJump(true);
+        return;
+      }
+      setMissedJump(false);
+      const previousTop = lastScrollTop.current;
+      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      const targetRow = model.rowAtUnit(range.startUnit);
+      setCurrentRow(targetRow);
+      virtualizer.scrollToIndex(targetRow, { align: 'center' });
+      if (annotationPulseTimerRef.current !== null)
+        window.clearTimeout(annotationPulseTimerRef.current);
+      setAnnotationPulsingId(annotation.id);
+      annotationPulseTimerRef.current = window.setTimeout(() => {
+        annotationPulseTimerRef.current = null;
+        setAnnotationPulsingId(null);
+      }, PULSE_MS);
+    },
+    [model, complete, virtualizer],
+  );
+
+  const clearSelectionAfterAnnotate = useCallback(() => {
+    scrollRef.current?.ownerDocument.getSelection()?.removeAllRanges();
+    hasSelection.current = false;
+    setPinnedRows([]);
+    setActiveSelection(null);
+    onSelectionChange(null);
+  }, [onSelectionChange]);
+
+  const annotationsController = useAnnotationsController({
+    documentId,
+    selection: activeSelection,
+    annotations,
+    onCreateAnnotation: onCreateAnnotation
+      ? (options) => {
+          onCreateAnnotation(options);
+          clearSelectionAfterAnnotate();
+        }
+      : undefined,
+    onUpdateAnnotation,
+    onDeleteAnnotation,
+    canUndoAnnotationDelete,
+    onUndoAnnotationDelete,
+    isStaleAnnotation: (annotation) => {
+      if (!complete) return false;
+      const txtAnchor = asTxtAnchor(annotation.anchor);
+      return !txtAnchor || model.rangeFor(txtAnchor) === null;
+    },
+    onSelectAnnotation: handleSelectAnnotation,
+  });
+
+  const effectiveHighlights = useMemo(() => {
+    if (annotations !== undefined) return highlights;
+    return [
+      ...highlights,
+      ...annotationsController.annotations.map(({ id, anchor, color }) => ({
+        annotationId: id,
+        anchor,
+        color,
+      })),
+    ];
+  }, [annotations, annotationsController.annotations, highlights]);
+
   const activeSearchMatch = search.activeMatch;
   const activeSearchRange = useMemo(
     () => (activeSearchMatch ? model.rangeFor(activeSearchMatch.anchor) : null),
@@ -520,9 +611,11 @@ export function TxtViewer({
 
   const pulsingAnnotationId = jumpResolved
     ? (jumpRequest?.annotationId ?? null)
-    : searchPulsing && activeSearchRange
-      ? SEARCH_HIGHLIGHT_ID
-      : null;
+    : annotationPulsingId
+      ? annotationPulsingId
+      : searchPulsing && activeSearchRange
+        ? SEARCH_HIGHLIGHT_ID
+        : null;
 
   useLayoutEffect(() => {
     if (jumpRow === null || jumpNonce === null) return;
@@ -560,7 +653,7 @@ export function TxtViewer({
   // ---- Rendering -----------------------------------------------------------
 
   const ranges = useMemo(() => {
-    const painted = paint(model, highlights);
+    const painted = paint(model, effectiveHighlights);
     // A jump can target an annotation from another notebook, with no highlight here.
     if (
       jumpRange &&
@@ -587,7 +680,7 @@ export function TxtViewer({
     model,
     rowCount,
     complete,
-    highlights,
+    effectiveHighlights,
     jumpRequest,
     jumpRange?.startUnit,
     jumpRange?.endUnit,
@@ -613,8 +706,8 @@ export function TxtViewer({
       data-reading-theme={effectivePreferences.theme}
       data-reading-width={effectivePreferences.readingWidth}
     >
-      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b bg-background px-3 text-foreground">
-        <div className="flex items-center gap-1">
+      <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-background px-3 py-1 text-foreground">
+        <div className="flex flex-wrap items-center gap-1">
           {returnStack.length > 0 && (
             <Button
               variant="ghost"
@@ -640,6 +733,15 @@ export function TxtViewer({
             count={bookmarksController.bookmarks.length}
             onToggle={bookmarksController.togglePanel}
           />
+          <AnnotationsListToggleButton
+            open={annotationsController.open}
+            count={annotationsController.annotations.length}
+            onToggle={annotationsController.togglePanel}
+          />
+          <SelectionAnnotationControls
+            hasSelection={activeSelection !== null}
+            controller={annotationsController}
+          />
         </div>
       </div>
       {preferencesPanel.open && (
@@ -647,6 +749,11 @@ export function TxtViewer({
       )}
       <DocumentSearchBar search={search} />
       <BookmarksPanel controller={bookmarksController} />
+      <SelectionNoteComposer
+        hasSelection={activeSelection !== null}
+        controller={annotationsController}
+      />
+      <AnnotationsPanel controller={annotationsController} />
       {(load.hadReplacements || missedJump) && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs text-foreground">
           {missedJump

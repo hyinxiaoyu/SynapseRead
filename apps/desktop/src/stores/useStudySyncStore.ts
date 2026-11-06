@@ -5,6 +5,7 @@ import { describeError } from '@/lib/utils';
 import {
   type AnchorLocation,
   type Annotation,
+  type AnnotationPatch,
   type Bookmark,
   bookmarkLocationKey,
   type CardPatch,
@@ -24,6 +25,10 @@ import {
 
 export const DEFAULT_NOTEBOOK_TITLE = 'My Notebook';
 export const DEFAULT_EXCERPT_COLOR = '#fde047';
+
+export interface DeletedAnnotationSnapshot {
+  annotation: Annotation;
+}
 
 const CHILD_OFFSET_X = 320;
 const SIBLING_OFFSET_Y = 140;
@@ -49,6 +54,7 @@ export interface StudySyncState {
 
   notebook: StudyNotebook | null;
   annotations: Annotation[];
+  deletedAnnotationHistory: DeletedAnnotationSnapshot[];
   cards: NoteCard[];
   nodes: MindMapNode[];
   edges: MindMapEdge[];
@@ -74,6 +80,14 @@ export interface StudySyncState {
 
   setSelection(selection: ReaderSelection | null): void;
   excerptSelection(): Promise<void>;
+  createAnnotationFromSelection(options?: {
+    color?: string;
+    note?: string;
+  }): Promise<Annotation | null>;
+  updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<void>;
+  removeAnnotation(annotationId: string): Promise<void>;
+  undoRemoveAnnotation(): Promise<Annotation | null>;
+  jumpToAnnotation(annotationId: string): void;
   jumpToNode(nodeId: string, annotationId?: string): void;
   completeJump(nonce: number): void;
 
@@ -115,6 +129,13 @@ export function selectHighlights(
   return annotations
     .filter((annotation) => annotation.documentId === documentId)
     .map(({ id, anchor, color }) => ({ annotationId: id, anchor, color }));
+}
+
+export function selectDocumentAnnotations(
+  annotations: readonly Annotation[],
+  documentId: string,
+): Annotation[] {
+  return annotations.filter((annotation) => annotation.documentId === documentId);
 }
 
 export function selectBookmarks(bookmarks: readonly Bookmark[], documentId: string): Bookmark[] {
@@ -189,6 +210,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       bookmarks: [],
       notebook: null,
       annotations: [],
+      deletedAnnotationHistory: [],
       cards: [],
       nodes: [],
       edges: [],
@@ -303,6 +325,128 @@ export function createStudySyncStore(backend: StudyBackend) {
           // The selection stays so the user can retry.
           set({ isExcerpting: false, error: describeError(error) });
         }
+      },
+
+      async createAnnotationFromSelection(options) {
+        const { selection, notebook, isExcerpting } = get();
+        if (!selection || !notebook || isExcerpting) return null;
+
+        let created: Annotation | null = null;
+        await guarded(async () => {
+          const saved = await backend.createAnnotation({
+            documentId: selection.documentId,
+            notebookId: notebook.id,
+            anchor: selection.anchor,
+            excerptText: selection.text,
+            excerptImagePng: selection.imagePng,
+            note: options?.note ?? null,
+            color: options?.color ?? DEFAULT_EXCERPT_COLOR,
+          });
+          created = saved;
+          set((state) => ({
+            annotations: [...state.annotations, saved],
+            selection: state.selection === selection ? null : state.selection,
+          }));
+        });
+        return created;
+      },
+
+      async updateAnnotation(annotationId, patch) {
+        await guarded(async () => {
+          const updated = await backend.updateAnnotation(annotationId, patch);
+          set((state) => ({
+            annotations: state.annotations.map((candidate) =>
+              candidate.id === annotationId ? updated : candidate,
+            ),
+          }));
+        });
+      },
+
+      async removeAnnotation(annotationId) {
+        const removed = get().annotations.find((annotation) => annotation.id === annotationId);
+        if (!removed) return;
+        const previousCards = get().cards;
+        set((state) => ({
+          annotations: state.annotations.filter((annotation) => annotation.id !== annotationId),
+          deletedAnnotationHistory: [...state.deletedAnnotationHistory, { annotation: removed }],
+          cards: state.cards.map((card) =>
+            card.annotationIds.includes(annotationId)
+              ? {
+                  ...card,
+                  annotationIds: card.annotationIds.filter((id) => id !== annotationId),
+                }
+              : card,
+          ),
+        }));
+        await guarded(
+          () => backend.deleteAnnotation(annotationId),
+          () =>
+            set((state) => ({
+              annotations: [...state.annotations, removed],
+              deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
+                (entry) => entry.annotation.id !== removed.id,
+              ),
+              cards: previousCards,
+            })),
+        );
+      },
+
+      async undoRemoveAnnotation() {
+        const last = get().deletedAnnotationHistory.at(-1);
+        if (!last) return null;
+        set((state) => ({
+          deletedAnnotationHistory: state.deletedAnnotationHistory.slice(0, -1),
+        }));
+
+        let restored: Annotation | null = null;
+        await guarded(
+          async () => {
+            const saved = await backend.createAnnotation({
+              documentId: last.annotation.documentId,
+              notebookId: last.annotation.notebookId,
+              anchor: last.annotation.anchor,
+              excerptText: last.annotation.excerptText,
+              excerptImagePng: null,
+              note: last.annotation.note ?? null,
+              color: last.annotation.color,
+            });
+            restored = saved;
+            set((state) => ({
+              annotations: [...state.annotations, saved],
+            }));
+          },
+          () =>
+            set((state) => ({
+              deletedAnnotationHistory: [...state.deletedAnnotationHistory, last],
+            })),
+        );
+        return restored;
+      },
+
+      jumpToAnnotation(annotationId) {
+        const { annotations, documents } = get();
+        const annotation = annotations.find((candidate) => candidate.id === annotationId);
+        if (!annotation) return;
+
+        if (!documents.some((document) => document.id === annotation.documentId)) {
+          set({ error: 'The source document for this annotation is no longer available.' });
+          return;
+        }
+
+        jumpNonce += 1;
+        set((state) => ({
+          openDocumentIds: state.openDocumentIds.includes(annotation.documentId)
+            ? state.openDocumentIds
+            : [...state.openDocumentIds, annotation.documentId],
+          activeDocumentId: annotation.documentId,
+          selection: state.activeDocumentId === annotation.documentId ? state.selection : null,
+          jumpRequest: {
+            nonce: jumpNonce,
+            documentId: annotation.documentId,
+            annotationId: annotation.id,
+            anchor: annotation.anchor,
+          },
+        }));
       },
 
       jumpToNode(nodeId, annotationId) {

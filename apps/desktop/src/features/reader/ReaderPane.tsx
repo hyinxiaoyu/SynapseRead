@@ -4,8 +4,18 @@ import { type ComponentType, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn } from '@/lib/utils';
-import { selectBookmarks, selectHighlights, useStudySyncStore } from '@/stores/useStudySyncStore';
-import type { AnchorLocation, DocumentViewerProps, StudyDocument } from '@/types/domain';
+import {
+  selectBookmarks,
+  selectDocumentAnnotations,
+  selectHighlights,
+  useStudySyncStore,
+} from '@/stores/useStudySyncStore';
+import type {
+  AnchorLocation,
+  AnnotationPatch,
+  DocumentViewerProps,
+  StudyDocument,
+} from '@/types/domain';
 
 export function ReaderPane() {
   const documents = useStudySyncStore((state) => state.documents);
@@ -114,11 +124,18 @@ export function ReaderPane() {
 function DocumentTab({ document, isActive }: { document: StudyDocument; isActive: boolean }) {
   const content = useStudySyncStore((state) => state.content);
   const annotations = useStudySyncStore((state) => state.annotations);
+  const deletedAnnotationHistory = useStudySyncStore((state) => state.deletedAnnotationHistory);
   const allBookmarks = useStudySyncStore((state) => state.bookmarks);
   const readingPreferences = useStudySyncStore((state) => state.readingPreferences);
   const updateReadingPreferences = useStudySyncStore((state) => state.updateReadingPreferences);
   const addBookmark = useStudySyncStore((state) => state.addBookmark);
   const removeBookmark = useStudySyncStore((state) => state.removeBookmark);
+  const createAnnotationFromSelection = useStudySyncStore(
+    (state) => state.createAnnotationFromSelection,
+  );
+  const updateAnnotation = useStudySyncStore((state) => state.updateAnnotation);
+  const removeAnnotation = useStudySyncStore((state) => state.removeAnnotation);
+  const undoRemoveAnnotation = useStudySyncStore((state) => state.undoRemoveAnnotation);
   const jumpRequest = useStudySyncStore((state) =>
     state.jumpRequest?.documentId === document.id ? state.jumpRequest : null,
   );
@@ -128,6 +145,10 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
 
   const highlights = useMemo(
     () => selectHighlights(annotations, document.id),
+    [annotations, document.id],
+  );
+  const documentAnnotations = useMemo(
+    () => selectDocumentAnnotations(annotations, document.id),
     [annotations, document.id],
   );
   const bookmarks = useMemo(
@@ -156,6 +177,27 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
     },
     [removeBookmark],
   );
+  const onCreateAnnotation = useCallback(
+    (options?: { color?: string; note?: string }) => {
+      void createAnnotationFromSelection(options);
+    },
+    [createAnnotationFromSelection],
+  );
+  const onUpdateAnnotation = useCallback(
+    (annotationId: string, patch: AnnotationPatch) => {
+      void updateAnnotation(annotationId, patch);
+    },
+    [updateAnnotation],
+  );
+  const onDeleteAnnotation = useCallback(
+    (annotationId: string) => {
+      void removeAnnotation(annotationId);
+    },
+    [removeAnnotation],
+  );
+  const onUndoAnnotationDelete = useCallback(() => {
+    void undoRemoveAnnotation();
+  }, [undoRemoveAnnotation]);
 
   // Safe: the entry is looked up by this document's own format.
   const Viewer = viewerRegistry[document.format] as ComponentType<DocumentViewerProps>;
@@ -174,6 +216,12 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
       bookmarks={bookmarks}
       onAddBookmark={onAddBookmark}
       onRemoveBookmark={onRemoveBookmark}
+      annotations={documentAnnotations}
+      onCreateAnnotation={onCreateAnnotation}
+      onUpdateAnnotation={onUpdateAnnotation}
+      onDeleteAnnotation={onDeleteAnnotation}
+      canUndoAnnotationDelete={deletedAnnotationHistory.length > 0}
+      onUndoAnnotationDelete={onUndoAnnotationDelete}
     />
   );
 }

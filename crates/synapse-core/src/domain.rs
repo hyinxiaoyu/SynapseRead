@@ -62,6 +62,15 @@ pub struct NormalizedRect {
     pub height: f64,
 }
 
+/// Normalized rectangles on a single PDF page, used when a highlight or excerpt
+/// spans multiple pages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfPageSpan {
+    pub page_index: u32,
+    pub rects: Vec<NormalizedRect>,
+}
+
 /// Format-agnostic position inside a document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "format", rename_all = "lowercase")]
@@ -70,6 +79,8 @@ pub enum AnchorLocation {
     Pdf {
         page_index: u32,
         rects: Vec<NormalizedRect>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_spans: Option<Vec<PdfPageSpan>>,
     },
     #[serde(rename_all = "camelCase")]
     Epub {
@@ -100,22 +111,49 @@ impl AnchorLocation {
     /// Rejects anchors that could never be resolved back to a source position.
     pub fn validate(&self) -> CoreResult<()> {
         let invalid = |message: &str| Err(CoreError::InvalidAnchor(message.to_owned()));
+        let valid_rect = |r: &NormalizedRect| {
+            let in_unit = |v: f64| (0.0..=1.0).contains(&v);
+            in_unit(r.x)
+                && in_unit(r.y)
+                && r.width > 0.0
+                && r.height > 0.0
+                && in_unit(r.x + r.width)
+                && in_unit(r.y + r.height)
+        };
         match self {
-            Self::Pdf { rects, .. } => {
+            Self::Pdf {
+                page_index,
+                rects,
+                page_spans,
+            } => {
                 if rects.is_empty() {
                     return invalid("a PDF anchor needs at least one rectangle");
                 }
-                let in_unit = |v: f64| (0.0..=1.0).contains(&v);
-                let all_valid = rects.iter().all(|r| {
-                    in_unit(r.x)
-                        && in_unit(r.y)
-                        && r.width > 0.0
-                        && r.height > 0.0
-                        && in_unit(r.x + r.width)
-                        && in_unit(r.y + r.height)
-                });
-                if !all_valid {
+                if !rects.iter().all(valid_rect) {
                     return invalid("PDF rectangles must be non-empty and within the unit square");
+                }
+                if let Some(spans) = page_spans {
+                    if spans.is_empty() {
+                        return invalid("PDF pageSpans cannot be empty when present");
+                    }
+                    if spans[0].page_index != *page_index {
+                        return invalid(
+                            "the first PDF pageSpan must match the anchor's primary pageIndex",
+                        );
+                    }
+                    for span in spans {
+                        if span.rects.is_empty() || !span.rects.iter().all(valid_rect) {
+                            return invalid(
+                                "each PDF pageSpan must have valid rectangles within the unit square",
+                            );
+                        }
+                    }
+                    if spans
+                        .windows(2)
+                        .any(|pair| pair[0].page_index >= pair[1].page_index)
+                    {
+                        return invalid("PDF pageSpans must be ordered by ascending pageIndex");
+                    }
                 }
             }
             Self::Epub {
@@ -212,8 +250,30 @@ pub struct Annotation {
     pub anchor: AnchorLocation,
     pub excerpt_text: Option<String>,
     pub excerpt_image_path: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
     pub color: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateAnnotationInput {
+    pub document_id: String,
+    pub notebook_id: String,
+    pub anchor: AnchorLocation,
+    pub excerpt_text: Option<String>,
+    /// A base64 PNG for an area capture. Core chooses where it is stored.
+    pub excerpt_image_png: Option<String>,
+    pub note: Option<String>,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnnotationPatch {
+    pub note: Option<String>,
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -447,7 +507,7 @@ mod tests {
     fn contract_fixture_parses_and_validates() {
         let fixture = include_str!("../../../fixtures/contract/anchors.json");
         let anchors: Vec<AnchorLocation> = serde_json::from_str(fixture).unwrap();
-        assert_eq!(anchors.len(), 5);
+        assert_eq!(anchors.len(), 6);
         for anchor in &anchors {
             anchor.validate().unwrap();
         }
@@ -470,6 +530,7 @@ mod tests {
                 width,
                 height,
             }],
+            page_spans: None,
         }
     }
 
@@ -487,8 +548,81 @@ mod tests {
         let anchor = AnchorLocation::Pdf {
             page_index: 0,
             rects: vec![],
+            page_spans: None,
         };
         assert!(anchor.validate().is_err());
+    }
+
+    #[test]
+    fn validates_cross_page_pdf_spans_and_backward_compatibility() {
+        // Legacy single-page PDF anchor without pageSpans still parses and round-trips without pageSpans.
+        let legacy_json = serde_json::json!({
+            "format": "pdf",
+            "pageIndex": 2,
+            "rects": [{ "x": 0.1, "y": 0.2, "width": 0.5, "height": 0.05 }]
+        });
+        let legacy: AnchorLocation = serde_json::from_value(legacy_json.clone()).unwrap();
+        legacy.validate().unwrap();
+        assert_eq!(serde_json::to_value(&legacy).unwrap(), legacy_json);
+
+        // Valid cross-page PDF anchor.
+        let valid_rect = NormalizedRect {
+            x: 0.1,
+            y: 0.2,
+            width: 0.5,
+            height: 0.05,
+        };
+        let cross_page = AnchorLocation::Pdf {
+            page_index: 1,
+            rects: vec![valid_rect],
+            page_spans: Some(vec![
+                PdfPageSpan {
+                    page_index: 1,
+                    rects: vec![valid_rect],
+                },
+                PdfPageSpan {
+                    page_index: 2,
+                    rects: vec![valid_rect],
+                },
+            ]),
+        };
+        cross_page.validate().unwrap();
+
+        // Empty page_spans rejected.
+        let empty_spans = AnchorLocation::Pdf {
+            page_index: 1,
+            rects: vec![valid_rect],
+            page_spans: Some(vec![]),
+        };
+        assert!(empty_spans.validate().is_err());
+
+        // Mismatched first page_index rejected.
+        let mismatched = AnchorLocation::Pdf {
+            page_index: 1,
+            rects: vec![valid_rect],
+            page_spans: Some(vec![PdfPageSpan {
+                page_index: 2,
+                rects: vec![valid_rect],
+            }]),
+        };
+        assert!(mismatched.validate().is_err());
+
+        // Unordered page_spans rejected.
+        let unordered = AnchorLocation::Pdf {
+            page_index: 2,
+            rects: vec![valid_rect],
+            page_spans: Some(vec![
+                PdfPageSpan {
+                    page_index: 2,
+                    rects: vec![valid_rect],
+                },
+                PdfPageSpan {
+                    page_index: 1,
+                    rects: vec![valid_rect],
+                },
+            ]),
+        };
+        assert!(unordered.validate().is_err());
     }
 
     #[test]

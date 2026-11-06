@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use synapse_core::domain::DocumentFormat;
 
 use synapse_core::domain::{
-    AnchorLocation, Bookmark, CardPatch, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt,
-    Document, MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences,
-    StudyNotebook, Viewport,
+    AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
+    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, MindMapEdge,
+    NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, StudyNotebook, Viewport,
 };
 use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
@@ -91,6 +91,30 @@ pub fn create_excerpt(
     state: State<'_, AppState>,
 ) -> IpcResult<CreatedExcerpt> {
     Ok(state.database()?.create_excerpt(&input)?)
+}
+
+#[tauri::command]
+pub fn create_annotation(
+    input: CreateAnnotationInput,
+    state: State<'_, AppState>,
+) -> IpcResult<Annotation> {
+    Ok(state.database()?.create_annotation(&input)?)
+}
+
+#[tauri::command]
+pub fn update_annotation(
+    annotation_id: String,
+    patch: AnnotationPatch,
+    state: State<'_, AppState>,
+) -> IpcResult<Annotation> {
+    Ok(state
+        .database()?
+        .update_annotation(&annotation_id, &patch)?)
+}
+
+#[tauri::command]
+pub fn delete_annotation(annotation_id: String, state: State<'_, AppState>) -> IpcResult<()> {
+    Ok(state.database()?.delete_annotation(&annotation_id)?)
 }
 
 /// Where an annotation's capture lives, for the asset protocol to load.

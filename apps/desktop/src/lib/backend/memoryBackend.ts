@@ -85,20 +85,45 @@ export function createMemoryBackend({
           throw fail('invalid_anchor', 'a PDF anchor needs at least one rectangle');
         }
         const inUnit = (v: number) => Number.isFinite(v) && v >= 0 && v <= 1;
-        const allValid = anchor.rects.every(
-          (r) =>
-            inUnit(r.x) &&
-            inUnit(r.y) &&
-            r.width > 0 &&
-            r.height > 0 &&
-            inUnit(r.x + r.width) &&
-            inUnit(r.y + r.height),
-        );
-        if (!allValid) {
+        const validRect = (r: { x: number; y: number; width: number; height: number }) =>
+          inUnit(r.x) &&
+          inUnit(r.y) &&
+          r.width > 0 &&
+          r.height > 0 &&
+          inUnit(r.x + r.width) &&
+          inUnit(r.y + r.height);
+        if (!anchor.rects.every(validRect)) {
           throw fail(
             'invalid_anchor',
             'PDF rectangles must be non-empty and within the unit square',
           );
+        }
+        if (anchor.pageSpans !== undefined) {
+          if (anchor.pageSpans.length === 0) {
+            throw fail('invalid_anchor', 'PDF pageSpans cannot be empty when present');
+          }
+          if (anchor.pageSpans[0]?.pageIndex !== anchor.pageIndex) {
+            throw fail(
+              'invalid_anchor',
+              "the first PDF pageSpan must match the anchor's primary pageIndex",
+            );
+          }
+          for (const span of anchor.pageSpans) {
+            if (span.rects.length === 0 || !span.rects.every(validRect)) {
+              throw fail(
+                'invalid_anchor',
+                'each PDF pageSpan must have valid rectangles within the unit square',
+              );
+            }
+          }
+          for (let index = 1; index < anchor.pageSpans.length; index += 1) {
+            if (
+              (anchor.pageSpans[index - 1]?.pageIndex ?? 0) >=
+              (anchor.pageSpans[index]?.pageIndex ?? 0)
+            ) {
+              throw fail('invalid_anchor', 'PDF pageSpans must be ordered by ascending pageIndex');
+            }
+          }
         }
         break;
       }
@@ -221,6 +246,7 @@ export function createMemoryBackend({
     },
 
     async createExcerpt(input) {
+      validateAnchor(input.anchor);
       const document = require(documents, input.documentId, 'document');
       require(notebooks, input.notebookId, 'notebook');
       if (document.format !== input.anchor.format) {
@@ -246,6 +272,7 @@ export function createMemoryBackend({
         anchor: input.anchor,
         excerptText: input.excerptText,
         excerptImagePath: input.excerptImagePng === null ? null : `captures/${annotationId}.png`,
+        note: null,
         color: input.color,
         createdAt: now(),
       };
@@ -283,6 +310,75 @@ export function createMemoryBackend({
       nodes.set(node.id, node);
       if (edge) edges.set(edge.id, edge);
       return { annotation, card, node, edge };
+    },
+
+    async createAnnotation(input) {
+      validateAnchor(input.anchor);
+      const document = require(documents, input.documentId, 'document');
+      require(notebooks, input.notebookId, 'notebook');
+      if (document.format !== input.anchor.format) {
+        throw fail(
+          'invalid_anchor',
+          `${input.anchor.format} anchor on a ${document.format} document`,
+        );
+      }
+      if (!input.color.trim()) {
+        throw fail('invalid_anchor', 'an annotation needs a highlight color');
+      }
+      const trimmedNote = input.note?.trim() || null;
+      if (!input.excerptText?.trim() && input.excerptImagePng === null && trimmedNote === null) {
+        throw fail(
+          'invalid_anchor',
+          'an annotation needs selected text, a note, or a captured image',
+        );
+      }
+      if (input.excerptImagePng !== null && !input.excerptImagePng.startsWith(PNG_BASE64_PREFIX)) {
+        throw fail('invalid_capture', 'the image is not a PNG');
+      }
+
+      const annotationId = crypto.randomUUID();
+      if (input.excerptImagePng !== null) captures.set(annotationId, input.excerptImagePng);
+      const annotation: Annotation = {
+        id: annotationId,
+        documentId: input.documentId,
+        notebookId: input.notebookId,
+        anchor: input.anchor,
+        excerptText: input.excerptText,
+        excerptImagePath: input.excerptImagePng === null ? null : `captures/${annotationId}.png`,
+        note: trimmedNote,
+        color: input.color.trim(),
+        createdAt: now(),
+      };
+      annotations.set(annotation.id, annotation);
+      return annotation;
+    },
+
+    async updateAnnotation(annotationId, patch) {
+      const existing = require(annotations, annotationId, 'annotation');
+      if (patch.color !== null && !patch.color.trim()) {
+        throw fail('invalid_anchor', 'an annotation needs a highlight color');
+      }
+      const updated: Annotation = {
+        ...existing,
+        note: patch.note !== null ? patch.note.trim() || null : (existing.note ?? null),
+        color: patch.color !== null ? patch.color.trim() : existing.color,
+      };
+      annotations.set(annotationId, updated);
+      return updated;
+    },
+
+    async deleteAnnotation(annotationId) {
+      require(annotations, annotationId, 'annotation');
+      annotations.delete(annotationId);
+      captures.delete(annotationId);
+      for (const [cardId, card] of cards) {
+        if (card.annotationIds.includes(annotationId)) {
+          cards.set(cardId, {
+            ...card,
+            annotationIds: card.annotationIds.filter((id) => id !== annotationId),
+          });
+        }
+      }
     },
 
     async updateCard(cardId, patch) {

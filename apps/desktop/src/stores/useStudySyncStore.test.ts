@@ -9,6 +9,7 @@ import {
   DEFAULT_NOTEBOOK_TITLE,
   nextNodePosition,
   selectBookmarks,
+  selectDocumentAnnotations,
   selectHighlights,
 } from './useStudySyncStore';
 
@@ -547,6 +548,72 @@ describe('useStudySyncStore', () => {
 
       expect(selectBookmarks(state().bookmarks, documentId)).toHaveLength(1);
       expect(state().error).toBe('delete failed');
+    });
+  });
+
+  describe('independent annotations', () => {
+    it('creates highlights and notes without MindMap cards/nodes, edits note/color, deletes with shared-card preservation, and undoes deletion', async () => {
+      const documentId = await openDocument();
+      select(documentId, 'independent highlight text');
+
+      const created = await state().createAnnotationFromSelection({
+        color: '#86efac',
+        note: 'Key definition',
+      });
+      expect(created).toMatchObject({
+        documentId,
+        excerptText: 'independent highlight text',
+        color: '#86efac',
+        note: 'Key definition',
+      });
+      expect(selectDocumentAnnotations(state().annotations, documentId)).toHaveLength(1);
+      expect(state().cards).toEqual([]);
+      expect(state().nodes).toEqual([]);
+      expect(state().selection).toBeNull();
+
+      await state().updateAnnotation(created?.id as string, {
+        color: '#93c5fd',
+        note: 'Updated note text',
+      });
+      expect(selectDocumentAnnotations(state().annotations, documentId)[0]).toMatchObject({
+        color: '#93c5fd',
+        note: 'Updated note text',
+      });
+
+      state().jumpToAnnotation(created?.id as string);
+      expect(state().jumpRequest).toMatchObject({
+        documentId,
+        annotationId: created?.id as string,
+        anchor: pdfAnchor,
+      });
+
+      // Excerpt a second selection into the MindMap, then delete its shared annotation:
+      // the card and MindMap node must remain intact while the annotation is removed.
+      select(documentId, 'shared card excerpt');
+      await state().excerptSelection();
+      expect(state().cards).toHaveLength(1);
+      expect(state().nodes).toHaveLength(1);
+      const sharedAnnotationId = state().cards[0]?.annotationIds[0] as string;
+
+      await state().removeAnnotation(sharedAnnotationId);
+      expect(state().annotations.some((item) => item.id === sharedAnnotationId)).toBe(false);
+      expect(state().cards).toHaveLength(1);
+      expect(state().cards[0]?.annotationIds).toEqual([]);
+      expect(state().nodes).toHaveLength(1);
+      expect(state().deletedAnnotationHistory).toHaveLength(1);
+
+      // Delete the independent annotation and undo both deletions in the current session.
+      await state().removeAnnotation(created?.id as string);
+      expect(selectDocumentAnnotations(state().annotations, documentId)).toHaveLength(0);
+
+      const restoredIndependent = await state().undoRemoveAnnotation();
+      expect(restoredIndependent).toMatchObject({
+        documentId,
+        excerptText: 'independent highlight text',
+        color: '#93c5fd',
+        note: 'Updated note text',
+      });
+      expect(selectDocumentAnnotations(state().annotations, documentId)).toHaveLength(1);
     });
   });
 });

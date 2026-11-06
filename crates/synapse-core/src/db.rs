@@ -9,9 +9,10 @@ use uuid::Uuid;
 
 use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
-    AnchorLocation, Annotation, Bookmark, CardPatch, CreateBookmarkInput, CreateExcerptInput,
-    CreatedExcerpt, Document, DocumentFormat, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard,
-    NotebookGraph, ReadingPreferences, StudyNotebook, Viewport,
+    AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
+    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentFormat, MindMapEdge,
+    MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, StudyNotebook,
+    Viewport,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -21,6 +22,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_reading_preferences.sql"),
     include_str!("../migrations/0003_bookmarks.sql"),
+    include_str!("../migrations/0004_independent_annotations.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -359,6 +361,156 @@ impl Database {
         })
     }
 
+    /// Creates an independent highlight or note inside `input.document_id`
+    /// without generating a `NoteCard` or `MindMapNode`.
+    pub fn create_annotation(&mut self, input: &CreateAnnotationInput) -> CoreResult<Annotation> {
+        input.anchor.validate()?;
+        if input.color.trim().is_empty() {
+            return Err(CoreError::InvalidAnchor(
+                "an annotation needs a highlight color".to_owned(),
+            ));
+        }
+        let has_text = input
+            .excerpt_text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty());
+        let has_note = input
+            .note
+            .as_deref()
+            .is_some_and(|note| !note.trim().is_empty());
+        if !has_text && input.excerpt_image_png.is_none() && !has_note {
+            return Err(CoreError::InvalidAnchor(
+                "an annotation needs selected text, a note, or a captured image".to_owned(),
+            ));
+        }
+        let capture = input
+            .excerpt_image_png
+            .as_deref()
+            .map(decode_capture)
+            .transpose()?;
+
+        let annotation_id = new_id();
+        let image_path = match (&capture, &self.captures) {
+            (Some(png), Some(store)) => Some(store.write(&annotation_id, png)?),
+            (Some(_), None) => {
+                return Err(CoreError::InvalidCapture(
+                    "this database has no directory for captures".to_owned(),
+                ));
+            }
+            (None, _) => None,
+        };
+
+        let result =
+            self.insert_independent_annotation(input, &annotation_id, image_path.as_deref());
+        if result.is_err()
+            && let (Some(path), Some(store)) = (&image_path, &self.captures)
+        {
+            store.remove(path);
+        }
+        result
+    }
+
+    fn insert_independent_annotation(
+        &mut self,
+        input: &CreateAnnotationInput,
+        annotation_id: &str,
+        image_path: Option<&str>,
+    ) -> CoreResult<Annotation> {
+        let tx = self.conn.transaction()?;
+        check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
+        check_notebook_exists(&tx, &input.notebook_id)?;
+
+        let normalized_note = input
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|note| !note.is_empty());
+        let anchor_type = input.anchor.format().as_str();
+        tx.execute(
+            "INSERT INTO annotations (id, document_id, notebook_id, anchor_type,
+                 anchor_payload_json, excerpt_text, excerpt_image_path, note, color)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                annotation_id,
+                input.document_id,
+                input.notebook_id,
+                anchor_type,
+                serde_json::to_string(&input.anchor)?,
+                input.excerpt_text,
+                image_path,
+                normalized_note,
+                input.color.trim(),
+            ],
+        )?;
+
+        let annotation = tx.query_row(
+            &format!("{ANNOTATION_SELECT} WHERE id = ?1"),
+            [annotation_id],
+            map_annotation,
+        )?;
+        tx.commit()?;
+        Ok(annotation)
+    }
+
+    /// Updates an annotation's inline `note` and/or highlight `color`.
+    /// When `patch.note` is `Some("")` or whitespace-only, `note` is cleared to `NULL`.
+    pub fn update_annotation(
+        &self,
+        annotation_id: &str,
+        patch: &AnnotationPatch,
+    ) -> CoreResult<Annotation> {
+        if let Some(color) = &patch.color
+            && color.trim().is_empty()
+        {
+            return Err(CoreError::InvalidAnchor(
+                "an annotation needs a highlight color".to_owned(),
+            ));
+        }
+        let update_note = patch.note.is_some();
+        let next_note = patch
+            .note
+            .as_deref()
+            .map(str::trim)
+            .filter(|note| !note.is_empty());
+        let next_color = patch.color.as_deref().map(str::trim);
+
+        let changed = self.conn.execute(
+            "UPDATE annotations SET
+                 note = CASE WHEN ?2 THEN ?3 ELSE note END,
+                 color = COALESCE(?4, color)
+             WHERE id = ?1",
+            params![annotation_id, update_note, next_note, next_color],
+        )?;
+        expect_changed(changed, "annotation", annotation_id)?;
+        Ok(self.conn.query_row(
+            &format!("{ANNOTATION_SELECT} WHERE id = ?1"),
+            [annotation_id],
+            map_annotation,
+        )?)
+    }
+
+    /// Deletes an annotation and removes its `card_annotations` links (via `ON DELETE CASCADE`).
+    /// Shared `NoteCard`s and `MindMapNode`s remain intact with their titles, notes, and tags;
+    /// their `annotation_ids` list simply no longer includes the deleted annotation.
+    pub fn delete_annotation(&mut self, annotation_id: &str) -> CoreResult<()> {
+        let image_path: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT excerpt_image_path FROM annotations WHERE id = ?1",
+                [annotation_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found("annotation", annotation_id))?;
+
+        self.conn
+            .execute("DELETE FROM annotations WHERE id = ?1", [annotation_id])?;
+        if let (Some(path), Some(store)) = (image_path, &self.captures) {
+            store.remove(&path);
+        }
+        Ok(())
+    }
+
     /// Absolute path of an annotation's capture, or `None` if it has no image.
     pub fn capture_path(&self, annotation_id: &str) -> CoreResult<Option<PathBuf>> {
         let stored: Option<String> = self
@@ -571,6 +723,19 @@ fn check_anchor_matches_document(
     Ok(())
 }
 
+fn check_notebook_exists(tx: &Transaction<'_>, notebook_id: &str) -> CoreResult<()> {
+    let exists: Option<String> = tx
+        .query_row(
+            "SELECT id FROM study_notebooks WHERE id = ?1",
+            [notebook_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    exists
+        .map(|_| ())
+        .ok_or_else(|| not_found("notebook", notebook_id))
+}
+
 fn check_node_in_notebook(
     tx: &Transaction<'_>,
     node_id: &str,
@@ -704,7 +869,7 @@ fn map_notebook(row: &Row<'_>) -> rusqlite::Result<StudyNotebook> {
 }
 
 const ANNOTATION_SELECT: &str = "SELECT id, document_id, notebook_id, anchor_payload_json,
-    excerpt_text, excerpt_image_path, color, created_at FROM annotations";
+    excerpt_text, excerpt_image_path, note, color, created_at FROM annotations";
 
 fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
     Ok(Annotation {
@@ -714,8 +879,9 @@ fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
         anchor: json_column(row, 3)?,
         excerpt_text: row.get(4)?,
         excerpt_image_path: row.get(5)?,
-        color: row.get(6)?,
-        created_at: row.get(7)?,
+        note: row.get(6)?,
+        color: row.get(7)?,
+        created_at: row.get(8)?,
     })
 }
 
@@ -867,6 +1033,7 @@ mod tests {
                     "excerpt_image_path",
                     "color",
                     "created_at",
+                    "note",
                 ],
             ),
             (
@@ -1126,6 +1293,7 @@ mod tests {
                 width: 0.5,
                 height: 0.5,
             }],
+            page_spans: None,
         };
         assert!(matches!(
             f.db.create_excerpt(&input),
@@ -1174,6 +1342,7 @@ mod tests {
                     width: 0.5,
                     height: 0.5,
                 }],
+                page_spans: None,
             },
             excerpt_text: None,
             excerpt_image_png: png.map(str::to_owned),
@@ -1520,6 +1689,7 @@ mod tests {
                         width: 1.0,
                         height: 0.1,
                     }],
+                    page_spans: None,
                 },
                 label: None,
             }),
@@ -1560,6 +1730,7 @@ mod tests {
                         width: 1.0,
                         height: 0.001,
                     }],
+                    page_spans: None,
                 },
                 label: Some("Page 3".to_owned()),
             })
@@ -1568,5 +1739,72 @@ mod tests {
 
         let reopened = Database::open(&db_path).unwrap();
         assert_eq!(reopened.list_bookmarks().unwrap(), vec![saved]);
+    }
+
+    #[test]
+    fn independent_annotations_crud_and_shared_card_deletion_semantics() {
+        let mut f = fixture();
+        // 1. Create an independent highlight with a note (no card or MindMap node created).
+        let standalone =
+            f.db.create_annotation(&CreateAnnotationInput {
+                document_id: f.document_id.clone(),
+                notebook_id: f.notebook_id.clone(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("some".to_owned()),
+                excerpt_image_png: None,
+                note: Some("  standalone note  ".to_owned()),
+                color: "#fde047".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(standalone.note.as_deref(), Some("standalone note"));
+        assert_eq!(standalone.color, "#fde047");
+        assert_eq!(count(&f.db, "annotations"), 1);
+        assert_eq!(count(&f.db, "note_cards"), 0);
+        assert_eq!(count(&f.db, "mindmap_nodes"), 0);
+
+        // 2. Edit note and color, then clear note with whitespace.
+        let edited =
+            f.db.update_annotation(
+                &standalone.id,
+                &AnnotationPatch {
+                    note: Some("updated note".to_owned()),
+                    color: Some("#86efac".to_owned()),
+                },
+            )
+            .unwrap();
+        assert_eq!(edited.note.as_deref(), Some("updated note"));
+        assert_eq!(edited.color, "#86efac");
+
+        let cleared =
+            f.db.update_annotation(
+                &standalone.id,
+                &AnnotationPatch {
+                    note: Some("   ".to_owned()),
+                    color: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(cleared.note, None);
+        assert_eq!(cleared.color, "#86efac");
+
+        // 3. Create an excerpt linked to a card and MindMap node, then delete the annotation.
+        // Shared card and node must remain intact, while `card.annotation_ids` drops the deleted id.
+        let created_excerpt = f.db.create_excerpt(&excerpt(&f, None)).unwrap();
+        let graph_before = f.db.load_notebook_graph(&f.notebook_id).unwrap();
+        assert_eq!(graph_before.annotations.len(), 2);
+        assert_eq!(graph_before.cards.len(), 1);
+        assert_eq!(
+            graph_before.cards[0].annotation_ids,
+            vec![created_excerpt.annotation.id.clone()]
+        );
+
+        f.db.delete_annotation(&created_excerpt.annotation.id)
+            .unwrap();
+        let graph_after = f.db.load_notebook_graph(&f.notebook_id).unwrap();
+        assert_eq!(graph_after.annotations, vec![cleared]);
+        assert_eq!(graph_after.cards.len(), 1);
+        assert_eq!(graph_after.cards[0].id, created_excerpt.card.id);
+        assert!(graph_after.cards[0].annotation_ids.is_empty());
+        assert_eq!(graph_after.nodes.len(), 1);
     }
 }

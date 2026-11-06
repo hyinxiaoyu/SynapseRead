@@ -16,6 +16,36 @@ describe('isAnchorLocation', () => {
     ['unknown format', { format: 'docx' }],
     ['pdf without rects', { format: 'pdf', pageIndex: 0 }],
     ['pdf with bad rect', { format: 'pdf', pageIndex: 0, rects: [{ x: 0 }] }],
+    [
+      'pdf with empty pageSpans',
+      {
+        format: 'pdf',
+        pageIndex: 0,
+        rects: [{ x: 0.1, y: 0.1, width: 0.2, height: 0.05 }],
+        pageSpans: [],
+      },
+    ],
+    [
+      'pdf with mismatched first pageSpan pageIndex',
+      {
+        format: 'pdf',
+        pageIndex: 0,
+        rects: [{ x: 0.1, y: 0.1, width: 0.2, height: 0.05 }],
+        pageSpans: [{ pageIndex: 1, rects: [{ x: 0.1, y: 0.1, width: 0.2, height: 0.05 }] }],
+      },
+    ],
+    [
+      'pdf with non-ascending pageSpans',
+      {
+        format: 'pdf',
+        pageIndex: 1,
+        rects: [{ x: 0.1, y: 0.1, width: 0.2, height: 0.05 }],
+        pageSpans: [
+          { pageIndex: 1, rects: [{ x: 0.1, y: 0.1, width: 0.2, height: 0.05 }] },
+          { pageIndex: 1, rects: [{ x: 0.1, y: 0.2, width: 0.2, height: 0.05 }] },
+        ],
+      },
+    ],
     ['epub without href', { format: 'epub', cfiRange: 'x' }],
     [
       'txt with string offset',

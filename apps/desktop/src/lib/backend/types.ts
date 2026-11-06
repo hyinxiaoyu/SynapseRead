@@ -1,7 +1,10 @@
 import type {
   AnchorLocation,
+  Annotation,
+  AnnotationPatch,
   Bookmark,
   CardPatch,
+  CreateAnnotationInput,
   CreateBookmarkInput,
   CreatedExcerpt,
   CreateExcerptInput,
@@ -56,6 +59,9 @@ export interface StudyBackend extends DocumentContentReader {
   loadNotebookGraph(notebookId: string): Promise<NotebookGraph>;
 
   createExcerpt(input: CreateExcerptInput): Promise<CreatedExcerpt>;
+  createAnnotation(input: CreateAnnotationInput): Promise<Annotation>;
+  updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<Annotation>;
+  deleteAnnotation(annotationId: string): Promise<void>;
   updateCard(cardId: string, patch: CardPatch): Promise<NoteCard>;
   updateNodeLayout(nodeId: string, patch: NodeLayoutPatch): Promise<void>;
   createEdge(

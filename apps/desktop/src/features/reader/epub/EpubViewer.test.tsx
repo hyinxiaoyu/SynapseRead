@@ -12,6 +12,7 @@ import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import {
   createStudySyncStore,
   selectBookmarks,
+  selectDocumentAnnotations,
   selectHighlights,
 } from '@/stores/useStudySyncStore';
 
@@ -146,6 +147,10 @@ function Harness({
     () => selectBookmarks(state.bookmarks, documentId),
     [state.bookmarks, documentId],
   );
+  const annotations = useMemo(
+    () => selectDocumentAnnotations(state.annotations, documentId),
+    [state.annotations, documentId],
+  );
   if (document?.format !== 'epub') throw new Error('expected an epub document');
   return (
     <EpubViewer
@@ -162,6 +167,12 @@ function Harness({
       bookmarks={bookmarks}
       onAddBookmark={(anchor, label) => void state.addBookmark(documentId, anchor, label)}
       onRemoveBookmark={(id) => void state.removeBookmark(id)}
+      annotations={annotations}
+      onCreateAnnotation={(options) => void state.createAnnotationFromSelection(options)}
+      onUpdateAnnotation={(id, patch) => void state.updateAnnotation(id, patch)}
+      onDeleteAnnotation={(id) => void state.removeAnnotation(id)}
+      canUndoAnnotationDelete={state.deletedAnnotationHistory.length > 0}
+      onUndoAnnotationDelete={() => void state.undoRemoveAnnotation()}
     />
   );
 }
@@ -669,6 +680,41 @@ describe('EpubViewer', () => {
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
     fireEvent.click(removeButtons[0] as HTMLElement);
     await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
+  });
+
+  it('creates, lists, jumps to, edits, deletes, and undoes independent highlights and notes without creating MindMap cards', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    select(CFI, 'quick brown fox');
+    fireEvent.click(screen.getByTestId('annotation-color-pink'));
+    fireEvent.click(screen.getByTestId('highlight-selection-button'));
+
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().cards).toEqual([]);
+    expect(store.getState().nodes).toEqual([]);
+    const annotationId = store.getState().annotations[0]?.id as string;
+    expect(engine.highlighted.get(annotationId)).toBe(CFI);
+
+    fireEvent.click(screen.getByTestId('annotations-toggle-button'));
+    expect(await screen.findByTestId('annotation-item')).toHaveTextContent('quick brown fox');
+
+    const noteInput = screen.getByTestId('annotation-note-input');
+    fireEvent.change(noteInput, { target: { value: 'EPUB chapter note' } });
+    fireEvent.blur(noteInput);
+    await waitFor(() => expect(store.getState().annotations[0]?.note).toBe('EPUB chapter note'));
+
+    fireEvent.click(screen.getByTestId('annotation-jump-button'));
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe(CFI));
+
+    fireEvent.click(screen.getByTestId('annotation-delete-button'));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(0));
+    expect(engine.removed).toContain(CFI);
+
+    fireEvent.click(await screen.findByTestId('undo-delete-annotation-button'));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]?.note).toBe('EPUB chapter note');
   });
 
   it('shows why a book could not open', async () => {

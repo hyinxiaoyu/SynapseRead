@@ -8,6 +8,7 @@ import { createMemoryBackend, type MemoryFile } from '@/lib/backend/memoryBacken
 import {
   createStudySyncStore,
   selectBookmarks,
+  selectDocumentAnnotations,
   selectHighlights,
 } from '@/stores/useStudySyncStore';
 import { documentFixture } from '@/test/fixtures';
@@ -33,6 +34,10 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
     () => selectBookmarks(state.bookmarks, documentId),
     [state.bookmarks, documentId],
   );
+  const annotations = useMemo(
+    () => selectDocumentAnnotations(state.annotations, documentId),
+    [state.annotations, documentId],
+  );
   if (document?.format !== 'txt') throw new Error('expected a txt document');
   return (
     <TxtViewer
@@ -49,6 +54,12 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
       bookmarks={bookmarks}
       onAddBookmark={(anchor, label) => void state.addBookmark(documentId, anchor, label)}
       onRemoveBookmark={(id) => void state.removeBookmark(id)}
+      annotations={annotations}
+      onCreateAnnotation={(options) => void state.createAnnotationFromSelection(options)}
+      onUpdateAnnotation={(id, patch) => void state.updateAnnotation(id, patch)}
+      onDeleteAnnotation={(id) => void state.removeAnnotation(id)}
+      canUndoAnnotationDelete={state.deletedAnnotationHistory.length > 0}
+      onUndoAnnotationDelete={() => void state.undoRemoveAnnotation()}
     />
   );
 }
@@ -545,6 +556,41 @@ describe('TxtViewer', () => {
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
     fireEvent.click(removeButtons[0] as HTMLElement);
     await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
+  });
+
+  it('creates, lists, jumps to, edits, deletes, and undoes independent highlights and notes without creating MindMap cards', async () => {
+    const bytes = documentFixture('sample.txt');
+    const { store, documentId } = await setup(bytes);
+    render(<Harness store={store} documentId={documentId} />);
+
+    await selectText('quick brown fox');
+    fireEvent.click(screen.getByTestId('annotation-color-pink'));
+    fireEvent.click(screen.getByTestId('add-note-selection-button'));
+    const composerInput = await screen.findByTestId('selection-note-input');
+    fireEvent.change(composerInput, { target: { value: 'TXT note on line 2' } });
+    fireEvent.click(screen.getByTestId('save-selection-note-button'));
+
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().cards).toEqual([]);
+    expect(store.getState().nodes).toEqual([]);
+    const annotationId = store.getState().annotations[0]?.id as string;
+    const painted = await segmentWith('quick brown fox');
+    expect(painted).toHaveAttribute('data-annotation-id', annotationId);
+
+    // Open annotations panel and edit note & color.
+    fireEvent.click(screen.getByTestId('annotations-toggle-button'));
+    const editNoteInput = await screen.findByTestId('annotation-note-input');
+    fireEvent.change(editNoteInput, { target: { value: 'Updated TXT note' } });
+    fireEvent.blur(editNoteInput);
+    await waitFor(() => expect(store.getState().annotations[0]?.note).toBe('Updated TXT note'));
+
+    // Delete and undo within the current session.
+    fireEvent.click(screen.getByTestId('annotation-delete-button'));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(0));
+
+    fireEvent.click(await screen.findByTestId('undo-delete-annotation-button'));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]?.note).toBe('Updated TXT note');
   });
 
   it('shows a read failure instead of an empty page', async () => {

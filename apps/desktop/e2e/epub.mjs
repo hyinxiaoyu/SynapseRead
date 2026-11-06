@@ -282,4 +282,33 @@ export async function epubFlow(page) {
     'removing EPUB bookmark',
   );
   await page.clickButton('Bookmarks');
+
+  // Independent highlights & notes in EPUB: highlight without creating a MindMap card, delete, and undo.
+  const epubPoints = await textPoints(page, 'final target sentence');
+  await page.drag(epubPoints.start, epubPoints.end);
+  await page.clickButton('Highlight selection');
+  await page.waitFor(
+    `${visibleViewer}?.querySelector('[data-testid="annotations-count"]')?.textContent === '4'`,
+    'EPUB independent highlight count (3 excerpts + 1 independent)',
+  );
+  await page.clickButton('Annotations');
+  await page.waitFor(
+    `${visibleViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 4`,
+    'EPUB annotations list items',
+  );
+  await page.evaluate(
+    `[...${visibleViewer}.querySelectorAll('[data-testid="annotation-delete-button"]')].at(-1).click()`,
+  );
+  await page.waitFor(
+    `${visibleViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 3`,
+    'deleting EPUB independent highlight',
+  );
+  await page.evaluate(
+    `${visibleViewer}.querySelector('[data-testid="undo-delete-annotation-button"]').click()`,
+  );
+  await page.waitFor(
+    `${visibleViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 4`,
+    'undoing EPUB highlight deletion',
+  );
+  await page.clickButton('Annotations');
 }

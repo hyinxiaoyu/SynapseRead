@@ -13,11 +13,18 @@ export interface NormalizedRect {
   height: number;
 }
 
-/** Covers both text highlights and rectangular area/image captures. */
+/** Normalized rectangles on a single PDF page when an anchor spans multiple pages. */
+export interface PdfPageSpan {
+  pageIndex: number;
+  rects: NormalizedRect[];
+}
+
+/** Covers both text highlights (including cross-page spans) and rectangular area/image captures. */
 export interface PdfAnchor {
   format: 'pdf';
   pageIndex: number;
   rects: NormalizedRect[];
+  pageSpans?: PdfPageSpan[];
 }
 
 export interface EpubAnchor {
@@ -77,8 +84,24 @@ export interface Annotation {
   anchor: AnchorLocation;
   excerptText: string | null;
   excerptImagePath: string | null;
+  note?: string | null;
   color: string;
   createdAt: string;
+}
+
+export interface CreateAnnotationInput {
+  documentId: string;
+  notebookId: string;
+  anchor: AnchorLocation;
+  excerptText: string | null;
+  excerptImagePng: string | null;
+  note: string | null;
+  color: string;
+}
+
+export interface AnnotationPatch {
+  note: string | null;
+  color: string | null;
 }
 
 export interface NoteCard {
@@ -319,6 +342,17 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   onAddBookmark?: (anchor: AnchorOf<F>, label?: string) => void;
   /** Removes a persisted bookmark by id. */
   onRemoveBookmark?: (bookmarkId: string) => void;
+  /** Persisted annotations (both independent highlights/notes and card-linked excerpts) for this document. */
+  annotations?: readonly Annotation[];
+  /** Creates an independent highlight/note from the current selection without creating a MindMap node. */
+  onCreateAnnotation?: (options?: { color?: string; note?: string }) => void;
+  /** Updates an annotation's inline note and/or color. */
+  onUpdateAnnotation?: (annotationId: string, patch: AnnotationPatch) => void;
+  /** Deletes an annotation from this document. */
+  onDeleteAnnotation?: (annotationId: string) => void;
+  /** Undoes the most recent annotation deletion in this session, if available. */
+  canUndoAnnotationDelete?: boolean;
+  onUndoAnnotationDelete?: () => void;
 }
 
 const isFiniteNumber = (value: unknown): value is number =>
@@ -335,15 +369,42 @@ const isRect = (value: unknown): value is NormalizedRect => {
   );
 };
 
+const isPdfPageSpan = (value: unknown): value is PdfPageSpan => {
+  if (typeof value !== 'object' || value === null) return false;
+  const span = value as Record<string, unknown>;
+  return (
+    isFiniteNumber(span.pageIndex) &&
+    Array.isArray(span.rects) &&
+    span.rects.length > 0 &&
+    span.rects.every(isRect)
+  );
+};
+
 /** Runtime guard for anchors arriving from outside the type system. */
 export function isAnchorLocation(value: unknown): value is AnchorLocation {
   if (typeof value !== 'object' || value === null) return false;
   const anchor = value as Record<string, unknown>;
   switch (anchor.format) {
-    case 'pdf':
-      return isFiniteNumber(anchor.pageIndex) && Array.isArray(anchor.rects)
-        ? anchor.rects.every(isRect)
-        : false;
+    case 'pdf': {
+      if (!isFiniteNumber(anchor.pageIndex) || !Array.isArray(anchor.rects)) return false;
+      if (!anchor.rects.every(isRect)) return false;
+      if (anchor.pageSpans !== undefined) {
+        if (
+          !Array.isArray(anchor.pageSpans) ||
+          anchor.pageSpans.length === 0 ||
+          !anchor.pageSpans.every(isPdfPageSpan)
+        ) {
+          return false;
+        }
+        if (anchor.pageSpans[0]?.pageIndex !== anchor.pageIndex) return false;
+        for (let index = 1; index < anchor.pageSpans.length; index += 1) {
+          const prev = anchor.pageSpans[index - 1]?.pageIndex;
+          const curr = anchor.pageSpans[index]?.pageIndex;
+          if (prev === undefined || curr === undefined || curr <= prev) return false;
+        }
+      }
+      return true;
+    }
     case 'epub':
       return typeof anchor.cfiRange === 'string' && typeof anchor.chapterHref === 'string';
     case 'txt':

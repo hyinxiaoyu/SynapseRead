@@ -14,6 +14,13 @@ import {
 
 import { Button } from '@/components/ui/button';
 import {
+  AnnotationsListToggleButton,
+  AnnotationsPanel,
+  SelectionAnnotationControls,
+  SelectionNoteComposer,
+  useAnnotationsController,
+} from '@/features/reader/AnnotationsPanel';
+import {
   BookmarksListToggleButton,
   BookmarksPanel,
   BookmarkToggleButton,
@@ -33,11 +40,14 @@ import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSideb
 import { PULSE_MS } from '@/features/reader/pulse';
 import { cn, describeError } from '@/lib/utils';
 import type {
+  Annotation,
   Bookmark,
   DocumentViewerProps,
   NormalizedRect,
   PdfAnchor,
+  PdfPageSpan,
   ReaderHighlight,
+  ReaderSelection,
 } from '@/types/domain';
 
 import {
@@ -416,6 +426,12 @@ function PdfPages({
   bookmarks,
   onAddBookmark,
   onRemoveBookmark,
+  annotations,
+  onCreateAnnotation,
+  onUpdateAnnotation,
+  onDeleteAnnotation,
+  canUndoAnnotationDelete,
+  onUndoAnnotationDelete,
 }: { engine: PdfDocumentHandle } & Omit<DocumentViewerProps<'pdf'>, 'content'>) {
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -459,7 +475,8 @@ function PdfPages({
     [sizeOf, scaleOf],
   );
 
-  const [pinnedPage, setPinnedPage] = useState<number | null>(null);
+  const [pinnedPages, setPinnedPages] = useState<readonly number[]>([]);
+  const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [captureMode, setCaptureMode] = useState(false);
   const [capture, setCapture] = useState<(CaptureBox & { highlightCount: number }) | null>(null);
   const [missedJump, setMissedJump] = useState(false);
@@ -481,7 +498,9 @@ function PdfPages({
       ) {
         if (page >= 0 && page < range.count) pages.add(page);
       }
-      if (pinnedPage !== null && pinnedPage < range.count) pages.add(pinnedPage);
+      for (const page of pinnedPages) {
+        if (page >= 0 && page < range.count) pages.add(page);
+      }
       return [...pages].sort((a, b) => a - b);
     },
   });
@@ -498,13 +517,15 @@ function PdfPages({
     if (!isActive) {
       if (selection?.anchorNode && root.contains(selection.anchorNode)) selection.removeAllRanges();
       hasSelection.current = false;
+      setActiveSelection(null);
       return;
     }
 
     const clear = () => {
       if (!hasSelection.current) return;
       hasSelection.current = false;
-      setPinnedPage(null);
+      setPinnedPages([]);
+      setActiveSelection(null);
       onSelectionChange(null);
     };
     const onChange = () => {
@@ -515,27 +536,40 @@ function PdfPages({
         if (!capture) clear();
         return;
       }
-      const startElement =
-        range.startContainer.nodeType === Node.ELEMENT_NODE
-          ? (range.startContainer as Element)
-          : range.startContainer.parentElement;
-      const pageElement = startElement?.closest<HTMLElement>('[data-page-index]');
-      const selected = pageElement && readPageSelection(range, pageElement);
-      if (!pageElement || !selected) {
+      const pageElements = Array.from(root.querySelectorAll<HTMLElement>('[data-page-index]'));
+      const spans: PdfPageSpan[] = [];
+      const texts: string[] = [];
+      for (const pageElement of pageElements) {
+        if (!range.intersectsNode(pageElement)) continue;
+        const selected = readPageSelection(range, pageElement);
+        if (!selected) continue;
+        const pageIndex = Number(pageElement.dataset.pageIndex);
+        spans.push({ pageIndex, rects: selected.rects });
+        texts.push(selected.text);
+      }
+      spans.sort((a, b) => a.pageIndex - b.pageIndex);
+      const firstSpan = spans[0];
+      if (!firstSpan) {
         clear();
         return;
       }
-      // `PdfAnchor` addresses one page, so a selection crossing pages keeps the first.
-      const pageIndex = Number(pageElement.dataset.pageIndex);
+      const anchor: PdfAnchor = {
+        format: 'pdf',
+        pageIndex: firstSpan.pageIndex,
+        rects: firstSpan.rects,
+        ...(spans.length > 1 ? { pageSpans: spans } : {}),
+      };
+      const nextSelection: ReaderSelection = {
+        documentId,
+        anchor,
+        text: texts.join('\n'),
+        imagePng: null,
+      };
       hasSelection.current = true;
       setCapture(null);
-      setPinnedPage(pageIndex);
-      onSelectionChange({
-        documentId,
-        anchor: { format: 'pdf', pageIndex, rects: selected.rects },
-        text: selected.text,
-        imagePng: null,
-      });
+      setPinnedPages(spans.map((span) => span.pageIndex));
+      setActiveSelection(nextSelection);
+      onSelectionChange(nextSelection);
     };
     view.addEventListener('selectionchange', onChange);
     return () => view.removeEventListener('selectionchange', onChange);
@@ -547,12 +581,14 @@ function PdfPages({
       hasSelection.current = true;
       setCapture({ pageIndex, rect, highlightCount: highlights.length });
       setCaptureMode(false);
-      onSelectionChange({
+      const nextSelection: ReaderSelection = {
         documentId,
         anchor: { format: 'pdf', pageIndex, rects: [rect] },
         text: null,
         imagePng: cropCanvasToPng(canvas, rect),
-      });
+      };
+      setActiveSelection(nextSelection);
+      onSelectionChange(nextSelection);
     },
     [documentId, highlights.length, onSelectionChange],
   );
@@ -562,6 +598,7 @@ function PdfPages({
     if (capture) {
       setCapture(null);
       hasSelection.current = false;
+      setActiveSelection(null);
       onSelectionChange(null);
     }
     setCaptureMode(!captureMode);
@@ -880,6 +917,75 @@ function PdfPages({
   const jumpReady = jumpExists && sizes.length > jumpAnchor.pageIndex && width > 0;
   const [searchPulsing, setSearchPulsing] = useState(false);
   const searchPulseTimerRef = useRef<number | null>(null);
+  const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
+  const annotationPulseTimerRef = useRef<number | null>(null);
+
+  const navigateToAnnotation = useCallback(
+    (annotation: Annotation) => {
+      const pdfAnchor = asPdfAnchor(annotation.anchor);
+      if (!pdfAnchor || pdfAnchor.pageIndex < 0 || pdfAnchor.pageIndex >= engine.pageCount) {
+        setMissedJump(true);
+        return;
+      }
+      setMissedJump(false);
+      const targetFraction = pdfAnchor.rects[0]?.y ?? 0;
+      const previous = currentReturnLocation();
+      if (
+        previous.pageIndex !== pdfAnchor.pageIndex ||
+        Math.abs(previous.fraction - targetFraction) > 0.02
+      ) {
+        setReturnStack((stack) => [...stack, previous]);
+      }
+      const pageStart = offsetWithin(pdfAnchor.pageIndex, 0);
+      const top = offsetWithin(pdfAnchor.pageIndex, targetFraction);
+      const currentViewportHeight = scrollRef.current?.clientHeight ?? 0;
+      scrollToPageOffset(pdfAnchor.pageIndex, Math.max(top - currentViewportHeight / 3, pageStart));
+      if (annotationPulseTimerRef.current !== null)
+        window.clearTimeout(annotationPulseTimerRef.current);
+      setAnnotationPulsingId(annotation.id);
+      annotationPulseTimerRef.current = window.setTimeout(() => {
+        annotationPulseTimerRef.current = null;
+        setAnnotationPulsingId(null);
+      }, PULSE_MS);
+    },
+    [currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
+  );
+
+  const clearSelectionAfterAnnotate = useCallback(() => {
+    scrollRef.current?.ownerDocument.getSelection()?.removeAllRanges();
+    hasSelection.current = false;
+    setPinnedPages([]);
+    setActiveSelection(null);
+    setCapture(null);
+    onSelectionChange(null);
+  }, [onSelectionChange]);
+
+  const annotationsController = useAnnotationsController({
+    documentId,
+    selection: activeSelection,
+    annotations,
+    onCreateAnnotation: onCreateAnnotation
+      ? (options) => {
+          onCreateAnnotation(options);
+          clearSelectionAfterAnnotate();
+        }
+      : undefined,
+    onUpdateAnnotation,
+    onDeleteAnnotation,
+    canUndoAnnotationDelete,
+    onUndoAnnotationDelete,
+    isStaleAnnotation: (annotation) => {
+      const pdfAnchor = asPdfAnchor(annotation.anchor);
+      if (!pdfAnchor) return true;
+      if (pdfAnchor.pageSpans && pdfAnchor.pageSpans.length > 0) {
+        return pdfAnchor.pageSpans.some(
+          (span) => span.pageIndex < 0 || span.pageIndex >= engine.pageCount,
+        );
+      }
+      return pdfAnchor.pageIndex < 0 || pdfAnchor.pageIndex >= engine.pageCount;
+    },
+    onSelectAnnotation: navigateToAnnotation,
+  });
 
   const navigateToSearchMatch = useCallback(
     (match: PdfSearchMatch) => {
@@ -918,6 +1024,8 @@ function PdfPages({
   useEffect(
     () => () => {
       if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
+      if (annotationPulseTimerRef.current !== null)
+        window.clearTimeout(annotationPulseTimerRef.current);
     },
     [],
   );
@@ -948,11 +1056,25 @@ function PdfPages({
   });
 
   const activeSearchMatch = search.activeMatch;
+  const effectiveHighlights = useMemo(() => {
+    if (annotations !== undefined) return highlights;
+    const localHighlights: ReaderHighlight[] = annotationsController.annotations.map(
+      ({ id, anchor, color }) => ({
+        annotationId: id,
+        anchor,
+        color,
+      }),
+    );
+    return [...highlights, ...localHighlights];
+  }, [annotations, annotationsController.annotations, highlights]);
+
   const pulsingAnnotationId = jumpReady
     ? (jumpRequest?.annotationId ?? null)
-    : searchPulsing && activeSearchMatch
-      ? SEARCH_HIGHLIGHT_ID
-      : null;
+    : annotationPulsingId
+      ? annotationPulsingId
+      : searchPulsing && activeSearchMatch
+        ? SEARCH_HIGHLIGHT_ID
+        : null;
 
   const viewportHeight = scrollRef.current?.clientHeight;
   const lastHandledJumpNonce = useRef<number | null>(null);
@@ -994,26 +1116,42 @@ function PdfPages({
 
   const byPage = useMemo(() => {
     const pages = new Map<number, ReaderHighlight[]>();
-    for (const highlight of highlights) {
-      const anchor = asPdfAnchor(highlight.anchor);
-      if (anchor) pages.set(anchor.pageIndex, [...(pages.get(anchor.pageIndex) ?? []), highlight]);
-    }
-    if (activeSearchMatch) {
-      pages.set(activeSearchMatch.pageIndex, [
-        ...(pages.get(activeSearchMatch.pageIndex) ?? []),
+    const addPageHighlight = (
+      pageIndex: number,
+      annotationId: string,
+      rects: NormalizedRect[],
+      color: string,
+    ) => {
+      pages.set(pageIndex, [
+        ...(pages.get(pageIndex) ?? []),
         {
-          annotationId: SEARCH_HIGHLIGHT_ID,
-          anchor: {
-            format: 'pdf',
-            pageIndex: activeSearchMatch.pageIndex,
-            rects: [...activeSearchMatch.rects],
-          },
-          color: SEARCH_HIGHLIGHT_COLOR,
+          annotationId,
+          anchor: { format: 'pdf', pageIndex, rects },
+          color,
         },
       ]);
+    };
+    for (const highlight of effectiveHighlights) {
+      const anchor = asPdfAnchor(highlight.anchor);
+      if (!anchor) continue;
+      if (anchor.pageSpans && anchor.pageSpans.length > 0) {
+        for (const span of anchor.pageSpans) {
+          addPageHighlight(span.pageIndex, highlight.annotationId, span.rects, highlight.color);
+        }
+      } else {
+        addPageHighlight(anchor.pageIndex, highlight.annotationId, anchor.rects, highlight.color);
+      }
+    }
+    if (activeSearchMatch) {
+      addPageHighlight(
+        activeSearchMatch.pageIndex,
+        SEARCH_HIGHLIGHT_ID,
+        [...activeSearchMatch.rects],
+        SEARCH_HIGHLIGHT_COLOR,
+      );
     }
     return pages;
-  }, [highlights, activeSearchMatch]);
+  }, [effectiveHighlights, activeSearchMatch]);
 
   const virtualItems = virtualizer.getVirtualItems();
   const maxPageWidth = virtualItems.reduce(
@@ -1033,7 +1171,7 @@ function PdfPages({
       data-zoom-mode={zoomMode}
     >
       <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b px-2 py-1 text-xs text-muted-foreground">
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           <Button
             variant={tocOpen ? 'secondary' : 'ghost'}
             size="sm"
@@ -1066,6 +1204,15 @@ function PdfPages({
             open={bookmarksController.open}
             count={bookmarksController.bookmarks.length}
             onToggle={bookmarksController.togglePanel}
+          />
+          <AnnotationsListToggleButton
+            open={annotationsController.open}
+            count={annotationsController.annotations.length}
+            onToggle={annotationsController.togglePanel}
+          />
+          <SelectionAnnotationControls
+            hasSelection={activeSelection !== null}
+            controller={annotationsController}
           />
         </div>
         <form
@@ -1172,6 +1319,11 @@ function PdfPages({
       </div>
       <DocumentSearchBar search={search} />
       <BookmarksPanel controller={bookmarksController} />
+      <SelectionNoteComposer
+        hasSelection={activeSelection !== null}
+        controller={annotationsController}
+      />
+      <AnnotationsPanel controller={annotationsController} />
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt is on a page this file does not have. The file may have changed.
