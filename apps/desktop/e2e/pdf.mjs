@@ -354,4 +354,80 @@ export async function pdfFlow(page) {
     'undoing PDF highlight deletion',
   );
   await page.clickButton('Annotations');
+
+  // Lazy thumbnails, embedded PDF annotations, internal links, display modes, and rotation.
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnails-toggle"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnail-3"]')?.getAttribute('aria-current') === 'page'`,
+    'PDF thumbnails sidebar active page 4',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnail-0"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '1'`,
+    'jumping to page 1 via PDF thumbnail click',
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-embedded-annotation"]')?.dataset.annotationSubtype === 'Highlight'`,
+    'embedded PDF Highlight annotation on page 1',
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-unsupported-annotations-notice"]')?.textContent.includes('Stamp')`,
+    'unsupported PDF Stamp annotation disclosure banner',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-internal-link"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '4'`,
+    'PDF internal link jump to page 4',
+  );
+  await page.clickButton('Return to previous location');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '1'`,
+    'returning from PDF internal link jump to page 1',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-mode-single"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'single' && document.querySelectorAll('[data-page-index]').length === 1`,
+    'PDF single-page display mode',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-mode-two-page"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'two-page' && document.querySelector('[data-page-index="1"]') !== null`,
+    'PDF two-page display mode',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-rotate-button"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.rotation === '90'`,
+    'PDF view rotation 90 degrees',
+  );
+  for (let step = 0; step < 3; step += 1) {
+    await page.evaluate(
+      `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-rotate-button"]').click()`,
+    );
+  }
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.rotation === '0'`,
+    'PDF view rotation restored to 0 degrees',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-mode-continuous"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'continuous'`,
+    'PDF continuous display mode restored',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnails-toggle"]').click()`,
+  );
 }

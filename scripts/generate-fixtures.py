@@ -56,13 +56,14 @@ def build_pdf():
                   b"/CapHeight 880/StemV 93>>")
     kids = []
     next_id = 7
-    for width, height, content in pages:
+    for index, (width, height, content) in enumerate(pages):
         page_id, content_id = next_id, next_id + 1
         next_id += 2
         kids.append(f"{page_id} 0 R")
+        annots_entry = "/Annots[21 0 R 22 0 R 23 0 R]" if index == 0 else ""
         objects[page_id] = (
             f"<</Type/Page/Parent 2 0 R/MediaBox[0 0 {width} {height}]"
-            f"/Resources<</Font<</F1 3 0 R/F2 4 0 R>>>>/Contents {content_id} 0 R>>"
+            f"/Resources<</Font<</F1 3 0 R/F2 4 0 R>>>>{annots_entry}/Contents {content_id} 0 R>>"
         ).encode()
         data = content.encode("latin-1")
         objects[content_id] = b"<</Length %d>>\nstream\n%s\nendstream" % (len(data), data)
@@ -75,6 +76,17 @@ def build_pdf():
     )
     objects[19] = b"<</Title(Blue Box Section)/Parent 18 0 R/Dest[11 0 R /XYZ 0 792 null]>>"
     objects[20] = b"<</Title(Part Two)/Parent 17 0 R/Prev 18 0 R/Dest[13 0 R /XYZ 0 595 null]>>"
+    # Page 1 annotations: internal link to Page 4, embedded Highlight with note, and unsupported Stamp.
+    objects[21] = (
+        b"<</Type/Annot/Subtype/Link/Rect[72 620 260 640]/Border[0 0 0]"
+        b"/Dest[13 0 R /XYZ 0 595 null]>>"
+    )
+    objects[22] = (
+        b"<</Type/Annot/Subtype/Highlight/Rect[72 670 300 688]"
+        b"/QuadPoints[72 688 300 688 72 670 300 670]/C[1 0.85 0.2]"
+        b"/T(Reviewer)/Contents(Embedded PDF review note)>>"
+    )
+    objects[23] = b"<</Type/Annot/Subtype/Stamp/Rect[420 700 520 740]/Name/Draft>>"
 
     out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
     offsets = {}

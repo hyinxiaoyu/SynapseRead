@@ -9,7 +9,7 @@ import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
 import type { DocumentSource, NormalizedRect } from '@/types/domain';
 
-import { canvasRegion, normalizeBoxes } from './pdfGeometry';
+import { canvasRegion, normalizeBoxes, type PdfRotation } from './pdfGeometry';
 
 // The legacy build because the modern one needs newer WebKit than we target: see
 // `docs/adr/0004-pdfjs-worker-csp.md`, which also explains everything else here.
@@ -40,6 +40,31 @@ export interface PdfPageText {
   runs: readonly PdfTextRun[];
 }
 
+export interface PdfInternalLink {
+  id: string;
+  rect: NormalizedRect;
+  targetPageIndex: number;
+  title?: string;
+}
+
+export type PdfSupportedEmbeddedSubtype =
+  'Highlight' | 'Text' | 'FreeText' | 'Underline' | 'StrikeOut';
+
+export interface PdfEmbeddedAnnotation {
+  id: string;
+  subtype: PdfSupportedEmbeddedSubtype;
+  rects: readonly NormalizedRect[];
+  contents: string;
+  author?: string;
+  color: string;
+}
+
+export interface PdfPageAnnotations {
+  links: readonly PdfInternalLink[];
+  embeddedAnnotations: readonly PdfEmbeddedAnnotation[];
+  unsupportedSubtypes: readonly string[];
+}
+
 export interface Cancellable {
   promise: Promise<unknown>;
   cancel(): void;
@@ -54,10 +79,22 @@ export interface PdfDocumentHandle {
   getOutline?(): Promise<readonly PdfOutlineItem[]>;
   /** Extracted text runs and normalized rects for a page, whether rendered or not. */
   getPageText?(pageIndex: number): Promise<PdfPageText>;
+  /** Internal links, visible embedded annotations, and disclosed unsupported subtypes on a page. */
+  getPageAnnotations?(pageIndex: number): Promise<PdfPageAnnotations>;
   /** Size in CSS pixels at scale 1, including the page's user unit. */
   pageSize(pageIndex: number): Promise<PageSize>;
-  renderPage(pageIndex: number, canvas: HTMLCanvasElement, scale: number): Cancellable;
-  renderTextLayer(pageIndex: number, container: HTMLElement, scale: number): Cancellable;
+  renderPage(
+    pageIndex: number,
+    canvas: HTMLCanvasElement,
+    scale: number,
+    rotation?: PdfRotation,
+  ): Cancellable;
+  renderTextLayer(
+    pageIndex: number,
+    container: HTMLElement,
+    scale: number,
+    rotation?: PdfRotation,
+  ): Cancellable;
   destroy(): void;
 }
 
@@ -154,6 +191,33 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
   });
   const pdf = await task.promise;
   const pageTextCache = new Map<number, Promise<PdfPageText>>();
+  const pageAnnotationsCache = new Map<number, Promise<PdfPageAnnotations>>();
+
+  const SUPPORTED_EMBEDDED_SUBTYPES = new Set<PdfSupportedEmbeddedSubtype>([
+    'Highlight',
+    'Text',
+    'FreeText',
+    'Underline',
+    'StrikeOut',
+  ]);
+
+  const toHexColor = (rawColor: unknown, fallback = '#fde047'): string => {
+    if (
+      (Array.isArray(rawColor) || ArrayBuffer.isView(rawColor)) &&
+      'length' in (rawColor as { length: number }) &&
+      (rawColor as { length: number }).length >= 3
+    ) {
+      const rgb = Array.from(rawColor as ArrayLike<number>).slice(0, 3);
+      return `#${rgb
+        .map((channel) =>
+          Math.min(255, Math.max(0, Math.round(channel)))
+            .toString(16)
+            .padStart(2, '0'),
+        )
+        .join('')}`;
+    }
+    return fallback;
+  };
 
   return {
     pageCount: pdf.numPages,
@@ -208,29 +272,172 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
       return promise;
     },
 
+    getPageAnnotations(pageIndex) {
+      const cached = pageAnnotationsCache.get(pageIndex);
+      if (cached) return cached;
+      const promise = (async (): Promise<PdfPageAnnotations> => {
+        const page = await pdf.getPage(pageIndex + 1);
+        const viewport = page.getViewport({ scale: 1 });
+        const pageBox = { left: 0, top: 0, width: viewport.width, height: viewport.height };
+        const rawList = (await page.getAnnotations({ intent: 'display' })) as readonly Record<
+          string,
+          unknown
+        >[];
+        const links: PdfInternalLink[] = [];
+        const embeddedAnnotations: PdfEmbeddedAnnotation[] = [];
+        const unsupportedSet = new Set<string>();
+
+        const normalizePdfRect = (rawRect: unknown): NormalizedRect | null => {
+          if (!Array.isArray(rawRect) || rawRect.length < 4) return null;
+          const [x1 = 0, y1 = 0] = viewport.convertToViewportPoint(
+            Number(rawRect[0]) || 0,
+            Number(rawRect[1]) || 0,
+          );
+          const [x2 = 0, y2 = 0] = viewport.convertToViewportPoint(
+            Number(rawRect[2]) || 0,
+            Number(rawRect[3]) || 0,
+          );
+          const left = Math.min(x1, x2);
+          const top = Math.min(y1, y2);
+          const width = Math.max(Math.abs(x2 - x1), 2);
+          const height = Math.max(Math.abs(y2 - y1), 2);
+          const [rect] = normalizeBoxes([{ left, top, width, height }], pageBox);
+          return rect ?? null;
+        };
+
+        for (let index = 0; index < rawList.length; index += 1) {
+          const raw = rawList[index];
+          if (!raw) continue;
+          const subtype = typeof raw.subtype === 'string' ? raw.subtype : '';
+          if (!subtype || subtype === 'Popup') continue;
+          const id =
+            typeof raw.id === 'string' && raw.id ? raw.id : `pdf-annot-${pageIndex}-${index}`;
+
+          if (subtype === 'Link') {
+            const rect = normalizePdfRect(raw.rect);
+            if (!rect) continue;
+            const targetPageIndex = await resolveDestPageIndex(pdf, raw.dest);
+            if (targetPageIndex !== null) {
+              const titleObj = raw.contentsObj as { str?: string } | undefined;
+              const title = (
+                titleObj?.str ?? (typeof raw.contents === 'string' ? raw.contents : '')
+              ).trim();
+              links.push({
+                id,
+                rect,
+                targetPageIndex,
+                ...(title ? { title } : {}),
+              });
+            }
+            continue;
+          }
+
+          if (SUPPORTED_EMBEDDED_SUBTYPES.has(subtype as PdfSupportedEmbeddedSubtype)) {
+            const rects: NormalizedRect[] = [];
+            const quadPoints = raw.quadPoints;
+            if (
+              (Array.isArray(quadPoints) || ArrayBuffer.isView(quadPoints)) &&
+              'length' in (quadPoints as { length: number }) &&
+              (quadPoints as { length: number }).length >= 8
+            ) {
+              const coords = Array.from(quadPoints as ArrayLike<number>);
+              for (let offset = 0; offset + 7 < coords.length; offset += 8) {
+                const points: [number, number][] = [
+                  viewport.convertToViewportPoint(coords[offset] ?? 0, coords[offset + 1] ?? 0) as [
+                    number,
+                    number,
+                  ],
+                  viewport.convertToViewportPoint(
+                    coords[offset + 2] ?? 0,
+                    coords[offset + 3] ?? 0,
+                  ) as [number, number],
+                  viewport.convertToViewportPoint(
+                    coords[offset + 4] ?? 0,
+                    coords[offset + 5] ?? 0,
+                  ) as [number, number],
+                  viewport.convertToViewportPoint(
+                    coords[offset + 6] ?? 0,
+                    coords[offset + 7] ?? 0,
+                  ) as [number, number],
+                ];
+                const xs = points.map((p) => p[0]);
+                const ys = points.map((p) => p[1]);
+                const left = Math.min(...xs);
+                const top = Math.min(...ys);
+                const width = Math.max(Math.max(...xs) - left, 2);
+                const height = Math.max(Math.max(...ys) - top, 2);
+                const [normalized] = normalizeBoxes([{ left, top, width, height }], pageBox);
+                if (normalized) rects.push(normalized);
+              }
+            }
+            if (rects.length === 0) {
+              const fallbackRect = normalizePdfRect(raw.rect);
+              if (fallbackRect) rects.push(fallbackRect);
+            }
+            if (rects.length === 0) continue;
+
+            const contentsObj = raw.contentsObj as { str?: string } | undefined;
+            const contents = (
+              contentsObj?.str ?? (typeof raw.contents === 'string' ? raw.contents : '')
+            ).trim();
+            const titleObj = raw.titleObj as { str?: string } | undefined;
+            const author = (
+              titleObj?.str ?? (typeof raw.title === 'string' ? raw.title : '')
+            ).trim();
+
+            embeddedAnnotations.push({
+              id,
+              subtype: subtype as PdfSupportedEmbeddedSubtype,
+              rects,
+              contents,
+              ...(author ? { author } : {}),
+              color: toHexColor(raw.color),
+            });
+            continue;
+          }
+
+          unsupportedSet.add(subtype);
+        }
+
+        return {
+          links,
+          embeddedAnnotations,
+          unsupportedSubtypes: [...unsupportedSet].sort(),
+        };
+      })();
+      pageAnnotationsCache.set(pageIndex, promise);
+      return promise;
+    },
+
     async pageSize(pageIndex) {
       const { width, height } = (await pdf.getPage(pageIndex + 1)).getViewport({ scale: 1 });
       return { width, height };
     },
 
-    renderPage(pageIndex, canvas, scale) {
+    renderPage(pageIndex, canvas, scale, rotation = 0) {
       return cancellableOnPage(pdf, pageIndex, (page) => {
         // Sharp on high-density displays, while layout stays in CSS pixels.
         const pixelRatio = window.devicePixelRatio || 1;
-        const viewport = page.getViewport({ scale: scale * pixelRatio });
+        const viewport = page.getViewport({
+          scale: scale * pixelRatio,
+          rotation: (page.rotate + rotation) % 360,
+        });
         canvas.width = Math.floor(viewport.width);
         canvas.height = Math.floor(viewport.height);
         return page.render({ canvas, viewport });
       });
     },
 
-    renderTextLayer(pageIndex, container, scale) {
+    renderTextLayer(pageIndex, container, scale, rotation = 0) {
       return cancellableOnPage(pdf, pageIndex, (page) => {
         container.replaceChildren();
         const layer = new TextLayer({
           textContentSource: page.streamTextContent({ includeMarkedContent: true }),
           container,
-          viewport: page.getViewport({ scale }),
+          viewport: page.getViewport({
+            scale,
+            rotation: (page.rotate + rotation) % 360,
+          }),
         });
         const promise = layer.render().then(() => {
           // Dragging past the last run would otherwise select the whole page.
@@ -244,6 +451,7 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
 
     destroy() {
       pageTextCache.clear();
+      pageAnnotationsCache.clear();
       void task.destroy();
       worker.destroy();
     },

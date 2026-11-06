@@ -1,5 +1,16 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Crop, ListTree, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
+import {
+  BookOpen,
+  Columns2,
+  Crop,
+  FileText,
+  LayoutGrid,
+  ListTree,
+  RotateCcw,
+  RotateCw,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -56,10 +67,18 @@ import {
   openPdfDocument,
   type PageSize,
   type PdfDocumentHandle,
+  type PdfInternalLink,
   type PdfOutlineItem,
+  type PdfPageAnnotations,
   type PdfPageText,
 } from './pdfEngine';
-import { mergeLineRects, normalizeBoxes } from './pdfGeometry';
+import {
+  mergeLineRects,
+  normalizeBoxes,
+  type PdfRotation,
+  rotateNormalizedRect,
+  unrotateNormalizedRect,
+} from './pdfGeometry';
 
 const PAGE_GAP_PX = 12;
 const SIDE_PADDING_PX = 12;
@@ -74,8 +93,12 @@ const DEFAULT_PAGE_SIZE: PageSize = { width: 612, height: 792 };
 const MIN_ZOOM_SCALE = 0.25;
 const MAX_ZOOM_SCALE = 4;
 const ZOOM_STEP = 0.25;
+const THUMBNAIL_WIDTH_PX = 92;
+const THUMBNAIL_ROW_HEIGHT_PX = 148;
 
 export type PdfZoomMode = 'fit-width' | 'fit-page' | 'actual-size' | 'custom';
+export type PdfDisplayMode = 'continuous' | 'single' | 'two-page';
+export type { PdfRotation };
 
 const asPdfAnchor = (anchor: { format: string } | null | undefined): PdfAnchor | null =>
   anchor?.format === 'pdf' ? (anchor as PdfAnchor) : null;
@@ -244,42 +267,191 @@ interface CaptureBox {
   rect: NormalizedRect;
 }
 
+const EMPTY_PAGE_ANNOTATIONS: PdfPageAnnotations = {
+  links: [],
+  embeddedAnnotations: [],
+  unsupportedSubtypes: [],
+};
+
+function PdfThumbnailItem({
+  engine,
+  pageIndex,
+  pageSize,
+  rotation,
+  isActive,
+  onSelect,
+}: {
+  engine: PdfDocumentHandle;
+  pageIndex: number;
+  pageSize: PageSize;
+  rotation: PdfRotation;
+  isActive: boolean;
+  onSelect: (pageIndex: number) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rotatedWidth = rotation === 90 || rotation === 270 ? pageSize.height : pageSize.width;
+  const rotatedHeight = rotation === 90 || rotation === 270 ? pageSize.width : pageSize.height;
+  const scale = Math.max(0.05, THUMBNAIL_WIDTH_PX / Math.max(rotatedWidth, 1));
+  const displayWidth = Math.max(24, Math.round(rotatedWidth * scale));
+  const displayHeight = Math.max(24, Math.min(116, Math.round(rotatedHeight * scale)));
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    return runCancellable(() => engine.renderPage(pageIndex, canvas, scale, rotation));
+  }, [engine, pageIndex, scale, rotation]);
+
+  return (
+    <button
+      type="button"
+      data-testid={`pdf-thumbnail-${pageIndex}`}
+      aria-label={`Thumbnail page ${pageIndex + 1}`}
+      aria-current={isActive ? 'page' : undefined}
+      onClick={() => onSelect(pageIndex)}
+      className={cn(
+        'flex w-full flex-col items-center gap-1 rounded p-1.5 text-xs transition-colors hover:bg-muted',
+        isActive && 'bg-primary/10 font-medium text-primary ring-1 ring-primary',
+      )}
+    >
+      <div
+        className="overflow-hidden rounded border bg-white shadow-xs"
+        style={{ width: displayWidth, height: displayHeight }}
+      >
+        <canvas ref={canvasRef} className="block size-full object-contain" />
+      </div>
+      <span className="tabular-nums">{pageIndex + 1}</span>
+    </button>
+  );
+}
+
+function PdfThumbnailsSidebar({
+  engine,
+  sizes,
+  rotation,
+  currentPageIndex,
+  onSelectPage,
+}: {
+  engine: PdfDocumentHandle;
+  sizes: readonly PageSize[];
+  rotation: PdfRotation;
+  currentPageIndex: number;
+  onSelectPage: (pageIndex: number) => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
+  const virtualizer = useVirtualizer({
+    count: engine.pageCount,
+    getScrollElement: () => listRef.current,
+    estimateSize: () => THUMBNAIL_ROW_HEIGHT_PX,
+    overscan: 2,
+  });
+
+  useEffect(() => {
+    virtualizer.scrollToIndex(currentPageIndex, { align: 'auto' });
+  }, [currentPageIndex, virtualizer]);
+
+  return (
+    <aside
+      data-testid="pdf-thumbnails-sidebar"
+      aria-label="Page thumbnails"
+      className="flex h-full w-36 shrink-0 flex-col border-r bg-background"
+    >
+      <div className="border-b px-2.5 py-1.5 text-xs font-medium text-muted-foreground">
+        Thumbnails
+      </div>
+      <div
+        ref={listRef}
+        data-testid="pdf-thumbnails-scroll"
+        className="min-h-0 flex-1 overflow-y-auto p-1.5"
+      >
+        <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualizer.getVirtualItems().map((item) => (
+            <div
+              key={item.key}
+              className="absolute top-0 left-0 w-full px-0.5"
+              style={{
+                height: item.size,
+                transform: `translateY(${item.start}px)`,
+              }}
+            >
+              <PdfThumbnailItem
+                engine={engine}
+                pageIndex={item.index}
+                pageSize={sizes[item.index] ?? sizes[0] ?? DEFAULT_PAGE_SIZE}
+                rotation={rotation}
+                isActive={item.index === currentPageIndex}
+                onSelect={onSelectPage}
+              />
+            </div>
+          ))}
+        </div>
+      </div>
+    </aside>
+  );
+}
+
 function PdfPage({
   engine,
   pageIndex,
   scale,
+  rotation,
   highlights,
   pulsingAnnotationId,
   captureMode,
   captureBox,
   onCapture,
+  onNavigateLink,
+  onPageAnnotationsLoaded,
 }: {
   engine: PdfDocumentHandle;
   pageIndex: number;
   scale: number;
+  rotation: PdfRotation;
   highlights: readonly ReaderHighlight[];
   pulsingAnnotationId: string | null;
   captureMode: boolean;
   captureBox: NormalizedRect | null;
   onCapture: (canvas: HTMLCanvasElement, rect: NormalizedRect) => void;
+  onNavigateLink: (link: PdfInternalLink) => void;
+  onPageAnnotationsLoaded: (pageIndex: number, annotations: PdfPageAnnotations) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<{ startX: number; startY: number; x: number; y: number } | null>(
     null,
   );
+  const [pageAnnotations, setPageAnnotations] =
+    useState<PdfPageAnnotations>(EMPTY_PAGE_ANNOTATIONS);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    return runCancellable(() => engine.renderPage(pageIndex, canvas, scale));
-  }, [engine, pageIndex, scale]);
+    return runCancellable(() => engine.renderPage(pageIndex, canvas, scale, rotation));
+  }, [engine, pageIndex, scale, rotation]);
 
   useEffect(() => {
     const layer = textLayerRef.current;
     if (!layer) return;
-    return runCancellable(() => engine.renderTextLayer(pageIndex, layer, scale));
-  }, [engine, pageIndex, scale]);
+    return runCancellable(() => engine.renderTextLayer(pageIndex, layer, scale, rotation));
+  }, [engine, pageIndex, scale, rotation]);
+
+  useEffect(() => {
+    if (!engine.getPageAnnotations) return;
+    let cancelled = false;
+    engine
+      .getPageAnnotations(pageIndex)
+      .then((loaded) => {
+        if (cancelled) return;
+        setPageAnnotations(loaded);
+        onPageAnnotationsLoaded(pageIndex, loaded);
+      })
+      .catch(() => {
+        if (!cancelled) setPageAnnotations(EMPTY_PAGE_ANNOTATIONS);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engine, pageIndex, onPageAnnotationsLoaded]);
 
   const pointIn = (event: ReactPointerEvent<HTMLElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
@@ -302,48 +474,123 @@ function PdfPage({
     if (rect) onCapture(canvas, rect);
   };
 
+  const rotatedCaptureBox = captureBox ? rotateNormalizedRect(captureBox, rotation) : null;
+
   return (
     <div
       data-page-index={pageIndex}
+      data-page-rotation={rotation}
       className="pdf-page relative bg-white shadow"
       style={{ '--scale-factor': scale, width: '100%', height: '100%' } as CSSProperties}
     >
       <canvas ref={canvasRef} className="block size-full" />
 
-      {highlights.map(({ annotationId, anchor, color }) =>
-        asPdfAnchor(anchor)?.rects.map((rect, index) => (
-          <div
-            key={`${annotationId}-${index}`}
-            data-annotation-id={annotationId}
-            className={cn(
-              'pointer-events-none absolute mix-blend-multiply',
-              pulsingAnnotationId === annotationId && 'anchor-pulse',
-            )}
-            style={
-              {
+      {pageAnnotations.embeddedAnnotations.map((annot) =>
+        annot.rects.map((rawRect, index) => {
+          const rect = rotateNormalizedRect(rawRect, rotation);
+          const isLineStyle = annot.subtype === 'Underline' || annot.subtype === 'StrikeOut';
+          return (
+            <div
+              key={`embedded-${annot.id}-${index}`}
+              data-testid="pdf-embedded-annotation"
+              data-annotation-subtype={annot.subtype}
+              title={
+                annot.contents
+                  ? `${annot.author ? `${annot.author}: ` : ''}${annot.contents}`
+                  : `${annot.subtype} annotation`
+              }
+              aria-label={
+                annot.contents
+                  ? `Embedded ${annot.subtype}: ${annot.contents}`
+                  : `Embedded ${annot.subtype}`
+              }
+              className={cn(
+                'pointer-events-auto absolute',
+                annot.subtype === 'Underline'
+                  ? 'border-b-2 border-amber-600/80'
+                  : annot.subtype === 'StrikeOut'
+                    ? 'border-b-2 border-rose-600/80'
+                    : 'mix-blend-multiply',
+              )}
+              style={{
                 left: `${rect.x * 100}%`,
                 top: `${rect.y * 100}%`,
                 width: `${rect.width * 100}%`,
                 height: `${rect.height * 100}%`,
-                backgroundColor: color,
-                '--anchor-pulse-color': color,
-              } as CSSProperties
-            }
-          />
-        )),
+                backgroundColor: isLineStyle ? 'transparent' : annot.color,
+              }}
+            >
+              {index === 0 && annot.contents && (
+                <span data-testid="pdf-embedded-annotation-note" className="sr-only">
+                  {annot.contents}
+                </span>
+              )}
+            </div>
+          );
+        }),
+      )}
+
+      {highlights.map(({ annotationId, anchor, color }) =>
+        asPdfAnchor(anchor)?.rects.map((rawRect, index) => {
+          const rect = rotateNormalizedRect(rawRect, rotation);
+          return (
+            <div
+              key={`${annotationId}-${index}`}
+              data-annotation-id={annotationId}
+              className={cn(
+                'pointer-events-none absolute mix-blend-multiply',
+                pulsingAnnotationId === annotationId && 'anchor-pulse',
+              )}
+              style={
+                {
+                  left: `${rect.x * 100}%`,
+                  top: `${rect.y * 100}%`,
+                  width: `${rect.width * 100}%`,
+                  height: `${rect.height * 100}%`,
+                  backgroundColor: color,
+                  '--anchor-pulse-color': color,
+                } as CSSProperties
+              }
+            />
+          );
+        }),
       )}
 
       <div ref={textLayerRef} data-testid="pdf-text-layer" className="textLayer" />
 
-      {captureBox && (
+      {pageAnnotations.links.map((link) => {
+        const rect = rotateNormalizedRect(link.rect, rotation);
+        return (
+          <button
+            key={link.id}
+            type="button"
+            data-testid="pdf-internal-link"
+            data-target-page={link.targetPageIndex}
+            aria-label={`Jump to linked page ${link.targetPageIndex + 1}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onNavigateLink(link);
+            }}
+            className="absolute z-10 cursor-pointer rounded-xs border border-transparent transition-colors hover:border-primary/50 hover:bg-primary/10 focus-visible:border-primary focus-visible:outline-none"
+            style={{
+              left: `${rect.x * 100}%`,
+              top: `${rect.y * 100}%`,
+              width: `${rect.width * 100}%`,
+              height: `${rect.height * 100}%`,
+            }}
+          />
+        );
+      })}
+
+      {rotatedCaptureBox && (
         <div
           data-testid="pdf-capture-box"
           className="pointer-events-none absolute border-2 border-primary"
           style={{
-            left: `${captureBox.x * 100}%`,
-            top: `${captureBox.y * 100}%`,
-            width: `${captureBox.width * 100}%`,
-            height: `${captureBox.height * 100}%`,
+            left: `${rotatedCaptureBox.x * 100}%`,
+            top: `${rotatedCaptureBox.y * 100}%`,
+            width: `${rotatedCaptureBox.width * 100}%`,
+            height: `${rotatedCaptureBox.height * 100}%`,
           }}
         />
       )}
@@ -384,6 +631,7 @@ function PdfPage({
 function readPageSelection(
   range: Range,
   pageElement: HTMLElement,
+  rotation: PdfRotation = 0,
 ): { rects: NormalizedRect[]; text: string } | null {
   const layer = pageElement.querySelector('.textLayer');
   if (!layer) return null;
@@ -409,7 +657,8 @@ function readPageSelection(
     text += part.toString();
   }
 
-  const rects = mergeLineRects(normalizeBoxes(boxes, box));
+  const viewportRects = mergeLineRects(normalizeBoxes(boxes, box));
+  const rects = viewportRects.map((rect) => unrotateNormalizedRect(rect, rotation));
   const cleaned = text.replace(/\n{2,}/g, '\n').trim();
   return rects.length > 0 && cleaned ? { rects, text: cleaned } : null;
 }
@@ -438,37 +687,46 @@ function PdfPages({
   const { width, height } = useSettledSize(scrollRef);
   const sizes = usePageSizes(engine);
   const [tocOpen, setTocOpen] = useState(false);
+  const [thumbnailsOpen, setThumbnailsOpen] = useState(false);
   const outline = usePdfOutline(engine, tocOpen);
   const outlineNodes = useMemo(() => toPdfOutlineNodes(outline), [outline]);
   const [zoomMode, setZoomMode] = useState<PdfZoomMode>('fit-width');
   const [customScale, setCustomScale] = useState(1);
+  const [displayMode, setDisplayMode] = useState<PdfDisplayMode>('continuous');
+  const [rotation, setRotation] = useState<PdfRotation>(0);
+  const [unsupportedSubtypes, setUnsupportedSubtypes] = useState<readonly string[]>([]);
   const contentWidth = Math.max(width - SIDE_PADDING_PX * 2, 1);
   const availableHeight = Math.max(height - PAGE_GAP_PX * 2, 1);
+  const availablePageWidth =
+    displayMode === 'two-page' ? Math.max((contentWidth - PAGE_GAP_PX) / 2, 1) : contentWidth;
 
   const sizeOf = useCallback(
-    (index: number) => sizes[index] ?? sizes[0] ?? DEFAULT_PAGE_SIZE,
-    [sizes],
+    (index: number): PageSize => {
+      const raw = sizes[index] ?? sizes[0] ?? DEFAULT_PAGE_SIZE;
+      return rotation === 90 || rotation === 270 ? { width: raw.height, height: raw.width } : raw;
+    },
+    [rotation, sizes],
   );
   const scaleOf = useCallback(
     (index: number) => {
       const size = sizeOf(index);
       switch (zoomMode) {
         case 'fit-width':
-          return contentWidth / size.width;
+          return availablePageWidth / size.width;
         case 'fit-page':
-          return Math.min(contentWidth / size.width, availableHeight / size.height);
+          return Math.min(availablePageWidth / size.width, availableHeight / size.height);
         case 'actual-size':
           return 1;
         case 'custom':
           return customScale;
       }
     },
-    [availableHeight, contentWidth, customScale, sizeOf, zoomMode],
+    [availableHeight, availablePageWidth, customScale, sizeOf, zoomMode],
   );
   const pageWidth = useCallback(
     (index: number) =>
-      zoomMode === 'fit-width' ? contentWidth : sizeOf(index).width * scaleOf(index),
-    [contentWidth, sizeOf, scaleOf, zoomMode],
+      zoomMode === 'fit-width' ? availablePageWidth : sizeOf(index).width * scaleOf(index),
+    [availablePageWidth, sizeOf, scaleOf, zoomMode],
   );
   const pageHeight = useCallback(
     (index: number) => sizeOf(index).height * scaleOf(index),
@@ -483,25 +741,93 @@ function PdfPages({
   const [returnStack, setReturnStack] = useState<PdfReturnLocation[]>([]);
   const pendingZoomTarget = useRef<PdfReturnLocation | null>(null);
 
+  // ---- Reopen at the last reading position ---------------------------------
+
+  const [initialCursor] = useState(() => asPdfAnchor(document.lastCursorAnchor));
+  const [initialJump] = useState(jumpRequest);
+  const [currentPageIndex, setCurrentPageIndex] = useState(() =>
+    initialCursor && initialCursor.pageIndex < engine.pageCount ? initialCursor.pageIndex : 0,
+  );
+  const [pageInput, setPageInput] = useState(() => String(currentPageIndex + 1));
+  const [pageInputInvalid, setPageInputInvalid] = useState(false);
+  const restored = useRef(initialCursor === null || initialJump !== null);
+  const lastReported = useRef(
+    initialCursor ? `${initialCursor.pageIndex}:${initialCursor.rects[0]?.y ?? 0}` : `0:0`,
+  );
+
+  useEffect(() => {
+    setPageInput(String(currentPageIndex + 1));
+    setPageInputInvalid(false);
+  }, [currentPageIndex]);
+
+  const rowCount =
+    displayMode === 'single'
+      ? 1
+      : displayMode === 'two-page'
+        ? Math.ceil(engine.pageCount / 2)
+        : engine.pageCount;
+
+  const rowOfPage = useCallback(
+    (pageIndex: number): number => {
+      if (displayMode === 'single') return 0;
+      if (displayMode === 'two-page') return Math.floor(pageIndex / 2);
+      return pageIndex;
+    },
+    [displayMode],
+  );
+
+  const pagesInRow = useCallback(
+    (rowIndex: number): readonly number[] => {
+      if (displayMode === 'single') return [currentPageIndex];
+      if (displayMode === 'two-page') {
+        const first = rowIndex * 2;
+        const second = first + 1;
+        return second < engine.pageCount ? [first, second] : [first];
+      }
+      return [rowIndex];
+    },
+    [currentPageIndex, displayMode, engine.pageCount],
+  );
+
+  const rowHeight = useCallback(
+    (rowIndex: number) => {
+      const pages = pagesInRow(rowIndex);
+      return Math.max(...pages.map((p) => pageHeight(p)), 1);
+    },
+    [pageHeight, pagesInRow],
+  );
+
+  const rowWidth = useCallback(
+    (rowIndex: number) => {
+      const pages = pagesInRow(rowIndex);
+      return (
+        pages.reduce((sum, p) => sum + pageWidth(p), 0) +
+        Math.max(0, pages.length - 1) * PAGE_GAP_PX
+      );
+    },
+    [pageWidth, pagesInRow],
+  );
+
   // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
   const virtualizer = useVirtualizer({
-    count: engine.pageCount,
+    count: rowCount,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (index) => pageHeight(index) + PAGE_GAP_PX,
+    estimateSize: (rowIndex) => rowHeight(rowIndex) + PAGE_GAP_PX,
     overscan: OVERSCAN_PAGES,
     rangeExtractor: (range) => {
-      const pages = new Set<number>();
+      const rows = new Set<number>();
       for (
-        let page = range.startIndex - range.overscan;
-        page <= range.endIndex + range.overscan;
-        page += 1
+        let row = range.startIndex - range.overscan;
+        row <= range.endIndex + range.overscan;
+        row += 1
       ) {
-        if (page >= 0 && page < range.count) pages.add(page);
+        if (row >= 0 && row < range.count) rows.add(row);
       }
       for (const page of pinnedPages) {
-        if (page >= 0 && page < range.count) pages.add(page);
+        const row = rowOfPage(page);
+        if (row >= 0 && row < range.count) rows.add(row);
       }
-      return [...pages].sort((a, b) => a - b);
+      return [...rows].sort((a, b) => a - b);
     },
   });
 
@@ -541,7 +867,7 @@ function PdfPages({
       const texts: string[] = [];
       for (const pageElement of pageElements) {
         if (!range.intersectsNode(pageElement)) continue;
-        const selected = readPageSelection(range, pageElement);
+        const selected = readPageSelection(range, pageElement, rotation);
         if (!selected) continue;
         const pageIndex = Number(pageElement.dataset.pageIndex);
         spans.push({ pageIndex, rects: selected.rects });
@@ -573,24 +899,25 @@ function PdfPages({
     };
     view.addEventListener('selectionchange', onChange);
     return () => view.removeEventListener('selectionchange', onChange);
-  }, [isActive, documentId, onSelectionChange, capture]);
+  }, [isActive, documentId, onSelectionChange, capture, rotation]);
 
   const onCapture = useCallback(
-    (pageIndex: number, canvas: HTMLCanvasElement, rect: NormalizedRect) => {
+    (pageIndex: number, canvas: HTMLCanvasElement, viewportRect: NormalizedRect) => {
       scrollRef.current?.ownerDocument.getSelection()?.removeAllRanges();
       hasSelection.current = true;
-      setCapture({ pageIndex, rect, highlightCount: highlights.length });
+      const canonicalRect = unrotateNormalizedRect(viewportRect, rotation);
+      setCapture({ pageIndex, rect: canonicalRect, highlightCount: highlights.length });
       setCaptureMode(false);
       const nextSelection: ReaderSelection = {
         documentId,
-        anchor: { format: 'pdf', pageIndex, rects: [rect] },
+        anchor: { format: 'pdf', pageIndex, rects: [canonicalRect] },
         text: null,
-        imagePng: cropCanvasToPng(canvas, rect),
+        imagePng: cropCanvasToPng(canvas, viewportRect),
       };
       setActiveSelection(nextSelection);
       onSelectionChange(nextSelection);
     },
-    [documentId, highlights.length, onSelectionChange],
+    [documentId, highlights.length, onSelectionChange, rotation],
   );
 
   const toggleCaptureMode = () => {
@@ -607,31 +934,13 @@ function PdfPages({
   // Excerpting adds a highlight, which then replaces the box.
   const visibleCapture = capture?.highlightCount === highlights.length ? capture : null;
 
-  // ---- Reopen at the last reading position ---------------------------------
-
-  const [initialCursor] = useState(() => asPdfAnchor(document.lastCursorAnchor));
-  const [initialJump] = useState(jumpRequest);
-  const [currentPageIndex, setCurrentPageIndex] = useState(() =>
-    initialCursor && initialCursor.pageIndex < engine.pageCount ? initialCursor.pageIndex : 0,
-  );
-  const [pageInput, setPageInput] = useState(() => String(currentPageIndex + 1));
-  const [pageInputInvalid, setPageInputInvalid] = useState(false);
-  const restored = useRef(initialCursor === null || initialJump !== null);
-  const lastReported = useRef(
-    initialCursor ? `${initialCursor.pageIndex}:${initialCursor.rects[0]?.y ?? 0}` : `0:0`,
-  );
-
-  useEffect(() => {
-    setPageInput(String(currentPageIndex + 1));
-    setPageInputInvalid(false);
-  }, [currentPageIndex]);
-
   const offsetWithin = useCallback(
     (pageIndex: number, fraction: number) => {
-      const [start] = virtualizer.getOffsetForIndex(pageIndex, 'start') ?? [0];
+      const rowIndex = rowOfPage(pageIndex);
+      const [start] = virtualizer.getOffsetForIndex(rowIndex, 'start') ?? [0];
       return start + fraction * pageHeight(pageIndex);
     },
-    [virtualizer, pageHeight],
+    [virtualizer, pageHeight, rowOfPage],
   );
 
   const lastScrollTop = useRef(0);
@@ -653,13 +962,22 @@ function PdfPages({
     ) {
       return { pageIndex: programmaticScrollRef.current.pageIndex, fraction: 0 };
     }
+    if (displayMode === 'single') {
+      const height = pageHeight(currentPageIndex);
+      const fraction = height > 0 ? Math.min(Math.max(lastScrollTop.current / height, 0), 0.99) : 0;
+      return { pageIndex: currentPageIndex, fraction };
+    }
     const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
     if (!item) return { pageIndex: currentPageIndex, fraction: 0 };
-    const height = pageHeight(item.index);
+    const pages = pagesInRow(item.index);
+    const pageIndex = pages.includes(currentPageIndex)
+      ? currentPageIndex
+      : (pages[0] ?? currentPageIndex);
+    const height = pageHeight(pageIndex);
     const fraction =
       height > 0 ? Math.min(Math.max((lastScrollTop.current - item.start) / height, 0), 0.99) : 0;
-    return { pageIndex: item.index, fraction };
-  }, [virtualizer, pageHeight, currentPageIndex]);
+    return { pageIndex, fraction };
+  }, [virtualizer, pageHeight, currentPageIndex, displayMode, pagesInRow]);
 
   const currentScale = scaleOf(currentPageIndex);
   const zoomPercent = Math.round(currentScale * 100);
@@ -690,6 +1008,32 @@ function PdfPages({
     [applyZoom, currentScale],
   );
 
+  const applyDisplayMode = useCallback(
+    (nextMode: PdfDisplayMode) => {
+      if (nextMode === displayMode) return;
+      pendingZoomTarget.current = currentReturnLocation();
+      setDisplayMode(nextMode);
+    },
+    [currentReturnLocation, displayMode],
+  );
+
+  const rotateClockwise = useCallback(() => {
+    pendingZoomTarget.current = currentReturnLocation();
+    setRotation((prev) => ((prev + 90) % 360) as PdfRotation);
+  }, [currentReturnLocation]);
+
+  const handlePageAnnotationsLoaded = useCallback(
+    (_pageIndex: number, loaded: PdfPageAnnotations) => {
+      if (loaded.unsupportedSubtypes.length === 0) return;
+      setUnsupportedSubtypes((prev) => {
+        const merged = new Set([...prev, ...loaded.unsupportedSubtypes]);
+        if (merged.size === prev.length) return prev;
+        return [...merged].sort();
+      });
+    },
+    [],
+  );
+
   // Page heights are computed rather than measured, so a change must be pushed in
   // before anything below reads an offset.
   useLayoutEffect(() => {
@@ -702,7 +1046,17 @@ function PdfPages({
       setCurrentPageIndex(target.pageIndex);
       virtualizer.scrollToOffset(nextTop);
     }
-  }, [virtualizer, sizes, contentWidth, availableHeight, zoomMode, customScale, offsetWithin]);
+  }, [
+    virtualizer,
+    sizes,
+    contentWidth,
+    availableHeight,
+    zoomMode,
+    customScale,
+    displayMode,
+    rotation,
+    offsetWithin,
+  ]);
 
   useLayoutEffect(() => {
     if (restored.current || !initialCursor || width === 0) return;
@@ -720,15 +1074,25 @@ function PdfPages({
   // ---- Reporting the reading position --------------------------------------
 
   const navigateToPage = useCallback(
-    (targetPageIndex: number) => {
+    (targetPageIndex: number, targetFraction = 0) => {
       if (targetPageIndex < 0 || targetPageIndex >= engine.pageCount) return;
       const previous = currentReturnLocation();
-      if (previous.pageIndex !== targetPageIndex || previous.fraction > 0.05) {
+      if (
+        previous.pageIndex !== targetPageIndex ||
+        Math.abs(previous.fraction - targetFraction) > 0.05
+      ) {
         setReturnStack((stack) => [...stack, previous]);
       }
-      scrollToPageOffset(targetPageIndex, offsetWithin(targetPageIndex, 0));
+      scrollToPageOffset(targetPageIndex, offsetWithin(targetPageIndex, targetFraction));
     },
     [engine.pageCount, currentReturnLocation, offsetWithin, scrollToPageOffset],
+  );
+
+  const navigateToInternalLink = useCallback(
+    (link: PdfInternalLink) => {
+      navigateToPage(link.targetPageIndex, 0);
+    },
+    [navigateToPage],
   );
 
   const handleReturnBack = () => {
@@ -803,20 +1167,17 @@ function PdfPages({
 
   const reportCursor = useCallback(() => {
     if (!restored.current) return;
-    const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
-    if (!item) return;
-    const height = pageHeight(item.index);
-    const fraction = Math.min(Math.max((lastScrollTop.current - item.start) / height, 0), 0.99);
-    const y = Math.round(fraction * 1e4) / 1e4;
-    const key = `${item.index}:${y}`;
+    const loc = currentReturnLocation();
+    const y = Math.round(loc.fraction * 1e4) / 1e4;
+    const key = `${loc.pageIndex}:${y}`;
     if (key === lastReported.current) return;
     lastReported.current = key;
     onCursorChange({
       format: 'pdf',
-      pageIndex: item.index,
+      pageIndex: loc.pageIndex,
       rects: [{ x: 0, y, width: 1, height: CURSOR_RECT_HEIGHT }],
     });
-  }, [virtualizer, pageHeight, onCursorChange]);
+  }, [currentReturnLocation, onCursorChange]);
 
   const pendingCursor = useRef<number | null>(null);
   const reportCursorRef = useRef(reportCursor);
@@ -836,9 +1197,15 @@ function PdfPages({
       }
     } else {
       programmaticScrollRef.current = null;
-      const item = virtualizer.getVirtualItemForOffset(nextScrollTop);
-      if (item && item.index !== currentPageIndex) {
-        setCurrentPageIndex(item.index);
+      if (displayMode !== 'single') {
+        const item = virtualizer.getVirtualItemForOffset(nextScrollTop);
+        if (item) {
+          const pages = pagesInRow(item.index);
+          const firstPage = pages[0];
+          if (firstPage !== undefined && !pages.includes(currentPageIndex)) {
+            setCurrentPageIndex(firstPage);
+          }
+        }
       }
     }
     if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
@@ -897,18 +1264,34 @@ function PdfPages({
         return;
       }
       if (event.shiftKey) return;
-      const currentPage = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
+      const currentPage =
+        displayMode === 'single'
+          ? currentPageIndex
+          : (pagesInRow(
+              virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0,
+            )[0] ?? currentPageIndex);
       if (event.key === 'ArrowRight' && currentPage + 1 < engine.pageCount) {
         event.preventDefault();
-        virtualizer.scrollToOffset(offsetWithin(currentPage + 1, 0));
+        scrollToPageOffset(currentPage + 1, offsetWithin(currentPage + 1, 0));
       } else if (event.key === 'ArrowLeft' && currentPage > 0) {
         event.preventDefault();
-        virtualizer.scrollToOffset(offsetWithin(currentPage - 1, 0));
+        scrollToPageOffset(currentPage - 1, offsetWithin(currentPage - 1, 0));
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [applyZoom, engine.pageCount, isActive, offsetWithin, stepZoom, virtualizer]);
+  }, [
+    applyZoom,
+    currentPageIndex,
+    displayMode,
+    engine.pageCount,
+    isActive,
+    offsetWithin,
+    pagesInRow,
+    scrollToPageOffset,
+    stepZoom,
+    virtualizer,
+  ]);
   // ---- Jumping -------------------------------------------------------------
 
   const jumpAnchor = asPdfAnchor(jumpRequest?.anchor);
@@ -1154,13 +1537,13 @@ function PdfPages({
   }, [effectiveHighlights, activeSearchMatch]);
 
   const virtualItems = virtualizer.getVirtualItems();
-  const maxPageWidth = virtualItems.reduce(
-    (max, item) => Math.max(max, pageWidth(item.index)),
-    pageWidth(currentPageIndex),
+  const maxRowWidth = virtualItems.reduce(
+    (max, item) => Math.max(max, rowWidth(item.index)),
+    rowWidth(rowOfPage(currentPageIndex)),
   );
   const innerMinWidth =
-    width > 0 && maxPageWidth > contentWidth + 1
-      ? `${Math.ceil(maxPageWidth + SIDE_PADDING_PX * 2)}px`
+    width > 0 && maxRowWidth > contentWidth + 1
+      ? `${Math.ceil(maxRowWidth + SIDE_PADDING_PX * 2)}px`
       : '100%';
 
   return (
@@ -1169,6 +1552,8 @@ function PdfPages({
       data-testid="pdf-viewer"
       data-pdf-worker={engine.usesRealWorker ? 'worker' : 'main-thread'}
       data-zoom-mode={zoomMode}
+      data-display-mode={displayMode}
+      data-rotation={rotation}
     >
       <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b px-2 py-1 text-xs text-muted-foreground">
         <div className="flex flex-wrap items-center gap-1">
@@ -1182,6 +1567,18 @@ function PdfPages({
           >
             <ListTree />
             Contents
+          </Button>
+          <Button
+            variant={thumbnailsOpen ? 'secondary' : 'ghost'}
+            size="sm"
+            className="h-6 px-2 text-xs"
+            data-testid="pdf-thumbnails-toggle"
+            aria-label="Page thumbnails"
+            aria-pressed={thumbnailsOpen}
+            onClick={() => setThumbnailsOpen((open) => !open)}
+          >
+            <LayoutGrid />
+            Thumbnails
           </Button>
           {returnStack.length > 0 && (
             <Button
@@ -1251,7 +1648,60 @@ function PdfPages({
             of {engine.pageCount}
           </span>
         </form>
-        <div role="group" aria-label="Zoom controls" className="flex items-center gap-0.5">
+        <div role="group" aria-label="Display mode" className="flex flex-wrap items-center gap-0.5">
+          <Button
+            variant={displayMode === 'continuous' ? 'secondary' : 'ghost'}
+            size="sm"
+            className="h-6 px-2 text-xs"
+            data-testid="pdf-mode-continuous"
+            aria-label="Continuous scroll"
+            aria-pressed={displayMode === 'continuous'}
+            onClick={() => applyDisplayMode('continuous')}
+          >
+            <BookOpen />
+            Continuous
+          </Button>
+          <Button
+            variant={displayMode === 'single' ? 'secondary' : 'ghost'}
+            size="sm"
+            className="h-6 px-2 text-xs"
+            data-testid="pdf-mode-single"
+            aria-label="Single page"
+            aria-pressed={displayMode === 'single'}
+            onClick={() => applyDisplayMode('single')}
+          >
+            <FileText />
+            Single page
+          </Button>
+          <Button
+            variant={displayMode === 'two-page' ? 'secondary' : 'ghost'}
+            size="sm"
+            className="h-6 px-2 text-xs"
+            data-testid="pdf-mode-two-page"
+            aria-label="Two pages"
+            aria-pressed={displayMode === 'two-page'}
+            onClick={() => applyDisplayMode('two-page')}
+          >
+            <Columns2 />
+            Two pages
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-xs"
+            data-testid="pdf-rotate-button"
+            aria-label="Rotate clockwise"
+            onClick={rotateClockwise}
+          >
+            <RotateCw />
+            Rotate
+          </Button>
+        </div>
+        <div
+          role="group"
+          aria-label="Zoom controls"
+          className="flex flex-wrap items-center gap-0.5"
+        >
           <Button
             variant={zoomMode === 'fit-width' ? 'secondary' : 'ghost'}
             size="sm"
@@ -1324,6 +1774,16 @@ function PdfPages({
         controller={annotationsController}
       />
       <AnnotationsPanel controller={annotationsController} />
+      {unsupportedSubtypes.length > 0 && (
+        <p
+          role="status"
+          data-testid="pdf-unsupported-annotations-notice"
+          className="shrink-0 border-b bg-muted/60 px-4 py-1 text-xs text-muted-foreground"
+        >
+          Unsupported PDF annotation types not shown: {unsupportedSubtypes.join(', ')}. Source PDF
+          is never modified.
+        </p>
+      )}
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt is on a page this file does not have. The file may have changed.
@@ -1335,7 +1795,16 @@ function PdfPages({
             items={outlineNodes}
             isActive={(targetPage) => targetPage === currentPageIndex}
             emptyMessage="No outline in this document."
-            onSelect={navigateToPage}
+            onSelect={(pageIndex) => navigateToPage(pageIndex)}
+          />
+        )}
+        {thumbnailsOpen && (
+          <PdfThumbnailsSidebar
+            engine={engine}
+            sizes={sizes}
+            rotation={rotation}
+            currentPageIndex={currentPageIndex}
+            onSelectPage={(pageIndex) => navigateToPage(pageIndex)}
           />
         )}
         {/*
@@ -1358,32 +1827,48 @@ function PdfPages({
           >
             {width > 0 &&
               virtualItems.map((item) => {
-                const itemWidth = pageWidth(item.index);
+                const pages = pagesInRow(item.index);
+                const itemWidth = rowWidth(item.index);
+                const itemHeight = rowHeight(item.index);
                 const itemLeft = Math.max(SIDE_PADDING_PX, (width - itemWidth) / 2);
                 return (
                   <div
-                    key={item.key}
-                    className="absolute"
+                    key={`${displayMode}-${item.key}`}
+                    className="absolute flex items-start"
                     style={{
                       top: 0,
                       left: itemLeft,
                       width: itemWidth,
-                      height: pageHeight(item.index),
+                      height: itemHeight,
+                      gap: PAGE_GAP_PX,
                       transform: `translateY(${item.start}px)`,
                     }}
                   >
-                    <PdfPage
-                      engine={engine}
-                      pageIndex={item.index}
-                      scale={scaleOf(item.index)}
-                      highlights={byPage.get(item.index) ?? EMPTY_HIGHLIGHTS}
-                      pulsingAnnotationId={pulsingAnnotationId}
-                      captureMode={captureMode}
-                      captureBox={
-                        visibleCapture?.pageIndex === item.index ? visibleCapture.rect : null
-                      }
-                      onCapture={(canvas, rect) => onCapture(item.index, canvas, rect)}
-                    />
+                    {pages.map((pageIndex) => (
+                      <div
+                        key={pageIndex}
+                        style={{
+                          width: pageWidth(pageIndex),
+                          height: pageHeight(pageIndex),
+                        }}
+                      >
+                        <PdfPage
+                          engine={engine}
+                          pageIndex={pageIndex}
+                          scale={scaleOf(pageIndex)}
+                          rotation={rotation}
+                          highlights={byPage.get(pageIndex) ?? EMPTY_HIGHLIGHTS}
+                          pulsingAnnotationId={pulsingAnnotationId}
+                          captureMode={captureMode}
+                          captureBox={
+                            visibleCapture?.pageIndex === pageIndex ? visibleCapture.rect : null
+                          }
+                          onCapture={(canvas, rect) => onCapture(pageIndex, canvas, rect)}
+                          onNavigateLink={navigateToInternalLink}
+                          onPageAnnotationsLoaded={handlePageAnnotationsLoaded}
+                        />
+                      </div>
+                    ))}
                   </div>
                 );
               })}

@@ -13,7 +13,7 @@ import {
 } from '@/stores/useStudySyncStore';
 import type { PdfAnchor } from '@/types/domain';
 
-import type { PdfOutlineItem, PdfPageText } from './pdfEngine';
+import type { PdfOutlineItem, PdfPageAnnotations, PdfPageText } from './pdfEngine';
 import { PdfViewer } from './PdfViewer';
 
 // jsdom cannot run pdf.js or draw a canvas: this replaces only the engine seam, and
@@ -24,6 +24,7 @@ const engineState = vi.hoisted(() => ({
   destroyed: 0,
   outline: [] as PdfOutlineItem[],
   pageTextGate: null as (() => Promise<void>) | null,
+  pageAnnotations: new Map<number, PdfPageAnnotations>(),
 }));
 
 const PNG = 'iVBORw0KGgoAAAA';
@@ -39,6 +40,12 @@ vi.mock('./pdfEngine', () => ({
         return engineState.usesRealWorker;
       },
       getOutline: async () => engineState.outline,
+      getPageAnnotations: async (pageIndex: number): Promise<PdfPageAnnotations> =>
+        engineState.pageAnnotations.get(pageIndex) ?? {
+          links: [],
+          embeddedAnnotations: [],
+          unsupportedSubtypes: [],
+        },
       getPageText: async (pageIndex: number): Promise<PdfPageText> => {
         if (engineState.pageTextGate) {
           await engineState.pageTextGate();
@@ -187,6 +194,7 @@ describe('PdfViewer', () => {
     engineState.opened = 0;
     engineState.destroyed = 0;
     engineState.pageTextGate = null;
+    engineState.pageAnnotations = new Map();
     engineState.outline = [
       {
         id: 'outline-0',
@@ -891,5 +899,100 @@ describe('PdfViewer', () => {
       color: '#93c5fd',
       note: 'Revised margin note',
     });
+  });
+
+  it('supports lazy thumbnails, continuous/single/two-page display modes, view rotation, internal links, and embedded annotations disclosure', async () => {
+    engineState.pageAnnotations.set(0, {
+      links: [
+        {
+          id: 'link-0-0',
+          rect: { x: 0.1, y: 0.2, width: 0.3, height: 0.04 },
+          targetPageIndex: 3,
+        },
+      ],
+      embeddedAnnotations: [
+        {
+          id: 'embed-0-0',
+          subtype: 'Highlight',
+          rects: [{ x: 0.15, y: 0.3, width: 0.4, height: 0.03 }],
+          contents: 'Embedded PDF review note',
+          author: 'Reviewer',
+          color: 'rgba(255, 217, 51, 0.38)',
+        },
+      ],
+      unsupportedSubtypes: ['Stamp'],
+    });
+
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    const page0 = await pageElement(0);
+
+    // Embedded annotation and unsupported subtype disclosure on Page 1.
+    const embedded = await screen.findByTestId('pdf-embedded-annotation');
+    expect(embedded).toHaveAttribute('data-annotation-subtype', 'Highlight');
+    expect(screen.getByTestId('pdf-embedded-annotation-note')).toHaveTextContent(
+      'Embedded PDF review note',
+    );
+    expect(await screen.findByTestId('pdf-unsupported-annotations-notice')).toHaveTextContent(
+      /Stamp/,
+    );
+
+    // Create a user highlight on Page 1 to verify geometry across rotation and display modes.
+    const node = textNode(page0, 0);
+    select([node, 0], [node, 10]);
+    fireEvent.click(screen.getByTestId('highlight-selection-button'));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+
+    const highlightEl = () =>
+      document.querySelector<HTMLElement>('[data-page-index="0"] [data-annotation-id]');
+    expect(highlightEl()?.style.left).toBe('10%');
+    expect(highlightEl()?.style.top).toBe('10%');
+
+    // Rotate clockwise (0 -> 90 -> 180 -> 270 -> 0) and verify rotated highlight geometry.
+    fireEvent.click(screen.getByTestId('pdf-rotate-button'));
+    expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-rotation', '90');
+    // At 90° clockwise, canonical (x=0.1, y=0.1, h=0.02) maps to x' = 1 - (0.1 + 0.02) = 0.88, y' = 0.1.
+    expect(parseFloat(highlightEl()?.style.left ?? '0')).toBeCloseTo(88, 2);
+    expect(parseFloat(highlightEl()?.style.top ?? '0')).toBeCloseTo(10, 2);
+
+    fireEvent.click(screen.getByTestId('pdf-rotate-button'));
+    expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-rotation', '180');
+    fireEvent.click(screen.getByTestId('pdf-rotate-button'));
+    expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-rotation', '270');
+    fireEvent.click(screen.getByTestId('pdf-rotate-button'));
+    expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-rotation', '0');
+    expect(highlightEl()?.style.left).toBe('10%');
+
+    // Internal link on Page 1 navigates to Page 4 (pageIndex 3) and supports Return Back.
+    const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+    fireEvent.click(await screen.findByTestId('pdf-internal-link'));
+    expect(pageInput).toHaveValue('4');
+    fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+    expect(pageInput).toHaveValue('1');
+
+    // Lazy thumbnails sidebar shows active page and jumps on click.
+    fireEvent.click(screen.getByTestId('pdf-thumbnails-toggle'));
+    expect(await screen.findByTestId('pdf-thumbnails-sidebar')).toBeInTheDocument();
+    expect(screen.getByTestId('pdf-thumbnail-0')).toHaveAttribute('aria-current', 'page');
+    fireEvent.click(screen.getByTestId('pdf-thumbnail-2'));
+    expect(pageInput).toHaveValue('3');
+    expect(screen.getByTestId('pdf-thumbnail-2')).toHaveAttribute('aria-current', 'page');
+
+    // Display modes: Single page and Two pages preserve current reading location (Page 3).
+    fireEvent.click(screen.getByTestId('pdf-mode-single'));
+    expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'single');
+    expect(pageInput).toHaveValue('3');
+    expect(document.querySelectorAll('[data-page-index]')).toHaveLength(1);
+    expect(document.querySelector('[data-page-index="2"]')).not.toBeNull();
+
+    fireEvent.click(screen.getByTestId('pdf-mode-two-page'));
+    expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'two-page');
+    expect(pageInput).toHaveValue('3');
+    expect(document.querySelector('[data-page-index="2"]')).not.toBeNull();
+    expect(document.querySelector('[data-page-index="3"]')).not.toBeNull();
+
+    fireEvent.click(screen.getByTestId('pdf-mode-continuous'));
+    expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'continuous');
+    expect(pageInput).toHaveValue('3');
   });
 });

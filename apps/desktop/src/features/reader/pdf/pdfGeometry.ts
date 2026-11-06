@@ -72,3 +72,55 @@ export function canvasRegion(
     height: Math.max(1, Math.round(rect.height * canvas.height)),
   };
 }
+
+export type PdfRotation = 0 | 90 | 180 | 270;
+
+function clampedNormalizedRect(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): NormalizedRect {
+  const clampedX = round(clampUnit(x));
+  const clampedY = round(clampUnit(y));
+  const right = round(clampUnit(x + width));
+  const bottom = round(clampUnit(y + height));
+  return {
+    x: clampedX,
+    y: clampedY,
+    width: Math.max(0.0001, round(right - clampedX)),
+    height: Math.max(0.0001, round(bottom - clampedY)),
+  };
+}
+
+/**
+ * Rotates a canonical (`0°`) normalized rectangle clockwise into a rotated page viewport.
+ */
+export function rotateNormalizedRect(rect: NormalizedRect, rotation: PdfRotation): NormalizedRect {
+  switch (rotation) {
+    case 0:
+      return rect;
+    case 90:
+      return clampedNormalizedRect(1 - rect.y - rect.height, rect.x, rect.height, rect.width);
+    case 180:
+      return clampedNormalizedRect(
+        1 - rect.x - rect.width,
+        1 - rect.y - rect.height,
+        rect.width,
+        rect.height,
+      );
+    case 270:
+      return clampedNormalizedRect(rect.y, 1 - rect.x - rect.width, rect.height, rect.width);
+  }
+}
+
+/**
+ * Converts a normalized rectangle measured on a rotated page back into canonical (`0°`) page space.
+ */
+export function unrotateNormalizedRect(
+  rect: NormalizedRect,
+  rotation: PdfRotation,
+): NormalizedRect {
+  const inverse = ((360 - rotation) % 360) as PdfRotation;
+  return rotateNormalizedRect(rect, inverse);
+}

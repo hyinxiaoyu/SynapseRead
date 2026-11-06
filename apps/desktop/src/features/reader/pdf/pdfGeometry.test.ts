@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { canvasRegion, mergeLineRects, normalizeBoxes } from './pdfGeometry';
+import {
+  canvasRegion,
+  mergeLineRects,
+  normalizeBoxes,
+  rotateNormalizedRect,
+  unrotateNormalizedRect,
+} from './pdfGeometry';
 
 const page = { left: 100, top: 50, width: 200, height: 400 };
 
@@ -64,5 +70,36 @@ describe('canvasRegion', () => {
       { width: 100, height: 100 },
     );
     expect(region).toMatchObject({ width: 1, height: 1 });
+  });
+});
+
+describe('rotateNormalizedRect / unrotateNormalizedRect', () => {
+  const canonical = { x: 0.1, y: 0.2, width: 0.3, height: 0.15 };
+
+  it('rotates clockwise through 90, 180, and 270 degrees and round-trips back to canonical', () => {
+    expect(rotateNormalizedRect(canonical, 0)).toEqual(canonical);
+    expect(rotateNormalizedRect(canonical, 90)).toEqual({
+      x: 0.65,
+      y: 0.1,
+      width: 0.15,
+      height: 0.3,
+    });
+    expect(rotateNormalizedRect(canonical, 180)).toEqual({
+      x: 0.6,
+      y: 0.65,
+      width: 0.3,
+      height: 0.15,
+    });
+    expect(rotateNormalizedRect(canonical, 270)).toEqual({
+      x: 0.2,
+      y: 0.6,
+      width: 0.15,
+      height: 0.3,
+    });
+
+    for (const rotation of [0, 90, 180, 270] as const) {
+      const rotated = rotateNormalizedRect(canonical, rotation);
+      expect(unrotateNormalizedRect(rotated, rotation)).toEqual(canonical);
+    }
   });
 });
