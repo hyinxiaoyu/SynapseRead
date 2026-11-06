@@ -9,9 +9,9 @@ use uuid::Uuid;
 
 use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
-    AnchorLocation, Annotation, CardPatch, CreateExcerptInput, CreatedExcerpt, Document,
-    DocumentFormat, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph,
-    ReadingPreferences, StudyNotebook, Viewport,
+    AnchorLocation, Annotation, Bookmark, CardPatch, CreateBookmarkInput, CreateExcerptInput,
+    CreatedExcerpt, Document, DocumentFormat, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard,
+    NotebookGraph, ReadingPreferences, StudyNotebook, Viewport,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -20,6 +20,7 @@ use crate::{CoreError, CoreResult};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_reading_preferences.sql"),
+    include_str!("../migrations/0003_bookmarks.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -473,6 +474,68 @@ impl Database {
         )?;
         self.get_reading_preferences()
     }
+
+    // ---- Bookmarks -------------------------------------------------------
+
+    pub fn list_bookmarks(&self) -> CoreResult<Vec<Bookmark>> {
+        let mut statement = self
+            .conn
+            .prepare(&format!("{BOOKMARK_SELECT} ORDER BY created_at, id"))?;
+        Ok(statement
+            .query_map([], map_bookmark)?
+            .collect::<Result<_, _>>()?)
+    }
+
+    /// Creates a bookmark at `input.anchor`, or updates and returns the existing
+    /// bookmark when `(document_id, location_key)` is already bookmarked.
+    /// Does not create an annotation, card, or MindMap node.
+    pub fn create_bookmark(&mut self, input: &CreateBookmarkInput) -> CoreResult<Bookmark> {
+        input.anchor.validate()?;
+        let tx = self.conn.transaction()?;
+        check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
+
+        let label = input
+            .label
+            .as_deref()
+            .and_then(|raw| raw.lines().map(str::trim).find(|line| !line.is_empty()))
+            .map(truncate_label)
+            .unwrap_or_else(|| input.anchor.default_bookmark_label());
+        let location_key = input.anchor.location_key();
+        let anchor_type = input.anchor.format().as_str();
+        let anchor_json = serde_json::to_string(&input.anchor)?;
+
+        tx.execute(
+            "INSERT INTO bookmarks (id, document_id, anchor_type, anchor_payload_json,
+                 location_key, label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT (document_id, location_key) DO UPDATE SET
+                 anchor_payload_json = excluded.anchor_payload_json,
+                 label = excluded.label",
+            params![
+                new_id(),
+                input.document_id,
+                anchor_type,
+                anchor_json,
+                location_key,
+                label,
+            ],
+        )?;
+
+        let bookmark = tx.query_row(
+            &format!("{BOOKMARK_SELECT} WHERE document_id = ?1 AND location_key = ?2"),
+            params![input.document_id, location_key],
+            map_bookmark,
+        )?;
+        tx.commit()?;
+        Ok(bookmark)
+    }
+
+    pub fn delete_bookmark(&self, bookmark_id: &str) -> CoreResult<()> {
+        let changed = self
+            .conn
+            .execute("DELETE FROM bookmarks WHERE id = ?1", [bookmark_id])?;
+        expect_changed(changed, "bookmark", bookmark_id)
+    }
 }
 
 fn migrate(conn: &mut Connection) -> CoreResult<()> {
@@ -575,10 +638,14 @@ fn card_title(excerpt_text: Option<&str>) -> String {
     let first_line = excerpt_text
         .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
         .unwrap_or("Image excerpt");
-    if first_line.chars().count() <= CARD_TITLE_MAX_CHARS {
-        return first_line.to_owned();
+    truncate_label(first_line)
+}
+
+fn truncate_label(text: &str) -> String {
+    if text.chars().count() <= CARD_TITLE_MAX_CHARS {
+        return text.to_owned();
     }
-    let mut title: String = first_line.chars().take(CARD_TITLE_MAX_CHARS - 1).collect();
+    let mut title: String = text.chars().take(CARD_TITLE_MAX_CHARS - 1).collect();
     title.push('…');
     title
 }
@@ -694,6 +761,19 @@ fn map_edge(row: &Row<'_>) -> rusqlite::Result<MindMapEdge> {
         source_node_id: row.get(2)?,
         target_node_id: row.get(3)?,
         label: row.get(4)?,
+    })
+}
+
+const BOOKMARK_SELECT: &str =
+    "SELECT id, document_id, anchor_payload_json, label, created_at FROM bookmarks";
+
+fn map_bookmark(row: &Row<'_>) -> rusqlite::Result<Bookmark> {
+    Ok(Bookmark {
+        id: row.get(0)?,
+        document_id: row.get(1)?,
+        anchor: json_column(row, 2)?,
+        label: row.get(3)?,
+        created_at: row.get(4)?,
     })
 }
 
@@ -827,6 +907,18 @@ mod tests {
             (
                 "reading_preferences",
                 &["id", "preferences_json", "updated_at"],
+            ),
+            (
+                "bookmarks",
+                &[
+                    "id",
+                    "document_id",
+                    "anchor_type",
+                    "anchor_payload_json",
+                    "location_key",
+                    "label",
+                    "created_at",
+                ],
             ),
         ];
         for (table, columns) in expected {
@@ -1331,5 +1423,150 @@ mod tests {
             db.save_reading_preferences(&invalid),
             Err(CoreError::InvalidPreferences(_))
         ));
+    }
+
+    #[test]
+    fn bookmarks_round_trip_deduplicate_and_do_not_create_cards_or_annotations() {
+        let mut f = fixture();
+        let created =
+            f.db.create_bookmark(&CreateBookmarkInput {
+                document_id: f.document_id.clone(),
+                anchor: txt_anchor(),
+                label: Some("  Line 1 · some content\nignored  ".to_owned()),
+            })
+            .unwrap();
+        assert_eq!(created.document_id, f.document_id);
+        assert_eq!(created.anchor, txt_anchor());
+        assert_eq!(created.label, "Line 1 · some content");
+
+        // Adding another bookmark at the same byte offset deduplicates in place.
+        let same_location = AnchorLocation::Txt {
+            start_byte_offset: 0,
+            end_byte_offset: 8,
+            line_index: 0,
+        };
+        let deduplicated =
+            f.db.create_bookmark(&CreateBookmarkInput {
+                document_id: f.document_id.clone(),
+                anchor: same_location.clone(),
+                label: None,
+            })
+            .unwrap();
+        assert_eq!(deduplicated.id, created.id);
+        assert_eq!(deduplicated.anchor, same_location);
+        assert_eq!(deduplicated.label, "Line 1");
+        assert_eq!(f.db.list_bookmarks().unwrap().len(), 1);
+
+        // A second bookmark at a different byte offset creates a second entry.
+        let second =
+            f.db.create_bookmark(&CreateBookmarkInput {
+                document_id: f.document_id.clone(),
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 5,
+                    end_byte_offset: 12,
+                    line_index: 1,
+                },
+                label: Some("Chapter 2".to_owned()),
+            })
+            .unwrap();
+        assert_ne!(second.id, created.id);
+        assert_eq!(f.db.list_bookmarks().unwrap().len(), 2);
+
+        // Bookmarks never create annotations, note cards, or MindMap nodes.
+        for table in [
+            "annotations",
+            "note_cards",
+            "card_annotations",
+            "mindmap_nodes",
+            "mindmap_edges",
+        ] {
+            assert_eq!(count(&f.db, table), 0, "{table}");
+        }
+
+        f.db.delete_bookmark(&created.id).unwrap();
+        assert_eq!(f.db.list_bookmarks().unwrap(), vec![second]);
+        assert!(matches!(
+            f.db.delete_bookmark(&created.id),
+            Err(CoreError::NotFound {
+                entity: "bookmark",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bookmarks_reject_wrong_format_invalid_anchors_and_missing_documents() {
+        let mut f = fixture();
+        assert!(matches!(
+            f.db.create_bookmark(&CreateBookmarkInput {
+                document_id: "missing".to_owned(),
+                anchor: txt_anchor(),
+                label: None,
+            }),
+            Err(CoreError::NotFound {
+                entity: "document",
+                ..
+            })
+        ));
+
+        assert!(matches!(
+            f.db.create_bookmark(&CreateBookmarkInput {
+                document_id: f.document_id.clone(),
+                anchor: AnchorLocation::Pdf {
+                    page_index: 0,
+                    rects: vec![NormalizedRect {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 1.0,
+                        height: 0.1,
+                    }],
+                },
+                label: None,
+            }),
+            Err(CoreError::InvalidAnchor(_))
+        ));
+
+        assert!(matches!(
+            f.db.create_bookmark(&CreateBookmarkInput {
+                document_id: f.document_id,
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 4,
+                    end_byte_offset: 4,
+                    line_index: 0,
+                },
+                label: None,
+            }),
+            Err(CoreError::InvalidAnchor(_))
+        ));
+    }
+
+    #[test]
+    fn bookmarks_persist_across_database_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("app.sqlite3");
+        let book_path = dir.path().join("book.pdf");
+        std::fs::write(&book_path, "pdf").unwrap();
+
+        let saved = {
+            let mut db = Database::open(&db_path).unwrap();
+            let doc = db.register_document(&book_path).unwrap();
+            db.create_bookmark(&CreateBookmarkInput {
+                document_id: doc.id,
+                anchor: AnchorLocation::Pdf {
+                    page_index: 2,
+                    rects: vec![NormalizedRect {
+                        x: 0.0,
+                        y: 0.25,
+                        width: 1.0,
+                        height: 0.001,
+                    }],
+                },
+                label: Some("Page 3".to_owned()),
+            })
+            .unwrap()
+        };
+
+        let reopened = Database::open(&db_path).unwrap();
+        assert_eq!(reopened.list_bookmarks().unwrap(), vec![saved]);
     }
 }

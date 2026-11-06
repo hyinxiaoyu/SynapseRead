@@ -11,6 +11,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 
 import { Button } from '@/components/ui/button';
 import {
+  BookmarksListToggleButton,
+  BookmarksPanel,
+  BookmarkToggleButton,
+  useBookmarksController,
+} from '@/features/reader/BookmarksPanel';
+import {
   DocumentSearchBar,
   DocumentSearchToggleButton,
   SEARCH_HIGHLIGHT_COLOR,
@@ -28,6 +34,7 @@ import {
 } from '@/features/reader/ReadingPreferencesBar';
 import { cn, describeError } from '@/lib/utils';
 import {
+  type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentViewerProps,
   type EpubAnchor,
@@ -71,6 +78,25 @@ function toOutlineNodes(items: readonly EpubTocItem[]): OutlineNode<string>[] {
   }));
 }
 
+function findOutlineLabel(items: readonly EpubTocItem[], href: string): string | null {
+  const cleanHref = (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+  for (const item of items) {
+    const cleanTarget = (item.href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+    if (
+      cleanHref &&
+      cleanTarget &&
+      (cleanHref === cleanTarget ||
+        cleanHref.endsWith(`/${cleanTarget}`) ||
+        cleanTarget.endsWith(`/${cleanHref}`))
+    ) {
+      return item.label;
+    }
+    const nested = findOutlineLabel(item.children, href);
+    if (nested) return nested;
+  }
+  return null;
+}
+
 function shouldIgnoreKeyEvent(event: KeyboardEvent): boolean {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
     return true;
@@ -99,6 +125,9 @@ export function EpubViewer({
   onCursorChange,
   preferences,
   onPreferencesChange,
+  bookmarks,
+  onAddBookmark,
+  onRemoveBookmark,
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
@@ -116,6 +145,8 @@ export function EpubViewer({
     onPreferencesChange?.(patch);
   };
   const [currentHref, setCurrentHref] = useState<string | null>(null);
+  const [currentCfi, setCurrentCfi] = useState<string | null>(null);
+  const [staleBookmarkIds, setStaleBookmarkIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pageInfo, setPageInfo] = useState<{ page: number; totalPages: number } | null>(null);
   const [bookProgress, setBookProgress] = useState<{
     chapter: number;
@@ -200,6 +231,7 @@ export function EpubViewer({
         engine.onLocation((location) => {
           currentLocationRef.current = location;
           setCurrentHref(location.href);
+          setCurrentCfi(location.cfi);
           if (location.page !== undefined && location.totalPages !== undefined) {
             setPageInfo({ page: location.page, totalPages: location.totalPages });
           }
@@ -339,6 +371,69 @@ export function EpubViewer({
 
   const activeSearchMatch = search.activeMatch;
 
+  const navigateToBookmark = useCallback(
+    (bookmark: Bookmark) => {
+      if (!handle) return;
+      const epubAnchor = asEpubAnchor(bookmark.anchor);
+      if (!epubAnchor) {
+        setMissedJump(true);
+        return;
+      }
+      const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+      void handle
+        .display(epubAnchor.cfiRange)
+        .then(() => {
+          setMissedJump(false);
+          if (previous && previous !== epubAnchor.cfiRange) {
+            setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+          }
+        })
+        .catch(() => {
+          setStaleBookmarkIds((prev) => new Set(prev).add(bookmark.id));
+          setMissedJump(true);
+        });
+    },
+    [handle],
+  );
+
+  const bookmarksController = useBookmarksController<'epub'>({
+    documentId,
+    isActive,
+    bookmarks,
+    onAddBookmark,
+    onRemoveBookmark,
+    getCurrentLocation: () => {
+      const loc = currentLocationRef.current;
+      const cfiRange = loc?.cfi ?? currentCfi ?? initialCursor?.cfiRange ?? 'epubcfi(/6/2!/4/2)';
+      const chapterHref =
+        loc?.href ??
+        currentHref ??
+        initialCursor?.chapterHref ??
+        handle?.toc[0]?.href ??
+        'chapter-1.xhtml';
+      const chapterTitle =
+        findOutlineLabel(handle?.toc ?? [], chapterHref) ??
+        (bookProgress ? `Ch. ${bookProgress.chapter}` : chapterHref);
+      const label =
+        readingMode !== 'scroll' && pageInfo
+          ? `${chapterTitle} · Page ${pageInfo.page}`
+          : chapterTitle;
+      return {
+        anchor: { format: 'epub', cfiRange, chapterHref },
+        label,
+      };
+    },
+    isActiveBookmark: (bookmark) => {
+      const epubAnchor = asEpubAnchor(bookmark.anchor);
+      if (!epubAnchor) return false;
+      const activeCfi = currentCfi ?? currentLocationRef.current?.cfi ?? initialCursor?.cfiRange;
+      if (activeCfi) return epubAnchor.cfiRange === activeCfi;
+      return currentHref !== null && epubAnchor.chapterHref === currentHref;
+    },
+    isStaleBookmark: (bookmark) => staleBookmarkIds.has(bookmark.id),
+    onSelectBookmark: navigateToBookmark,
+  });
+
   useEffect(() => {
     if (!handle) return;
     const wanted = new Map<string, { cfiRange: string; color: string }>();
@@ -445,6 +540,7 @@ export function EpubViewer({
     if (!handle || !isActive) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (search.handleKeyDown(event)) return;
+      if (bookmarksController.handleKeyDown(event)) return;
       if (shouldIgnoreKeyEvent(event)) return;
       if (event.key === 'ArrowRight') {
         event.preventDefault();
@@ -460,7 +556,7 @@ export function EpubViewer({
       window.removeEventListener('keydown', onKeyDown);
       handle.onKeyDown(() => undefined);
     };
-  }, [handle, isActive, search]);
+  }, [bookmarksController, handle, isActive, search]);
 
   useEffect(() => {
     // The store drops the selection on a tab switch; keep the frame in step.
@@ -537,11 +633,12 @@ export function EpubViewer({
       data-reading-theme={effectivePreferences.theme}
       data-reading-width={effectivePreferences.readingWidth}
     >
-      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b bg-background px-3 text-foreground">
-        <div className="flex items-center gap-1">
+      <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-background px-2 py-1 text-foreground">
+        <div className="flex flex-wrap items-center gap-1">
           <Button
             variant={tocOpen ? 'secondary' : 'ghost'}
             size="sm"
+            className="h-6 px-2 text-xs"
             aria-label="Table of contents"
             aria-pressed={tocOpen}
             disabled={!handle}
@@ -554,6 +651,7 @@ export function EpubViewer({
             <Button
               variant="ghost"
               size="sm"
+              className="h-6 px-2 text-xs"
               aria-label="Return to previous location"
               disabled={!handle}
               onClick={handleReturnBack}
@@ -570,6 +668,7 @@ export function EpubViewer({
                   key={mode}
                   variant={active ? 'secondary' : 'ghost'}
                   size="sm"
+                  className="h-6 px-2 text-xs"
                   aria-pressed={active}
                   disabled={!handle}
                   onClick={() => updatePreferences({ epubReadingMode: mode })}
@@ -590,6 +689,17 @@ export function EpubViewer({
             disabled={!handle}
             onToggle={search.toggleSearch}
           />
+          <BookmarkToggleButton
+            bookmarked={bookmarksController.isCurrentBookmarked}
+            disabled={!handle}
+            onToggle={bookmarksController.toggleCurrentBookmark}
+          />
+          <BookmarksListToggleButton
+            open={bookmarksController.open}
+            count={bookmarksController.bookmarks.length}
+            disabled={!handle}
+            onToggle={bookmarksController.togglePanel}
+          />
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
           {readingMode !== 'scroll' && pageInfo && (
@@ -607,13 +717,20 @@ export function EpubViewer({
           <Button
             variant="ghost"
             size="sm"
+            className="h-6 px-2 text-xs"
             disabled={!handle}
             onClick={() => void handle?.previous()}
           >
             <ChevronLeft />
             Previous
           </Button>
-          <Button variant="ghost" size="sm" disabled={!handle} onClick={() => void handle?.next()}>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-xs"
+            disabled={!handle}
+            onClick={() => void handle?.next()}
+          >
             Next
             <ChevronRight />
           </Button>
@@ -627,6 +744,7 @@ export function EpubViewer({
         />
       )}
       <DocumentSearchBar search={search} />
+      <BookmarksPanel controller={bookmarksController} />
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt could not be found in this book. The file may have changed.

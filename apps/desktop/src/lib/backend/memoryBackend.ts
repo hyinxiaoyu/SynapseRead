@@ -5,8 +5,12 @@ import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-in
 import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
 
 import {
+  type AnchorLocation,
   type Annotation,
+  type Bookmark,
+  bookmarkLocationKey,
   DEFAULT_READING_PREFERENCES,
+  defaultBookmarkLabel,
   type DocumentFormat,
   type IpcError,
   type MindMapEdge,
@@ -70,8 +74,51 @@ export function createMemoryBackend({
   const nodes = new Map<string, MindMapNode>();
   const edges = new Map<string, MindMapEdge>();
   const captures = new Map<string, string>();
+  const bookmarks = new Map<string, Bookmark>();
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
   let picks = 0;
+
+  const validateAnchor = (anchor: AnchorLocation): void => {
+    switch (anchor.format) {
+      case 'pdf': {
+        if (anchor.rects.length === 0) {
+          throw fail('invalid_anchor', 'a PDF anchor needs at least one rectangle');
+        }
+        const inUnit = (v: number) => Number.isFinite(v) && v >= 0 && v <= 1;
+        const allValid = anchor.rects.every(
+          (r) =>
+            inUnit(r.x) &&
+            inUnit(r.y) &&
+            r.width > 0 &&
+            r.height > 0 &&
+            inUnit(r.x + r.width) &&
+            inUnit(r.y + r.height),
+        );
+        if (!allValid) {
+          throw fail(
+            'invalid_anchor',
+            'PDF rectangles must be non-empty and within the unit square',
+          );
+        }
+        break;
+      }
+      case 'epub':
+        if (!anchor.cfiRange || !anchor.chapterHref) {
+          throw fail('invalid_anchor', 'an EPUB anchor needs a CFI range and a chapter href');
+        }
+        break;
+      case 'txt':
+        if (anchor.startByteOffset >= anchor.endByteOffset) {
+          throw fail('invalid_anchor', 'a TXT anchor must cover at least one byte');
+        }
+        break;
+      case 'md':
+        if (!anchor.astNodeId) {
+          throw fail('invalid_anchor', 'a Markdown anchor needs an AST node id');
+        }
+        break;
+    }
+  };
 
   const require = <T>(map: Map<string, T>, id: string, entity: string): T => {
     const value = map.get(id);
@@ -307,6 +354,57 @@ export function createMemoryBackend({
       }
       readingPreferences = { ...preferences };
       return { ...readingPreferences };
+    },
+
+    listBookmarks: async () => [...bookmarks.values()],
+
+    async createBookmark(input) {
+      validateAnchor(input.anchor);
+      const document = require(documents, input.documentId, 'document');
+      if (document.format !== input.anchor.format) {
+        throw fail(
+          'invalid_anchor',
+          `${input.anchor.format} anchor on a ${document.format} document`,
+        );
+      }
+      const firstLine = input.label
+        ?.split('\n')
+        .map((line) => line.trim())
+        .find((line) => line.length > 0);
+      const label = firstLine
+        ? firstLine.length <= 80
+          ? firstLine
+          : `${firstLine.slice(0, 79)}…`
+        : defaultBookmarkLabel(input.anchor);
+      const key = bookmarkLocationKey(input.anchor);
+      const existing = [...bookmarks.values()].find(
+        (candidate) =>
+          candidate.documentId === input.documentId &&
+          bookmarkLocationKey(candidate.anchor) === key,
+      );
+      if (existing) {
+        const updated: Bookmark = {
+          ...existing,
+          anchor: input.anchor,
+          label,
+        };
+        bookmarks.set(updated.id, updated);
+        return updated;
+      }
+      const bookmark: Bookmark = {
+        id: crypto.randomUUID(),
+        documentId: input.documentId,
+        anchor: input.anchor,
+        label,
+        createdAt: now(),
+      };
+      bookmarks.set(bookmark.id, bookmark);
+      return bookmark;
+    },
+
+    async deleteBookmark(bookmarkId) {
+      require(bookmarks, bookmarkId, 'bookmark');
+      bookmarks.delete(bookmarkId);
     },
 
     loadDocumentSource: async (document) => ({

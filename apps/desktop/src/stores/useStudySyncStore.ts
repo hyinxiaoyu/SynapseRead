@@ -3,7 +3,10 @@ import { create } from 'zustand';
 import { createDefaultBackend, type StudyBackend } from '@/lib/backend';
 import { describeError } from '@/lib/utils';
 import {
+  type AnchorLocation,
   type Annotation,
+  type Bookmark,
+  bookmarkLocationKey,
   type CardPatch,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
@@ -42,6 +45,7 @@ export interface StudySyncState {
   activeDocumentId: string | null;
   isDraggingFile: boolean;
   readingPreferences: ReadingPreferences;
+  bookmarks: Bookmark[];
 
   notebook: StudyNotebook | null;
   annotations: Annotation[];
@@ -83,6 +87,11 @@ export interface StudySyncState {
   updateCard(cardId: string, patch: CardPatch): Promise<void>;
   saveViewport(viewport: Viewport): Promise<void>;
   updateReadingPreferences(patch: Partial<ReadingPreferences>): Promise<void>;
+
+  addBookmark(documentId: string, anchor: AnchorLocation, label?: string): Promise<Bookmark | null>;
+  removeBookmark(bookmarkId: string): Promise<void>;
+  toggleBookmark(documentId: string, anchor: AnchorLocation, label?: string): Promise<void>;
+  jumpToBookmark(bookmarkId: string): void;
 }
 
 /** Children stack to the right of their parent; roots cascade from the origin. */
@@ -106,6 +115,10 @@ export function selectHighlights(
   return annotations
     .filter((annotation) => annotation.documentId === documentId)
     .map(({ id, anchor, color }) => ({ annotationId: id, anchor, color }));
+}
+
+export function selectBookmarks(bookmarks: readonly Bookmark[], documentId: string): Bookmark[] {
+  return bookmarks.filter((bookmark) => bookmark.documentId === documentId);
 }
 
 /**
@@ -173,6 +186,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       activeDocumentId: null,
       isDraggingFile: false,
       readingPreferences: { ...DEFAULT_READING_PREFERENCES },
+      bookmarks: [],
       notebook: null,
       annotations: [],
       cards: [],
@@ -187,14 +201,15 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().status === 'loading' || get().status === 'ready') return;
         set({ status: 'loading', error: null });
         try {
-          const [documents, notebooks, readingPreferences] = await Promise.all([
+          const [documents, notebooks, readingPreferences, bookmarks] = await Promise.all([
             backend.listDocuments(),
             backend.listNotebooks(),
             backend.getReadingPreferences(),
+            backend.listBookmarks(),
           ]);
           const notebook = notebooks[0] ?? (await backend.createNotebook(DEFAULT_NOTEBOOK_TITLE));
           const graph = await backend.loadNotebookGraph(notebook.id);
-          set({ status: 'ready', documents, readingPreferences, ...graph });
+          set({ status: 'ready', documents, readingPreferences, bookmarks, ...graph });
         } catch (error) {
           set({ status: 'error', error: describeError(error) });
         }
@@ -385,6 +400,80 @@ export function createStudySyncStore(backend: StudyBackend) {
           },
           () => set({ readingPreferences: previous }),
         );
+      },
+
+      async addBookmark(documentId, anchor, label) {
+        let created: Bookmark | null = null;
+        await guarded(async () => {
+          const saved = await backend.createBookmark({
+            documentId,
+            anchor,
+            label: label ?? null,
+          });
+          created = saved;
+          set((state) => {
+            const exists = state.bookmarks.some((candidate) => candidate.id === saved.id);
+            return {
+              bookmarks: exists
+                ? state.bookmarks.map((candidate) =>
+                    candidate.id === saved.id ? saved : candidate,
+                  )
+                : [...state.bookmarks, saved],
+            };
+          });
+        });
+        return created;
+      },
+
+      async removeBookmark(bookmarkId) {
+        const removed = get().bookmarks.find((bookmark) => bookmark.id === bookmarkId);
+        if (!removed) return;
+        set((state) => ({
+          bookmarks: state.bookmarks.filter((bookmark) => bookmark.id !== bookmarkId),
+        }));
+        await guarded(
+          () => backend.deleteBookmark(bookmarkId),
+          () => set((state) => ({ bookmarks: [...state.bookmarks, removed] })),
+        );
+      },
+
+      async toggleBookmark(documentId, anchor, label) {
+        const key = bookmarkLocationKey(anchor);
+        const existing = get().bookmarks.find(
+          (bookmark) =>
+            bookmark.documentId === documentId && bookmarkLocationKey(bookmark.anchor) === key,
+        );
+        if (existing) {
+          await get().removeBookmark(existing.id);
+        } else {
+          await get().addBookmark(documentId, anchor, label);
+        }
+      },
+
+      jumpToBookmark(bookmarkId) {
+        const { bookmarks, documents } = get();
+        const bookmark = bookmarks.find((candidate) => candidate.id === bookmarkId);
+        if (!bookmark) return;
+
+        if (!documents.some((document) => document.id === bookmark.documentId)) {
+          set({ error: 'The source document for this bookmark is no longer available.' });
+          return;
+        }
+
+        jumpNonce += 1;
+        set((state) => ({
+          openDocumentIds: state.openDocumentIds.includes(bookmark.documentId)
+            ? state.openDocumentIds
+            : [...state.openDocumentIds, bookmark.documentId],
+          activeDocumentId: bookmark.documentId,
+          selection: state.activeDocumentId === bookmark.documentId ? state.selection : null,
+          jumpRequest: {
+            nonce: jumpNonce,
+            documentId: bookmark.documentId,
+            annotationId: bookmark.id,
+            anchor: bookmark.anchor,
+          },
+        }));
       },
     };
   });

@@ -152,6 +152,49 @@ export interface NodeLayoutPatch {
   isCollapsed: boolean;
 }
 
+/** Independent reading bookmark inside a document (no card or annotation). */
+export interface Bookmark {
+  id: string;
+  documentId: string;
+  anchor: AnchorLocation;
+  label: string;
+  createdAt: string;
+}
+
+export interface CreateBookmarkInput {
+  documentId: string;
+  anchor: AnchorLocation;
+  label: string | null;
+}
+
+/** Canonical key identifying a bookmarkable reading location within a document. */
+export function bookmarkLocationKey(anchor: AnchorLocation): string {
+  switch (anchor.format) {
+    case 'pdf':
+      return `pdf:${anchor.pageIndex}`;
+    case 'epub':
+      return `epub:${anchor.chapterHref}:${anchor.cfiRange}`;
+    case 'txt':
+      return `txt:${anchor.startByteOffset}`;
+    case 'md':
+      return `md:${anchor.astNodeId}:${anchor.offset}`;
+  }
+}
+
+/** Fallback human-readable label when a bookmark is created without one. */
+export function defaultBookmarkLabel(anchor: AnchorLocation): string {
+  switch (anchor.format) {
+    case 'pdf':
+      return `Page ${anchor.pageIndex + 1}`;
+    case 'epub':
+      return anchor.chapterHref;
+    case 'txt':
+      return `Line ${anchor.lineIndex + 1}`;
+    case 'md':
+      return anchor.astNodeId;
+  }
+}
+
 export type ReadingTheme = 'light' | 'sepia' | 'dark';
 export type ReadingFontFamily = 'serif' | 'sans' | 'mono';
 export type ReadingWidth = 'narrow' | 'medium' | 'wide' | 'full';
@@ -270,6 +313,12 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   preferences?: ReadingPreferences;
   /** Updates and persists reading preferences. */
   onPreferencesChange?: (patch: Partial<ReadingPreferences>) => void;
+  /** Persisted bookmarks for this document. */
+  bookmarks?: readonly Bookmark[];
+  /** Adds (or updates if at the same location) a bookmark for this document. */
+  onAddBookmark?: (anchor: AnchorOf<F>, label?: string) => void;
+  /** Removes a persisted bookmark by id. */
+  onRemoveBookmark?: (bookmarkId: string) => void;
 }
 
 const isFiniteNumber = (value: unknown): value is number =>

@@ -143,6 +143,34 @@ impl AnchorLocation {
         }
         Ok(())
     }
+
+    /// Canonical key identifying a bookmarkable reading location within a document.
+    pub fn location_key(&self) -> String {
+        match self {
+            Self::Pdf { page_index, .. } => format!("pdf:{page_index}"),
+            Self::Epub {
+                cfi_range,
+                chapter_href,
+            } => format!("epub:{chapter_href}:{cfi_range}"),
+            Self::Txt {
+                start_byte_offset, ..
+            } => format!("txt:{start_byte_offset}"),
+            Self::Md {
+                ast_node_id,
+                offset,
+            } => format!("md:{ast_node_id}:{offset}"),
+        }
+    }
+
+    /// Fallback human-readable label when a bookmark is created without one.
+    pub fn default_bookmark_label(&self) -> String {
+        match self {
+            Self::Pdf { page_index, .. } => format!("Page {}", page_index + 1),
+            Self::Epub { chapter_href, .. } => chapter_href.clone(),
+            Self::Txt { line_index, .. } => format!("Line {}", line_index + 1),
+            Self::Md { ast_node_id, .. } => ast_node_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,6 +304,25 @@ pub struct NodeLayoutPatch {
     pub pos_x: f64,
     pub pos_y: f64,
     pub is_collapsed: bool,
+}
+
+/// Independent reading bookmark inside a document (no card or annotation).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bookmark {
+    pub id: String,
+    pub document_id: String,
+    pub anchor: AnchorLocation,
+    pub label: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateBookmarkInput {
+    pub document_id: String,
+    pub anchor: AnchorLocation,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

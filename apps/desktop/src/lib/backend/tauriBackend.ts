@@ -3,6 +3,7 @@ import { listen, TauriEvent, type UnlistenFn } from '@tauri-apps/api/event';
 
 import type { DroppedDocumentsPayload, StudyBackend } from '@/lib/backend/types';
 import type {
+  Bookmark,
   CreatedExcerpt,
   MindMapEdge,
   NoteCard,
@@ -75,6 +76,10 @@ export function createTauriBackend(): StudyBackend {
     getReadingPreferences: () => invoke<ReadingPreferences>('get_reading_preferences'),
     saveReadingPreferences: (preferences) =>
       invoke<ReadingPreferences>('save_reading_preferences', { preferences }),
+
+    listBookmarks: () => invoke<Bookmark[]>('list_bookmarks'),
+    createBookmark: (input) => invoke<Bookmark>('create_bookmark', { input }),
+    deleteBookmark: (bookmarkId) => invoke('delete_bookmark', { bookmarkId }),
 
     // The asset protocol enforces its scope in Rust, whatever this URL names.
     loadDocumentSource: async (document) => ({

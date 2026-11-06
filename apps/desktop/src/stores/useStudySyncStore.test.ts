@@ -8,6 +8,7 @@ import {
   createStudySyncStore,
   DEFAULT_NOTEBOOK_TITLE,
   nextNodePosition,
+  selectBookmarks,
   selectHighlights,
 } from './useStudySyncStore';
 
@@ -477,6 +478,75 @@ describe('useStudySyncStore', () => {
       await state().updateReadingPreferences({ fontSize: 300 });
       expect(state().readingPreferences.fontSize).toBe(120);
       expect(state().error).toMatch(/fontSize/);
+    });
+  });
+
+  describe('bookmarks', () => {
+    it('adds, deduplicates, toggles, jumps to, and persists bookmarks without creating cards or annotations', async () => {
+      const documentId = await openDocument();
+      const firstAnchor = {
+        format: 'pdf' as const,
+        pageIndex: 2,
+        rects: [{ x: 0, y: 0.1, width: 1, height: 0.01 }],
+      };
+      const secondAnchor = {
+        format: 'pdf' as const,
+        pageIndex: 4,
+        rects: [{ x: 0, y: 0.2, width: 1, height: 0.01 }],
+      };
+
+      const created = await state().addBookmark(documentId, firstAnchor, 'Page 3 · Introduction');
+      expect(created).toMatchObject({
+        documentId,
+        anchor: firstAnchor,
+        label: 'Page 3 · Introduction',
+      });
+      expect(selectBookmarks(state().bookmarks, documentId)).toHaveLength(1);
+      expect(state().annotations).toEqual([]);
+      expect(state().cards).toEqual([]);
+      expect(state().nodes).toEqual([]);
+
+      // Adding a bookmark at the same location updates the existing entry in place.
+      const deduped = await state().addBookmark(documentId, firstAnchor, 'Page 3 · Updated');
+      expect(deduped?.id).toBe(created?.id);
+      expect(selectBookmarks(state().bookmarks, documentId)).toEqual([
+        expect.objectContaining({ id: created?.id, label: 'Page 3 · Updated' }),
+      ]);
+
+      await state().toggleBookmark(documentId, secondAnchor, 'Page 5');
+      expect(selectBookmarks(state().bookmarks, documentId)).toHaveLength(2);
+
+      // Jumping to a bookmark activates the document and emits a jumpRequest.
+      state().jumpToBookmark(created?.id as string);
+      expect(state().jumpRequest).toMatchObject({
+        documentId,
+        annotationId: created?.id as string,
+        anchor: firstAnchor,
+      });
+
+      // Bookmarks persist across store re-initialization.
+      const reopened = createStudySyncStore(backend);
+      await reopened.getState().initialize();
+      expect(selectBookmarks(reopened.getState().bookmarks, documentId)).toHaveLength(2);
+
+      // Toggling an existing bookmark removes it.
+      await state().toggleBookmark(documentId, firstAnchor);
+      expect(selectBookmarks(state().bookmarks, documentId)).toHaveLength(1);
+    });
+
+    it('restores a bookmark when deleting it fails', async () => {
+      const documentId = await openDocument();
+      const created = await state().addBookmark(
+        documentId,
+        pdfAnchor as ReaderSelection['anchor'],
+        'Page 3',
+      );
+      vi.spyOn(backend, 'deleteBookmark').mockRejectedValue(new Error('delete failed'));
+
+      await state().removeBookmark(created?.id as string);
+
+      expect(selectBookmarks(state().bookmarks, documentId)).toHaveLength(1);
+      expect(state().error).toBe('delete failed');
     });
   });
 });

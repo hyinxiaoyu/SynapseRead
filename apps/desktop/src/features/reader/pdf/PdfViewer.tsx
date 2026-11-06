@@ -14,6 +14,12 @@ import {
 
 import { Button } from '@/components/ui/button';
 import {
+  BookmarksListToggleButton,
+  BookmarksPanel,
+  BookmarkToggleButton,
+  useBookmarksController,
+} from '@/features/reader/BookmarksPanel';
+import {
   buildSearchSnippet,
   DocumentSearchBar,
   type DocumentSearchResultItem,
@@ -27,6 +33,7 @@ import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSideb
 import { PULSE_MS } from '@/features/reader/pulse';
 import { cn, describeError } from '@/lib/utils';
 import type {
+  Bookmark,
   DocumentViewerProps,
   NormalizedRect,
   PdfAnchor,
@@ -406,6 +413,9 @@ function PdfPages({
   onSelectionChange,
   onJumpHandled,
   onCursorChange,
+  bookmarks,
+  onAddBookmark,
+  onRemoveBookmark,
 }: { engine: PdfDocumentHandle } & Omit<DocumentViewerProps<'pdf'>, 'content'>) {
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -690,6 +700,58 @@ function PdfPages({
     setReturnStack((stack) => stack.slice(0, -1));
     scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
   };
+
+  const navigateToBookmark = useCallback(
+    (bookmark: Bookmark) => {
+      const pdfAnchor = asPdfAnchor(bookmark.anchor);
+      if (!pdfAnchor || pdfAnchor.pageIndex < 0 || pdfAnchor.pageIndex >= engine.pageCount) {
+        setMissedJump(true);
+        return;
+      }
+      setMissedJump(false);
+      const targetFraction = pdfAnchor.rects[0]?.y ?? 0;
+      const previous = currentReturnLocation();
+      if (
+        previous.pageIndex !== pdfAnchor.pageIndex ||
+        Math.abs(previous.fraction - targetFraction) > 0.02
+      ) {
+        setReturnStack((stack) => [...stack, previous]);
+      }
+      scrollToPageOffset(pdfAnchor.pageIndex, offsetWithin(pdfAnchor.pageIndex, targetFraction));
+    },
+    [currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
+  );
+
+  const bookmarksController = useBookmarksController<'pdf'>({
+    documentId,
+    isActive,
+    bookmarks,
+    onAddBookmark,
+    onRemoveBookmark,
+    getCurrentLocation: () => {
+      const loc = currentReturnLocation();
+      const y = Math.round(loc.fraction * 1e4) / 1e4;
+      return {
+        anchor: {
+          format: 'pdf',
+          pageIndex: loc.pageIndex,
+          rects: [{ x: 0, y, width: 1, height: CURSOR_RECT_HEIGHT }],
+        },
+        label: `Page ${loc.pageIndex + 1}`,
+      };
+    },
+    isActiveBookmark: (bookmark) => {
+      const pdfAnchor = asPdfAnchor(bookmark.anchor);
+      return pdfAnchor !== null && pdfAnchor.pageIndex === currentPageIndex;
+    },
+    isStaleBookmark: (bookmark) => {
+      const pdfAnchor = asPdfAnchor(bookmark.anchor);
+      return (
+        pdfAnchor === null || pdfAnchor.pageIndex < 0 || pdfAnchor.pageIndex >= engine.pageCount
+      );
+    },
+    onSelectBookmark: navigateToBookmark,
+  });
 
   const submitPageInput = () => {
     const trimmed = pageInput.trim();
@@ -996,6 +1058,15 @@ function PdfPages({
             </Button>
           )}
           <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
+          <BookmarkToggleButton
+            bookmarked={bookmarksController.isCurrentBookmarked}
+            onToggle={bookmarksController.toggleCurrentBookmark}
+          />
+          <BookmarksListToggleButton
+            open={bookmarksController.open}
+            count={bookmarksController.bookmarks.length}
+            onToggle={bookmarksController.togglePanel}
+          />
         </div>
         <form
           className="flex items-center gap-1"
@@ -1100,6 +1171,7 @@ function PdfPages({
         </Button>
       </div>
       <DocumentSearchBar search={search} />
+      <BookmarksPanel controller={bookmarksController} />
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt is on a page this file does not have. The file may have changed.

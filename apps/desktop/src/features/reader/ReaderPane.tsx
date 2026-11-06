@@ -4,7 +4,7 @@ import { type ComponentType, useCallback, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn } from '@/lib/utils';
-import { selectHighlights, useStudySyncStore } from '@/stores/useStudySyncStore';
+import { selectBookmarks, selectHighlights, useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { AnchorLocation, DocumentViewerProps, StudyDocument } from '@/types/domain';
 
 export function ReaderPane() {
@@ -114,8 +114,11 @@ export function ReaderPane() {
 function DocumentTab({ document, isActive }: { document: StudyDocument; isActive: boolean }) {
   const content = useStudySyncStore((state) => state.content);
   const annotations = useStudySyncStore((state) => state.annotations);
+  const allBookmarks = useStudySyncStore((state) => state.bookmarks);
   const readingPreferences = useStudySyncStore((state) => state.readingPreferences);
   const updateReadingPreferences = useStudySyncStore((state) => state.updateReadingPreferences);
+  const addBookmark = useStudySyncStore((state) => state.addBookmark);
+  const removeBookmark = useStudySyncStore((state) => state.removeBookmark);
   const jumpRequest = useStudySyncStore((state) =>
     state.jumpRequest?.documentId === document.id ? state.jumpRequest : null,
   );
@@ -127,6 +130,10 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
     () => selectHighlights(annotations, document.id),
     [annotations, document.id],
   );
+  const bookmarks = useMemo(
+    () => selectBookmarks(allBookmarks, document.id),
+    [allBookmarks, document.id],
+  );
   const onCursorChange = useCallback(
     (anchor: AnchorLocation) => reportCursor(document.id, anchor),
     [reportCursor, document.id],
@@ -136,6 +143,18 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
       void updateReadingPreferences(patch);
     },
     [updateReadingPreferences],
+  );
+  const onAddBookmark = useCallback(
+    (anchor: AnchorLocation, label?: string) => {
+      void addBookmark(document.id, anchor, label);
+    },
+    [addBookmark, document.id],
+  );
+  const onRemoveBookmark = useCallback(
+    (bookmarkId: string) => {
+      void removeBookmark(bookmarkId);
+    },
+    [removeBookmark],
   );
 
   // Safe: the entry is looked up by this document's own format.
@@ -152,6 +171,9 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
       onCursorChange={onCursorChange}
       preferences={readingPreferences}
       onPreferencesChange={onPreferencesChange}
+      bookmarks={bookmarks}
+      onAddBookmark={onAddBookmark}
+      onRemoveBookmark={onRemoveBookmark}
     />
   );
 }

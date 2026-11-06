@@ -256,4 +256,30 @@ export async function epubFlow(page) {
   await page.clickButton('Return to previous location');
   await page.waitFor(chapterIs('Chapter Two'), 'returning from EPUB search jump to Chapter Two');
   await page.clickButton('Close search');
+
+  // Independent bookmarks in EPUB: bookmark Chapter Two, jump to Chapter One, jump back via bookmark, and remove.
+  await page.clickButton('Bookmark current location');
+  await page.waitFor(
+    `${visibleViewer}?.querySelector('[data-testid="bookmarks-count"]')?.textContent === '1'`,
+    'EPUB bookmark badge count',
+  );
+  await page.clickButton('One');
+  await page.waitFor(chapterIs('Chapter One'), 'EPUB jump to Chapter One before bookmark jump');
+  await page.clickButton('Bookmarks');
+  await page.waitFor(
+    `${visibleViewer}?.querySelector('[data-testid="bookmark-jump-button"]')`,
+    'EPUB bookmark item in list',
+  );
+  await page.evaluate(
+    `${visibleViewer}.querySelector('[data-testid="bookmark-jump-button"]').click()`,
+  );
+  await page.waitFor(chapterIs('Chapter Two'), 'jumping to EPUB bookmark in Chapter Two');
+  await page.evaluate(
+    `${visibleViewer}.querySelector('[data-testid="bookmark-remove-button"]').click()`,
+  );
+  await page.waitFor(
+    `!${visibleViewer}?.querySelector('[data-testid="bookmarks-count"]')`,
+    'removing EPUB bookmark',
+  );
+  await page.clickButton('Bookmarks');
 }

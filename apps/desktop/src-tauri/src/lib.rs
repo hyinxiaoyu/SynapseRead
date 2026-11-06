@@ -30,6 +30,9 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::delete_edge,
         commands::db::get_reading_preferences,
         commands::db::save_reading_preferences,
+        commands::db::list_bookmarks,
+        commands::db::create_bookmark,
+        commands::db::delete_bookmark,
         commands::fs_reader::read_text_stream,
     ])
 }

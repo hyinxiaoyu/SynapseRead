@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearchBar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend, type MemoryFile } from '@/lib/backend/memoryBackend';
-import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
+import {
+  createStudySyncStore,
+  selectBookmarks,
+  selectHighlights,
+} from '@/stores/useStudySyncStore';
 import { documentFixture } from '@/test/fixtures';
 import type { TxtAnchor } from '@/types/domain';
 
@@ -25,6 +29,10 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
     () => selectHighlights(state.annotations, documentId),
     [state.annotations, documentId],
   );
+  const bookmarks = useMemo(
+    () => selectBookmarks(state.bookmarks, documentId),
+    [state.bookmarks, documentId],
+  );
   if (document?.format !== 'txt') throw new Error('expected a txt document');
   return (
     <TxtViewer
@@ -38,6 +46,9 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
       onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
       preferences={state.readingPreferences}
       onPreferencesChange={(patch) => void state.updateReadingPreferences(patch)}
+      bookmarks={bookmarks}
+      onAddBookmark={(anchor, label) => void state.addBookmark(documentId, anchor, label)}
+      onRemoveBookmark={(id) => void state.removeBookmark(id)}
     />
   );
 }
@@ -463,6 +474,77 @@ describe('TxtViewer', () => {
     // Empty query resets search state.
     fireEvent.change(searchInput, { target: { value: '   ' } });
     expect(screen.getByTestId('search-status')).toHaveTextContent('Enter a search term');
+  });
+
+  it('adds, lists, jumps to, persists, removes, and handles stale bookmarks without creating cards or annotations', async () => {
+    const bytes = documentFixture('sample.txt');
+    const { backend, store, documentId } = await setup(bytes);
+    const first = render(<Harness store={store} documentId={documentId} />);
+    await segmentWith('SynapseRead sample text');
+
+    // Scroll to row 20 and add a bookmark with Cmd/Ctrl+D.
+    scrollTo(20 * ROW_PX);
+    fireEvent.keyDown(window, { key: 'd', ctrlKey: true });
+
+    await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+    expect(store.getState().annotations).toEqual([]);
+    expect(store.getState().cards).toEqual([]);
+    expect(store.getState().nodes).toEqual([]);
+    expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'true');
+
+    // Cmd/Ctrl+D inside an editable input is ignored.
+    fireEvent.keyDown(window, { key: 'f', ctrlKey: true });
+    const searchInput = await screen.findByTestId('search-input');
+    fireEvent.keyDown(searchInput, { key: 'd', ctrlKey: true });
+    expect(store.getState().bookmarks).toHaveLength(1);
+    fireEvent.keyDown(searchInput, { key: 'Escape' });
+
+    // Scroll back to top, open bookmarks list, and jump to the saved bookmark.
+    scrollTo(0);
+    expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
+    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    await screen.findByTestId('bookmark-item');
+    expect(screen.getByTestId('bookmark-label')).toHaveTextContent(/Line 21/);
+    const jumpButton = screen.getByTestId('bookmark-jump-button');
+    fireEvent.click(jumpButton);
+    expect(scroller().scrollTop).toBe(20 * ROW_PX);
+    expect(jumpButton).toHaveAttribute('aria-current', 'location');
+
+    // Return to previous location restores the top scroll position.
+    fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+    expect(scroller().scrollTop).toBe(0);
+
+    // Add a stale bookmark past the end of the file and verify stale status handling.
+    await act(() =>
+      store.getState().addBookmark(
+        documentId,
+        {
+          format: 'txt',
+          startByteOffset: bytes.byteLength + 500,
+          endByteOffset: bytes.byteLength + 520,
+          lineIndex: 999,
+        },
+        'Stale line',
+      ),
+    );
+    expect(await screen.findByTestId('bookmark-stale')).toHaveTextContent('Stale');
+    const jumpButtons = screen.getAllByTestId('bookmark-jump-button');
+    fireEvent.click(jumpButtons[1] as HTMLElement);
+    expect(await screen.findByRole('status')).toHaveTextContent(/past the end of this file/);
+
+    // Persist across reopen and remove bookmarks.
+    first.unmount();
+    const reopened = createStudySyncStore(backend);
+    await reopened.getState().initialize();
+    await reopened.getState().openDocument();
+    render(<Harness store={reopened} documentId={documentId} />);
+    await segmentWith('SynapseRead sample text');
+    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    expect(await screen.findAllByTestId('bookmark-item')).toHaveLength(2);
+
+    const removeButtons = screen.getAllByTestId('bookmark-remove-button');
+    fireEvent.click(removeButtons[0] as HTMLElement);
+    await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
   });
 
   it('shows a read failure instead of an empty page', async () => {

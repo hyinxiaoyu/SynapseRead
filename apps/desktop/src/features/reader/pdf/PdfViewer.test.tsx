@@ -5,7 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearchBar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
-import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
+import {
+  createStudySyncStore,
+  selectBookmarks,
+  selectHighlights,
+} from '@/stores/useStudySyncStore';
 import type { PdfAnchor } from '@/types/domain';
 
 import type { PdfOutlineItem, PdfPageText } from './pdfEngine';
@@ -100,6 +104,10 @@ function Harness({
     () => selectHighlights(state.annotations, documentId),
     [state.annotations, documentId],
   );
+  const bookmarks = useMemo(
+    () => selectBookmarks(state.bookmarks, documentId),
+    [state.bookmarks, documentId],
+  );
   if (document?.format !== 'pdf') throw new Error('expected a pdf document');
   return (
     <PdfViewer
@@ -111,6 +119,9 @@ function Harness({
       onSelectionChange={state.setSelection}
       onJumpHandled={state.completeJump}
       onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
+      bookmarks={bookmarks}
+      onAddBookmark={(anchor, label) => void state.addBookmark(documentId, anchor, label)}
+      onRemoveBookmark={(id) => void state.removeBookmark(id)}
     />
   );
 }
@@ -729,5 +740,75 @@ describe('PdfViewer', () => {
       expect(screen.getByTestId('search-status')).toHaveTextContent('Search cancelled'),
     );
     releaseGate?.();
+  });
+
+  it('adds, lists, jumps to, persists, removes, and handles stale bookmarks without creating cards or annotations', async () => {
+    const { backend, store, documentId } = await setup();
+    const first = render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+
+    // Jump to Page 3 (pageIndex 2) and bookmark with Cmd/Ctrl+D.
+    const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+    fireEvent.change(pageInput, { target: { value: '3' } });
+    fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+    expect(pageInput).toHaveValue('3');
+
+    fireEvent.keyDown(window, { key: 'd', metaKey: true });
+    await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+    expect(store.getState().annotations).toEqual([]);
+    expect(store.getState().cards).toEqual([]);
+    expect(store.getState().nodes).toEqual([]);
+    expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'true');
+
+    // Cmd/Ctrl+D inside the page number input is ignored.
+    fireEvent.keyDown(pageInput, { key: 'd', metaKey: true });
+    expect(store.getState().bookmarks).toHaveLength(1);
+
+    // Navigate back to Page 1, open bookmarks list, and jump to the saved bookmark.
+    fireEvent.change(pageInput, { target: { value: '1' } });
+    fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+    expect(pageInput).toHaveValue('1');
+    expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    await screen.findByTestId('bookmark-item');
+    expect(screen.getByTestId('bookmark-label')).toHaveTextContent('Page 3');
+    const jumpButton = screen.getByTestId('bookmark-jump-button');
+    fireEvent.click(jumpButton);
+    expect(pageInput).toHaveValue('3');
+    expect(jumpButton).toHaveAttribute('aria-current', 'location');
+
+    // Return to previous location returns to Page 1.
+    fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+    expect(pageInput).toHaveValue('1');
+
+    // Add a stale bookmark on an out-of-range page and verify stale badge & status.
+    await act(() =>
+      store.getState().addBookmark(
+        documentId,
+        {
+          format: 'pdf',
+          pageIndex: 99,
+          rects: [{ x: 0, y: 0, width: 1, height: 0.01 }],
+        },
+        'Page 100',
+      ),
+    );
+    expect(await screen.findByTestId('bookmark-stale')).toHaveTextContent('Stale');
+    const jumpButtons = screen.getAllByTestId('bookmark-jump-button');
+    fireEvent.click(jumpButtons[1] as HTMLElement);
+    expect(await screen.findByRole('status')).toHaveTextContent(/page this file does not have/);
+
+    // Persist across reopen and remove bookmarks.
+    first.unmount();
+    const reopened = await reopen(backend);
+    render(<Harness store={reopened} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    expect(await screen.findAllByTestId('bookmark-item')).toHaveLength(2);
+
+    const removeButtons = screen.getAllByTestId('bookmark-remove-button');
+    fireEvent.click(removeButtons[0] as HTMLElement);
+    await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
   });
 });

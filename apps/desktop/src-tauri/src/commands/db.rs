@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use synapse_core::domain::DocumentFormat;
 
 use synapse_core::domain::{
-    AnchorLocation, CardPatch, CreateExcerptInput, CreatedExcerpt, Document, MindMapEdge,
-    NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, StudyNotebook, Viewport,
+    AnchorLocation, Bookmark, CardPatch, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt,
+    Document, MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences,
+    StudyNotebook, Viewport,
 };
 use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
@@ -151,4 +152,22 @@ pub fn save_reading_preferences(
     state: State<'_, AppState>,
 ) -> IpcResult<ReadingPreferences> {
     Ok(state.database()?.save_reading_preferences(&preferences)?)
+}
+
+#[tauri::command]
+pub fn list_bookmarks(state: State<'_, AppState>) -> IpcResult<Vec<Bookmark>> {
+    Ok(state.database()?.list_bookmarks()?)
+}
+
+#[tauri::command]
+pub fn create_bookmark(
+    input: CreateBookmarkInput,
+    state: State<'_, AppState>,
+) -> IpcResult<Bookmark> {
+    Ok(state.database()?.create_bookmark(&input)?)
+}
+
+#[tauri::command]
+pub fn delete_bookmark(bookmark_id: String, state: State<'_, AppState>) -> IpcResult<()> {
+    Ok(state.database()?.delete_bookmark(&bookmark_id)?)
 }

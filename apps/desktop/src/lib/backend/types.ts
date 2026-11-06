@@ -1,6 +1,8 @@
 import type {
   AnchorLocation,
+  Bookmark,
   CardPatch,
+  CreateBookmarkInput,
   CreatedExcerpt,
   CreateExcerptInput,
   DocumentContentReader,
@@ -69,4 +71,8 @@ export interface StudyBackend extends DocumentContentReader {
 
   getReadingPreferences(): Promise<ReadingPreferences>;
   saveReadingPreferences(preferences: ReadingPreferences): Promise<ReadingPreferences>;
+
+  listBookmarks(): Promise<Bookmark[]>;
+  createBookmark(input: CreateBookmarkInput): Promise<Bookmark>;
+  deleteBookmark(bookmarkId: string): Promise<void>;
 }

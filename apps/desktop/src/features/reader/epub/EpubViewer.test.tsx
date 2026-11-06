@@ -9,7 +9,11 @@ import {
 } from '@/features/reader/DocumentSearchBar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
-import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
+import {
+  createStudySyncStore,
+  selectBookmarks,
+  selectHighlights,
+} from '@/stores/useStudySyncStore';
 
 import type {
   EpubLocation,
@@ -138,6 +142,10 @@ function Harness({
     () => selectHighlights(state.annotations, documentId),
     [state.annotations, documentId],
   );
+  const bookmarks = useMemo(
+    () => selectBookmarks(state.bookmarks, documentId),
+    [state.bookmarks, documentId],
+  );
   if (document?.format !== 'epub') throw new Error('expected an epub document');
   return (
     <EpubViewer
@@ -151,6 +159,9 @@ function Harness({
       onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
       preferences={state.readingPreferences}
       onPreferencesChange={(patch) => void state.updateReadingPreferences(patch)}
+      bookmarks={bookmarks}
+      onAddBookmark={(anchor, label) => void state.addBookmark(documentId, anchor, label)}
+      onRemoveBookmark={(id) => void state.removeBookmark(id)}
     />
   );
 }
@@ -572,6 +583,92 @@ describe('EpubViewer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
     expect(screen.getByTestId('search-result-location')).toHaveTextContent('Two');
+  });
+
+  it('adds, lists, jumps to, persists, removes, and handles stale bookmarks without creating cards or annotations', async () => {
+    const { backend, store, documentId } = await setup();
+    const first = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 1,
+        totalPages: 2,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 25,
+      }),
+    );
+
+    // Trigger Cmd+D from inside the EPUB iframe via `emitKeyDown`.
+    act(() =>
+      engine.emitKeyDown(
+        new KeyboardEvent('keydown', { key: 'd', metaKey: true, cancelable: true }),
+      ),
+    );
+    await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+    expect(store.getState().annotations).toEqual([]);
+    expect(store.getState().cards).toEqual([]);
+    expect(store.getState().nodes).toEqual([]);
+    expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'true');
+
+    // Move to Chapter Two (`FAR_CFI`) and verify the toggle button reflects the new location.
+    act(() =>
+      engine.emitLocation({
+        cfi: FAR_CFI,
+        href: 'OEBPS/chapter2.xhtml',
+        page: 1,
+        totalPages: 2,
+        chapterIndex: 1,
+        totalChapters: 2,
+        bookProgress: 75,
+      }),
+    );
+    expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
+
+    // Open the bookmarks panel and jump back to Chapter One's bookmark.
+    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    expect(await screen.findByTestId('bookmark-label')).toHaveTextContent('One · Page 1');
+    fireEvent.click(screen.getByTestId('bookmark-jump-button'));
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe(CFI));
+
+    // Return to previous location returns to Chapter Two (`FAR_CFI`).
+    const backButton = await screen.findByRole('button', { name: 'Return to previous location' });
+    fireEvent.click(backButton);
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe(FAR_CFI));
+
+    // Add a stale bookmark whose CFI fails `display` and verify stale badge & status.
+    const staleCfi = 'epubcfi(/6/99!/4/2/1:0)';
+    engine.failCfi = staleCfi;
+    await act(() =>
+      store.getState().addBookmark(
+        documentId,
+        {
+          format: 'epub',
+          chapterHref: 'OEBPS/missing.xhtml',
+          cfiRange: staleCfi,
+        },
+        'Missing chapter',
+      ),
+    );
+    const jumpButtons = screen.getAllByTestId('bookmark-jump-button');
+    fireEvent.click(jumpButtons[1] as HTMLElement);
+    expect(await screen.findByTestId('bookmark-stale')).toHaveTextContent('Stale');
+    expect(await screen.findByRole('status')).toHaveTextContent(/could not be found in this book/);
+
+    // Persist across reopen and remove bookmarks.
+    first.unmount();
+    const reopened = await reopen(backend);
+    render(<Harness store={reopened} documentId={documentId} />);
+    await opened();
+    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    expect(await screen.findAllByTestId('bookmark-item')).toHaveLength(2);
+
+    const removeButtons = screen.getAllByTestId('bookmark-remove-button');
+    fireEvent.click(removeButtons[0] as HTMLElement);
+    await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
   });
 
   it('shows why a book could not open', async () => {

@@ -538,3 +538,88 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         .unwrap_err();
     assert_eq!(bad["code"], "invalid_preferences");
 }
+
+#[test]
+fn bookmarks_round_trip_deduplicate_and_persist_across_relaunch() {
+    let h = Harness::new();
+    let document = h.register("book.pdf", "pdf bytes");
+    assert_eq!(h.ok("list_bookmarks", json!({})), json!([]));
+
+    let created = h.ok(
+        "create_bookmark",
+        json!({
+            "input": {
+                "documentId": document["id"],
+                "anchor": {
+                    "format": "pdf",
+                    "pageIndex": 1,
+                    "rects": [{ "x": 0.0, "y": 0.1, "width": 1.0, "height": 0.001 }],
+                },
+                "label": "Page 2",
+            }
+        }),
+    );
+    assert_eq!(created["documentId"], document["id"]);
+    assert_eq!(created["label"], "Page 2");
+    assert_eq!(created["anchor"]["pageIndex"], 1);
+
+    // Deduplicate same PDF page location while updating its stored anchor/label.
+    let updated = h.ok(
+        "create_bookmark",
+        json!({
+            "input": {
+                "documentId": document["id"],
+                "anchor": {
+                    "format": "pdf",
+                    "pageIndex": 1,
+                    "rects": [{ "x": 0.0, "y": 0.4, "width": 1.0, "height": 0.001 }],
+                },
+                "label": "Page 2 (updated)",
+            }
+        }),
+    );
+    assert_eq!(updated["id"], created["id"]);
+    assert_eq!(updated["label"], "Page 2 (updated)");
+    assert_eq!(
+        h.ok("list_bookmarks", json!({})).as_array().unwrap().len(),
+        1
+    );
+
+    // Rejects mismatched anchor format.
+    let mismatch = h
+        .call(
+            "create_bookmark",
+            json!({
+                "input": {
+                    "documentId": document["id"],
+                    "anchor": {
+                        "format": "txt",
+                        "startByteOffset": 0,
+                        "endByteOffset": 4,
+                        "lineIndex": 0,
+                    },
+                    "label": null,
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(mismatch["code"], "invalid_anchor");
+
+    // Reopen database on next launch and verify bookmark persists, then delete it.
+    let bookmark_id = created["id"].clone();
+    let Harness { dir, app, .. } = h;
+    drop(app);
+
+    let next = Harness::in_dir(dir);
+    let listed = next.ok("list_bookmarks", json!({}));
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["id"], bookmark_id);
+
+    next.ok("delete_bookmark", json!({ "bookmarkId": bookmark_id }));
+    assert_eq!(next.ok("list_bookmarks", json!({})), json!([]));
+
+    let missing = next
+        .call("delete_bookmark", json!({ "bookmarkId": bookmark_id }))
+        .unwrap_err();
+    assert_eq!(missing["code"], "not_found");
+}

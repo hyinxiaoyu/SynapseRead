@@ -274,4 +274,41 @@ export async function pdfFlow(page) {
     'returning from PDF search jump to page 1',
   );
   await page.clickButton('Close search');
+
+  // Independent bookmarks in PDF: bookmark page 4 via outline jump, return to page 1, jump to bookmark, and remove.
+  await page.clickButton('Part Two');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '4'`,
+    'PDF jump to page 4 before bookmarking',
+  );
+  await page.clickButton('Bookmark current location');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmarks-count"]')?.textContent === '1'`,
+    'PDF bookmark badge count',
+  );
+  await scrollToPage(page, 0);
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '1'`,
+    'PDF scroll back to page 1',
+  );
+  await page.clickButton('Bookmarks');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmark-jump-button"]')`,
+    'PDF bookmark item in list',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmark-jump-button"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '4'`,
+    'jumping to PDF bookmark on page 4',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmark-remove-button"]').click()`,
+  );
+  await page.waitFor(
+    `!document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmarks-count"]')`,
+    'removing PDF bookmark',
+  );
+  await page.clickButton('Bookmarks');
 }

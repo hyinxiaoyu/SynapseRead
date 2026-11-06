@@ -14,6 +14,12 @@ import {
 
 import { Button } from '@/components/ui/button';
 import {
+  BookmarksListToggleButton,
+  BookmarksPanel,
+  BookmarkToggleButton,
+  useBookmarksController,
+} from '@/features/reader/BookmarksPanel';
+import {
   DocumentSearchBar,
   DocumentSearchToggleButton,
   SEARCH_HIGHLIGHT_COLOR,
@@ -31,6 +37,7 @@ import {
 } from '@/features/reader/ReadingPreferencesBar';
 import { cn, describeError } from '@/lib/utils';
 import {
+  type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
   type DocumentViewerProps,
@@ -204,6 +211,9 @@ export function TxtViewer({
   onCursorChange,
   preferences,
   onPreferencesChange,
+  bookmarks,
+  onAddBookmark,
+  onRemoveBookmark,
 }: DocumentViewerProps<'txt'>) {
   const load = useTextStream(content, document.id, document.encoding);
   const { model, rowCount, complete } = load;
@@ -226,6 +236,7 @@ export function TxtViewer({
   const [pinnedRows, setPinnedRows] = useState<readonly number[]>([]);
   const [missedJump, setMissedJump] = useState(false);
   const [returnStack, setReturnStack] = useState<number[]>([]);
+  const [currentRow, setCurrentRow] = useState(0);
 
   // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
   const virtualizer = useVirtualizer({
@@ -374,6 +385,8 @@ export function TxtViewer({
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     lastScrollTop.current = event.currentTarget.scrollTop;
+    const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
+    setCurrentRow(row);
     if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
     pendingCursor.current = window.setTimeout(() => {
       pendingCursor.current = null;
@@ -408,7 +421,9 @@ export function TxtViewer({
       if (!range) return;
       const previousTop = lastScrollTop.current;
       setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
-      virtualizer.scrollToIndex(model.rowAtUnit(range.startUnit), { align: 'center' });
+      const targetRow = model.rowAtUnit(range.startUnit);
+      setCurrentRow(targetRow);
+      virtualizer.scrollToIndex(targetRow, { align: 'center' });
       if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
       setSearchPulsing(true);
       searchPulseTimerRef.current = window.setTimeout(() => {
@@ -431,6 +446,68 @@ export function TxtViewer({
     runSearch: (query, caseSensitive) => model.search(query, { caseSensitive }),
     onNavigateToMatch: navigateToSearchMatch,
     searchRevision: `${rowCount}:${complete}`,
+  });
+
+  const getCurrentLocation = useCallback(() => {
+    const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? currentRow;
+    const anchor = model.cursorAnchorForRow(row);
+    if (!anchor) return null;
+    const snippet = model.rowText(row).trim();
+    const label = snippet
+      ? `Line ${row + 1} · ${snippet.length > 48 ? `${snippet.slice(0, 48)}…` : snippet}`
+      : `Line ${row + 1}`;
+    return { anchor, label };
+  }, [virtualizer, currentRow, model]);
+
+  const isActiveBookmark = useCallback(
+    (bookmark: Bookmark) => {
+      const txtAnchor = asTxtAnchor(bookmark.anchor);
+      if (!txtAnchor) return false;
+      const range = model.rangeFor(txtAnchor);
+      if (!range) return false;
+      const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? currentRow;
+      return model.rowAtUnit(range.startUnit) === row;
+    },
+    [model, virtualizer, currentRow],
+  );
+
+  const isStaleBookmark = useCallback(
+    (bookmark: Bookmark) => {
+      if (!complete) return false;
+      const txtAnchor = asTxtAnchor(bookmark.anchor);
+      return !txtAnchor || model.rangeFor(txtAnchor) === null;
+    },
+    [complete, model],
+  );
+
+  const handleSelectBookmark = useCallback(
+    (bookmark: Bookmark) => {
+      const txtAnchor = asTxtAnchor(bookmark.anchor);
+      const range = txtAnchor ? model.rangeFor(txtAnchor) : null;
+      if (!range) {
+        if (complete) setMissedJump(true);
+        return;
+      }
+      setMissedJump(false);
+      const previousTop = lastScrollTop.current;
+      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      const targetRow = model.rowAtUnit(range.startUnit);
+      setCurrentRow(targetRow);
+      virtualizer.scrollToIndex(targetRow, { align: 'start' });
+    },
+    [model, complete, virtualizer],
+  );
+
+  const bookmarksController = useBookmarksController<'txt'>({
+    documentId,
+    isActive,
+    bookmarks,
+    onAddBookmark,
+    onRemoveBookmark,
+    getCurrentLocation,
+    isActiveBookmark,
+    isStaleBookmark,
+    onSelectBookmark: handleSelectBookmark,
   });
 
   const activeSearchMatch = search.activeMatch;
@@ -554,12 +631,22 @@ export function TxtViewer({
             onToggle={preferencesPanel.toggle}
           />
           <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
+          <BookmarkToggleButton
+            bookmarked={bookmarksController.isCurrentBookmarked}
+            onToggle={bookmarksController.toggleCurrentBookmark}
+          />
+          <BookmarksListToggleButton
+            open={bookmarksController.open}
+            count={bookmarksController.bookmarks.length}
+            onToggle={bookmarksController.togglePanel}
+          />
         </div>
       </div>
       {preferencesPanel.open && (
         <ReadingPreferencesBar preferences={effectivePreferences} onChange={updatePreferences} />
       )}
       <DocumentSearchBar search={search} />
+      <BookmarksPanel controller={bookmarksController} />
       {(load.hadReplacements || missedJump) && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs text-foreground">
           {missedJump
