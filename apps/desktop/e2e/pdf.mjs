@@ -341,7 +341,7 @@ export async function pdfFlow(page) {
   );
   await page.selectText('[data-page-index="3"] .textLayer span', 'final target sentence');
   await page.waitFor(excerptEnabled, 'selecting text on page 4 for independent highlight');
-  await page.clickButton('Highlight selection');
+  await page.clickButton('Yellow highlight');
   await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
     `[...document.querySelectorAll('[data-testid="annotation-item"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 3`,

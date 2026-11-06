@@ -5,8 +5,7 @@ import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmente
 import { dispatchCommandKeydown } from '@/features/commands/registry';
 import {
   type AnnotationPlacement,
-  SelectionAnnotationControls,
-  SelectionNoteComposer,
+  localHighlights,
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
@@ -16,6 +15,9 @@ import {
   ToolbarSearchField,
   useDocumentSearch,
 } from '@/features/reader/DocumentSearch';
+import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
+import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
+import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
 import { indexOutline, type OutlineNode } from '@/features/reader/navigator/OutlineTree';
 import { useNavigator } from '@/features/reader/navigator/useNavigator';
@@ -58,6 +60,7 @@ import { useJumpHistory } from '@/features/reader/useJumpHistory';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
+  type AnnotationStyle,
   type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentViewerProps,
@@ -207,9 +210,12 @@ export function EpubViewer({
   onDeleteAnnotation,
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
+  onExcerptSelection,
+  canExcerpt,
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
+  const readerAreaRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [staleAnnotationIds, setStaleAnnotationIds] = useState<ReadonlySet<string>>(
@@ -407,7 +413,9 @@ export function EpubViewer({
 
   // ---- Highlights ----------------------------------------------------------
 
-  const painted = useRef(new Map<string, { cfiRange: string; color: string }>());
+  const painted = useRef(
+    new Map<string, { cfiRange: string; color: string; style: AnnotationStyle }>(),
+  );
   const searchPulseCleanupRef = useRef<(() => void) | null>(null);
 
   const navigateToSearchMatch = useCallback(
@@ -436,6 +444,7 @@ export function EpubViewer({
         painted.current.set(SEARCH_HIGHLIGHT_ID, {
           cfiRange: match.cfiRange,
           color: SEARCH_HIGHLIGHT_COLOR,
+          style: 'highlight',
         });
       }
 
@@ -623,22 +632,33 @@ export function EpubViewer({
 
   const effectiveHighlights = useMemo(() => {
     if (annotations !== undefined) return highlights;
-    return [
-      ...highlights,
-      ...annotationsController.annotations.map(({ id, anchor, color }) => ({
-        annotationId: id,
-        anchor,
-        color,
-      })),
-    ];
+    return [...highlights, ...localHighlights(annotationsController.annotations)];
   }, [annotations, annotationsController.annotations, highlights]);
+
+  const getSelectionRect = useCallback(() => handle?.selectionRect() ?? null, [handle]);
+  const popover = useSelectionPopover({
+    isActive,
+    selection: activeSelection,
+    annotations: annotationsController,
+    surfaceRef: areaRef,
+    getSelectionRect,
+  });
+  const { openForAnnotation, reportPointer } = popover;
+  useEffect(() => {
+    if (!handle) return;
+    handle.onMarkClick((annotationId, rect) => {
+      if (!latest.current.isActive) return;
+      openForAnnotation(annotationId, rect);
+    });
+    handle.onPointer(reportPointer);
+  }, [handle, openForAnnotation, reportPointer]);
 
   useEffect(() => {
     if (!handle) return;
-    const wanted = new Map<string, { cfiRange: string; color: string }>();
-    for (const { annotationId, anchor, color } of effectiveHighlights) {
+    const wanted = new Map<string, { cfiRange: string; color: string; style: AnnotationStyle }>();
+    for (const { annotationId, anchor, color, style = 'highlight' } of effectiveHighlights) {
       const epubAnchor = asEpubAnchor(anchor);
-      if (epubAnchor) wanted.set(annotationId, { cfiRange: epubAnchor.cfiRange, color });
+      if (epubAnchor) wanted.set(annotationId, { cfiRange: epubAnchor.cfiRange, color, style });
     }
     // A jump can target an annotation from another notebook, with no highlight here.
     const jumpAnchor = asEpubAnchor(jumpRequest?.anchor);
@@ -646,26 +666,33 @@ export function EpubViewer({
       wanted.set(jumpRequest.annotationId, {
         cfiRange: jumpAnchor.cfiRange,
         color: FALLBACK_HIGHLIGHT,
+        style: 'highlight',
       });
     }
     if (activeSearchMatch) {
       wanted.set(SEARCH_HIGHLIGHT_ID, {
         cfiRange: activeSearchMatch.cfiRange,
         color: SEARCH_HIGHLIGHT_COLOR,
+        style: 'highlight',
       });
     }
 
     for (const [annotationId, existing] of painted.current) {
       const next = wanted.get(annotationId);
-      if (!next || next.cfiRange !== existing.cfiRange || next.color !== existing.color) {
-        handle.removeHighlight(existing.cfiRange);
+      if (
+        !next ||
+        next.cfiRange !== existing.cfiRange ||
+        next.color !== existing.color ||
+        next.style !== existing.style
+      ) {
+        handle.removeHighlight(existing.cfiRange, existing.style);
         painted.current.delete(annotationId);
       }
     }
-    for (const [annotationId, { cfiRange, color }] of wanted) {
+    for (const [annotationId, mark] of wanted) {
       if (!painted.current.has(annotationId)) {
-        handle.highlight(annotationId, cfiRange, color);
-        painted.current.set(annotationId, { cfiRange, color });
+        handle.highlight(annotationId, mark.cfiRange, mark.color, mark.style);
+        painted.current.set(annotationId, mark);
       }
     }
   }, [handle, effectiveHighlights, jumpRequest, activeSearchMatch]);
@@ -938,6 +965,7 @@ export function EpubViewer({
     annotations: annotationsController,
     selectionText: activeSelection?.text ?? null,
     markup,
+    popover,
     reflowable: {
       preferences: effectivePreferences,
       onChange: updatePreferences,
@@ -1034,13 +1062,11 @@ export function EpubViewer({
               format="epub"
               disabled={!handle}
             />
-            {markup.visible && (
-              <SelectionAnnotationControls
-                hasSelection={activeSelection !== null}
-                controller={annotationsController}
-                disabled={!handle}
-              />
-            )}
+            <MarkupToggleButton
+              visible={markup.visible}
+              highlightMode={annotationsController.highlightMode}
+              onToggle={markup.toggle}
+            />
             <ToolbarSeparator />
             <BookmarkToggleButton
               bookmarked={bookmarksController.isCurrentBookmarked}
@@ -1073,12 +1099,18 @@ export function EpubViewer({
           />
         )}
         {/* Notices float over the page column only, never over the sidebar. */}
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <div ref={readerAreaRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {markup.visible && <MarkupBar controller={annotationsController} onClose={markup.hide} />}
+          <SelectionPopover
+            popover={popover}
+            annotations={annotationsController}
+            selection={activeSelection}
+            boundsRef={readerAreaRef}
+            onExcerpt={onExcerptSelection}
+            canExcerpt={canExcerpt}
+            onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
+          />
           <ReaderPopoverLayer>
-            <SelectionNoteComposer
-              hasSelection={activeSelection !== null}
-              controller={annotationsController}
-            />
             {missedJump && (
               <p role="status" className="bg-muted px-4 py-1.5 text-xs">
                 That excerpt could not be found in this book. The file may have changed.

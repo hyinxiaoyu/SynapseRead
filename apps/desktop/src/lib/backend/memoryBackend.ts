@@ -7,6 +7,7 @@ import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-in
 import {
   type AnchorLocation,
   type Annotation,
+  type AnnotationStyle,
   type Bookmark,
   bookmarkLocationKey,
   DEFAULT_READING_PREFERENCES,
@@ -68,6 +69,13 @@ const FORMAT_BY_EXTENSION: Record<string, DocumentFormat> = {
 };
 
 const fail = (code: string, message: string): IpcError => ({ code, message });
+
+const ANNOTATION_STYLES: readonly string[] = ['highlight', 'underline'] satisfies AnnotationStyle[];
+
+/** Core rejects an unknown style while deserializing the request. */
+function checkAnnotationStyle(style: string): void {
+  if (!ANNOTATION_STYLES.includes(style)) throw fail('json', `unknown annotation style: ${style}`);
+}
 const now = () => new Date().toISOString();
 
 /**
@@ -460,6 +468,7 @@ export function createMemoryBackend({
         excerptImagePath: input.excerptImagePng === null ? null : `captures/${annotationId}.png`,
         note: null,
         color: input.color,
+        style: 'highlight',
         createdAt: now(),
       };
       const card: NoteCard = {
@@ -511,6 +520,7 @@ export function createMemoryBackend({
       if (!input.color.trim()) {
         throw fail('invalid_anchor', 'an annotation needs a highlight color');
       }
+      checkAnnotationStyle(input.style);
       const trimmedNote = input.note?.trim() || null;
       if (!input.excerptText?.trim() && input.excerptImagePng === null && trimmedNote === null) {
         throw fail(
@@ -533,6 +543,7 @@ export function createMemoryBackend({
         excerptImagePath: input.excerptImagePng === null ? null : `captures/${annotationId}.png`,
         note: trimmedNote,
         color: input.color.trim(),
+        style: input.style,
         createdAt: now(),
       };
       annotations.set(annotation.id, annotation);
@@ -544,10 +555,12 @@ export function createMemoryBackend({
       if (patch.color !== null && !patch.color.trim()) {
         throw fail('invalid_anchor', 'an annotation needs a highlight color');
       }
+      if (patch.style != null) checkAnnotationStyle(patch.style);
       const updated: Annotation = {
         ...existing,
         note: patch.note !== null ? patch.note.trim() || null : (existing.note ?? null),
         color: patch.color !== null ? patch.color.trim() : existing.color,
+        style: patch.style ?? existing.style,
       };
       annotations.set(annotationId, updated);
       return updated;

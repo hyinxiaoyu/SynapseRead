@@ -19,6 +19,8 @@
         "separator",
         "edit.highlight",
         "edit.addNote",
+        "edit.selectionActions",
+        "edit.highlightMode",
         "edit.excerpt"
       ]
     },
@@ -100,12 +102,19 @@
     },
     "edit.useSelectionForFind": { "title": "Use Selection for Find", "shortcut": "CmdOrCtrl+E" },
     "edit.undoDelete": { "title": "Undo Delete", "shortcut": "CmdOrCtrl+Z", "accelerator": false },
-    "edit.highlight": {
-      "title": "Highlight Selection",
+    "edit.highlight": { "title": "Highlight Selection", "shortcut": "Shift+CmdOrCtrl+H" },
+    "edit.addNote": { "title": "Add Note to Selection" },
+    "edit.selectionActions": {
+      "title": "Show Selection Actions",
+      "shortcut": "Shift+F10",
+      "aliases": ["ContextMenu"],
+      "accelerator": false
+    },
+    "edit.highlightMode": {
+      "title": "Highlight Mode",
       "shortcut": "Ctrl+Cmd+H",
       "shortcutOther": "Ctrl+Alt+H"
     },
-    "edit.addNote": { "title": "Add Note to Selection" },
     "edit.excerpt": { "title": "Excerpt to MindMap", "shortcut": "Shift+CmdOrCtrl+E" },
     "view.toggleSidebar": { "title": "Toggle Sidebar", "shortcut": "Alt+CmdOrCtrl+S" },
     "view.hideSidebar": { "title": "Hide Sidebar", "shortcut": "Alt+CmdOrCtrl+1" },

@@ -7,14 +7,20 @@ import type {
   DocumentSearchController,
   DocumentSearchResultItem,
 } from '@/features/reader/DocumentSearch';
+import type { SelectionPopoverController } from '@/features/reader/markup/useSelectionPopover';
 import type { NavigatorController, NavigatorTab } from '@/features/reader/navigator/useNavigator';
 import { DEFAULT_FONT_SIZE, steppedFontSize } from '@/features/reader/appearance/AppearancePopover';
 import type { ReadingPreferences } from '@/types/domain';
 
-/** The markup group (colors, Highlight, Add note) can be put away with ⇧⌘A. */
+/** The markup bar under the toolbar (⇧⌘A), put away until it is asked for. */
 export function useMarkupToolbar() {
-  const [visible, setVisible] = useState(true);
-  return { visible, toggle: () => setVisible((current) => !current) };
+  const [visible, setVisible] = useState(false);
+  return {
+    visible,
+    toggle: () => setVisible((current) => !current),
+    show: () => setVisible(true),
+    hide: () => setVisible(false),
+  };
 }
 
 export type MarkupToolbar = ReturnType<typeof useMarkupToolbar>;
@@ -53,6 +59,7 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   annotations,
   selectionText,
   markup,
+  popover,
   reflowable,
   extra,
 }: {
@@ -68,6 +75,7 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   /** The current selection's text, or null with nothing selected. */
   selectionText: string | null;
   markup: MarkupToolbar;
+  popover: SelectionPopoverController;
   /** Text size and the Appearance popover, for formats that reflow. */
   reflowable?: ReflowableOptions;
   extra?: CommandHandlers;
@@ -105,8 +113,22 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
       enabled: ready && hasSelection,
     },
     'edit.undoDelete': { run: undoDelete, enabled: ready && canUndoDelete },
-    'edit.highlight': { run: annotations.createHighlight, enabled: ready && hasSelection },
-    'edit.addNote': { run: annotations.toggleDraftNote, enabled: ready && hasSelection },
+    // The last color and style used, as in Books.
+    'edit.highlight': { run: () => annotations.createHighlight(), enabled: ready && hasSelection },
+    'edit.addNote': { run: popover.openNote, enabled: ready && hasSelection },
+    'edit.selectionActions': {
+      run: popover.showFromKeyboard,
+      enabled: ready && (hasSelection || popover.target !== null),
+    },
+    'edit.highlightMode': {
+      run: () => {
+        // Turning it on shows the bar, so the armed mode is never invisible.
+        if (!annotations.highlightMode) markup.show();
+        annotations.toggleHighlightMode();
+      },
+      enabled: ready,
+      title: annotations.highlightMode ? 'Turn Off Highlight Mode' : 'Turn On Highlight Mode',
+    },
     'view.toggleSidebar': {
       run: navigator.toggle,
       enabled: sidebarReady,

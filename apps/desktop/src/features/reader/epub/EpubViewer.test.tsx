@@ -48,6 +48,7 @@ const engine = vi.hoisted(() => ({
   ],
   displayed: [] as (string | undefined)[],
   highlighted: new Map<string, string>(),
+  highlightStyles: new Map<string, string>(),
   removed: [] as string[],
   pulsing: new Set<string>(),
   selectionCleared: 0,
@@ -58,6 +59,8 @@ const engine = vi.hoisted(() => ({
   emitKeyDown: (() => undefined) as (event: KeyboardEvent) => void,
   emitGesture: (() => undefined) as (sample: PageGestureSample) => void,
   emitWheel: (() => false) as (wheel: WheelSample) => boolean,
+  emitMarkClick: (() => undefined) as (annotationId: string, rect: null) => void,
+  emitPointer: (() => undefined) as (down: boolean) => void,
   cursor: '',
   displayedFractions: [] as [number, number][],
   next: vi.fn(async () => undefined),
@@ -111,8 +114,10 @@ vi.mock('./epubEngine', () => ({
     setReadingMode: engine.setReadingMode,
     setPreferences: engine.setPreferences,
     setColumns: engine.setColumns,
-    highlight: (annotationId: string, cfiRange: string) =>
-      void engine.highlighted.set(annotationId, cfiRange),
+    highlight(annotationId: string, cfiRange: string, _color: string, style = 'highlight') {
+      engine.highlighted.set(annotationId, cfiRange);
+      engine.highlightStyles.set(annotationId, style);
+    },
     removeHighlight: (cfiRange: string) => void engine.removed.push(cfiRange),
     setPulse(annotationId: string, pulsing: boolean) {
       if (pulsing) engine.pulsing.add(annotationId);
@@ -123,6 +128,13 @@ vi.mock('./epubEngine', () => ({
       engine.selectionCleared += 1;
     },
     resize: () => undefined,
+    selectionRect: () => null,
+    onMarkClick(listener: (annotationId: string, rect: null) => void) {
+      engine.emitMarkClick = listener;
+    },
+    onPointer(listener: (down: boolean) => void) {
+      engine.emitPointer = listener;
+    },
     onSelection(listener: (selection: EpubSelection | null) => void) {
       engine.emitSelection = listener as (selection: unknown) => void;
     },
@@ -245,6 +257,7 @@ describe('EpubViewer', () => {
     ];
     engine.displayed = [];
     engine.highlighted = new Map();
+    engine.highlightStyles = new Map();
     engine.removed = [];
     engine.pulsing = new Set();
     engine.selectionCleared = 0;
@@ -971,14 +984,36 @@ describe('EpubViewer', () => {
     await opened();
 
     select(CFI, 'quick brown fox');
-    fireEvent.click(screen.getByTestId('annotation-color-pink'));
-    fireEvent.click(screen.getByTestId('highlight-selection-button'));
+    // The selection popover offers the colors; choosing one highlights at once.
+    const popover = await screen.findByTestId('selection-popover');
+    expect(popover).toHaveAttribute('data-popover-mode', 'create');
+    fireEvent.click(screen.getByRole('button', { name: 'Pink highlight' }));
 
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
     expect(store.getState().cards).toEqual([]);
     expect(store.getState().nodes).toEqual([]);
     const annotationId = store.getState().annotations[0]?.id as string;
+    expect(store.getState().annotations[0]?.color).toBe('#f9a8d4');
     expect(engine.highlighted.get(annotationId)).toBe(CFI);
+    await waitFor(() => expect(screen.queryByTestId('selection-popover')).toBeNull());
+
+    // Clicking the mark reopens the popover to restyle it as an underline.
+    act(() => engine.emitMarkClick(annotationId, null));
+    expect(await screen.findByTestId('selection-popover')).toHaveAttribute(
+      'data-popover-mode',
+      'edit',
+    );
+    expect(screen.getByRole('button', { name: 'Pink highlight' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Underline' }));
+    await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('underline'));
+    await waitFor(() => expect(engine.highlightStyles.get(annotationId)).toBe('underline'));
+    // A press in the page puts the popover away.
+    act(() => engine.emitPointer(true));
+    await waitFor(() => expect(screen.queryByTestId('selection-popover')).toBeNull());
+    act(() => engine.emitPointer(false));
 
     fireEvent.keyDown(window, { key: '4', code: 'Digit4', altKey: true, metaKey: true });
     expect(await screen.findByTestId('annotation-item')).toHaveTextContent('quick brown fox');

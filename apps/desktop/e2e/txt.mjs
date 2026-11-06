@@ -219,7 +219,7 @@ export async function txtFlow(page) {
 
   // Independent highlights & notes in TXT viewer: highlight dropped file text without creating a MindMap card, delete, and undo.
   await page.selectText(SEGMENT, 'Dropped E2E');
-  await page.clickButton('Highlight selection');
+  await page.clickButton('Yellow highlight');
   await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
     `[...document.querySelectorAll('[data-testid="annotation-item"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 1`,

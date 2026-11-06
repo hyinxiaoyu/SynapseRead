@@ -1,0 +1,435 @@
+import { Copy, Quote, StickyNote, Trash2, Underline } from 'lucide-react';
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+
+import { Button } from '@/components/ui/button';
+import { commandTooltip } from '@/features/commands/commands';
+import {
+  ANNOTATION_COLORS,
+  type AnnotationsController,
+  COLOR_TARGET_CLASS,
+  ColorDot,
+} from '@/features/reader/AnnotationsPanel';
+import { placePopover, toViewportRect, type ViewportRect } from '@/features/reader/markup/geometry';
+import type { SelectionPopoverController } from '@/features/reader/markup/useSelectionPopover';
+import { cn } from '@/lib/utils';
+import type { Annotation, ReaderSelection } from '@/types/domain';
+
+/** Copies text, falling back to the editing command where the async API is refused. */
+async function copyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.setAttribute('readonly', '');
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.append(field);
+    field.select();
+    document.execCommand('copy');
+    field.remove();
+  }
+}
+
+/** Keeps the reader's text selection alive through a press on a popover control. */
+const keepSelection = (event: { preventDefault: () => void }) => event.preventDefault();
+
+function PopoverAction({
+  icon: Icon,
+  label,
+  title,
+  pressed,
+  testId,
+  onClick,
+  children,
+}: {
+  icon: typeof Copy;
+  label: string;
+  title?: string;
+  pressed?: boolean | undefined;
+  testId: string;
+  onClick: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={pressed}
+      title={title ?? label}
+      data-testid={testId}
+      data-popover-control=""
+      tabIndex={-1}
+      onMouseDown={keepSelection}
+      onClick={onClick}
+      className={cn(
+        'flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-md px-1.5 text-xs font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4',
+        pressed && 'bg-accent text-accent-foreground',
+      )}
+    >
+      <Icon aria-hidden="true" />
+      {children}
+    </button>
+  );
+}
+
+/**
+ * Apple Books' selection callout: colors, Underline, Note, Excerpt to MindMap,
+ * and Copy beside the selection, or, for a highlight that was clicked, its color,
+ * style, note, and Delete. Lives in reader code and acts only through the
+ * annotations controller and the viewer's callbacks.
+ */
+export function SelectionPopover({
+  popover,
+  annotations,
+  selection,
+  boundsRef,
+  onExcerpt,
+  canExcerpt = true,
+  onReturnFocus,
+}: {
+  popover: SelectionPopoverController;
+  annotations: AnnotationsController;
+  selection: ReaderSelection | null;
+  /** The reader's area: the popover stays inside it. */
+  boundsRef: RefObject<HTMLElement | null>;
+  onExcerpt?: (() => void) | undefined;
+  canExcerpt?: boolean | undefined;
+  /** Where focus goes when the popover is put away with Esc. */
+  onReturnFocus: () => void;
+}) {
+  const { target } = popover;
+  const annotation: Annotation | null =
+    target?.kind === 'annotation'
+      ? (annotations.annotations.find((candidate) => candidate.id === target.annotationId) ?? null)
+      : null;
+  const editing = annotation !== null;
+
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+  const [placement, setPlacement] = useState<'above' | 'below'>('above');
+
+  // ---- Placement: beside the selection, inside the reader, following scrolls --
+
+  const shown = target !== null;
+  const annotationRect = target?.kind === 'annotation' ? target.rect : null;
+  const { selectionRect } = popover;
+  useLayoutEffect(() => {
+    if (!shown) return;
+    const place = () => {
+      const root = rootRef.current;
+      const boundsElement = boundsRef.current;
+      if (!root || !boundsElement) return;
+      const bounds: ViewportRect = toViewportRect(boundsElement.getBoundingClientRect());
+      const anchor = editing ? annotationRect : selectionRect();
+      const next = placePopover(
+        anchor,
+        { width: root.offsetWidth, height: root.offsetHeight },
+        bounds,
+      );
+      setPosition((current) =>
+        current && current.top === next.top && current.left === next.left
+          ? current
+          : { top: next.top, left: next.left },
+      );
+      setPlacement(next.placement);
+    };
+    place();
+    const view = rootRef.current?.ownerDocument.defaultView;
+    view?.addEventListener('scroll', place, true);
+    view?.addEventListener('resize', place);
+    const observer =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => place());
+    if (rootRef.current) observer?.observe(rootRef.current);
+    return () => {
+      view?.removeEventListener('scroll', place, true);
+      view?.removeEventListener('resize', place);
+      observer?.disconnect();
+    };
+  }, [shown, editing, annotationRect, selectionRect, selection, boundsRef, popover.noteOpen]);
+
+  // ---- A highlight's popover closes on a press anywhere else ---------------
+
+  const { dismiss } = popover;
+  useEffect(() => {
+    if (!editing) return;
+    const view = rootRef.current?.ownerDocument.defaultView;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) dismiss();
+    };
+    view?.addEventListener('pointerdown', onPointerDown, true);
+    return () => view?.removeEventListener('pointerdown', onPointerDown, true);
+  }, [editing, dismiss]);
+
+  // ---- Focus: ⇧F10 and Add Note move into the popover ----------------------
+
+  const noteFieldRef = useRef<HTMLTextAreaElement>(null);
+  const handledFocusRequest = useRef(popover.focusRequest);
+  useEffect(() => {
+    if (!shown || handledFocusRequest.current === popover.focusRequest) return;
+    handledFocusRequest.current = popover.focusRequest;
+    if (popover.noteOpen) noteFieldRef.current?.focus();
+    else rootRef.current?.querySelector<HTMLElement>('[data-popover-control]')?.focus();
+  }, [shown, popover.focusRequest, popover.noteOpen]);
+
+  // ---- The note being written or edited ------------------------------------
+
+  const [editNote, setEditNote] = useState('');
+  const [editNoteFor, setEditNoteFor] = useState<string | null>(null);
+  if (editing && popover.noteOpen && editNoteFor !== annotation.id) {
+    setEditNoteFor(annotation.id);
+    setEditNote(annotation.note ?? '');
+  }
+  if (!popover.noteOpen && editNoteFor !== null) setEditNoteFor(null);
+  const noteValue = editing ? editNote : annotations.draftNote;
+
+  if (!shown) return null;
+
+  const close = () => {
+    dismiss();
+    onReturnFocus();
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      if (popover.noteOpen) {
+        popover.closeNote();
+        rootRef.current?.querySelector<HTMLElement>('[data-testid="popover-note"]')?.focus();
+        return;
+      }
+      close();
+      return;
+    }
+    if (event.target instanceof HTMLTextAreaElement) return;
+    // A toolbar: arrows move between controls, so only one is in the Tab order.
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    const controls = Array.from(
+      rootRef.current?.querySelectorAll<HTMLElement>('[data-popover-control]') ?? [],
+    );
+    const index = controls.indexOf(event.target as HTMLElement);
+    if (index < 0) return;
+    event.preventDefault();
+    const next =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? controls.length - 1
+          : (index + (event.key === 'ArrowRight' ? 1 : -1) + controls.length) % controls.length;
+    controls[next]?.focus();
+  };
+
+  const chooseColor = (color: string) => {
+    if (annotation) {
+      annotations.setActiveColor(color);
+      annotations.updateAnnotation(annotation.id, { note: null, color, style: null });
+      return;
+    }
+    annotations.createHighlight({ color, style: 'highlight' });
+  };
+
+  const toggleUnderline = () => {
+    if (annotation) {
+      const style = annotation.style === 'underline' ? 'highlight' : 'underline';
+      annotations.setActiveStyle(style);
+      annotations.updateAnnotation(annotation.id, { note: null, color: null, style });
+      return;
+    }
+    annotations.createHighlight({ style: 'underline' });
+  };
+
+  const toggleNote = () => {
+    if (popover.noteOpen) popover.closeNote();
+    else popover.openNote();
+  };
+
+  const saveNote = () => {
+    if (annotation) {
+      annotations.updateAnnotation(annotation.id, { note: editNote, color: null });
+      popover.closeNote();
+      return;
+    }
+    annotations.submitNoteSelection();
+  };
+
+  const copy = () => {
+    const text = annotation ? annotation.excerptText : selection?.text;
+    if (text) void copyText(text);
+    close();
+  };
+
+  const currentColor = annotation ? annotation.color : annotations.activeColor;
+  const label = editing ? 'Highlight actions' : 'Selection actions';
+
+  return (
+    <div
+      ref={rootRef}
+      role="dialog"
+      aria-label={label}
+      data-testid="selection-popover"
+      data-popover-mode={editing ? 'edit' : 'create'}
+      data-placement={placement}
+      data-reader-popover=""
+      onKeyDown={onKeyDown}
+      className="fixed z-40 flex w-max max-w-[min(26rem,calc(100vw-1rem))] flex-col gap-1.5 rounded-xl border bg-background p-1 text-foreground shadow-lg"
+      style={
+        position
+          ? { top: position.top, left: position.left }
+          : // Measured before it is placed, so it does not flash at the corner.
+            { top: 0, left: 0, visibility: 'hidden' }
+      }
+    >
+      <div
+        role="toolbar"
+        aria-label={label}
+        aria-orientation="horizontal"
+        // Arrow keys move between controls here; they must not turn the page.
+        data-arrow-keys=""
+        className="flex items-center gap-0.5"
+      >
+        <div role="group" aria-label="Highlight color" className="flex items-center">
+          {ANNOTATION_COLORS.map(({ label: name, value }, index) => {
+            const selected = currentColor === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                aria-label={`${name} highlight`}
+                aria-pressed={selected}
+                title={
+                  editing
+                    ? `${name} highlight`
+                    : index === 0
+                      ? commandTooltip(`${name} highlight`, 'edit.highlight')
+                      : `${name} highlight`
+                }
+                data-testid={`popover-color-${name.toLowerCase()}`}
+                data-popover-control=""
+                tabIndex={index === 0 ? 0 : -1}
+                onMouseDown={keepSelection}
+                onClick={() => chooseColor(value)}
+                className={COLOR_TARGET_CLASS}
+              >
+                <ColorDot color={value} selected={selected} className="size-6" />
+              </button>
+            );
+          })}
+        </div>
+        <div role="separator" aria-orientation="vertical" className="mx-0.5 h-5 w-px bg-border" />
+        <PopoverAction
+          icon={Underline}
+          label="Underline"
+          pressed={annotation ? annotation.style === 'underline' : undefined}
+          testId="popover-underline"
+          onClick={toggleUnderline}
+        />
+        <PopoverAction
+          icon={StickyNote}
+          label={annotation?.note ? 'Edit Note' : 'Add Note'}
+          title={
+            editing
+              ? annotation.note
+                ? 'Edit Note'
+                : 'Add Note'
+              : commandTooltip('Add Note', 'edit.addNote')
+          }
+          pressed={popover.noteOpen}
+          testId="popover-note"
+          onClick={toggleNote}
+        />
+        {!editing && onExcerpt && (
+          <PopoverAction
+            icon={Quote}
+            label="Excerpt to MindMap"
+            title={
+              canExcerpt
+                ? commandTooltip('Excerpt to MindMap', 'edit.excerpt')
+                : 'Saving the last excerpt…'
+            }
+            testId="popover-excerpt"
+            onClick={() => {
+              if (!canExcerpt) return;
+              onExcerpt();
+              close();
+            }}
+          />
+        )}
+        <PopoverAction icon={Copy} label="Copy" testId="popover-copy" onClick={copy} />
+        {annotation && (
+          <PopoverAction
+            icon={Trash2}
+            label="Delete Highlight"
+            testId="popover-delete"
+            onClick={() => {
+              annotations.deleteAnnotation(annotation.id);
+              close();
+            }}
+          />
+        )}
+      </div>
+      {popover.noteOpen && (
+        <form
+          aria-label={editing ? 'Edit note' : 'Add note to selection'}
+          data-testid="popover-note-form"
+          className="flex flex-col gap-1.5 px-1 pb-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveNote();
+          }}
+        >
+          <textarea
+            ref={noteFieldRef}
+            aria-label={editing ? 'Highlight note' : 'Selection note'}
+            data-testid="popover-note-input"
+            placeholder="Write a note…"
+            rows={3}
+            value={noteValue}
+            onChange={(event) =>
+              editing
+                ? setEditNote(event.target.value)
+                : annotations.setDraftNote(event.target.value)
+            }
+            onKeyDown={(event) => {
+              // ⌘↩ saves, as in Notes; a bare Return is a new line.
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                saveNote();
+              }
+            }}
+            className="w-full min-w-64 resize-none rounded-md border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <div className="flex justify-end gap-1.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onMouseDown={keepSelection}
+              onClick={popover.closeNote}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              data-testid="popover-note-save"
+              onMouseDown={keepSelection}
+            >
+              Save Note
+            </Button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}

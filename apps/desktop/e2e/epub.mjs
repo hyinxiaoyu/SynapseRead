@@ -387,7 +387,7 @@ export async function epubFlow(page) {
   // Independent highlights & notes in EPUB: highlight without creating a MindMap card, delete, and undo.
   const epubPoints = await textPoints(page, 'final target sentence');
   await page.drag(epubPoints.start, epubPoints.end);
-  await page.clickButton('Highlight selection');
+  await page.clickButton('Yellow highlight');
   await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
     `[...document.querySelectorAll('[data-testid="annotation-item"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 4`,

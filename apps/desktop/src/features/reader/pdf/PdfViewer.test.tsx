@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -946,13 +946,15 @@ describe('PdfViewer', () => {
     const page0 = await pageElement(0);
     const node = textNode(page0, 0);
 
-    // Select text, pick Green highlight color, and add a note via SelectionNoteComposer.
+    // Pick Green in the markup bar, select text, and add a note from the popover.
+    fireEvent.click(screen.getByTestId('markup-toggle'));
+    fireEvent.click(screen.getByTestId('markup-color-green'));
     select([node, 0], [node, 10]);
-    fireEvent.click(screen.getByTestId('annotation-color-green'));
-    fireEvent.click(screen.getByTestId('add-note-selection-button'));
-    const noteComposerInput = await screen.findByTestId('selection-note-input');
+    const popover = await screen.findByTestId('selection-popover');
+    fireEvent.click(within(popover).getByRole('button', { name: 'Add Note' }));
+    const noteComposerInput = await screen.findByTestId('popover-note-input');
     fireEvent.change(noteComposerInput, { target: { value: 'Margin note on page 1' } });
-    fireEvent.click(screen.getByTestId('save-selection-note-button'));
+    fireEvent.click(screen.getByTestId('popover-note-save'));
 
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
     expect(store.getState().cards).toEqual([]);
@@ -962,6 +964,30 @@ describe('PdfViewer', () => {
       color: '#86efac',
       note: 'Margin note on page 1',
     });
+
+    // A click on the highlight opens the popover in edit mode, here to make it an underline.
+    const mark = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>(
+        '[data-page-index="0"] [data-annotation-id]',
+      );
+      if (!element) throw new Error('no highlight yet');
+      return element;
+    });
+    fireEvent.click(mark);
+    const editor = await screen.findByTestId('selection-popover');
+    expect(editor).toHaveAttribute('data-popover-mode', 'edit');
+    fireEvent.click(within(editor).getByRole('button', { name: 'Underline' }));
+    await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('underline'));
+    await waitFor(() =>
+      expect(
+        document.querySelector<HTMLElement>('[data-page-index="0"] [data-annotation-id]')?.dataset
+          .annotationStyle,
+      ).toBe('underline'),
+    );
+    fireEvent.keyDown(within(editor).getByRole('button', { name: 'Underline' }), {
+      key: 'Escape',
+    });
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
 
     // Open annotations panel, edit note & color, jump to annotation, delete, and undo delete.
     fireEvent.keyDown(window, { key: '4', code: 'Digit4', altKey: true, metaKey: true });
@@ -1046,7 +1072,7 @@ describe('PdfViewer', () => {
     // Create a user highlight on Page 1 to verify geometry across rotation and display modes.
     const node = textNode(page0, 0);
     select([node, 0], [node, 10]);
-    fireEvent.click(screen.getByTestId('highlight-selection-button'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yellow highlight' }));
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
 
     const highlightEl = () =>

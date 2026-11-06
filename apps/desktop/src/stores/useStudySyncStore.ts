@@ -10,6 +10,7 @@ import {
   type Bookmark,
   bookmarkLocationKey,
   type CardPatch,
+  type CreateAnnotationOptions,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
   type DocumentSourceStatus,
@@ -101,10 +102,7 @@ export interface StudySyncState {
 
   setSelection(selection: ReaderSelection | null): void;
   excerptSelection(): Promise<void>;
-  createAnnotationFromSelection(options?: {
-    color?: string;
-    note?: string;
-  }): Promise<Annotation | null>;
+  createAnnotationFromSelection(options?: CreateAnnotationOptions): Promise<Annotation | null>;
   updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<void>;
   removeAnnotation(annotationId: string): Promise<void>;
   undoRemoveAnnotation(): Promise<Annotation | null>;
@@ -149,7 +147,7 @@ export function selectHighlights(
 ): ReaderHighlight[] {
   return annotations
     .filter((annotation) => annotation.documentId === documentId)
-    .map(({ id, anchor, color }) => ({ annotationId: id, anchor, color }));
+    .map(({ id, anchor, color, style }) => ({ annotationId: id, anchor, color, style }));
 }
 
 export function selectDocumentAnnotations(
@@ -520,6 +518,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             excerptImagePng: selection.imagePng,
             note: options?.note ?? null,
             color: options?.color ?? DEFAULT_EXCERPT_COLOR,
+            style: options?.style ?? 'highlight',
           });
           created = saved;
           set((state) => ({
@@ -588,6 +587,7 @@ export function createStudySyncStore(backend: StudyBackend) {
               excerptImagePng: null,
               note: last.annotation.note ?? null,
               color: last.annotation.color,
+              style: last.annotation.style,
             });
             restored = saved;
             set((state) => ({

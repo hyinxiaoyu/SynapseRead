@@ -13,11 +13,17 @@ import {
   findSubstringMatches,
 } from '@/features/reader/DocumentSearch';
 import {
+  markViewportRect,
+  rangeViewportRect,
+  type ViewportRect,
+} from '@/features/reader/markup/geometry';
+import {
   isOverContent,
   type PageGestureSample,
   type WheelSample,
 } from '@/features/reader/paging/pageTurn';
 import {
+  type AnnotationStyle,
   DEFAULT_READING_PREFERENCES,
   type DocumentSource,
   type EpubReadingMode,
@@ -91,13 +97,20 @@ export interface EpubHandle {
   setColumns(columns: 1 | 2): void;
   /** `theme` must already be resolved: `auto` renders as Light. */
   setPreferences(preferences: ReadingPreferences): void;
-  highlight(annotationId: string, cfiRange: string, color: string): void;
-  removeHighlight(cfiRange: string): void;
+  /** Marks a range; an underline draws only a line under the text. */
+  highlight(annotationId: string, cfiRange: string, color: string, style?: AnnotationStyle): void;
+  removeHighlight(cfiRange: string, style?: AnnotationStyle): void;
   /** Whether a highlight's marks are on screen; the marks draw after `display` resolves. */
   setPulse(annotationId: string, pulsing: boolean): boolean;
   clearSelection(): void;
+  /** The box around the selected text, in the top window's coordinates. */
+  selectionRect(): ViewportRect | null;
   resize(width: number, height: number): void;
   onSelection(listener: (selection: EpubSelection | null) => void): void;
+  /** A click on a highlight or underline, with the box around its marks. */
+  onMarkClick(listener: (annotationId: string, rect: ViewportRect | null) => void): void;
+  /** The primary button going down and up inside a chapter frame. */
+  onPointer(listener: (down: boolean) => void): void;
   onLocation(listener: (location: EpubLocation) => void): void;
   onKeyDown(listener: (event: KeyboardEvent) => void): void;
   /** Pointer events in a chapter frame, in the top window's coordinates. */
@@ -441,6 +454,9 @@ export async function openEpubDocument(
   let keyDownListener: (event: KeyboardEvent) => void = () => undefined;
   let gestureListener: (sample: PageGestureSample) => void = () => undefined;
   let wheelListener: (wheel: WheelSample) => boolean = () => false;
+  let markClickListener: (annotationId: string, rect: ViewportRect | null) => void = () =>
+    undefined;
+  let pointerListener: (down: boolean) => void = () => undefined;
   let frameCursor = '';
 
   rendition.hooks.content.register((contents: Contents) => {
@@ -465,8 +481,12 @@ export async function openEpubDocument(
       return selection !== null && !selection.isCollapsed;
     };
     chapterDoc.documentElement.style.cursor = frameCursor;
+    chapterDoc.addEventListener('pointerup', (event: PointerEvent) => {
+      if (event.button === 0) pointerListener(false);
+    });
     chapterDoc.addEventListener('pointerdown', (event: PointerEvent) => {
       if (event.button !== 0) return;
+      pointerListener(true);
       const { left, top } = offset();
       gestureListener({
         kind: 'down',
@@ -732,14 +752,36 @@ export async function openEpubDocument(
       }
     },
 
-    highlight(annotationId, cfiRange, color) {
-      rendition.annotations.highlight(cfiRange, { annotationId }, undefined, 'epub-highlight', {
+    highlight(annotationId, cfiRange, color, style = 'highlight') {
+      // marks-pane forwards clicks in the frame to the mark under them.
+      const onClick = () => {
+        // A drag that ends over a mark clicks it too; that press made a selection instead.
+        const selecting = contentsList().some((contents) => {
+          const selection = contents.window.getSelection();
+          return selection !== null && !selection.isCollapsed;
+        });
+        if (selecting) return;
+        const marks = element.querySelectorAll(
+          `[data-annotation-id="${CSS.escape(annotationId)}"]`,
+        );
+        markClickListener(annotationId, markViewportRect(Array.from(marks), annotationId));
+      };
+      if (style === 'underline') {
+        rendition.annotations.underline(cfiRange, { annotationId }, onClick, 'epub-underline', {
+          stroke: color,
+          'stroke-opacity': '1',
+          'stroke-width': '2',
+        });
+        return;
+      }
+      rendition.annotations.highlight(cfiRange, { annotationId }, onClick, 'epub-highlight', {
         fill: color,
         'fill-opacity': '0.4',
         'mix-blend-mode': 'multiply',
       });
     },
-    removeHighlight: (cfiRange) => rendition.annotations.remove(cfiRange, 'highlight'),
+    removeHighlight: (cfiRange, style = 'highlight') =>
+      rendition.annotations.remove(cfiRange, style),
 
     setPulse(annotationId, pulsing) {
       const marks = element.querySelectorAll(`[data-annotation-id="${CSS.escape(annotationId)}"]`);
@@ -749,6 +791,24 @@ export async function openEpubDocument(
 
     clearSelection() {
       for (const contents of contentsList()) contents.window.getSelection()?.removeAllRanges();
+    },
+    selectionRect() {
+      for (const contents of contentsList()) {
+        const selection = contents.window.getSelection();
+        if (!selection || selection.isCollapsed || selection.rangeCount === 0) continue;
+        const frame = contents.window.frameElement?.getBoundingClientRect();
+        return rangeViewportRect(selection.getRangeAt(0), {
+          left: frame?.left ?? 0,
+          top: frame?.top ?? 0,
+        });
+      }
+      return null;
+    },
+    onMarkClick(listener) {
+      markClickListener = listener;
+    },
+    onPointer(listener) {
+      pointerListener = listener;
     },
     resize: (width, height) => rendition.resize(width, height),
     onSelection(listener) {

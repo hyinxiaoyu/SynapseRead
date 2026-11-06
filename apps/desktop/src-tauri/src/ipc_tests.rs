@@ -697,10 +697,12 @@ fn independent_annotations_round_trip_and_preserve_shared_cards() {
                 "excerptImagePng": null,
                 "note": "inline commentary",
                 "color": "#fde047",
+                "style": "underline",
             }
         }),
     );
     assert_eq!(created["excerptText"], "cross page text");
+    assert_eq!(created["style"], "underline");
     assert_eq!(created["note"], "inline commentary");
     assert_eq!(created["color"], "#fde047");
     assert_eq!(created["anchor"], cross_page_anchor);
@@ -712,10 +714,12 @@ fn independent_annotations_round_trip_and_preserve_shared_cards() {
             "patch": {
                 "note": "edited commentary",
                 "color": "#93c5fd",
+                "style": "highlight",
             }
         }),
     );
     assert_eq!(updated["note"], "edited commentary");
+    assert_eq!(updated["style"], "highlight");
     assert_eq!(updated["color"], "#93c5fd");
 
     let graph = h.ok(
@@ -735,6 +739,52 @@ fn independent_annotations_round_trip_and_preserve_shared_cards() {
         json!({ "notebookId": notebook["id"] }),
     );
     assert_eq!(graph_after["annotations"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn annotation_style_defaults_to_highlight_and_rejects_unknown_styles() {
+    let h = Harness::new();
+    let document = h.register("notes.txt", "some text");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+    let input = |style: Option<&str>| {
+        let mut input = json!({
+            "documentId": document["id"],
+            "notebookId": notebook["id"],
+            "anchor": {
+                "format": "txt",
+                "startByteOffset": 0,
+                "endByteOffset": 4,
+                "lineIndex": 0,
+            },
+            "excerptText": "some",
+            "excerptImagePng": null,
+            "note": null,
+            "color": "#fde047",
+        });
+        if let Some(style) = style {
+            input["style"] = json!(style);
+        }
+        json!({ "input": input })
+    };
+
+    // A caller that predates styles still creates a highlight.
+    let created = h.ok("create_annotation", input(None));
+    assert_eq!(created["style"], "highlight");
+
+    let error = h
+        .call("create_annotation", input(Some("strikethrough")))
+        .unwrap_err();
+    assert!(error.to_string().contains("strikethrough"), "{error}");
+
+    // A patch without `style` keeps it.
+    let updated = h.ok(
+        "update_annotation",
+        json!({
+            "annotationId": created["id"],
+            "patch": { "note": null, "color": "#86efac" }
+        }),
+    );
+    assert_eq!(updated["style"], "highlight");
 }
 
 #[test]

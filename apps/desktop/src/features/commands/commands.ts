@@ -192,7 +192,7 @@ function keyCode(key: string): string | null {
     case 'Plus':
       return 'NumpadAdd';
     default:
-      return /^(Arrow\w+|F\d+|Page(Up|Down)|Home|End|Space)$/.test(key) ? key : null;
+      return /^(Arrow\w+|F\d+|Page(Up|Down)|Home|End|Space|ContextMenu)$/.test(key) ? key : null;
   }
 }
 

@@ -123,10 +123,19 @@ describe('StudyWorkspace', () => {
     await renderReady();
     const excerpt = screen.getByRole('button', { name: 'Excerpt to MindMap' });
     expect(excerpt).toBeDisabled();
+    // Inactive, it is a ghost button whose tooltip says why, not a dark primary one.
+    expect(excerpt).toHaveAttribute('aria-description', expect.stringMatching(/select text/i));
+    expect(screen.getByTestId('excerpt-button-wrapper')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/select text/i),
+    );
+    expect(excerpt.className).not.toMatch(/\bbg-primary\b/);
 
     fireEvent.click(screen.getByRole('button', { name: 'Open' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
     expect(excerpt).toBeEnabled();
+    expect(excerpt).not.toHaveAttribute('aria-description');
+    expect(excerpt.className).toMatch(/\bbg-primary\b/);
   });
 
   it('runs selection -> excerpt -> highlight -> inspector', async () => {

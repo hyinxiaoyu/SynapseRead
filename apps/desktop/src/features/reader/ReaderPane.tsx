@@ -241,17 +241,11 @@ export function ReaderPane() {
           <FolderOpen />
           Open
         </Button>
-        <Button
-          size="sm"
-          title={commandTooltip('Excerpt to MindMap', 'edit.excerpt')}
-          disabled={!selection || isExcerpting}
-          // Keeps the reader's text selection alive through the click in every engine.
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => void excerptSelection()}
-        >
-          <Quote />
-          Excerpt to MindMap
-        </Button>
+        <ExcerptButton
+          hasSelection={selection !== null}
+          busy={isExcerpting}
+          onExcerpt={() => void excerptSelection()}
+        />
         {recentMenuOpen && recentDocuments.length > 0 && (
           <div
             role="region"
@@ -356,6 +350,52 @@ export function ReaderPane() {
         )}
       </div>
     </section>
+  );
+}
+
+/** Why Excerpt to MindMap cannot run, for its tooltip. */
+export function excerptUnavailableReason(hasSelection: boolean, busy: boolean): string | null {
+  if (busy) return 'Saving the last excerpt…';
+  if (!hasSelection) return 'Select text or capture an area in the document to excerpt it';
+  return null;
+}
+
+/**
+ * The primary action only once there is something to excerpt. Until then it is a
+ * ghost button, and its tooltip says why: a disabled control shows no tooltip of
+ * its own, so the wrapper carries it.
+ */
+function ExcerptButton({
+  hasSelection,
+  busy,
+  onExcerpt,
+}: {
+  hasSelection: boolean;
+  busy: boolean;
+  onExcerpt: () => void;
+}) {
+  const reason = excerptUnavailableReason(hasSelection, busy);
+  const tooltip = commandTooltip('Excerpt to MindMap', 'edit.excerpt');
+  return (
+    <span
+      title={reason ? `${tooltip}: ${reason}` : tooltip}
+      data-testid="excerpt-button-wrapper"
+      className="inline-flex"
+    >
+      <Button
+        size="sm"
+        variant={reason ? 'ghost' : 'default'}
+        data-testid="excerpt-button"
+        aria-description={reason ?? undefined}
+        disabled={reason !== null}
+        // Keeps the reader's text selection alive through the click in every engine.
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={onExcerpt}
+      >
+        <Quote />
+        Excerpt to MindMap
+      </Button>
+    </span>
   );
 }
 
@@ -491,6 +531,8 @@ function DocumentTab({
   const completeJump = useStudySyncStore((state) => state.completeJump);
   const reportCursor = useStudySyncStore((state) => state.reportCursor);
   const immersive = useStudySyncStore((state) => state.immersive);
+  const isExcerpting = useStudySyncStore((state) => state.isExcerpting);
+  const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
 
   const highlights = useMemo(
     () => selectHighlights(annotations, document.id),
@@ -547,6 +589,9 @@ function DocumentTab({
   const onUndoAnnotationDelete = useCallback(() => {
     void undoRemoveAnnotation();
   }, [undoRemoveAnnotation]);
+  const onExcerptSelection = useCallback(() => {
+    void excerptSelection();
+  }, [excerptSelection]);
 
   if (sourceStatus && sourceStatus.state !== 'ok') {
     return (
@@ -587,6 +632,8 @@ function DocumentTab({
       onDeleteAnnotation={onDeleteAnnotation}
       canUndoAnnotationDelete={deletedAnnotationHistory.length > 0}
       onUndoAnnotationDelete={onUndoAnnotationDelete}
+      onExcerptSelection={onExcerptSelection}
+      canExcerpt={!isExcerpting}
     />
   );
 }

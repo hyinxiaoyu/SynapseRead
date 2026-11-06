@@ -4,6 +4,7 @@ import contract from '../../../../../fixtures/contract/commands.json';
 
 import {
   COMMAND_IDS,
+  commandBindings,
   commandDefinition,
   commandTooltip,
   formatShortcut,
@@ -81,7 +82,8 @@ describe('command contract', () => {
     expect(mac('go.page')).toBe('⌥⌘G');
     expect(mac('edit.findPrevious')).toBe('⇧⌘G');
     expect(mac('bookmarks.toggle')).toBe('⌘D');
-    expect(mac('edit.highlight')).toBe('⌃⌘H');
+    expect(mac('edit.highlight')).toBe('⇧⌘H');
+    expect(mac('edit.highlightMode')).toBe('⌃⌘H');
     expect(mac('view.markup')).toBe('⇧⌘A');
     expect(mac('view.fullScreen')).toBe('⌃⌘F');
     expect(mac('go.back')).toBe('⌘[');
@@ -92,7 +94,7 @@ describe('command contract', () => {
     expect(formatShortcut('Shift+CmdOrCtrl+G', 'other')).toBe('Ctrl+Shift+G');
     expect(commandDefinition('view.fullScreen', 'other').shortcut).toBe('F11');
     expect(
-      formatShortcut(commandDefinition('edit.highlight', 'other').shortcut ?? '', 'other'),
+      formatShortcut(commandDefinition('edit.highlightMode', 'other').shortcut ?? '', 'other'),
     ).toBe('Ctrl+Alt+H');
     expect(commandTooltip('Add Bookmark', 'bookmarks.toggle', 'mac')).toBe('Add Bookmark (⌘D)');
     expect(commandTooltip('Add Bookmark', 'bookmarks.toggle', 'other')).toBe(
@@ -108,6 +110,22 @@ describe('command contract', () => {
         expect(spec.accelerator, id).toBe(false);
       }
     }
+  });
+});
+
+describe('selection commands', () => {
+  it('opens the selection popover with Shift+F10 or the context-menu key, outside the menu', () => {
+    const definition = commandDefinition('edit.selectionActions', 'mac');
+    expect(definition.shortcut).toBe('Shift+F10');
+    expect(commandBindings(definition)).toContain('ContextMenu');
+    expect(shortcutMatches(key({ key: 'F10', code: 'F10', shiftKey: true }), 'Shift+F10')).toBe(
+      true,
+    );
+    expect(shortcutMatches(key({ key: 'ContextMenu', code: 'ContextMenu' }), 'ContextMenu')).toBe(
+      true,
+    );
+    const specs = contract.commands as Record<string, { accelerator?: boolean }>;
+    expect(specs['edit.selectionActions']?.accelerator).toBe(false);
   });
 });
 

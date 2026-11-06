@@ -9,11 +9,11 @@ use uuid::Uuid;
 
 use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
-    AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
-    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentFormat,
-    DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard,
-    NotebookGraph, ReadingPreferences, RelinkDocumentResult, StudyNotebook, Viewport,
-    WorkspaceSession,
+    AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, CardPatch,
+    CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document,
+    DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode,
+    NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, RelinkDocumentResult,
+    StudyNotebook, Viewport, WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -27,6 +27,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0005_workspace_session.sql"),
     include_str!("../migrations/0006_workspace_immersive.sql"),
     include_str!("../migrations/0007_reading_appearance.sql"),
+    include_str!("../migrations/0008_annotation_style.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -566,8 +567,8 @@ impl Database {
         let anchor_type = input.anchor.format().as_str();
         tx.execute(
             "INSERT INTO annotations (id, document_id, notebook_id, anchor_type,
-                 anchor_payload_json, excerpt_text, excerpt_image_path, note, color)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 anchor_payload_json, excerpt_text, excerpt_image_path, note, color, style)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 annotation_id,
                 input.document_id,
@@ -578,6 +579,7 @@ impl Database {
                 image_path,
                 normalized_note,
                 input.color.trim(),
+                input.style.as_str(),
             ],
         )?;
 
@@ -611,13 +613,21 @@ impl Database {
             .map(str::trim)
             .filter(|note| !note.is_empty());
         let next_color = patch.color.as_deref().map(str::trim);
+        let next_style = patch.style.map(AnnotationStyle::as_str);
 
         let changed = self.conn.execute(
             "UPDATE annotations SET
                  note = CASE WHEN ?2 THEN ?3 ELSE note END,
-                 color = COALESCE(?4, color)
+                 color = COALESCE(?4, color),
+                 style = COALESCE(?5, style)
              WHERE id = ?1",
-            params![annotation_id, update_note, next_note, next_color],
+            params![
+                annotation_id,
+                update_note,
+                next_note,
+                next_color,
+                next_style
+            ],
         )?;
         expect_changed(changed, "annotation", annotation_id)?;
         Ok(self.conn.query_row(
@@ -1082,7 +1092,7 @@ fn map_notebook(row: &Row<'_>) -> rusqlite::Result<StudyNotebook> {
 }
 
 const ANNOTATION_SELECT: &str = "SELECT id, document_id, notebook_id, anchor_payload_json,
-    excerpt_text, excerpt_image_path, note, color, created_at FROM annotations";
+    excerpt_text, excerpt_image_path, note, color, created_at, style FROM annotations";
 
 fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
     Ok(Annotation {
@@ -1094,6 +1104,7 @@ fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
         excerpt_image_path: row.get(5)?,
         note: row.get(6)?,
         color: row.get(7)?,
+        style: AnnotationStyle::from_column(&row.get::<_, String>(9)?),
         created_at: row.get(8)?,
     })
 }
@@ -1248,6 +1259,7 @@ mod tests {
                     "color",
                     "created_at",
                     "note",
+                    "style",
                 ],
             ),
             (
@@ -2049,6 +2061,7 @@ mod tests {
                 excerpt_image_png: None,
                 note: Some("  standalone note  ".to_owned()),
                 color: "#fde047".to_owned(),
+                style: AnnotationStyle::Highlight,
             })
             .unwrap();
         assert_eq!(standalone.note.as_deref(), Some("standalone note"));
@@ -2064,11 +2077,13 @@ mod tests {
                 &AnnotationPatch {
                     note: Some("updated note".to_owned()),
                     color: Some("#86efac".to_owned()),
+                    style: Some(AnnotationStyle::Underline),
                 },
             )
             .unwrap();
         assert_eq!(edited.note.as_deref(), Some("updated note"));
         assert_eq!(edited.color, "#86efac");
+        assert_eq!(edited.style, AnnotationStyle::Underline);
 
         let cleared =
             f.db.update_annotation(
@@ -2076,11 +2091,13 @@ mod tests {
                 &AnnotationPatch {
                     note: Some("   ".to_owned()),
                     color: None,
+                    style: None,
                 },
             )
             .unwrap();
         assert_eq!(cleared.note, None);
         assert_eq!(cleared.color, "#86efac");
+        assert_eq!(cleared.style, AnnotationStyle::Underline);
 
         // 3. Create an excerpt linked to a card and MindMap node, then delete the annotation.
         // Shared card and node must remain intact, while `card.annotation_ids` drops the deleted id.
@@ -2181,6 +2198,7 @@ mod tests {
                 excerpt_image_png: None,
                 note: Some("preserved note".to_owned()),
                 color: "#fde047".to_owned(),
+                style: AnnotationStyle::default(),
             })
             .unwrap();
 

@@ -111,6 +111,7 @@ describe('useStudySyncStore', () => {
           annotationId: state().annotations[0]?.id,
           anchor: pdfAnchor,
           color: state().annotations[0]?.color,
+          style: 'highlight',
         },
       ]);
       expect(selectHighlights(state().annotations, otherId)).toEqual([]);

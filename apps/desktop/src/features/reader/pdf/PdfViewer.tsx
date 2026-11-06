@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import {
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
@@ -28,10 +29,17 @@ import {
 import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmented-control';
 import {
   type AnnotationPlacement,
-  SelectionAnnotationControls,
-  SelectionNoteComposer,
+  localHighlights,
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
+import {
+  annotationAtPoint,
+  focusInReaderPopover,
+  selectionViewportRect,
+} from '@/features/reader/markup/geometry';
+import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
+import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
+import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import {
   buildSearchSnippet,
@@ -70,6 +78,7 @@ import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReader
 import { cn, describeError } from '@/lib/utils';
 import type {
   Annotation,
+  AnnotationStyle,
   Bookmark,
   DocumentViewerProps,
   NormalizedRect,
@@ -623,13 +632,14 @@ function PdfPage({
         }),
       )}
 
-      {highlights.map(({ annotationId, anchor, color }) =>
+      {highlights.map(({ annotationId, anchor, color, style = 'highlight' }) =>
         asPdfAnchor(anchor)?.rects.map((rawRect, index) => {
           const rect = rotateNormalizedRect(rawRect, rotation);
           return (
             <div
               key={`${annotationId}-${index}`}
               data-annotation-id={annotationId}
+              data-annotation-style={style}
               className={cn(
                 'pointer-events-none absolute mix-blend-multiply',
                 pulsingAnnotationId === annotationId && 'anchor-pulse',
@@ -640,9 +650,11 @@ function PdfPage({
                   top: `${rect.y * 100}%`,
                   width: `${rect.width * 100}%`,
                   height: `${rect.height * 100}%`,
-                  backgroundColor: color,
+                  ...(style === 'underline'
+                    ? { borderBottom: `2px solid ${color}` }
+                    : { backgroundColor: color }),
                   '--anchor-pulse-color': color,
-                } as CSSProperties
+                } as CSSProperties & Record<'--anchor-pulse-color', string>
               }
             />
           );
@@ -776,9 +788,12 @@ function PdfPages({
   onDeleteAnnotation,
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
+  onExcerptSelection,
+  canExcerpt,
 }: { engine: PdfDocumentHandle } & Omit<DocumentViewerProps<'pdf'>, 'content'>) {
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const readerAreaRef = useRef<HTMLDivElement>(null);
   const { width, height } = useSettledSize(scrollRef);
   const sizes = usePageSizes(engine);
   const navigator = useNavigator('pdf', ['thumbnails', 'contents', 'notes', 'bookmarks']);
@@ -959,7 +974,8 @@ function PdfPages({
       const range = current && current.rangeCount > 0 ? current.getRangeAt(0) : null;
       if (!range || range.collapsed || !root.contains(range.commonAncestorContainer)) {
         // A capture is a selection too, and a click on its surface must not drop it.
-        if (!capture) clear();
+        // Typing a note for the selection moves the document's selection into the field.
+        if (!capture && !focusInReaderPopover(view)) clear();
         return;
       }
       const pageElements = Array.from(root.querySelectorAll<HTMLElement>('[data-page-index]'));
@@ -1502,15 +1518,28 @@ function PdfPages({
   const activeSearchMatch = search.activeMatch;
   const effectiveHighlights = useMemo(() => {
     if (annotations !== undefined) return highlights;
-    const localHighlights: ReaderHighlight[] = annotationsController.annotations.map(
-      ({ id, anchor, color }) => ({
-        annotationId: id,
-        anchor,
-        color,
-      }),
-    );
-    return [...highlights, ...localHighlights];
+    return [...highlights, ...localHighlights(annotationsController.annotations)];
   }, [annotations, annotationsController.annotations, highlights]);
+
+  // Captures are excerpted from the toolbar; the popover is for selected text.
+  const getSelectionRect = useCallback(() => selectionViewportRect(scrollRef.current), []);
+  const popover = useSelectionPopover({
+    isActive,
+    selection: activeSelection,
+    annotations: annotationsController,
+    surfaceRef: scrollRef,
+    getSelectionRect,
+  });
+  const openClickedHighlight = (event: ReactMouseEvent<HTMLElement>) => {
+    if (captureMode || event.button !== 0 || event.detail > 1) return;
+    const selection = event.currentTarget.ownerDocument.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    // Highlights let clicks through to the text layer, so find the one under the point.
+    const pageElement = (event.target as Element).closest('[data-page-index]');
+    if (!pageElement) return;
+    const hit = annotationAtPoint(event, pageElement);
+    if (hit) popover.openForAnnotation(hit.annotationId, hit.rect);
+  };
 
   const pulsingAnnotationId = jumpReady
     ? (jumpRequest?.annotationId ?? null)
@@ -1693,6 +1722,7 @@ function PdfPages({
     annotations: annotationsController,
     selectionText: activeSelection?.text ?? null,
     markup,
+    popover,
     extra: {
       'view.layoutSingle': { run: () => applyDisplayMode('single') },
       'view.layoutTwoPage': { run: () => applyDisplayMode('two-page') },
@@ -1734,6 +1764,7 @@ function PdfPages({
       annotationId: string,
       rects: NormalizedRect[],
       color: string,
+      style: AnnotationStyle = 'highlight',
     ) => {
       pages.set(pageIndex, [
         ...(pages.get(pageIndex) ?? []),
@@ -1741,18 +1772,20 @@ function PdfPages({
           annotationId,
           anchor: { format: 'pdf', pageIndex, rects },
           color,
+          style,
         },
       ]);
     };
     for (const highlight of effectiveHighlights) {
       const anchor = asPdfAnchor(highlight.anchor);
       if (!anchor) continue;
+      const { annotationId, color, style } = highlight;
       if (anchor.pageSpans && anchor.pageSpans.length > 0) {
         for (const span of anchor.pageSpans) {
-          addPageHighlight(span.pageIndex, highlight.annotationId, span.rects, highlight.color);
+          addPageHighlight(span.pageIndex, annotationId, span.rects, color, style);
         }
       } else {
-        addPageHighlight(anchor.pageIndex, highlight.annotationId, anchor.rects, highlight.color);
+        addPageHighlight(anchor.pageIndex, annotationId, anchor.rects, color, style);
       }
     }
     if (activeSearchMatch) {
@@ -1937,12 +1970,11 @@ function PdfPages({
               pressed={captureMode}
               onClick={toggleCaptureMode}
             />
-            {markup.visible && (
-              <SelectionAnnotationControls
-                hasSelection={activeSelection !== null}
-                controller={annotationsController}
-              />
-            )}
+            <MarkupToggleButton
+              visible={markup.visible}
+              highlightMode={annotationsController.highlightMode}
+              onToggle={markup.toggle}
+            />
             <ToolbarSeparator />
             <BookmarkToggleButton
               bookmarked={bookmarksController.isCurrentBookmarked}
@@ -2015,12 +2047,18 @@ function PdfPages({
           />
         )}
         {/* Notices float over the page column only, never over the sidebar. */}
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <div ref={readerAreaRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {markup.visible && <MarkupBar controller={annotationsController} onClose={markup.hide} />}
+          <SelectionPopover
+            popover={popover}
+            annotations={annotationsController}
+            selection={activeSelection?.text ? activeSelection : null}
+            boundsRef={readerAreaRef}
+            onExcerpt={onExcerptSelection}
+            canExcerpt={canExcerpt}
+            onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+          />
           <ReaderPopoverLayer>
-            <SelectionNoteComposer
-              hasSelection={activeSelection !== null}
-              controller={annotationsController}
-            />
             {unsupportedSubtypes.length > 0 && !chromeHidden && (
               <p
                 role="status"
@@ -2046,6 +2084,7 @@ function PdfPages({
             <div
               ref={scrollRef}
               onScroll={onScroll}
+              onClick={openClickedHighlight}
               tabIndex={-1}
               data-testid="pdf-scroll"
               data-turn-zone={gestures.zone ?? undefined}

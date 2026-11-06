@@ -1,4 +1,4 @@
-import { Check, Highlighter, Link2, MessageSquare, Pencil, StickyNote, Undo2 } from 'lucide-react';
+import { Check, Link2, Pencil, Undo2 } from 'lucide-react';
 import { Fragment, type KeyboardEvent as ReactKeyboardEvent, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
@@ -10,16 +10,27 @@ import {
   rowClassName,
 } from '@/features/reader/navigator/parts';
 import { isDeleteKey, useRovingList } from '@/features/reader/navigator/useRovingList';
-import { collapseClass, ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
-import type { Annotation, AnnotationPatch, ReaderSelection } from '@/types/domain';
+import type {
+  Annotation,
+  AnnotationPatch,
+  AnnotationStyle,
+  CreateAnnotationOptions,
+  ReaderSelection,
+} from '@/types/domain';
 
 export const ANNOTATION_COLORS: readonly { label: string; value: string }[] = [
   { label: 'Yellow', value: '#fde047' },
   { label: 'Green', value: '#86efac' },
   { label: 'Blue', value: '#93c5fd' },
   { label: 'Pink', value: '#f9a8d4' },
+  { label: 'Purple', value: '#c4b5fd' },
 ];
+
+/** `Yellow`, or the hex value for a color outside the palette (an imported note). */
+export function annotationColorName(color: string): string {
+  return ANNOTATION_COLORS.find(({ value }) => value === color)?.label ?? color;
+}
 
 export function formatAnnotationLocation(annotation: Annotation): string {
   const { anchor } = annotation;
@@ -44,15 +55,23 @@ export function formatAnnotationLocation(annotation: Annotation): string {
 
 export interface AnnotationsController {
   annotations: readonly Annotation[];
+  /** The last color used, which ⇧⌘H and highlight mode apply. */
   activeColor: string;
+  activeStyle: AnnotationStyle;
+  /** Preview's sticky highlight mode: every new selection is highlighted. */
+  highlightMode: boolean;
   draftNoteOpen: boolean;
   draftNote: string;
   canUndoDelete: boolean;
   setActiveColor: (color: string) => void;
+  setActiveStyle: (style: AnnotationStyle) => void;
+  toggleHighlightMode: () => void;
   setDraftNote: (value: string) => void;
   toggleDraftNote: () => void;
+  openDraftNote: () => void;
   closeDraftNote: () => void;
-  createHighlight: () => void;
+  /** Marks the selection; the color and style become the new defaults. */
+  createHighlight: (options?: { color?: string; style?: AnnotationStyle }) => void;
   submitNoteSelection: () => void;
   selectAnnotation: (annotation: Annotation) => void;
   updateAnnotation: (annotationId: string, patch: AnnotationPatch) => void;
@@ -65,7 +84,7 @@ export interface UseAnnotationsOptions {
   documentId: string;
   selection?: ReaderSelection | null | undefined;
   annotations?: readonly Annotation[] | undefined;
-  onCreateAnnotation?: ((options?: { color?: string; note?: string }) => void) | undefined;
+  onCreateAnnotation?: ((options?: CreateAnnotationOptions) => void) | undefined;
   onUpdateAnnotation?: ((annotationId: string, patch: AnnotationPatch) => void) | undefined;
   onDeleteAnnotation?: ((annotationId: string) => void) | undefined;
   canUndoAnnotationDelete?: boolean | undefined;
@@ -87,6 +106,8 @@ export function useAnnotationsController({
   onSelectAnnotation,
 }: UseAnnotationsOptions): AnnotationsController {
   const [activeColor, setActiveColor] = useState<string>(ANNOTATION_COLORS[0]?.value ?? '#fde047');
+  const [activeStyle, setActiveStyle] = useState<AnnotationStyle>('highlight');
+  const [highlightMode, setHighlightMode] = useState(false);
   const [draftNoteOpen, setDraftNoteOpen] = useState(false);
   const [draftNote, setDraftNote] = useState('');
   const [localAnnotations, setLocalAnnotations] = useState<Annotation[]>([]);
@@ -96,11 +117,15 @@ export function useAnnotationsController({
   const effectiveCanUndo =
     canUndoAnnotationDelete !== undefined ? canUndoAnnotationDelete : localDeleted.length > 0;
 
-  const createWithOptions = (options?: { color?: string; note?: string }) => {
-    const color = options?.color ?? activeColor;
-    const note = options?.note?.trim() || null;
+  const createWithOptions = (
+    options: Required<Pick<CreateAnnotationOptions, 'color' | 'style'>> & {
+      note?: string;
+    },
+  ) => {
+    const { color, style } = options;
+    const note = options.note?.trim() || null;
     if (onCreateAnnotation) {
-      onCreateAnnotation({ color, ...(note ? { note } : {}) });
+      onCreateAnnotation({ color, style, ...(note ? { note } : {}) });
       return;
     }
     if (!selection || selection.documentId !== documentId) return;
@@ -115,17 +140,23 @@ export function useAnnotationsController({
         excerptImagePath: null,
         note,
         color,
+        style,
         createdAt: new Date().toISOString(),
       },
     ]);
   };
 
-  const createHighlight = () => {
-    createWithOptions({ color: activeColor });
+  const createHighlight = (options?: { color?: string; style?: AnnotationStyle }) => {
+    const color = options?.color ?? activeColor;
+    const style = options?.style ?? activeStyle;
+    setActiveColor(color);
+    setActiveStyle(style);
+    setDraftNoteOpen(false);
+    createWithOptions({ color, style });
   };
 
   const submitNoteSelection = () => {
-    createWithOptions({ color: activeColor, note: draftNote });
+    createWithOptions({ color: activeColor, style: activeStyle, note: draftNote });
     setDraftNote('');
     setDraftNoteOpen(false);
   };
@@ -142,6 +173,7 @@ export function useAnnotationsController({
               ...candidate,
               note: patch.note !== null ? patch.note.trim() || null : (candidate.note ?? null),
               color: patch.color !== null ? patch.color : candidate.color,
+              style: patch.style ?? candidate.style,
             }
           : candidate,
       ),
@@ -173,12 +205,17 @@ export function useAnnotationsController({
   return {
     annotations: effectiveAnnotations,
     activeColor,
+    activeStyle,
+    highlightMode,
     draftNoteOpen,
     draftNote,
     canUndoDelete: effectiveCanUndo,
     setActiveColor,
+    setActiveStyle,
+    toggleHighlightMode: () => setHighlightMode((current) => !current),
     setDraftNote,
     toggleDraftNote: () => setDraftNoteOpen((current) => !current),
+    openDraftNote: () => setDraftNoteOpen(true),
     closeDraftNote: () => setDraftNoteOpen(false),
     createHighlight,
     submitNoteSelection,
@@ -190,140 +227,44 @@ export function useAnnotationsController({
   };
 }
 
-/**
- * The markup group: highlight colors, Highlight, and Add note. Colors fold into
- * the `»` menu's width budget first; the two actions stay.
- */
+/** The highlights an annotation list paints, for a viewer with no store behind it. */
+export function localHighlights(
+  annotations: readonly Annotation[],
+): { annotationId: string; anchor: Annotation['anchor']; color: string; style: AnnotationStyle }[] {
+  return annotations.map(({ id, anchor, color, style }) => ({
+    annotationId: id,
+    anchor,
+    color,
+    style,
+  }));
+}
+
 /** A 28 px target around a 20 px swatch (WCAG 2.2 target size, HIG minimum). */
-const COLOR_TARGET_CLASS =
+export const COLOR_TARGET_CLASS =
   'flex size-7 shrink-0 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
 /** A highlight color swatch; the check mark shows the choice without relying on hue. */
-function ColorDot({ color, selected }: { color: string; selected: boolean }) {
+export function ColorDot({
+  color,
+  selected,
+  className,
+}: {
+  color: string;
+  selected: boolean;
+  className?: string;
+}) {
   return (
     <span
       aria-hidden="true"
       className={cn(
         'flex size-5 items-center justify-center rounded-full border border-black/25 text-black/75',
         selected && 'ring-2 ring-foreground ring-offset-1 ring-offset-background',
+        className,
       )}
       style={{ backgroundColor: color }}
     >
       {selected && <Check className="size-3" strokeWidth={3} />}
     </span>
-  );
-}
-
-export function SelectionAnnotationControls({
-  hasSelection,
-  disabled = false,
-  controller,
-}: {
-  hasSelection: boolean;
-  disabled?: boolean;
-  controller: AnnotationsController;
-}) {
-  return (
-    <div className="flex shrink-0 items-center gap-0.5">
-      <div
-        role="group"
-        aria-label="Highlight color"
-        className={cn('flex items-center px-0.5', collapseClass('lg'))}
-        data-testid="annotation-color-picker"
-      >
-        {ANNOTATION_COLORS.map(({ label, value }) => {
-          const selected = controller.activeColor === value;
-          return (
-            <button
-              key={value}
-              type="button"
-              aria-label={`Highlight color ${label}`}
-              aria-pressed={selected}
-              title={`Highlight color ${label}`}
-              data-testid={`annotation-color-${label.toLowerCase()}`}
-              disabled={disabled}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => controller.setActiveColor(value)}
-              className={COLOR_TARGET_CLASS}
-            >
-              <ColorDot color={value} selected={selected} />
-            </button>
-          );
-        })}
-      </div>
-      <ToolbarButton
-        icon={Highlighter}
-        label="Highlight selection"
-        command="edit.highlight"
-        testId="highlight-selection-button"
-        disabled={disabled || !hasSelection}
-        preserveSelection
-        onClick={controller.createHighlight}
-      />
-      <ToolbarButton
-        icon={StickyNote}
-        label="Add note to selection"
-        command="edit.addNote"
-        pressed={controller.draftNoteOpen}
-        testId="add-note-selection-button"
-        disabled={disabled || !hasSelection}
-        preserveSelection
-        onClick={controller.toggleDraftNote}
-      />
-    </div>
-  );
-}
-
-export function SelectionNoteComposer({
-  hasSelection,
-  controller,
-}: {
-  hasSelection: boolean;
-  controller: AnnotationsController;
-}) {
-  if (!controller.draftNoteOpen || !hasSelection) return null;
-
-  return (
-    <form
-      aria-label="Add note to selection"
-      data-testid="selection-note-composer"
-      data-reader-popover=""
-      className="flex shrink-0 items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-xs"
-      onSubmit={(event) => {
-        event.preventDefault();
-        controller.submitNoteSelection();
-      }}
-    >
-      <MessageSquare className="size-3.5 shrink-0 text-muted-foreground" />
-      <input
-        type="text"
-        aria-label="Selection note"
-        data-testid="selection-note-input"
-        placeholder="Write a note for this highlight…"
-        value={controller.draftNote}
-        onChange={(event) => controller.setDraftNote(event.target.value)}
-        className="h-6 min-w-0 flex-1 rounded border bg-background px-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      />
-      <Button
-        type="submit"
-        size="sm"
-        className="h-6 px-2 text-xs"
-        data-testid="save-selection-note-button"
-        onMouseDown={(event) => event.preventDefault()}
-      >
-        Save note
-      </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className="h-6 px-2 text-xs"
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={controller.closeDraftNote}
-      >
-        Cancel
-      </Button>
-    </form>
   );
 }
 
@@ -573,7 +514,8 @@ export function AnnotationsList({
   if (controller.annotations.length === 0) {
     body = (
       <NavigatorEmptyState testId="annotations-empty" title="No highlights or notes yet">
-        Select text, then press {shortcutOf('edit.highlight')} to highlight it or choose Add Note.
+        Select text, then choose a color in the popover above it, or press{' '}
+        {shortcutOf('edit.highlight')} to highlight it.
       </NavigatorEmptyState>
     );
   } else if (placed.length === 0) {

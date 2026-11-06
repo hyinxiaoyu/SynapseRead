@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -60,6 +60,8 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
       onDeleteAnnotation={(id) => void state.removeAnnotation(id)}
       canUndoAnnotationDelete={state.deletedAnnotationHistory.length > 0}
       onUndoAnnotationDelete={() => void state.undoRemoveAnnotation()}
+      onExcerptSelection={() => void state.excerptSelection()}
+      canExcerpt={!state.isExcerpting}
     />
   );
 }
@@ -678,14 +680,24 @@ describe('TxtViewer', () => {
     const { store, documentId } = await setup(bytes);
     render(<Harness store={store} documentId={documentId} />);
 
+    // The markup bar (⇧⌘A) picks the color new marks use.
+    expect(screen.queryByTestId('markup-bar')).toBeNull();
+    fireEvent.keyDown(window, { key: 'a', code: 'KeyA', shiftKey: true, ctrlKey: true });
+    fireEvent.click(
+      within(await screen.findByTestId('markup-bar')).getByRole('button', {
+        name: 'Pink highlight',
+      }),
+    );
+
     await selectText('quick brown fox');
-    fireEvent.click(screen.getByTestId('annotation-color-pink'));
-    fireEvent.click(screen.getByTestId('add-note-selection-button'));
-    const composerInput = await screen.findByTestId('selection-note-input');
+    const popover = await screen.findByTestId('selection-popover');
+    fireEvent.click(within(popover).getByRole('button', { name: 'Add Note' }));
+    const composerInput = await screen.findByTestId('popover-note-input');
     fireEvent.change(composerInput, { target: { value: 'TXT note on line 2' } });
-    fireEvent.click(screen.getByTestId('save-selection-note-button'));
+    fireEvent.click(screen.getByTestId('popover-note-save'));
 
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]?.color).toBe('#f9a8d4');
     expect(store.getState().cards).toEqual([]);
     expect(store.getState().nodes).toEqual([]);
     const annotationId = store.getState().annotations[0]?.id as string;
@@ -722,6 +734,126 @@ describe('TxtViewer', () => {
     expect(await screen.findByTestId('annotations-empty')).toHaveTextContent(/highlight it/);
     fireEvent.keyDown(window, { key: 'z', code: 'KeyZ', ctrlKey: true });
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+  });
+
+  it('offers a selection popover with named swatches, the keyboard, edit mode, and excerpting', async () => {
+    const { store, documentId } = await setup(documentFixture('sample.txt'));
+    render(<Harness store={store} documentId={documentId} />);
+
+    // Nothing to act on yet: no popover, and no disabled Highlight or Add Note buttons.
+    await segmentWith('quick brown fox');
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+    expect(screen.queryByRole('button', { name: /highlight selection/i })).toBeNull();
+
+    await selectText('quick brown fox');
+    const popover = await screen.findByTestId('selection-popover');
+    expect(popover).toHaveAttribute('data-popover-mode', 'create');
+    const swatches = within(popover).getAllByRole('button', { name: / highlight$/ });
+    expect(swatches.map((swatch) => swatch.getAttribute('aria-label'))).toEqual([
+      'Yellow highlight',
+      'Green highlight',
+      'Blue highlight',
+      'Pink highlight',
+      'Purple highlight',
+    ]);
+    // The last color is marked by a check, not by its hue alone.
+    expect(swatches[0]).toHaveAttribute('aria-pressed', 'true');
+    expect(swatches[0]?.querySelector('svg')).not.toBeNull();
+    for (const name of ['Underline', 'Add Note', 'Excerpt to MindMap', 'Copy']) {
+      expect(within(popover).getByRole('button', { name })).toBeInTheDocument();
+    }
+
+    // ⇧F10 moves focus into the popover; arrows move along it; Esc puts it away.
+    fireEvent.keyDown(window, { key: 'F10', code: 'F10', shiftKey: true });
+    expect(swatches[0]).toHaveFocus();
+    fireEvent.keyDown(swatches[0] as HTMLElement, { key: 'ArrowRight' });
+    expect(swatches[1]).toHaveFocus();
+    fireEvent.keyDown(swatches[1] as HTMLElement, { key: 'Escape' });
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+    // The context-menu key brings it back.
+    fireEvent.keyDown(window, { key: 'ContextMenu', code: 'ContextMenu' });
+    expect(await screen.findByTestId('selection-popover')).toBeInTheDocument();
+
+    // Underline uses the last color.
+    fireEvent.click(screen.getByRole('button', { name: 'Underline' }));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    const underlined = store.getState().annotations[0];
+    expect(underlined?.style).toBe('underline');
+    expect(underlined?.color).toBe('#fde047');
+    const painted = await segmentWith('quick brown fox');
+    expect(painted).toHaveAttribute('data-annotation-style', 'underline');
+    expect(painted.style.textDecorationLine).toBe('underline');
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+
+    // Clicking it opens the same popover in edit mode: color, note, delete.
+    fireEvent.click(painted);
+    const editor = await screen.findByTestId('selection-popover');
+    expect(editor).toHaveAttribute('data-popover-mode', 'edit');
+    expect(within(editor).getByRole('button', { name: 'Underline' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(editor).queryByRole('button', { name: 'Excerpt to MindMap' })).toBeNull();
+    fireEvent.click(within(editor).getByRole('button', { name: 'Green highlight' }));
+    await waitFor(() => expect(store.getState().annotations[0]?.color).toBe('#86efac'));
+    expect(store.getState().annotations[0]?.style).toBe('underline');
+    fireEvent.click(within(editor).getByRole('button', { name: 'Underline' }));
+    await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('highlight'));
+    fireEvent.click(within(editor).getByRole('button', { name: 'Add Note' }));
+    fireEvent.change(await screen.findByTestId('popover-note-input'), {
+      target: { value: 'Edited in place' },
+    });
+    fireEvent.click(screen.getByTestId('popover-note-save'));
+    await waitFor(() => expect(store.getState().annotations[0]?.note).toBe('Edited in place'));
+    fireEvent.click(within(editor).getByRole('button', { name: 'Delete Highlight' }));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(0));
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+
+    // ⇧⌘H highlights with the last color (green, from the edit above).
+    await selectText('quick brown fox');
+    fireEvent.keyDown(window, { key: 'h', code: 'KeyH', shiftKey: true, ctrlKey: true });
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]?.color).toBe('#86efac');
+    expect(store.getState().annotations[0]?.style).toBe('highlight');
+
+    // Excerpt to MindMap from the popover.
+    await selectText('quick brown fox');
+    fireEvent.click(
+      within(await screen.findByTestId('selection-popover')).getByRole('button', {
+        name: 'Excerpt to MindMap',
+      }),
+    );
+    await waitFor(() => expect(store.getState().cards).toHaveLength(1));
+  });
+
+  it('highlights every pointer selection while highlight mode is on', async () => {
+    const { store, documentId } = await setup(documentFixture('sample.txt'));
+    render(<Harness store={store} documentId={documentId} />);
+    await segmentWith('quick brown fox');
+
+    // ⌃⌘H arms it and shows the markup bar, where it reads as on.
+    fireEvent.keyDown(window, { key: 'h', code: 'KeyH', altKey: true, ctrlKey: true });
+    const toggle = within(await screen.findByTestId('markup-bar')).getByRole('switch', {
+      name: 'Highlight Mode',
+    });
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Underline' }));
+
+    fireEvent.pointerDown(scroller(), { button: 0 });
+    await selectText('quick brown fox');
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+    fireEvent.pointerUp(window, { button: 0 });
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]?.style).toBe('underline');
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+
+    // Off again, a selection gets the popover instead.
+    fireEvent.click(toggle);
+    fireEvent.pointerDown(scroller(), { button: 0 });
+    await selectText('quick brown fox');
+    fireEvent.pointerUp(window, { button: 0 });
+    expect(await screen.findByTestId('selection-popover')).toBeInTheDocument();
+    expect(store.getState().annotations).toHaveLength(1);
   });
 
   it('shows a read failure instead of an empty page', async () => {

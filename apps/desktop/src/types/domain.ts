@@ -100,6 +100,9 @@ export interface StudyNotebook {
   createdAt: string;
 }
 
+/** How an annotation is drawn over its text. Excerpts are always highlights. */
+export type AnnotationStyle = 'highlight' | 'underline';
+
 export interface Annotation {
   id: string;
   documentId: string;
@@ -109,6 +112,7 @@ export interface Annotation {
   excerptImagePath: string | null;
   note?: string | null;
   color: string;
+  style: AnnotationStyle;
   createdAt: string;
 }
 
@@ -120,11 +124,21 @@ export interface CreateAnnotationInput {
   excerptImagePng: string | null;
   note: string | null;
   color: string;
+  style: AnnotationStyle;
 }
 
 export interface AnnotationPatch {
   note: string | null;
   color: string | null;
+  /** Omitted or `null` keeps the current style. */
+  style?: AnnotationStyle | null;
+}
+
+/** What a reader asks for when it creates an annotation from its selection. */
+export interface CreateAnnotationOptions {
+  color?: string;
+  note?: string;
+  style?: AnnotationStyle;
 }
 
 export interface NoteCard {
@@ -361,6 +375,8 @@ export interface ReaderHighlight {
   annotationId: string;
   anchor: AnchorLocation;
   color: string;
+  /** Absent for marks that are not annotations, such as search matches. */
+  style?: AnnotationStyle;
 }
 
 /**
@@ -399,7 +415,7 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   /** Persisted annotations (both independent highlights/notes and card-linked excerpts) for this document. */
   annotations?: readonly Annotation[];
   /** Creates an independent highlight/note from the current selection without creating a MindMap node. */
-  onCreateAnnotation?: (options?: { color?: string; note?: string }) => void;
+  onCreateAnnotation?: (options?: CreateAnnotationOptions) => void;
   /** Updates an annotation's inline note and/or color. */
   onUpdateAnnotation?: (annotationId: string, patch: AnnotationPatch) => void;
   /** Deletes an annotation from this document. */
@@ -407,6 +423,10 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   /** Undoes the most recent annotation deletion in this session, if available. */
   canUndoAnnotationDelete?: boolean;
   onUndoAnnotationDelete?: () => void;
+  /** Sends the published selection to the MindMap, as the Excerpt to MindMap button does. */
+  onExcerptSelection?: () => void;
+  /** False while an excerpt is being written. */
+  canExcerpt?: boolean;
 }
 
 const isFiniteNumber = (value: unknown): value is number =>

@@ -2,6 +2,7 @@ import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
 import {
   type CSSProperties,
   memo,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,11 +14,7 @@ import {
 
 import { PanelLeft } from 'lucide-react';
 
-import {
-  SelectionAnnotationControls,
-  SelectionNoteComposer,
-  useAnnotationsController,
-} from '@/features/reader/AnnotationsPanel';
+import { localHighlights, useAnnotationsController } from '@/features/reader/AnnotationsPanel';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import {
   SEARCH_HIGHLIGHT_COLOR,
@@ -25,6 +22,14 @@ import {
   ToolbarSearchField,
   useDocumentSearch,
 } from '@/features/reader/DocumentSearch';
+import {
+  annotationAtPoint,
+  focusInReaderPopover,
+  selectionViewportRect,
+} from '@/features/reader/markup/geometry';
+import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
+import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
+import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
 import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
@@ -63,6 +68,7 @@ import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReader
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
+  type AnnotationStyle,
   type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
@@ -145,6 +151,7 @@ function useTextStream(content: DocumentContentReader, documentId: string, encod
 interface PaintedRange {
   annotationId: string;
   color: string;
+  style: AnnotationStyle;
   startUnit: number;
   endUnit: number;
 }
@@ -198,16 +205,26 @@ const TxtRow = memo(function TxtRow({
             </span>
           );
         }
-        const style: CSSProperties & Record<'--anchor-pulse-color', string> = {
-          backgroundColor: range.color,
-          color: '#000',
-          '--anchor-pulse-color': range.color,
-        };
+        const style: CSSProperties & Record<'--anchor-pulse-color', string> =
+          range.style === 'underline'
+            ? {
+                textDecorationLine: 'underline',
+                textDecorationColor: range.color,
+                textDecorationThickness: '0.18em',
+                textUnderlineOffset: '0.2em',
+                '--anchor-pulse-color': range.color,
+              }
+            : {
+                backgroundColor: range.color,
+                color: '#000',
+                '--anchor-pulse-color': range.color,
+              };
         return (
           <span
             key={unit}
             {...unitAttribute}
             data-annotation-id={range.annotationId}
+            data-annotation-style={range.style}
             style={style}
             className={cn(pulsingAnnotationId === range.annotationId && 'anchor-pulse')}
           >
@@ -224,10 +241,10 @@ const asTxtAnchor = (anchor: { format: string } | null | undefined): TxtAnchor |
 
 function paint(model: TxtTextModel, highlights: readonly ReaderHighlight[]): PaintedRange[] {
   const ranges: PaintedRange[] = [];
-  for (const { annotationId, anchor, color } of highlights) {
+  for (const { annotationId, anchor, color, style = 'highlight' } of highlights) {
     const txtAnchor = asTxtAnchor(anchor);
     const range = txtAnchor && model.rangeFor(txtAnchor);
-    if (range) ranges.push({ annotationId, color, ...range });
+    if (range) ranges.push({ annotationId, color, style, ...range });
   }
   return ranges;
 }
@@ -257,11 +274,14 @@ export function TxtViewer({
   onDeleteAnnotation,
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
+  onExcerptSelection,
+  canExcerpt,
 }: DocumentViewerProps<'txt'>) {
   const load = useTextStream(content, document.id, document.encoding);
   const { model, rowCount, complete } = load;
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const readerAreaRef = useRef<HTMLDivElement>(null);
 
   const [localPreferences, setLocalPreferences] = useState<ReadingPreferences>(
     () => preferences ?? DEFAULT_READING_PREFERENCES,
@@ -342,6 +362,8 @@ export function TxtViewer({
         !root.contains(range.startContainer) ||
         !root.contains(range.endContainer)
       ) {
+        // Typing a note for the selection moves the document's selection into the field.
+        if (focusInReaderPopover(view)) return;
         clear();
         return;
       }
@@ -634,16 +656,26 @@ export function TxtViewer({
     onSelectAnnotation: handleSelectAnnotation,
   });
 
+  const getSelectionRect = useCallback(() => selectionViewportRect(scrollRef.current), []);
+  const popover = useSelectionPopover({
+    isActive,
+    selection: activeSelection,
+    annotations: annotationsController,
+    surfaceRef: scrollRef,
+    getSelectionRect,
+  });
+  const openClickedHighlight = (event: ReactMouseEvent<HTMLElement>) => {
+    const page = pageRef.current;
+    if (!page || event.button !== 0 || event.detail > 1) return;
+    const selection = page.ownerDocument.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    const hit = annotationAtPoint(event, page);
+    if (hit) popover.openForAnnotation(hit.annotationId, hit.rect);
+  };
+
   const effectiveHighlights = useMemo(() => {
     if (annotations !== undefined) return highlights;
-    return [
-      ...highlights,
-      ...annotationsController.annotations.map(({ id, anchor, color }) => ({
-        annotationId: id,
-        anchor,
-        color,
-      })),
-    ];
+    return [...highlights, ...localHighlights(annotationsController.annotations)];
   }, [annotations, annotationsController.annotations, highlights]);
 
   const activeSearchMatch = search.activeMatch;
@@ -772,6 +804,7 @@ export function TxtViewer({
     annotations: annotationsController,
     selectionText: activeSelection?.text ?? null,
     markup,
+    popover,
     reflowable: {
       preferences: effectivePreferences,
       onChange: updatePreferences,
@@ -817,6 +850,7 @@ export function TxtViewer({
       painted.push({
         annotationId: jumpRequest.annotationId,
         color: '#fde047',
+        style: 'highlight',
         ...jumpRange,
       });
     }
@@ -824,6 +858,7 @@ export function TxtViewer({
       painted.push({
         annotationId: SEARCH_HIGHLIGHT_ID,
         color: SEARCH_HIGHLIGHT_COLOR,
+        style: 'highlight',
         ...activeSearchRange,
       });
     }
@@ -890,12 +925,11 @@ export function TxtViewer({
               onChange={updatePreferences}
               format="txt"
             />
-            {markup.visible && (
-              <SelectionAnnotationControls
-                hasSelection={activeSelection !== null}
-                controller={annotationsController}
-              />
-            )}
+            <MarkupToggleButton
+              visible={markup.visible}
+              highlightMode={annotationsController.highlightMode}
+              onToggle={markup.toggle}
+            />
             <ToolbarSeparator />
             <BookmarkToggleButton
               bookmarked={bookmarksController.isCurrentBookmarked}
@@ -921,12 +955,18 @@ export function TxtViewer({
             })}
           />
         )}
-        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+        <div ref={readerAreaRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {markup.visible && <MarkupBar controller={annotationsController} onClose={markup.hide} />}
+          <SelectionPopover
+            popover={popover}
+            annotations={annotationsController}
+            selection={activeSelection}
+            boundsRef={readerAreaRef}
+            onExcerpt={onExcerptSelection}
+            canExcerpt={canExcerpt}
+            onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+          />
           <ReaderPopoverLayer>
-            <SelectionNoteComposer
-              hasSelection={activeSelection !== null}
-              controller={annotationsController}
-            />
             {(load.hadReplacements || missedJump) && (
               <p role="status" className="bg-muted px-4 py-1.5 text-xs text-foreground">
                 {missedJump
@@ -948,6 +988,7 @@ export function TxtViewer({
               <div
                 ref={pageRef}
                 role="document"
+                onClick={openClickedHighlight}
                 aria-label={document.title}
                 // Hyphenation needs a language; a text file declares none.
                 lang={window.navigator.language || undefined}

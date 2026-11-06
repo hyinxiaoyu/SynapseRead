@@ -282,6 +282,33 @@ pub struct StudyNotebook {
     pub created_at: String,
 }
 
+/// How an annotation is drawn over its text. Excerpts are always highlights.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnnotationStyle {
+    #[default]
+    Highlight,
+    Underline,
+}
+
+impl AnnotationStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Highlight => "highlight",
+            Self::Underline => "underline",
+        }
+    }
+
+    /// Rows only hold what the column's CHECK allows; anything else reads as a
+    /// highlight rather than failing the whole notebook load.
+    pub fn from_column(value: &str) -> Self {
+        match value {
+            "underline" => Self::Underline,
+            _ => Self::Highlight,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Annotation {
@@ -294,6 +321,8 @@ pub struct Annotation {
     #[serde(default)]
     pub note: Option<String>,
     pub color: String,
+    #[serde(default)]
+    pub style: AnnotationStyle,
     pub created_at: String,
 }
 
@@ -308,6 +337,9 @@ pub struct CreateAnnotationInput {
     pub excerpt_image_png: Option<String>,
     pub note: Option<String>,
     pub color: String,
+    /// Optional on the wire so older callers keep creating highlights.
+    #[serde(default)]
+    pub style: AnnotationStyle,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -315,6 +347,9 @@ pub struct CreateAnnotationInput {
 pub struct AnnotationPatch {
     pub note: Option<String>,
     pub color: Option<String>,
+    /// `None` keeps the current style.
+    #[serde(default)]
+    pub style: Option<AnnotationStyle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

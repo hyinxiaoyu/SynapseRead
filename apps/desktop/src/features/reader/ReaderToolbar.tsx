@@ -267,8 +267,8 @@ export function ToolbarTitle({ title, subtitle }: { title: string; subtitle?: Re
 }
 
 /**
- * Notices and the note composer float over the page as popovers
- * instead of stacking strips above it, so the reading area never jumps.
+ * Notices float over the page as popovers instead of stacking strips above
+ * it, so the reading area never jumps.
  */
 export function ReaderPopoverLayer({ children }: { children: ReactNode }) {
   return (
