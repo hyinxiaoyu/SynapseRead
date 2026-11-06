@@ -119,7 +119,7 @@ export async function txtFlow(page) {
   // Independent bookmarks in TXT: bookmark at scrollTop 1500, scroll to top, jump back, and remove.
   await page.clickButton('Bookmark current location');
   await page.waitFor(
-    `${visibleTxtViewer}?.querySelector('[data-testid="bookmarks-count"]')?.textContent === '1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')?.textContent === '1'`,
     'TXT bookmark badge count',
   );
   await page.evaluate(`${visibleScroller}.scrollTop = 0`);
@@ -140,7 +140,7 @@ export async function txtFlow(page) {
     `${visibleTxtViewer}.querySelector('[data-testid="bookmark-remove-button"]').click()`,
   );
   await page.waitFor(
-    `!${visibleTxtViewer}?.querySelector('[data-testid="bookmarks-count"]')`,
+    `!document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')`,
     'removing TXT bookmark',
   );
   await page.clickButton('Bookmarks');
@@ -177,7 +177,7 @@ export async function txtFlow(page) {
   await page.selectText(SEGMENT, 'Dropped E2E');
   await page.clickButton('Highlight selection');
   await page.waitFor(
-    `${visibleTxtViewer}?.querySelector('[data-testid="annotations-count"]')?.textContent === '1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="annotations-count"]')?.textContent === '1'`,
     'TXT independent highlight count',
   );
   await page.clickButton('Annotations');

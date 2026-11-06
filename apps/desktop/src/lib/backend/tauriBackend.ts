@@ -1,7 +1,9 @@
 import { Channel, convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen, TauriEvent, type UnlistenFn } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import type { DroppedDocumentsPayload, StudyBackend } from '@/lib/backend/types';
+import { detectPlatform } from '@/lib/platform';
 import type {
   Annotation,
   Bookmark,
@@ -19,10 +21,30 @@ import type {
 } from '@/types/domain';
 
 const DOCUMENTS_DROPPED_EVENT = 'synapse://documents-dropped';
+const MENU_COMMAND_EVENT = 'menu-command';
+
+/**
+ * `listen` resolves asynchronously; this unsubscribes even when disposed before
+ * then, and drops anything delivered in between.
+ */
+function subscribe(start: (isLive: () => boolean) => Promise<UnlistenFn>): () => void {
+  let disposed = false;
+  let stop: UnlistenFn | null = null;
+  void start(() => !disposed).then((unlisten) => {
+    if (disposed) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    disposed = true;
+    stop?.();
+  };
+}
 
 export function createTauriBackend(): StudyBackend {
   return {
     kind: 'tauri',
+    // Only macOS gets the overlay title bar: see `create_main_window` in `lib.rs`.
+    chromeStyle: detectPlatform() === 'mac' ? 'overlay' : 'standard',
 
     pickDocument: () => invoke<StudyDocument | null>('pick_document'),
     dropFiles: async () => ({ documents: [], error: null }),
@@ -100,6 +122,30 @@ export function createTauriBackend(): StudyBackend {
     listBookmarks: () => invoke<Bookmark[]>('list_bookmarks'),
     createBookmark: (input) => invoke<Bookmark>('create_bookmark', { input }),
     deleteBookmark: (bookmarkId) => invoke('delete_bookmark', { bookmarkId }),
+
+    onMenuCommand: (listener) =>
+      subscribe((isLive) =>
+        listen<{ commandId: string }>(MENU_COMMAND_EVENT, (event) => {
+          if (isLive()) listener(event.payload.commandId);
+        }),
+      ),
+    setMenuItemStates: (states) => invoke('set_menu_item_states', { states }),
+    isFullscreen: () => getCurrentWindow().isFullscreen(),
+    setFullscreen: (fullscreen) => getCurrentWindow().setFullscreen(fullscreen),
+    onFullscreenChange(listener) {
+      const window = getCurrentWindow();
+      let last: boolean | null = null;
+      // Neither the green button nor Esc reports full screen directly; a resize does.
+      return subscribe((isLive) =>
+        window.onResized(() => {
+          void window.isFullscreen().then((fullscreen) => {
+            if (!isLive() || fullscreen === last) return;
+            last = fullscreen;
+            listener(fullscreen);
+          });
+        }),
+      );
+    },
 
     // The asset protocol enforces its scope in Rust, whatever this URL names.
     loadDocumentSource: async (document) => ({

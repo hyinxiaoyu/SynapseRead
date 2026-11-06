@@ -1,5 +1,4 @@
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
-import { RotateCcw } from 'lucide-react';
 import {
   type CSSProperties,
   memo,
@@ -12,7 +11,6 @@ import {
   type UIEvent,
 } from 'react';
 
-import { Button } from '@/components/ui/button';
 import {
   AnnotationsListToggleButton,
   AnnotationsPanel,
@@ -35,6 +33,14 @@ import {
 } from '@/features/reader/DocumentSearchBar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import {
+  HistoryButtons,
+  ReaderPopoverLayer,
+  ReaderToolbar,
+  ToolbarOverflowMenu,
+  ToolbarSeparator,
+  ToolbarTitle,
+} from '@/features/reader/ReaderToolbar';
+import {
   FONT_FAMILY_CSS,
   READING_WIDTH_CLASSES,
   ReadingPreferencesBar,
@@ -42,6 +48,8 @@ import {
   THEME_SURFACE_CLASSES,
   useReadingPreferencesPanel,
 } from '@/features/reader/ReadingPreferencesBar';
+import { useJumpHistory } from '@/features/reader/useJumpHistory';
+import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
@@ -225,6 +233,7 @@ export function TxtViewer({
   onSelectionChange,
   onJumpHandled,
   onCursorChange,
+  chromeHidden = false,
   preferences,
   onPreferencesChange,
   bookmarks,
@@ -258,7 +267,9 @@ export function TxtViewer({
   const [pinnedRows, setPinnedRows] = useState<readonly number[]>([]);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [missedJump, setMissedJump] = useState(false);
-  const [returnStack, setReturnStack] = useState<number[]>([]);
+  const history = useJumpHistory<number>();
+  const pushHistory = history.push;
+  const markup = useMarkupToolbar();
   const [currentRow, setCurrentRow] = useState(0);
   const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
   const annotationPulseTimerRef = useRef<number | null>(null);
@@ -449,7 +460,7 @@ export function TxtViewer({
       const range = model.rangeFor(match.anchor);
       if (!range) return;
       const previousTop = lastScrollTop.current;
-      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
       virtualizer.scrollToIndex(targetRow, { align: 'center' });
@@ -460,7 +471,7 @@ export function TxtViewer({
         setSearchPulsing(false);
       }, PULSE_MS);
     },
-    [model, virtualizer],
+    [pushHistory, model, virtualizer],
   );
 
   useEffect(
@@ -521,17 +532,16 @@ export function TxtViewer({
       }
       setMissedJump(false);
       const previousTop = lastScrollTop.current;
-      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
       virtualizer.scrollToIndex(targetRow, { align: 'start' });
     },
-    [model, complete, virtualizer],
+    [pushHistory, model, complete, virtualizer],
   );
 
   const bookmarksController = useBookmarksController<'txt'>({
     documentId,
-    isActive,
     bookmarks,
     onAddBookmark,
     onRemoveBookmark,
@@ -551,7 +561,7 @@ export function TxtViewer({
       }
       setMissedJump(false);
       const previousTop = lastScrollTop.current;
-      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
       virtualizer.scrollToIndex(targetRow, { align: 'center' });
@@ -563,7 +573,7 @@ export function TxtViewer({
         setAnnotationPulsingId(null);
       }, PULSE_MS);
     },
-    [model, complete, virtualizer],
+    [pushHistory, model, complete, virtualizer],
   );
 
   const clearSelectionAfterAnnotate = useCallback(() => {
@@ -629,17 +639,57 @@ export function TxtViewer({
     if (lastHandledJumpNonce.current !== jumpNonce) {
       lastHandledJumpNonce.current = jumpNonce;
       const previousTop = lastScrollTop.current;
-      setReturnStack((stack) => [...stack, previousTop]);
+      pushHistory(previousTop);
     }
     virtualizer.scrollToIndex(jumpRow, { align: 'center' });
-  }, [jumpNonce, jumpRow, virtualizer]);
+  }, [pushHistory, jumpNonce, jumpRow, virtualizer]);
 
   const handleReturnBack = () => {
-    const targetTop = returnStack.at(-1);
-    if (targetTop === undefined) return;
-    setReturnStack((stack) => stack.slice(0, -1));
-    scrollRef.current?.scrollTo({ top: targetTop });
+    const targetTop = history.goBack(scrollRef.current?.scrollTop ?? lastScrollTop.current);
+    if (targetTop !== undefined) scrollRef.current?.scrollTo({ top: targetTop });
   };
+
+  const handleForward = () => {
+    const targetTop = history.goForward(scrollRef.current?.scrollTop ?? lastScrollTop.current);
+    if (targetTop !== undefined) scrollRef.current?.scrollTo({ top: targetTop });
+  };
+
+  // Entering focus mode puts the panels away; leaving it does not reopen them.
+  const [wasChromeHidden, setWasChromeHidden] = useState(chromeHidden);
+  if (wasChromeHidden !== chromeHidden) {
+    setWasChromeHidden(chromeHidden);
+    if (chromeHidden) {
+      preferencesPanel.close();
+      bookmarksController.closePanel();
+      annotationsController.closePanel();
+    }
+  }
+
+  const pageBy = (direction: 1 | -1) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    scroller.scrollBy({ top: direction * scroller.clientHeight * 0.9 });
+  };
+
+  useReaderCommands({
+    isActive,
+    search,
+    bookmarks: bookmarksController,
+    annotations: annotationsController,
+    hasSelection: activeSelection !== null,
+    markup,
+    reflowable: {
+      preferences: effectivePreferences,
+      onChange: updatePreferences,
+      panel: preferencesPanel,
+    },
+    extra: {
+      'go.previousPage': { run: () => pageBy(-1) },
+      'go.nextPage': { run: () => pageBy(1) },
+      'go.back': { run: handleReturnBack, enabled: history.canGoBack },
+      'go.forward': { run: handleForward, enabled: history.canGoForward },
+    },
+  });
 
   useEffect(() => {
     if (jumpNonce === null) return;
@@ -713,96 +763,141 @@ export function TxtViewer({
       data-reading-theme={effectivePreferences.theme}
       data-reading-width={effectivePreferences.readingWidth}
     >
-      <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-background px-3 py-1 text-foreground">
-        <div className="flex flex-wrap items-center gap-1">
-          {returnStack.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-label="Return to previous location"
-              onClick={handleReturnBack}
-            >
-              <RotateCcw />
-              Back
-            </Button>
+      <ReaderToolbar
+        isActive={isActive}
+        leading={
+          <HistoryButtons
+            canGoBack={history.canGoBack}
+            canGoForward={history.canGoForward}
+            onBack={handleReturnBack}
+            onForward={handleForward}
+          />
+        }
+        center={
+          <ToolbarTitle
+            title={document.title}
+            subtitle={
+              <span data-testid="txt-progress">
+                Line {currentRow + 1} of {rowCount}
+                {!complete && '…'}
+              </span>
+            }
+          />
+        }
+        trailing={
+          <>
+            <ReadingPreferencesToggleButton
+              open={preferencesPanel.open}
+              onToggle={preferencesPanel.toggle}
+            />
+            {markup.visible && (
+              <SelectionAnnotationControls
+                hasSelection={activeSelection !== null}
+                controller={annotationsController}
+              />
+            )}
+            <ToolbarSeparator />
+            <BookmarkToggleButton
+              bookmarked={bookmarksController.isCurrentBookmarked}
+              onToggle={bookmarksController.toggleCurrentBookmark}
+            />
+            <BookmarksListToggleButton
+              open={bookmarksController.open}
+              count={bookmarksController.bookmarks.length}
+              collapse="md"
+              onToggle={bookmarksController.togglePanel}
+            />
+            <AnnotationsListToggleButton
+              open={annotationsController.open}
+              count={annotationsController.annotations.length}
+              collapse="md"
+              onToggle={annotationsController.togglePanel}
+            />
+            <ToolbarOverflowMenu
+              items={[
+                {
+                  label: 'Bookmarks',
+                  collapse: 'md',
+                  pressed: bookmarksController.open,
+                  onSelect: bookmarksController.togglePanel,
+                },
+                {
+                  label: 'Annotations',
+                  collapse: 'md',
+                  pressed: annotationsController.open,
+                  onSelect: annotationsController.togglePanel,
+                },
+              ]}
+            />
+            <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
+          </>
+        }
+      />
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <ReaderPopoverLayer>
+          {preferencesPanel.open && (
+            <ReadingPreferencesBar
+              preferences={effectivePreferences}
+              onChange={updatePreferences}
+            />
           )}
-          <ReadingPreferencesToggleButton
-            open={preferencesPanel.open}
-            onToggle={preferencesPanel.toggle}
-          />
-          <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
-          <BookmarkToggleButton
-            bookmarked={bookmarksController.isCurrentBookmarked}
-            onToggle={bookmarksController.toggleCurrentBookmark}
-          />
-          <BookmarksListToggleButton
-            open={bookmarksController.open}
-            count={bookmarksController.bookmarks.length}
-            onToggle={bookmarksController.togglePanel}
-          />
-          <AnnotationsListToggleButton
-            open={annotationsController.open}
-            count={annotationsController.annotations.length}
-            onToggle={annotationsController.togglePanel}
-          />
-          <SelectionAnnotationControls
+          <DocumentSearchBar search={search} />
+          <BookmarksPanel controller={bookmarksController} />
+          <SelectionNoteComposer
             hasSelection={activeSelection !== null}
             controller={annotationsController}
           />
-        </div>
-      </div>
-      {preferencesPanel.open && (
-        <ReadingPreferencesBar preferences={effectivePreferences} onChange={updatePreferences} />
-      )}
-      <DocumentSearchBar search={search} />
-      <BookmarksPanel controller={bookmarksController} />
-      <SelectionNoteComposer
-        hasSelection={activeSelection !== null}
-        controller={annotationsController}
-      />
-      <AnnotationsPanel controller={annotationsController} />
-      {(load.hadReplacements || missedJump) && (
-        <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs text-foreground">
-          {missedJump
-            ? 'That excerpt is past the end of this file, which may have changed since it was saved.'
-            : 'This file has bytes that are not valid UTF-8. They are shown as �.'}
-        </p>
-      )}
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        data-testid="txt-scroll"
-        className="min-h-0 flex-1 overflow-auto"
-      >
-        <div
-          role="document"
-          aria-label={document.title}
-          className={cn(
-            'relative mx-auto w-full',
-            READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
+          <AnnotationsPanel controller={annotationsController} />
+          {(load.hadReplacements || missedJump) && (
+            <p role="status" className="bg-muted px-4 py-1.5 text-xs text-foreground">
+              {missedJump
+                ? 'That excerpt is past the end of this file, which may have changed since it was saved.'
+                : 'This file has bytes that are not valid UTF-8. They are shown as �.'}
+            </p>
           )}
-          style={{
-            height: virtualizer.getTotalSize(),
-            fontFamily: FONT_FAMILY_CSS[effectivePreferences.fontFamily],
-            fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
-            lineHeight:
-              effectivePreferences.lineSpacing === 1.75 ? 1.625 : effectivePreferences.lineSpacing,
-          }}
+        </ReaderPopoverLayer>
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          data-testid="txt-scroll"
+          className="min-h-0 flex-1 overflow-auto"
         >
-          {virtualizer.getVirtualItems().map((item) => (
-            <div
-              key={item.key}
-              data-index={item.index}
-              ref={virtualizer.measureElement}
-              className="absolute top-0 left-0 min-h-[1lh] w-full px-6 break-words whitespace-pre-wrap"
-              style={{ transform: `translateY(${item.start}px)` }}
-            >
-              <TxtRow
-                segments={segmentRow(model.rowStart(item.index), model.rowText(item.index), ranges)}
-                pulsingAnnotationId={pulsingAnnotationId}
-              />
-            </div>
-          ))}
+          <div
+            role="document"
+            aria-label={document.title}
+            className={cn(
+              'relative mx-auto w-full',
+              READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
+            )}
+            style={{
+              height: virtualizer.getTotalSize(),
+              fontFamily: FONT_FAMILY_CSS[effectivePreferences.fontFamily],
+              fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
+              lineHeight:
+                effectivePreferences.lineSpacing === 1.75
+                  ? 1.625
+                  : effectivePreferences.lineSpacing,
+            }}
+          >
+            {virtualizer.getVirtualItems().map((item) => (
+              <div
+                key={item.key}
+                data-index={item.index}
+                ref={virtualizer.measureElement}
+                className="absolute top-0 left-0 min-h-[1lh] w-full px-6 break-words whitespace-pre-wrap"
+                style={{ transform: `translateY(${item.start}px)` }}
+              >
+                <TxtRow
+                  segments={segmentRow(
+                    model.rowStart(item.index),
+                    model.rowText(item.index),
+                    ranges,
+                  )}
+                  pulsingAnnotationId={pulsingAnnotationId}
+                />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     </div>

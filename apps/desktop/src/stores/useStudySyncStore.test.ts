@@ -658,6 +658,7 @@ describe('useStudySyncStore', () => {
       await backend.saveWorkspaceSession({
         openDocumentIds: [firstId, 'deleted-doc-id', secondId],
         activeDocumentId: firstId,
+        immersive: false,
       });
 
       const restarted = createStudySyncStore(backend);
@@ -669,6 +670,25 @@ describe('useStudySyncStore', () => {
         theme: 'dark',
         fontSize: 130,
       });
+    });
+
+    it('persists immersive reading with the session and restores it on restart', async () => {
+      const firstId = await openDocument();
+      expect(state().immersive).toBe(false);
+      state().setImmersive(true);
+      await vi.waitFor(async () =>
+        expect((await backend.getWorkspaceSession()).immersive).toBe(true),
+      );
+
+      const restarted = createStudySyncStore(backend);
+      await restarted.getState().initialize();
+      expect(restarted.getState().immersive).toBe(true);
+      expect(restarted.getState().openDocumentIds).toEqual([firstId]);
+
+      restarted.getState().setImmersive(false);
+      await vi.waitFor(async () =>
+        expect((await backend.getWorkspaceSession()).immersive).toBe(false),
+      );
     });
 
     it('detects missing, moved, and changed sources across PDF, EPUB, and TXT, and relinks while preserving notes', async () => {

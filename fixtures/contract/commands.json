@@ -1,0 +1,128 @@
+{
+  "$comment": "The single list of app commands. The native menu (src-tauri/src/menu.rs) and the frontend command registry (features/commands) both read it, so a menu item, its key equivalent, and the toolbar tooltip cannot drift apart. Shortcuts use Tauri accelerator syntax. `shortcutOther` replaces `shortcut` off macOS; `aliases` are extra keyboard-only bindings; `accelerator: false` keeps a key out of the menu so it does not swallow it in text fields; `allowInSearch` lets a command run while the search field has focus.",
+  "menus": [
+    {
+      "id": "file",
+      "title": "File",
+      "items": ["file.open", "separator", "file.closeTab"]
+    },
+    {
+      "id": "edit",
+      "title": "Edit",
+      "items": [
+        "edit.find",
+        "edit.findNext",
+        "edit.findPrevious",
+        "separator",
+        "edit.highlight",
+        "edit.addNote",
+        "edit.excerpt"
+      ]
+    },
+    {
+      "id": "view",
+      "title": "View",
+      "items": [
+        "view.toggleSidebar",
+        "view.sidebarContents",
+        "view.sidebarThumbnails",
+        "view.sidebarAnnotations",
+        "view.sidebarSearch",
+        "separator",
+        "view.layoutSingle",
+        "view.layoutTwoPage",
+        "view.layoutScroll",
+        "separator",
+        "view.zoomIn",
+        "view.zoomOut",
+        "view.actualSize",
+        "view.zoomToFit",
+        "view.zoomToWidth",
+        "separator",
+        "view.rotateLeft",
+        "view.rotateRight",
+        "separator",
+        "view.appearance",
+        "view.markup",
+        "separator",
+        "view.immersive",
+        "view.fullScreen"
+      ]
+    },
+    {
+      "id": "go",
+      "title": "Go",
+      "items": ["go.previousPage", "go.nextPage", "go.page", "separator", "go.back", "go.forward"]
+    },
+    {
+      "id": "bookmarks",
+      "title": "Bookmarks",
+      "items": ["bookmarks.toggle", "view.sidebarBookmarks"]
+    },
+    {
+      "id": "window",
+      "title": "Window",
+      "items": ["window.mindMap", "window.inspector"]
+    },
+    {
+      "id": "help",
+      "title": "Help",
+      "items": ["help.shortcuts"]
+    }
+  ],
+  "commands": {
+    "file.open": { "title": "Open…", "shortcut": "CmdOrCtrl+O" },
+    "file.closeTab": { "title": "Close Tab", "shortcut": "CmdOrCtrl+W" },
+    "edit.find": { "title": "Find…", "shortcut": "CmdOrCtrl+F", "allowInSearch": true },
+    "edit.findNext": { "title": "Find Next", "shortcut": "CmdOrCtrl+G", "allowInSearch": true },
+    "edit.findPrevious": {
+      "title": "Find Previous",
+      "shortcut": "Shift+CmdOrCtrl+G",
+      "allowInSearch": true
+    },
+    "edit.highlight": {
+      "title": "Highlight Selection",
+      "shortcut": "Ctrl+Cmd+H",
+      "shortcutOther": "Ctrl+Alt+H"
+    },
+    "edit.addNote": { "title": "Add Note to Selection" },
+    "edit.excerpt": { "title": "Excerpt to MindMap", "shortcut": "Shift+CmdOrCtrl+E" },
+    "view.toggleSidebar": { "title": "Toggle Sidebar", "shortcut": "Alt+CmdOrCtrl+S" },
+    "view.sidebarContents": { "title": "Table of Contents", "shortcut": "Alt+CmdOrCtrl+1" },
+    "view.sidebarThumbnails": { "title": "Thumbnails", "shortcut": "Alt+CmdOrCtrl+2" },
+    "view.sidebarBookmarks": { "title": "Show Bookmarks", "shortcut": "Alt+CmdOrCtrl+3" },
+    "view.sidebarAnnotations": { "title": "Annotations", "shortcut": "Alt+CmdOrCtrl+4" },
+    "view.sidebarSearch": { "title": "Search Results", "shortcut": "Alt+CmdOrCtrl+5" },
+    "view.layoutSingle": { "title": "Single Page" },
+    "view.layoutTwoPage": { "title": "Two Pages" },
+    "view.layoutScroll": { "title": "Continuous Scroll" },
+    "view.zoomIn": {
+      "title": "Zoom In",
+      "shortcut": "CmdOrCtrl+=",
+      "aliases": ["CmdOrCtrl+Plus", "Shift+CmdOrCtrl+="]
+    },
+    "view.zoomOut": { "title": "Zoom Out", "shortcut": "CmdOrCtrl+-" },
+    "view.actualSize": { "title": "Actual Size", "shortcut": "CmdOrCtrl+0" },
+    "view.zoomToFit": { "title": "Zoom to Fit", "shortcut": "CmdOrCtrl+8" },
+    "view.zoomToWidth": { "title": "Zoom to Width", "shortcut": "CmdOrCtrl+9" },
+    "view.rotateLeft": { "title": "Rotate Left", "shortcut": "CmdOrCtrl+L" },
+    "view.rotateRight": { "title": "Rotate Right", "shortcut": "CmdOrCtrl+R" },
+    "view.appearance": { "title": "Appearance…" },
+    "view.markup": { "title": "Show Markup Toolbar", "shortcut": "Shift+CmdOrCtrl+A" },
+    "view.immersive": { "title": "Enter Focus Mode", "shortcut": "Shift+CmdOrCtrl+F" },
+    "view.fullScreen": {
+      "title": "Enter Full Screen",
+      "shortcut": "Ctrl+Cmd+F",
+      "shortcutOther": "F11"
+    },
+    "go.previousPage": { "title": "Previous Page", "shortcut": "ArrowLeft", "accelerator": false },
+    "go.nextPage": { "title": "Next Page", "shortcut": "ArrowRight", "accelerator": false },
+    "go.page": { "title": "Go to Page…", "shortcut": "Alt+CmdOrCtrl+G" },
+    "go.back": { "title": "Back", "shortcut": "CmdOrCtrl+[" },
+    "go.forward": { "title": "Forward", "shortcut": "CmdOrCtrl+]" },
+    "bookmarks.toggle": { "title": "Add Bookmark", "shortcut": "CmdOrCtrl+D" },
+    "window.mindMap": { "title": "Show MindMap", "shortcut": "Shift+CmdOrCtrl+M" },
+    "window.inspector": { "title": "Show Inspector" },
+    "help.shortcuts": { "title": "Keyboard Shortcuts", "shortcut": "CmdOrCtrl+/" }
+  }
+}

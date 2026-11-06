@@ -1,13 +1,16 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
-  BookOpen,
   Columns2,
   Crop,
+  Expand,
   FileText,
   LayoutGrid,
-  ListTree,
+  MoveHorizontal,
+  PanelLeft,
   RotateCcw,
   RotateCw,
+  ScrollText,
+  Scan,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -23,7 +26,7 @@ import {
   type UIEvent,
 } from 'react';
 
-import { Button } from '@/components/ui/button';
+import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmented-control';
 import {
   AnnotationsListToggleButton,
   AnnotationsPanel,
@@ -49,6 +52,16 @@ import {
 } from '@/features/reader/DocumentSearchBar';
 import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
 import { PULSE_MS } from '@/features/reader/pulse';
+import {
+  HistoryButtons,
+  ReaderPopoverLayer,
+  ReaderToolbar,
+  ToolbarButton,
+  ToolbarOverflowMenu,
+  ToolbarSeparator,
+} from '@/features/reader/ReaderToolbar';
+import { useJumpHistory } from '@/features/reader/useJumpHistory';
+import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
 import type {
   Annotation,
@@ -186,6 +199,20 @@ function toPdfOutlineNodes(items: readonly PdfOutlineItem[]): OutlineNode<number
     children: toPdfOutlineNodes(item.children),
   }));
 }
+
+const DISPLAY_MODES: readonly SegmentedOption<PdfDisplayMode>[] = [
+  { value: 'single', label: 'Single page', icon: FileText, testId: 'pdf-mode-single' },
+  { value: 'two-page', label: 'Two pages', icon: Columns2, testId: 'pdf-mode-two-page' },
+  {
+    value: 'continuous',
+    label: 'Continuous scroll',
+    icon: ScrollText,
+    testId: 'pdf-mode-continuous',
+  },
+];
+
+const isSamePdfLocation = (a: PdfReturnLocation, b: PdfReturnLocation) =>
+  a.pageIndex === b.pageIndex && Math.abs(a.fraction - b.fraction) <= 0.02;
 
 interface PdfReturnLocation {
   pageIndex: number;
@@ -689,6 +716,7 @@ function PdfPages({
   engine,
   document,
   isActive,
+  chromeHidden = false,
   highlights,
   jumpRequest,
   onSelectionChange,
@@ -760,7 +788,10 @@ function PdfPages({
   const [captureMode, setCaptureMode] = useState(false);
   const [capture, setCapture] = useState<(CaptureBox & { highlightCount: number }) | null>(null);
   const [missedJump, setMissedJump] = useState(false);
-  const [returnStack, setReturnStack] = useState<PdfReturnLocation[]>([]);
+  const history = useJumpHistory<PdfReturnLocation>(isSamePdfLocation);
+  const pushHistory = history.push;
+  const markup = useMarkupToolbar();
+  const pageInputRef = useRef<HTMLInputElement>(null);
   const pendingZoomTarget = useRef<PdfReturnLocation | null>(null);
 
   // ---- Reopen at the last reading position ---------------------------------
@@ -967,6 +998,13 @@ function PdfPages({
 
   const lastScrollTop = useRef(0);
   const programmaticScrollRef = useRef<{ pageIndex: number; scrollTop: number } | null>(null);
+  /**
+   * Where the reader is, as a page and fraction, kept current by every scroll.
+   * When the pane's width changes (a sidebar opens, the window resizes) and fit
+   * width rescales the pages, the view returns here rather than to a pixel
+   * offset that now belongs to another part of the document.
+   */
+  const layoutAnchor = useRef<PdfReturnLocation | null>(null);
   const scrollToPageOffset = useCallback(
     (pageIndex: number, offset: number) => {
       setCurrentPageIndex(pageIndex);
@@ -974,15 +1012,21 @@ function PdfPages({
       const actualScrollTop = scrollRef.current?.scrollTop ?? offset;
       lastScrollTop.current = actualScrollTop;
       programmaticScrollRef.current = { pageIndex, scrollTop: actualScrollTop };
+      const height = pageHeight(pageIndex);
+      const fraction = height > 0 ? (offset - offsetWithin(pageIndex, 0)) / height : 0;
+      layoutAnchor.current = { pageIndex, fraction: Math.min(Math.max(fraction, 0), 0.99) };
     },
-    [virtualizer],
+    [offsetWithin, pageHeight, virtualizer],
   );
   const currentReturnLocation = useCallback((): PdfReturnLocation => {
     if (
       programmaticScrollRef.current &&
       Math.abs(lastScrollTop.current - programmaticScrollRef.current.scrollTop) <= 2
     ) {
-      return { pageIndex: programmaticScrollRef.current.pageIndex, fraction: 0 };
+      // Where the viewer was sent, exactly; geometry may still be settling.
+      const anchor = layoutAnchor.current;
+      const { pageIndex } = programmaticScrollRef.current;
+      return anchor?.pageIndex === pageIndex ? anchor : { pageIndex, fraction: 0 };
     }
     if (displayMode === 'single') {
       const height = pageHeight(currentPageIndex);
@@ -1039,10 +1083,14 @@ function PdfPages({
     [currentReturnLocation, displayMode],
   );
 
-  const rotateClockwise = useCallback(() => {
-    pendingZoomTarget.current = currentReturnLocation();
-    setRotation((prev) => ((prev + 90) % 360) as PdfRotation);
-  }, [currentReturnLocation]);
+  const rotateBy = useCallback(
+    (degrees: 90 | -90) => {
+      pendingZoomTarget.current = currentReturnLocation();
+      setRotation((prev) => ((prev + degrees + 360) % 360) as PdfRotation);
+    },
+    [currentReturnLocation],
+  );
+  const rotateClockwise = useCallback(() => rotateBy(90), [rotateBy]);
 
   const handlePageAnnotationsLoaded = useCallback(
     (_pageIndex: number, loaded: PdfPageAnnotations) => {
@@ -1058,9 +1106,13 @@ function PdfPages({
 
   // Page heights are computed rather than measured, so a change must be pushed in
   // before anything below reads an offset.
+  const anchoredWidth = useRef(contentWidth);
   useLayoutEffect(() => {
     virtualizer.measure();
-    const target = pendingZoomTarget.current;
+    const widthChanged = anchoredWidth.current !== contentWidth;
+    anchoredWidth.current = contentWidth;
+    const target =
+      pendingZoomTarget.current ?? (widthChanged && restored.current ? layoutAnchor.current : null);
     if (target) {
       pendingZoomTarget.current = null;
       const nextTop = offsetWithin(target.pageIndex, target.fraction);
@@ -1105,11 +1157,11 @@ function PdfPages({
         previous.pageIndex !== targetPageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.05
       ) {
-        setReturnStack((stack) => [...stack, previous]);
+        pushHistory(previous);
       }
       scrollToPageOffset(targetPageIndex, offsetWithin(targetPageIndex, targetFraction));
     },
-    [engine.pageCount, currentReturnLocation, offsetWithin, scrollToPageOffset],
+    [pushHistory, engine.pageCount, currentReturnLocation, offsetWithin, scrollToPageOffset],
   );
 
   const navigateToInternalLink = useCallback(
@@ -1120,10 +1172,15 @@ function PdfPages({
   );
 
   const handleReturnBack = () => {
-    const target = returnStack.at(-1);
-    if (!target) return;
-    setReturnStack((stack) => stack.slice(0, -1));
-    scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
+    const target = history.goBack(currentReturnLocation());
+    if (target)
+      scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
+  };
+
+  const handleForward = () => {
+    const target = history.goForward(currentReturnLocation());
+    if (target)
+      scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
   };
 
   const navigateToBookmark = useCallback(
@@ -1140,16 +1197,15 @@ function PdfPages({
         previous.pageIndex !== pdfAnchor.pageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.02
       ) {
-        setReturnStack((stack) => [...stack, previous]);
+        pushHistory(previous);
       }
       scrollToPageOffset(pdfAnchor.pageIndex, offsetWithin(pdfAnchor.pageIndex, targetFraction));
     },
-    [currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
+    [pushHistory, currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
   );
 
   const bookmarksController = useBookmarksController<'pdf'>({
     documentId,
-    isActive,
     bookmarks,
     onAddBookmark,
     onRemoveBookmark,
@@ -1212,6 +1268,11 @@ function PdfPages({
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     const nextScrollTop = event.currentTarget.scrollTop;
     lastScrollTop.current = nextScrollTop;
+    const isProgrammatic =
+      programmaticScrollRef.current !== null &&
+      Math.abs(nextScrollTop - programmaticScrollRef.current.scrollTop) <= 2;
+    // A programmatic scroll already recorded its exact target.
+    if (!isProgrammatic) layoutAnchor.current = currentReturnLocation();
     if (
       programmaticScrollRef.current &&
       Math.abs(nextScrollTop - programmaticScrollRef.current.scrollTop) <= 2
@@ -1248,74 +1309,6 @@ function PdfPages({
     [],
   );
 
-  useEffect(() => {
-    if (!isActive) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.altKey) {
-        return;
-      }
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      if (target) {
-        const tag = target.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
-          return;
-        }
-        if (
-          target.closest(
-            '[contenteditable="true"], [role="textbox"], [role="slider"], [role="separator"], [role="tablist"], .react-flow',
-          )
-        ) {
-          return;
-        }
-      }
-      if (event.metaKey || event.ctrlKey) {
-        if (event.key === '=' || event.key === '+') {
-          event.preventDefault();
-          stepZoom(1);
-        } else if (event.key === '-' || event.key === '_') {
-          event.preventDefault();
-          stepZoom(-1);
-        } else if (event.key === '0' && !event.shiftKey) {
-          event.preventDefault();
-          applyZoom('actual-size');
-        } else if (event.key === '9' && !event.shiftKey) {
-          event.preventDefault();
-          applyZoom('fit-width');
-        } else if (event.key === '8' && !event.shiftKey) {
-          event.preventDefault();
-          applyZoom('fit-page');
-        }
-        return;
-      }
-      if (event.shiftKey) return;
-      const currentPage =
-        displayMode === 'single'
-          ? currentPageIndex
-          : (pagesInRow(
-              virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0,
-            )[0] ?? currentPageIndex);
-      if (event.key === 'ArrowRight' && currentPage + 1 < engine.pageCount) {
-        event.preventDefault();
-        scrollToPageOffset(currentPage + 1, offsetWithin(currentPage + 1, 0));
-      } else if (event.key === 'ArrowLeft' && currentPage > 0) {
-        event.preventDefault();
-        scrollToPageOffset(currentPage - 1, offsetWithin(currentPage - 1, 0));
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [
-    applyZoom,
-    currentPageIndex,
-    displayMode,
-    engine.pageCount,
-    isActive,
-    offsetWithin,
-    pagesInRow,
-    scrollToPageOffset,
-    stepZoom,
-    virtualizer,
-  ]);
   // ---- Jumping -------------------------------------------------------------
 
   const jumpAnchor = asPdfAnchor(jumpRequest?.anchor);
@@ -1341,7 +1334,7 @@ function PdfPages({
         previous.pageIndex !== pdfAnchor.pageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.02
       ) {
-        setReturnStack((stack) => [...stack, previous]);
+        pushHistory(previous);
       }
       const pageStart = offsetWithin(pdfAnchor.pageIndex, 0);
       const top = offsetWithin(pdfAnchor.pageIndex, targetFraction);
@@ -1355,7 +1348,7 @@ function PdfPages({
         setAnnotationPulsingId(null);
       }, PULSE_MS);
     },
-    [currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
+    [pushHistory, currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
   );
 
   const clearSelectionAfterAnnotate = useCallback(() => {
@@ -1402,17 +1395,7 @@ function PdfPages({
         previous.pageIndex !== match.pageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.02
       ) {
-        setReturnStack((stack) => {
-          const top = stack.at(-1);
-          if (
-            top &&
-            top.pageIndex === previous.pageIndex &&
-            Math.abs(top.fraction - previous.fraction) <= 0.02
-          ) {
-            return stack;
-          }
-          return [...stack, previous];
-        });
+        pushHistory(previous);
       }
       const pageStart = offsetWithin(match.pageIndex, 0);
       const top = offsetWithin(match.pageIndex, targetFraction);
@@ -1425,7 +1408,7 @@ function PdfPages({
         setSearchPulsing(false);
       }, PULSE_MS);
     },
-    [currentReturnLocation, offsetWithin, scrollToPageOffset],
+    [pushHistory, currentReturnLocation, offsetWithin, scrollToPageOffset],
   );
 
   useEffect(
@@ -1495,7 +1478,7 @@ function PdfPages({
         previous.pageIndex !== jumpAnchor.pageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.02
       ) {
-        setReturnStack((stack) => [...stack, previous]);
+        pushHistory(previous);
       }
     }
     setCurrentPageIndex(jumpAnchor.pageIndex);
@@ -1518,6 +1501,84 @@ function PdfPages({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [jumpNonce, jumpExists, jumpReady, onJumpHandled]);
+
+  // ---- Commands -----------------------------------------------------------
+
+  const stepPage = (direction: 1 | -1) => {
+    const currentPage =
+      displayMode === 'single'
+        ? currentPageIndex
+        : (pagesInRow(virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0)[0] ??
+          currentPageIndex);
+    const target = currentPage + direction;
+    if (target < 0 || target >= engine.pageCount) return;
+    scrollToPageOffset(target, offsetWithin(target, 0));
+  };
+
+  const goToPage = () => {
+    const input = pageInputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  };
+
+  // Entering focus mode puts the panels away; leaving it does not reopen them.
+  const [wasChromeHidden, setWasChromeHidden] = useState(chromeHidden);
+  if (wasChromeHidden !== chromeHidden) {
+    setWasChromeHidden(chromeHidden);
+    if (chromeHidden) {
+      bookmarksController.closePanel();
+      annotationsController.closePanel();
+    }
+  }
+
+  const showToc = tocOpen && !chromeHidden;
+  const showThumbnails = thumbnailsOpen && !chromeHidden;
+  const canZoomIn = currentScale < MAX_ZOOM_SCALE - 1e-4;
+  const canZoomOut = currentScale > MIN_ZOOM_SCALE + 1e-4;
+
+  useReaderCommands({
+    isActive,
+    search,
+    bookmarks: bookmarksController,
+    annotations: annotationsController,
+    hasSelection: activeSelection !== null,
+    markup,
+    extra: {
+      'view.toggleSidebar': {
+        run: () => {
+          if (tocOpen || thumbnailsOpen) {
+            setTocOpen(false);
+            setThumbnailsOpen(false);
+          } else {
+            setTocOpen(true);
+          }
+        },
+        enabled: !chromeHidden,
+        title: showToc || showThumbnails ? 'Hide Sidebar' : 'Show Sidebar',
+      },
+      'view.sidebarContents': { run: () => setTocOpen((open) => !open), enabled: !chromeHidden },
+      'view.sidebarThumbnails': {
+        run: () => setThumbnailsOpen((open) => !open),
+        enabled: !chromeHidden,
+      },
+      'view.layoutSingle': { run: () => applyDisplayMode('single') },
+      'view.layoutTwoPage': { run: () => applyDisplayMode('two-page') },
+      'view.layoutScroll': { run: () => applyDisplayMode('continuous') },
+      'view.zoomIn': { run: () => stepZoom(1), enabled: canZoomIn },
+      'view.zoomOut': { run: () => stepZoom(-1), enabled: canZoomOut },
+      'view.actualSize': { run: () => applyZoom('actual-size') },
+      'view.zoomToFit': { run: () => applyZoom('fit-page') },
+      'view.zoomToWidth': { run: () => applyZoom('fit-width') },
+      'view.rotateLeft': { run: () => rotateBy(-90) },
+      'view.rotateRight': { run: () => rotateBy(90) },
+      'go.previousPage': { run: () => stepPage(-1) },
+      'go.nextPage': { run: () => stepPage(1) },
+      'go.page': { run: goToPage },
+      'go.back': { run: handleReturnBack, enabled: history.canGoBack },
+      'go.forward': { run: handleForward, enabled: history.canGoForward },
+    },
+  });
 
   // ---- Rendering -----------------------------------------------------------
 
@@ -1578,243 +1639,247 @@ function PdfPages({
       data-zoom-mode={zoomMode}
       data-display-mode={displayMode}
       data-rotation={rotation}
+      data-chrome-hidden={chromeHidden || undefined}
     >
-      <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b px-2 py-1 text-xs text-muted-foreground">
-        <div className="flex flex-wrap items-center gap-1">
-          <Button
-            variant={tocOpen ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-label="Table of contents"
-            aria-pressed={tocOpen}
-            onClick={() => setTocOpen((open) => !open)}
-          >
-            <ListTree />
-            Contents
-          </Button>
-          <Button
-            variant={thumbnailsOpen ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-thumbnails-toggle"
-            aria-label="Page thumbnails"
-            aria-pressed={thumbnailsOpen}
-            onClick={() => setThumbnailsOpen((open) => !open)}
-          >
-            <LayoutGrid />
-            Thumbnails
-          </Button>
-          {returnStack.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-xs"
-              aria-label="Return to previous location"
-              onClick={handleReturnBack}
+      <ReaderToolbar
+        isActive={isActive}
+        leading={
+          <>
+            <ToolbarButton
+              icon={PanelLeft}
+              label="Table of contents"
+              command="view.sidebarContents"
+              pressed={showToc}
+              disabled={chromeHidden}
+              onClick={() => setTocOpen((open) => !open)}
+            />
+            <ToolbarButton
+              icon={LayoutGrid}
+              label="Page thumbnails"
+              command="view.sidebarThumbnails"
+              pressed={showThumbnails}
+              testId="pdf-thumbnails-toggle"
+              disabled={chromeHidden}
+              onClick={() => setThumbnailsOpen((open) => !open)}
+            />
+            <SegmentedControl
+              label="Display mode"
+              options={DISPLAY_MODES}
+              value={displayMode}
+              onChange={applyDisplayMode}
+            />
+            <HistoryButtons
+              canGoBack={history.canGoBack}
+              canGoForward={history.canGoForward}
+              onBack={handleReturnBack}
+              onForward={handleForward}
+            />
+          </>
+        }
+        center={
+          <div className="flex min-w-0 flex-col items-center leading-tight">
+            <span
+              data-testid="reader-toolbar-title"
+              className="max-w-full truncate text-xs font-semibold"
             >
-              <RotateCcw />
-              Back
-            </Button>
-          )}
-          <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
-          <BookmarkToggleButton
-            bookmarked={bookmarksController.isCurrentBookmarked}
-            onToggle={bookmarksController.toggleCurrentBookmark}
-          />
-          <BookmarksListToggleButton
-            open={bookmarksController.open}
-            count={bookmarksController.bookmarks.length}
-            onToggle={bookmarksController.togglePanel}
-          />
-          <AnnotationsListToggleButton
-            open={annotationsController.open}
-            count={annotationsController.annotations.length}
-            onToggle={annotationsController.togglePanel}
-          />
-          <SelectionAnnotationControls
+              {document.title}
+            </span>
+            <form
+              className="flex items-center gap-1 text-[11px] text-muted-foreground"
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitPageInput();
+              }}
+            >
+              <label htmlFor={`pdf-page-input-${documentId}`}>Page</label>
+              <input
+                ref={pageInputRef}
+                id={`pdf-page-input-${documentId}`}
+                type="text"
+                inputMode="numeric"
+                aria-label="Page number"
+                aria-invalid={pageInputInvalid}
+                value={pageInput}
+                onChange={(event) => {
+                  setPageInput(event.target.value);
+                  if (pageInputInvalid) setPageInputInvalid(false);
+                }}
+                onBlur={() => {
+                  if (pageInputInvalid) {
+                    setPageInput(String(currentPageIndex + 1));
+                    setPageInputInvalid(false);
+                  }
+                }}
+                className={cn(
+                  'h-4.5 w-9 rounded border bg-background px-1 text-center text-[11px] text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  pageInputInvalid && 'border-destructive text-destructive',
+                )}
+              />
+              <span data-testid="pdf-page-count" className="tabular-nums">
+                of {engine.pageCount}
+              </span>
+            </form>
+          </div>
+        }
+        trailing={
+          <>
+            <div role="group" aria-label="Zoom controls" className="flex items-center gap-0.5">
+              <ToolbarButton
+                icon={MoveHorizontal}
+                label="Fit width"
+                command="view.zoomToWidth"
+                pressed={zoomMode === 'fit-width'}
+                collapse="xl"
+                onClick={() => applyZoom('fit-width')}
+              />
+              <ToolbarButton
+                icon={Expand}
+                label="Fit page"
+                command="view.zoomToFit"
+                pressed={zoomMode === 'fit-page'}
+                collapse="xl"
+                onClick={() => applyZoom('fit-page')}
+              />
+              <ToolbarButton
+                icon={Scan}
+                label="Actual size"
+                command="view.actualSize"
+                pressed={zoomMode === 'actual-size'}
+                collapse="xl"
+                onClick={() => applyZoom('actual-size')}
+              />
+              <ToolbarButton
+                icon={ZoomOut}
+                label="Zoom out"
+                command="view.zoomOut"
+                disabled={!canZoomOut}
+                onClick={() => stepZoom(-1)}
+              />
+              <span
+                data-testid="pdf-zoom-level"
+                className="min-w-9 text-center text-xs text-foreground tabular-nums"
+              >
+                {zoomPercent}%
+              </span>
+              <ToolbarButton
+                icon={ZoomIn}
+                label="Zoom in"
+                command="view.zoomIn"
+                disabled={!canZoomIn}
+                onClick={() => stepZoom(1)}
+              />
+            </div>
+            <ToolbarButton
+              icon={RotateCcw}
+              label="Rotate counterclockwise"
+              command="view.rotateLeft"
+              collapse="lg"
+              onClick={() => rotateBy(-90)}
+            />
+            <ToolbarButton
+              icon={RotateCw}
+              label="Rotate clockwise"
+              command="view.rotateRight"
+              testId="pdf-rotate-button"
+              collapse="lg"
+              onClick={rotateClockwise}
+            />
+            <ToolbarSeparator />
+            <ToolbarButton
+              icon={Crop}
+              label="Capture area"
+              pressed={captureMode}
+              onClick={toggleCaptureMode}
+            />
+            {markup.visible && (
+              <SelectionAnnotationControls
+                hasSelection={activeSelection !== null}
+                controller={annotationsController}
+              />
+            )}
+            <ToolbarSeparator />
+            <BookmarkToggleButton
+              bookmarked={bookmarksController.isCurrentBookmarked}
+              onToggle={bookmarksController.toggleCurrentBookmark}
+            />
+            <BookmarksListToggleButton
+              open={bookmarksController.open}
+              count={bookmarksController.bookmarks.length}
+              collapse="md"
+              onToggle={bookmarksController.togglePanel}
+            />
+            <AnnotationsListToggleButton
+              open={annotationsController.open}
+              count={annotationsController.annotations.length}
+              collapse="md"
+              onToggle={annotationsController.togglePanel}
+            />
+            <ToolbarOverflowMenu
+              items={[
+                {
+                  label: 'Fit width',
+                  collapse: 'xl',
+                  pressed: zoomMode === 'fit-width',
+                  onSelect: () => applyZoom('fit-width'),
+                },
+                {
+                  label: 'Fit page',
+                  collapse: 'xl',
+                  pressed: zoomMode === 'fit-page',
+                  onSelect: () => applyZoom('fit-page'),
+                },
+                {
+                  label: 'Actual size',
+                  collapse: 'xl',
+                  pressed: zoomMode === 'actual-size',
+                  onSelect: () => applyZoom('actual-size'),
+                },
+                { label: 'Rotate counterclockwise', collapse: 'lg', onSelect: () => rotateBy(-90) },
+                { label: 'Rotate clockwise', collapse: 'lg', onSelect: rotateClockwise },
+                {
+                  label: 'Bookmarks',
+                  collapse: 'md',
+                  pressed: bookmarksController.open,
+                  onSelect: bookmarksController.togglePanel,
+                },
+                {
+                  label: 'Annotations',
+                  collapse: 'md',
+                  pressed: annotationsController.open,
+                  onSelect: annotationsController.togglePanel,
+                },
+              ]}
+            />
+            <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
+          </>
+        }
+      />
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <ReaderPopoverLayer>
+          <DocumentSearchBar search={search} />
+          <BookmarksPanel controller={bookmarksController} />
+          <SelectionNoteComposer
             hasSelection={activeSelection !== null}
             controller={annotationsController}
           />
-        </div>
-        <form
-          className="flex items-center gap-1"
-          onSubmit={(event) => {
-            event.preventDefault();
-            submitPageInput();
-          }}
-        >
-          <label htmlFor={`pdf-page-input-${documentId}`} className="text-xs text-muted-foreground">
-            Page
-          </label>
-          <input
-            id={`pdf-page-input-${documentId}`}
-            type="text"
-            inputMode="numeric"
-            aria-label="Page number"
-            aria-invalid={pageInputInvalid}
-            value={pageInput}
-            onChange={(event) => {
-              setPageInput(event.target.value);
-              if (pageInputInvalid) setPageInputInvalid(false);
-            }}
-            onBlur={() => {
-              if (pageInputInvalid) {
-                setPageInput(String(currentPageIndex + 1));
-                setPageInputInvalid(false);
-              }
-            }}
-            className={cn(
-              'h-6 w-10 rounded border bg-background px-1 text-center text-xs text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              pageInputInvalid && 'border-destructive text-destructive',
-            )}
-          />
-          <span data-testid="pdf-page-count" className="text-xs text-muted-foreground tabular-nums">
-            of {engine.pageCount}
-          </span>
-        </form>
-        <div role="group" aria-label="Display mode" className="flex flex-wrap items-center gap-0.5">
-          <Button
-            variant={displayMode === 'continuous' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-mode-continuous"
-            aria-label="Continuous scroll"
-            aria-pressed={displayMode === 'continuous'}
-            onClick={() => applyDisplayMode('continuous')}
-          >
-            <BookOpen />
-            Continuous
-          </Button>
-          <Button
-            variant={displayMode === 'single' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-mode-single"
-            aria-label="Single page"
-            aria-pressed={displayMode === 'single'}
-            onClick={() => applyDisplayMode('single')}
-          >
-            <FileText />
-            Single page
-          </Button>
-          <Button
-            variant={displayMode === 'two-page' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-mode-two-page"
-            aria-label="Two pages"
-            aria-pressed={displayMode === 'two-page'}
-            onClick={() => applyDisplayMode('two-page')}
-          >
-            <Columns2 />
-            Two pages
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-rotate-button"
-            aria-label="Rotate clockwise"
-            onClick={rotateClockwise}
-          >
-            <RotateCw />
-            Rotate
-          </Button>
-        </div>
-        <div
-          role="group"
-          aria-label="Zoom controls"
-          className="flex flex-wrap items-center gap-0.5"
-        >
-          <Button
-            variant={zoomMode === 'fit-width' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-pressed={zoomMode === 'fit-width'}
-            onClick={() => applyZoom('fit-width')}
-          >
-            Fit width
-          </Button>
-          <Button
-            variant={zoomMode === 'fit-page' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-pressed={zoomMode === 'fit-page'}
-            onClick={() => applyZoom('fit-page')}
-          >
-            Fit page
-          </Button>
-          <Button
-            variant={zoomMode === 'actual-size' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-pressed={zoomMode === 'actual-size'}
-            onClick={() => applyZoom('actual-size')}
-          >
-            Actual size
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6"
-            aria-label="Zoom out"
-            disabled={currentScale <= MIN_ZOOM_SCALE + 1e-4}
-            onClick={() => stepZoom(-1)}
-          >
-            <ZoomOut />
-          </Button>
-          <span
-            data-testid="pdf-zoom-level"
-            className="min-w-10 text-center text-xs text-foreground tabular-nums"
-          >
-            {zoomPercent}%
-          </span>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6"
-            aria-label="Zoom in"
-            disabled={currentScale >= MAX_ZOOM_SCALE - 1e-4}
-            onClick={() => stepZoom(1)}
-          >
-            <ZoomIn />
-          </Button>
-        </div>
-        <Button
-          variant={captureMode ? 'secondary' : 'ghost'}
-          size="sm"
-          className="h-6 px-2 text-xs"
-          aria-pressed={captureMode}
-          onClick={toggleCaptureMode}
-        >
-          <Crop />
-          Capture area
-        </Button>
-      </div>
-      <DocumentSearchBar search={search} />
-      <BookmarksPanel controller={bookmarksController} />
-      <SelectionNoteComposer
-        hasSelection={activeSelection !== null}
-        controller={annotationsController}
-      />
-      <AnnotationsPanel controller={annotationsController} />
-      {unsupportedSubtypes.length > 0 && (
-        <p
-          role="status"
-          data-testid="pdf-unsupported-annotations-notice"
-          className="shrink-0 border-b bg-muted/60 px-4 py-1 text-xs text-muted-foreground"
-        >
-          Unsupported PDF annotation types not shown: {unsupportedSubtypes.join(', ')}. Source PDF
-          is never modified.
-        </p>
-      )}
-      {missedJump && (
-        <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
-          That excerpt is on a page this file does not have. The file may have changed.
-        </p>
-      )}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        {tocOpen && (
+          <AnnotationsPanel controller={annotationsController} />
+          {unsupportedSubtypes.length > 0 && !chromeHidden && (
+            <p
+              role="status"
+              data-testid="pdf-unsupported-annotations-notice"
+              className="bg-muted px-4 py-1 text-xs text-muted-foreground"
+            >
+              Unsupported PDF annotation types not shown: {unsupportedSubtypes.join(', ')}. Source
+              PDF is never modified.
+            </p>
+          )}
+          {missedJump && (
+            <p role="status" className="bg-muted px-4 py-1.5 text-xs">
+              That excerpt is on a page this file does not have. The file may have changed.
+            </p>
+          )}
+        </ReaderPopoverLayer>
+        {showToc && (
           <OutlineSidebar
             items={outlineNodes}
             isActive={(targetPage) => targetPage === currentPageIndex}
@@ -1822,7 +1887,7 @@ function PdfPages({
             onSelect={(pageIndex) => navigateToPage(pageIndex)}
           />
         )}
-        {thumbnailsOpen && (
+        {showThumbnails && (
           <PdfThumbnailsSidebar
             engine={engine}
             sizes={sizes}

@@ -497,9 +497,17 @@ fn shipped_security_config_matches_the_decisions() {
 
     let capability: Value =
         serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+    // Window permissions are listed one by one: the unified title bar drags the
+    // window, and full screen is a toolbar command. Nothing that opens a dialog or
+    // touches the filesystem: the JS dialog API widens the asset scope by itself.
     assert_eq!(
         capability["permissions"],
-        json!(["core:default"]),
+        json!([
+            "core:default",
+            "core:window:allow-start-dragging",
+            "core:window:allow-set-fullscreen",
+            "core:window:allow-is-fullscreen"
+        ]),
         "the JS dialog API widens the asset scope by itself"
     );
 }
@@ -739,6 +747,7 @@ fn workspace_session_and_touch_document_opened_persist_across_relaunch() {
             "session": {
                 "openDocumentIds": [first["id"], second["id"]],
                 "activeDocumentId": second["id"],
+                "immersive": true,
             }
         }),
     );
@@ -747,6 +756,7 @@ fn workspace_session_and_touch_document_opened_persist_across_relaunch() {
         json!({
             "openDocumentIds": [first["id"], second["id"]],
             "activeDocumentId": second["id"],
+            "immersive": true,
         })
     );
 
@@ -761,7 +771,47 @@ fn workspace_session_and_touch_document_opened_persist_across_relaunch() {
         json!({
             "openDocumentIds": [first_id, second_id.clone()],
             "activeDocumentId": second_id,
+            "immersive": true,
         })
+    );
+
+    // A session saved without the flag, as an older frontend sends it, is not immersive.
+    let legacy = next.ok(
+        "save_workspace_session",
+        json!({ "session": { "openDocumentIds": [first_id], "activeDocumentId": null } }),
+    );
+    assert_eq!(legacy["immersive"], false);
+}
+
+#[test]
+fn menu_item_states_accept_exactly_what_the_frontend_sends() {
+    let h = Harness::new();
+    // The mock runtime cannot build a native menu, so this checks the wire format and
+    // that a window without a menu (tests, or a platform without one) is not an error.
+    // `menu::tests` checks the menu contract itself.
+    h.ok(
+        "set_menu_item_states",
+        json!({
+            "states": [
+                { "id": "bookmarks.toggle", "enabled": true, "title": "Remove Bookmark" },
+                { "id": "view.rotateLeft", "enabled": false },
+                { "id": "not.a.command", "enabled": true },
+            ]
+        }),
+    );
+    assert!(
+        h.call(
+            "set_menu_item_states",
+            json!({ "states": [{ "id": "file.open", "enabled": true, "checked": true }] }),
+        )
+        .is_err()
+    );
+    assert!(
+        h.call(
+            "set_menu_item_states",
+            json!({ "states": [{ "id": "file.open" }] })
+        )
+        .is_err()
     );
 }
 

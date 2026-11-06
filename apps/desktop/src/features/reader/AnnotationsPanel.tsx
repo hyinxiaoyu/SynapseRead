@@ -1,7 +1,20 @@
-import { Highlighter, Link2, MessageSquare, StickyNote, Trash2, Undo2 } from 'lucide-react';
+import {
+  Highlighter,
+  Link2,
+  MessageSquare,
+  NotebookPen,
+  StickyNote,
+  Trash2,
+  Undo2,
+} from 'lucide-react';
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import {
+  collapseClass,
+  type ToolbarCollapse,
+  ToolbarButton,
+} from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
 import type { Annotation, AnnotationPatch, ReaderSelection } from '@/types/domain';
 
@@ -192,38 +205,35 @@ export function AnnotationsListToggleButton({
   open,
   count,
   disabled = false,
+  collapse,
   onToggle,
 }: {
   open: boolean;
   count: number;
   disabled?: boolean;
+  collapse?: ToolbarCollapse;
   onToggle: () => void;
 }) {
   return (
-    <Button
-      variant={open ? 'secondary' : 'ghost'}
-      size="sm"
-      className="h-6 px-2 text-xs"
-      aria-label="Annotations"
-      aria-pressed={open}
-      data-testid="annotations-toggle-button"
+    <ToolbarButton
+      icon={NotebookPen}
+      label="Annotations"
+      command="view.sidebarAnnotations"
+      pressed={open}
+      testId="annotations-toggle-button"
+      badge={count}
+      badgeTestId="annotations-count"
       disabled={disabled}
+      {...(collapse ? { collapse } : {})}
       onClick={onToggle}
-    >
-      <Highlighter />
-      Annotations
-      {count > 0 && (
-        <span
-          data-testid="annotations-count"
-          className="rounded-full bg-muted px-1.5 py-0.2 text-[10px] font-medium text-foreground tabular-nums"
-        >
-          {count}
-        </span>
-      )}
-    </Button>
+    />
   );
 }
 
+/**
+ * The markup group: highlight colors, Highlight, and Add note. Colors fold into
+ * the `»` menu's width budget first; the two actions stay.
+ */
 export function SelectionAnnotationControls({
   hasSelection,
   disabled = false,
@@ -234,11 +244,11 @@ export function SelectionAnnotationControls({
   controller: AnnotationsController;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-1">
+    <div className="flex shrink-0 items-center gap-0.5">
       <div
         role="group"
         aria-label="Highlight color"
-        className="flex items-center gap-1 px-1"
+        className={cn('flex items-center gap-1 px-1', collapseClass('lg'))}
         data-testid="annotation-color-picker"
       >
         {ANNOTATION_COLORS.map(({ label, value }) => {
@@ -249,6 +259,7 @@ export function SelectionAnnotationControls({
               type="button"
               aria-label={`Highlight color ${label}`}
               aria-pressed={selected}
+              title={`Highlight color ${label}`}
               data-testid={`annotation-color-${label.toLowerCase()}`}
               disabled={disabled}
               onMouseDown={(event) => event.preventDefault()}
@@ -262,33 +273,25 @@ export function SelectionAnnotationControls({
           );
         })}
       </div>
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-6 px-2 text-xs"
-        aria-label="Highlight selection"
-        data-testid="highlight-selection-button"
+      <ToolbarButton
+        icon={Highlighter}
+        label="Highlight selection"
+        command="edit.highlight"
+        testId="highlight-selection-button"
         disabled={disabled || !hasSelection}
-        onMouseDown={(event) => event.preventDefault()}
+        preserveSelection
         onClick={controller.createHighlight}
-      >
-        <Highlighter />
-        Highlight
-      </Button>
-      <Button
-        variant={controller.draftNoteOpen ? 'secondary' : 'ghost'}
-        size="sm"
-        className="h-6 px-2 text-xs"
-        aria-label="Add note to selection"
-        aria-pressed={controller.draftNoteOpen}
-        data-testid="add-note-selection-button"
+      />
+      <ToolbarButton
+        icon={StickyNote}
+        label="Add note to selection"
+        command="edit.addNote"
+        pressed={controller.draftNoteOpen}
+        testId="add-note-selection-button"
         disabled={disabled || !hasSelection}
-        onMouseDown={(event) => event.preventDefault()}
+        preserveSelection
         onClick={controller.toggleDraftNote}
-      >
-        <StickyNote />
-        Add note
-      </Button>
+      />
     </div>
   );
 }
@@ -306,6 +309,7 @@ export function SelectionNoteComposer({
     <form
       aria-label="Add note to selection"
       data-testid="selection-note-composer"
+      data-reader-popover=""
       className="flex shrink-0 items-center gap-2 border-b bg-muted/40 px-3 py-1.5 text-xs"
       onSubmit={(event) => {
         event.preventDefault();
@@ -486,6 +490,7 @@ export function AnnotationsPanel({
       role="region"
       aria-label="Annotations"
       data-testid="annotations-panel"
+      data-reader-popover=""
       className="shrink-0 border-b bg-background text-xs text-foreground"
     >
       <div className="flex items-center justify-between border-b px-3 py-1">

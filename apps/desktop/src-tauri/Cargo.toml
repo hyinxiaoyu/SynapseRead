@@ -16,12 +16,15 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 synapse-core = { path = "../../../crates/synapse-core" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 
 [dev-dependencies]
-serde_json.workspace = true
+# Only to check that every accelerator in the command contract parses: Tauri drops
+# an unparsable one silently. Same version Tauri itself uses.
+muda = { version = "0.20", default-features = false }
 tauri = { version = "2", features = ["test"] }
 tempfile.workspace = true
 

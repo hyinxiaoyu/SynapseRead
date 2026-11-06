@@ -11,6 +11,8 @@ import {
 } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { commandTooltip } from '@/features/commands/commands';
+import { useCommands } from '@/features/commands/registry';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn, describeError } from '@/lib/utils';
 import {
@@ -29,16 +31,6 @@ import {
   type DocumentViewerProps,
   type StudyDocument,
 } from '@/types/domain';
-
-function isEditableShortcutTarget(target: EventTarget | null): boolean {
-  const element = target instanceof HTMLElement ? target : null;
-  if (!element) return false;
-  const tag = element.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || element.isContentEditable) {
-    return true;
-  }
-  return element.closest('[contenteditable="true"], [role="textbox"]') !== null;
-}
 
 function describeResumeLocation(document: StudyDocument): string {
   if (!document.lastCursorAnchor) return 'Start reading';
@@ -98,6 +90,7 @@ export function ReaderPane() {
   const activateDocument = useStudySyncStore((state) => state.activateDocument);
   const closeDocument = useStudySyncStore((state) => state.closeDocument);
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
+  const immersive = useStudySyncStore((state) => state.immersive);
   const [recentMenuOpen, setRecentMenuOpen] = useState(false);
 
   const openDocuments = useMemo(
@@ -110,30 +103,30 @@ export function ReaderPane() {
   const recentDocuments = useMemo(() => selectRecentDocuments(documents), [documents]);
   const activeDocument = openDocuments.find((document) => document.id === activeDocumentId);
 
+  useCommands({
+    'file.open': { run: () => void openDocument() },
+    'file.closeTab': {
+      run: () => {
+        if (activeDocumentId !== null) closeDocument(activeDocumentId);
+      },
+      enabled: activeDocumentId !== null,
+    },
+    'edit.excerpt': {
+      run: () => void excerptSelection(),
+      enabled: selection !== null && !isExcerpting,
+    },
+  });
+
   useEffect(() => {
+    if (!recentMenuOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      if (event.key === 'Escape' && recentMenuOpen) {
-        event.preventDefault();
-        setRecentMenuOpen(false);
-        return;
-      }
-      if (event.altKey || event.shiftKey) return;
-      if (!(event.metaKey || event.ctrlKey)) return;
-      const key = event.key.toLowerCase();
-      if (key !== 'o' && key !== 'w') return;
-      if (isEditableShortcutTarget(event.target)) return;
-      if (key === 'o') {
-        event.preventDefault();
-        void openDocument();
-      } else if (key === 'w' && activeDocumentId !== null) {
-        event.preventDefault();
-        closeDocument(activeDocumentId);
-      }
+      if (event.defaultPrevented || event.key !== 'Escape') return;
+      event.preventDefault();
+      setRecentMenuOpen(false);
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeDocumentId, closeDocument, openDocument, recentMenuOpen]);
+  }, [recentMenuOpen]);
 
   const handleTabKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
@@ -171,7 +164,13 @@ export function ReaderPane() {
 
   return (
     <section aria-label="Document reader" className="flex h-full flex-col">
-      <header className="relative flex h-11 shrink-0 items-center gap-1 border-b px-2">
+      {/* Focus mode hides the tabs; Esc or the toolbar brings them back. */}
+      <header
+        className={cn(
+          'relative flex h-10 shrink-0 items-center gap-1 border-b px-2',
+          immersive && 'hidden',
+        )}
+      >
         <div
           role="tablist"
           aria-label="Open documents"
@@ -225,12 +224,18 @@ export function ReaderPane() {
             Recent
           </Button>
         )}
-        <Button variant="ghost" size="sm" onClick={() => void openDocument()}>
+        <Button
+          variant="ghost"
+          size="sm"
+          title={commandTooltip('Open', 'file.open')}
+          onClick={() => void openDocument()}
+        >
           <FolderOpen />
           Open
         </Button>
         <Button
           size="sm"
+          title={commandTooltip('Excerpt to MindMap', 'edit.excerpt')}
           disabled={!selection || isExcerpting}
           // Keeps the reader's text selection alive through the click in every engine.
           onMouseDown={(event) => event.preventDefault()}
@@ -244,7 +249,8 @@ export function ReaderPane() {
             role="region"
             aria-label="Recent documents"
             data-testid="recent-documents-menu"
-            className="absolute top-11 right-2 z-30 w-80 rounded-md border bg-background p-1.5 shadow-md"
+            data-reader-popover=""
+            className="absolute top-10 right-2 z-30 w-80 rounded-md border bg-background p-1.5 shadow-md"
           >
             <p className="px-2 py-1 text-xs font-medium text-muted-foreground">Recent documents</p>
             <ol data-testid="recent-documents-list" className="max-h-60 divide-y overflow-y-auto">
@@ -476,6 +482,7 @@ function DocumentTab({
   const setSelection = useStudySyncStore((state) => state.setSelection);
   const completeJump = useStudySyncStore((state) => state.completeJump);
   const reportCursor = useStudySyncStore((state) => state.reportCursor);
+  const immersive = useStudySyncStore((state) => state.immersive);
 
   const highlights = useMemo(
     () => selectHighlights(annotations, document.id),
@@ -554,6 +561,7 @@ function DocumentTab({
       key={`${document.id}:${relinkedNonce}`}
       document={document}
       isActive={isActive}
+      chromeHidden={immersive}
       content={content}
       highlights={highlights}
       jumpRequest={jumpRequest}

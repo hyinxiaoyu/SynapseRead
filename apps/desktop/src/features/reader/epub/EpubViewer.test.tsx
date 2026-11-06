@@ -418,20 +418,36 @@ describe('EpubViewer', () => {
     const host = screen.getByTestId('epub-host');
     expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
     expect(host).toHaveClass('max-w-none');
-    expect(screen.getByRole('button', { name: 'Two pages' })).toHaveAttribute(
-      'aria-pressed',
+    expect(screen.getByRole('radiogroup', { name: 'Reading mode' })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Two pages' })).toHaveAttribute(
+      'aria-checked',
       'true',
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'paged');
     expect(host).toHaveClass('max-w-6xl');
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('paged');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Scroll' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
     expect(host).toHaveClass('max-w-6xl');
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('scroll');
+
+    // The segmented control is one tab stop; arrow keys move and select, wrapping,
+    // and do not also turn the page.
+    const scroll = screen.getByRole('radio', { name: 'Scroll' });
+    expect(scroll).toHaveAttribute('tabindex', '0');
+    expect(screen.getByRole('radio', { name: 'Two pages' })).toHaveAttribute('tabindex', '-1');
+    scroll.focus();
+    fireEvent.keyDown(scroll, { key: 'ArrowLeft' });
+    expect(viewer).toHaveAttribute('data-reading-mode', 'paged');
+    expect(screen.getByRole('radio', { name: 'Single page' })).toHaveFocus();
+    expect(engine.previous).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('radio', { name: 'Single page' }), { key: 'End' });
+    expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
+    fireEvent.keyDown(screen.getByRole('radio', { name: 'Scroll' }), { key: 'ArrowRight' });
+    expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
   });
 
   it('persists reading mode and appearance preferences across restart', async () => {
@@ -439,7 +455,7 @@ describe('EpubViewer', () => {
     const view = render(<Harness store={store} documentId={documentId} />);
     await opened();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
     fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
     fireEvent.click(screen.getByRole('button', { name: 'Sepia' }));
     fireEvent.click(screen.getByRole('button', { name: 'Sans' }));
@@ -497,7 +513,7 @@ describe('EpubViewer', () => {
     expect(screen.getByTestId('epub-book-progress')).toHaveTextContent('Book 25% (Ch. 1/2)');
 
     // Scroll mode hides chapter pages while keeping whole-book progress visible.
-    fireEvent.click(screen.getByRole('button', { name: 'Scroll' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
     expect(screen.queryByTestId('epub-chapter-page')).not.toBeInTheDocument();
     expect(screen.getByTestId('epub-book-progress')).toHaveTextContent('Book 25% (Ch. 1/2)');
   });

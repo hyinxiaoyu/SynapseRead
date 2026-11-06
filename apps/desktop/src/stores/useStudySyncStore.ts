@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 
 import { createDefaultBackend, type StudyBackend } from '@/lib/backend';
+import type { MenuItemState, WindowChromeStyle } from '@/lib/backend/types';
 import { describeError } from '@/lib/utils';
 import {
   type AnchorLocation,
@@ -53,6 +54,11 @@ export interface StudySyncState {
   openDocumentIds: string[];
   activeDocumentId: string | null;
   isDraggingFile: boolean;
+  /** Immersive reading: chrome collapsed. Part of the session, so it survives a restart. */
+  immersive: boolean;
+  /** Whether the window is full screen, however it got there. */
+  fullscreen: boolean;
+  chromeStyle: WindowChromeStyle;
   readingPreferences: ReadingPreferences;
   bookmarks: Bookmark[];
 
@@ -84,6 +90,11 @@ export interface StudySyncState {
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
   reportCursor(documentId: string, anchor: StudyDocument['lastCursorAnchor']): void;
+  setImmersive(immersive: boolean): void;
+  setFullscreen(fullscreen: boolean): Promise<void>;
+  /** Native menu choices, as command ids. Thin pass-throughs to the backend. */
+  onMenuCommand(listener: (commandId: string) => void): () => void;
+  setMenuItemStates(states: readonly MenuItemState[]): Promise<void>;
 
   /** A loadable URL for an annotation's capture, or `null` if it has no image. */
   captureUrl(annotationId: string): Promise<string | null>;
@@ -182,9 +193,9 @@ export function createStudySyncStore(backend: StudyBackend) {
     };
 
     const persistSession = () => {
-      const { openDocumentIds, activeDocumentId } = get();
+      const { openDocumentIds, activeDocumentId, immersive } = get();
       void guarded(async () => {
-        await backend.saveWorkspaceSession({ openDocumentIds, activeDocumentId });
+        await backend.saveWorkspaceSession({ openDocumentIds, activeDocumentId, immersive });
       });
     };
 
@@ -238,6 +249,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       if (opened.length > 0) persistSession();
     };
 
+    backend.onFullscreenChange((fullscreen) => set({ fullscreen }));
+
     backend.onFileDrop((event) => {
       if (event.type === 'enter') {
         set({ isDraggingFile: true });
@@ -264,6 +277,9 @@ export function createStudySyncStore(backend: StudyBackend) {
       openDocumentIds: [],
       activeDocumentId: null,
       isDraggingFile: false,
+      immersive: false,
+      fullscreen: false,
+      chromeStyle: backend.chromeStyle,
       readingPreferences: { ...DEFAULT_READING_PREFERENCES },
       bookmarks: [],
       notebook: null,
@@ -309,6 +325,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             documentSourceStatuses,
             openDocumentIds,
             activeDocumentId,
+            immersive: session.immersive,
             readingPreferences,
             bookmarks,
             ...graph,
@@ -417,6 +434,26 @@ export function createStudySyncStore(backend: StudyBackend) {
             jumpRequest: state.jumpRequest?.documentId === documentId ? null : state.jumpRequest,
           };
         });
+        persistSession();
+      },
+
+      async setFullscreen(fullscreen) {
+        await guarded(async () => {
+          await backend.setFullscreen(fullscreen);
+          set({ fullscreen: await backend.isFullscreen() });
+        });
+      },
+
+      onMenuCommand: (listener) => backend.onMenuCommand(listener),
+
+      async setMenuItemStates(states) {
+        // A menu that lags a moment behind is harmless; an error banner for it is not.
+        await backend.setMenuItemStates(states).catch(() => undefined);
+      },
+
+      setImmersive(immersive) {
+        if (get().immersive === immersive) return;
+        set({ immersive });
         persistSession();
       },
 

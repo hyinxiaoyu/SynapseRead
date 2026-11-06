@@ -259,6 +259,10 @@ pub struct RelinkDocumentResult {
 pub struct WorkspaceSession {
     pub open_document_ids: Vec<String>,
     pub active_document_id: Option<String>,
+    /// Immersive reading: chrome collapsed and the toolbar auto-hiding. Optional on
+    /// the wire so a frontend that predates it still round-trips.
+    #[serde(default)]
+    pub immersive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -191,13 +191,13 @@ export async function epubFlow(page) {
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in single-page mode');
   assert(
     await page.evaluate(
-      `${visibleViewer}.querySelector('[data-testid="epub-chapter-page"]')?.textContent.includes('Chapter page')`,
+      `document.querySelector('[data-testid="unified-toolbar"] [data-testid="epub-chapter-page"]')?.textContent.includes('Chapter page')`,
     ),
     'distinguishes chapter-local pages',
   );
   assert(
     await page.evaluate(
-      `${visibleViewer}.querySelector('[data-testid="epub-book-progress"]')?.textContent.includes('Ch. 2/2')`,
+      `document.querySelector('[data-testid="unified-toolbar"] [data-testid="epub-book-progress"]')?.textContent.includes('Ch. 2/2')`,
     ),
     'shows whole-book progress separately from chapter pages',
   );
@@ -260,7 +260,7 @@ export async function epubFlow(page) {
   // Independent bookmarks in EPUB: bookmark Chapter Two, jump to Chapter One, jump back via bookmark, and remove.
   await page.clickButton('Bookmark current location');
   await page.waitFor(
-    `${visibleViewer}?.querySelector('[data-testid="bookmarks-count"]')?.textContent === '1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')?.textContent === '1'`,
     'EPUB bookmark badge count',
   );
   await page.clickButton('One');
@@ -278,7 +278,7 @@ export async function epubFlow(page) {
     `${visibleViewer}.querySelector('[data-testid="bookmark-remove-button"]').click()`,
   );
   await page.waitFor(
-    `!${visibleViewer}?.querySelector('[data-testid="bookmarks-count"]')`,
+    `!document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')`,
     'removing EPUB bookmark',
   );
   await page.clickButton('Bookmarks');
@@ -288,7 +288,7 @@ export async function epubFlow(page) {
   await page.drag(epubPoints.start, epubPoints.end);
   await page.clickButton('Highlight selection');
   await page.waitFor(
-    `${visibleViewer}?.querySelector('[data-testid="annotations-count"]')?.textContent === '4'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="annotations-count"]')?.textContent === '4'`,
     'EPUB independent highlight count (3 excerpts + 1 independent)',
   );
   await page.clickButton('Annotations');

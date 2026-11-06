@@ -1,7 +1,8 @@
-import { Bookmark as BookmarkIcon, Trash2 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { BookmarkCheck, Bookmark as BookmarkIcon, BookmarkPlus, Trash2 } from 'lucide-react';
+import { useCallback, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { type ToolbarCollapse, ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
 import {
   type AnchorOf,
@@ -11,19 +12,8 @@ import {
   type DocumentFormat,
 } from '@/types/domain';
 
-function isEditableElement(target: EventTarget | null): boolean {
-  const element = target instanceof HTMLElement ? target : null;
-  if (!element) return false;
-  const tag = element.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || element.isContentEditable) {
-    return true;
-  }
-  return element.closest('[contenteditable="true"], [role="textbox"]') !== null;
-}
-
 export interface UseBookmarksOptions<F extends DocumentFormat> {
   documentId: string;
-  isActive: boolean;
   bookmarks?: readonly Bookmark[] | undefined;
   onAddBookmark?: ((anchor: AnchorOf<F>, label?: string) => void) | undefined;
   onRemoveBookmark?: ((bookmarkId: string) => void) | undefined;
@@ -44,12 +34,10 @@ export interface BookmarksController {
   removeBookmark: (bookmarkId: string) => void;
   isBookmarkActive: (bookmark: Bookmark) => boolean;
   isBookmarkStale: (bookmark: Bookmark) => boolean;
-  handleKeyDown: (event: KeyboardEvent) => boolean;
 }
 
 export function useBookmarksController<F extends DocumentFormat>({
   documentId,
-  isActive,
   bookmarks,
   onAddBookmark,
   onRemoveBookmark,
@@ -134,36 +122,6 @@ export function useBookmarksController<F extends DocumentFormat>({
     addBookmark(current.anchor, current.label);
   }, [addBookmark, effectiveBookmarks, getCurrentLocation, isBookmarkActive, removeBookmark]);
 
-  const latestToggleRef = useRef(toggleCurrentBookmark);
-  useEffect(() => {
-    latestToggleRef.current = toggleCurrentBookmark;
-  });
-
-  const handleKeyDown = useCallback((event: KeyboardEvent): boolean => {
-    if (event.defaultPrevented) return false;
-    if (
-      (event.metaKey || event.ctrlKey) &&
-      !event.altKey &&
-      !event.shiftKey &&
-      event.key.toLowerCase() === 'd'
-    ) {
-      if (isEditableElement(event.target)) return false;
-      event.preventDefault();
-      latestToggleRef.current();
-      return true;
-    }
-    return false;
-  }, []);
-
-  useEffect(() => {
-    if (!isActive) return;
-    const onWindowKeyDown = (event: KeyboardEvent) => {
-      handleKeyDown(event);
-    };
-    window.addEventListener('keydown', onWindowKeyDown);
-    return () => window.removeEventListener('keydown', onWindowKeyDown);
-  }, [handleKeyDown, isActive]);
-
   return {
     open,
     bookmarks: effectiveBookmarks,
@@ -175,7 +133,6 @@ export function useBookmarksController<F extends DocumentFormat>({
     removeBookmark,
     isBookmarkActive,
     isBookmarkStale,
-    handleKeyDown,
   };
 }
 
@@ -189,20 +146,15 @@ export function BookmarkToggleButton({
   onToggle: () => void;
 }) {
   return (
-    <Button
-      variant={bookmarked ? 'secondary' : 'ghost'}
-      size="sm"
-      className="h-6 px-2 text-xs"
-      aria-label="Bookmark current location"
-      aria-pressed={bookmarked}
-      data-testid="toggle-bookmark-button"
-      title="Bookmark current location (Cmd/Ctrl+D)"
+    <ToolbarButton
+      icon={bookmarked ? BookmarkCheck : BookmarkPlus}
+      label="Bookmark current location"
+      command="bookmarks.toggle"
+      pressed={bookmarked}
+      testId="toggle-bookmark-button"
       disabled={disabled}
       onClick={onToggle}
-    >
-      <BookmarkIcon className={cn(bookmarked && 'fill-current')} />
-      Bookmark
-    </Button>
+    />
   );
 }
 
@@ -210,35 +162,28 @@ export function BookmarksListToggleButton({
   open,
   count,
   disabled = false,
+  collapse,
   onToggle,
 }: {
   open: boolean;
   count: number;
   disabled?: boolean;
+  collapse?: ToolbarCollapse;
   onToggle: () => void;
 }) {
   return (
-    <Button
-      variant={open ? 'secondary' : 'ghost'}
-      size="sm"
-      className="h-6 px-2 text-xs"
-      aria-label="Bookmarks"
-      aria-pressed={open}
-      data-testid="bookmarks-toggle-button"
+    <ToolbarButton
+      icon={BookmarkIcon}
+      label="Bookmarks"
+      command="view.sidebarBookmarks"
+      pressed={open}
+      testId="bookmarks-toggle-button"
+      badge={count}
+      badgeTestId="bookmarks-count"
       disabled={disabled}
+      {...(collapse ? { collapse } : {})}
       onClick={onToggle}
-    >
-      <BookmarkIcon />
-      Bookmarks
-      {count > 0 && (
-        <span
-          data-testid="bookmarks-count"
-          className="rounded-full bg-muted px-1.5 py-0.2 text-[10px] font-medium text-foreground tabular-nums"
-        >
-          {count}
-        </span>
-      )}
-    </Button>
+    />
   );
 }
 
@@ -250,6 +195,7 @@ export function BookmarksPanel({ controller }: { controller: BookmarksController
       role="region"
       aria-label="Bookmarks"
       data-testid="bookmarks-panel"
+      data-reader-popover=""
       className="shrink-0 border-b bg-background text-xs text-foreground"
     >
       {controller.bookmarks.length === 0 ? (

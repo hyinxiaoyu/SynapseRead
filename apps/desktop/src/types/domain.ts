@@ -83,6 +83,8 @@ export interface RelinkDocumentResult {
 export interface WorkspaceSession {
   openDocumentIds: string[];
   activeDocumentId: string | null;
+  /** Immersive reading: reader chrome collapsed and the toolbar auto-hiding. */
+  immersive: boolean;
 }
 
 export interface Viewport {
@@ -345,6 +347,11 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   document: StudyDocument & { format: F };
   /** False while another tab is showing. The viewer stays mounted to keep its state. */
   isActive: boolean;
+  /**
+   * Immersive reading: the viewer hides its sidebars and floating panels and lets
+   * the page take the theme color. Its commands keep working.
+   */
+  chromeHidden?: boolean;
   content: DocumentContentReader;
   highlights: ReaderHighlight[];
   /** Set while a jump is outstanding for this document. */

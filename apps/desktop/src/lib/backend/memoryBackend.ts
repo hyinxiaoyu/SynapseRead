@@ -90,7 +90,11 @@ export function createMemoryBackend({
   const captures = new Map<string, string>();
   const bookmarks = new Map<string, Bookmark>();
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
-  let workspaceSession: WorkspaceSession = { openDocumentIds: [], activeDocumentId: null };
+  let workspaceSession: WorkspaceSession = {
+    openDocumentIds: [],
+    activeDocumentId: null,
+    immersive: false,
+  };
   let picks = 0;
   let clockSeq = 0;
   const monotonicNow = () => {
@@ -233,6 +237,7 @@ export function createMemoryBackend({
 
   return {
     kind: 'memory',
+    chromeStyle: 'standard',
 
     async pickDocument() {
       const path = paths[picks % paths.length];
@@ -381,7 +386,7 @@ export function createMemoryBackend({
         openDocumentIds.includes(workspaceSession.activeDocumentId)
           ? workspaceSession.activeDocumentId
           : (openDocumentIds.at(-1) ?? null);
-      return { openDocumentIds, activeDocumentId };
+      return { openDocumentIds, activeDocumentId, immersive: workspaceSession.immersive };
     },
 
     async saveWorkspaceSession(session) {
@@ -395,7 +400,7 @@ export function createMemoryBackend({
         session.activeDocumentId && openDocumentIds.includes(session.activeDocumentId)
           ? session.activeDocumentId
           : (openDocumentIds.at(-1) ?? null);
-      workspaceSession = { openDocumentIds, activeDocumentId };
+      workspaceSession = { openDocumentIds, activeDocumentId, immersive: session.immersive };
       return { ...workspaceSession };
     },
 
@@ -682,6 +687,28 @@ export function createMemoryBackend({
     async deleteBookmark(bookmarkId) {
       require(bookmarks, bookmarkId, 'bookmark');
       bookmarks.delete(bookmarkId);
+    },
+
+    // A browser has no native menu; the keyboard and toolbar reach every command.
+    onMenuCommand: () => () => undefined,
+    setMenuItemStates: async () => undefined,
+    // The page's Fullscreen API stands in for the window's in the browser preview.
+    isFullscreen: async () => globalThis.document?.fullscreenElement != null,
+    async setFullscreen(fullscreen) {
+      const page = globalThis.document;
+      if (!page) return;
+      if (fullscreen && !page.fullscreenElement) {
+        await page.documentElement.requestFullscreen?.();
+      } else if (!fullscreen && page.fullscreenElement) {
+        await page.exitFullscreen?.();
+      }
+    },
+    onFullscreenChange(listener) {
+      const page = globalThis.document;
+      if (!page) return () => undefined;
+      const onChange = () => listener(page.fullscreenElement != null);
+      page.addEventListener('fullscreenchange', onChange);
+      return () => page.removeEventListener('fullscreenchange', onChange);
     },
 
     loadDocumentSource: async (document) => ({

@@ -91,6 +91,10 @@ error, not a silent UTF-8 fallback. Only malformed bytes fall back (lossily).
 **Keep it cross-platform.** V1 ships for macOS only, but do not add macOS-only code
 paths outside a `cfg` or an adapter, and never hard-code path separators.
 
+**Commands are defined once.** Menu items, shortcuts, and toolbar tooltips come from
+`fixtures/contract/commands.json`. Components handle commands with `useCommands`; do not
+add a `keydown` listener for a shortcut ([ADR 0006](docs/adr/0006-command-registry.md)).
+
 **Local-first.** No telemetry and no network calls. User documents and data stay
 on the device.
 
@@ -102,8 +106,9 @@ A change to a command or a domain type must be made together in:
 2. `apps/desktop/src/types/domain.ts` (TypeScript types and `isAnchorLocation`)
 3. `apps/desktop/src/lib/backend/` (`types.ts`, `tauriBackend.ts`, `memoryBackend.ts`)
 4. `apps/desktop/src-tauri/src/ipc_tests.rs` (the JSON the frontend actually sends)
-5. `fixtures/contract/anchors.json` when anchors change, and
-   `fixtures/contract/text-chunks.json` when text chunks change; both languages test them
+5. `fixtures/contract/anchors.json` when anchors change,
+   `fixtures/contract/text-chunks.json` when text chunks change, and
+   `fixtures/contract/commands.json` when menu commands change; both languages test them
 
 Tauri maps camelCase JS argument names to snake_case Rust parameters.
 

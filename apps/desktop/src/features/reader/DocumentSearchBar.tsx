@@ -8,6 +8,7 @@ import {
 } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
 
 export const SEARCH_HIGHLIGHT_ID = '__search_active__';
@@ -46,17 +47,6 @@ export function findSubstringMatches(
 }
 
 const collapseWhitespace = (value: string) => value.replace(/\s+/g, ' ');
-
-function isEditableSearchTarget(target: EventTarget | null): boolean {
-  const element = target instanceof HTMLElement ? target : null;
-  if (!element) return false;
-  if (element.dataset.testid === 'search-input') return false;
-  const tag = element.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || element.isContentEditable) {
-    return true;
-  }
-  return element.closest('[contenteditable="true"], [role="textbox"]') !== null;
-}
 
 /** Context snippet around `[matchStart, matchEnd]` for search result lists. */
 export function buildSearchSnippet(
@@ -254,18 +244,8 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent): boolean => {
+      // Cmd/Ctrl+F and Find Next/Previous are commands: see `useReaderCommands`.
       if (event.defaultPrevented) return false;
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        !event.altKey &&
-        !event.shiftKey &&
-        event.key.toLowerCase() === 'f'
-      ) {
-        if (isEditableSearchTarget(event.target)) return false;
-        event.preventDefault();
-        openSearch();
-        return true;
-      }
       if (
         event.key === 'Escape' &&
         !event.metaKey &&
@@ -280,7 +260,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
       }
       return false;
     },
-    [cancelSearch, closeSearch, openSearch],
+    [cancelSearch, closeSearch],
   );
 
   useEffect(() => {
@@ -356,18 +336,14 @@ export function DocumentSearchToggleButton({
   onToggle: () => void;
 }) {
   return (
-    <Button
-      variant={open ? 'secondary' : 'ghost'}
-      size="sm"
-      className="h-6 px-2 text-xs"
-      aria-label="Find in document"
-      aria-pressed={open}
+    <ToolbarButton
+      icon={Search}
+      label="Find in document"
+      command="edit.find"
+      pressed={open}
       disabled={disabled}
       onClick={onToggle}
-    >
-      <Search />
-      Find
-    </Button>
+    />
   );
 }
 
@@ -422,6 +398,7 @@ export function DocumentSearchBar<TMatch extends DocumentSearchResultItem>({
       role="search"
       aria-label="Find in document"
       data-testid="document-search-bar"
+      data-reader-popover=""
       className="shrink-0 border-b bg-background text-xs text-foreground"
     >
       <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5">
@@ -430,6 +407,7 @@ export function DocumentSearchBar<TMatch extends DocumentSearchResultItem>({
           type="search"
           aria-label="Find in document"
           data-testid="search-input"
+          data-command-scope="search"
           placeholder="Find in document…"
           value={search.query}
           onChange={(event) => search.setQuery(event.target.value)}

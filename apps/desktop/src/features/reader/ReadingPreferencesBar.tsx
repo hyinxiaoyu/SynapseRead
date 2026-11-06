@@ -2,6 +2,7 @@ import { Minus, Plus, Type } from 'lucide-react';
 import { useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
 import type {
   ReadingFontFamily,
@@ -58,6 +59,12 @@ const READING_WIDTHS: readonly { value: ReadingWidth; label: string }[] = [
 const FONT_SIZE_STEP = 10;
 const MIN_FONT_SIZE = 75;
 const MAX_FONT_SIZE = 200;
+export const DEFAULT_FONT_SIZE = 100;
+
+/** The font size one step bigger (`1`) or smaller (`-1`), clamped to the allowed range. */
+export function steppedFontSize(fontSize: number, direction: 1 | -1): number {
+  return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, fontSize + direction * FONT_SIZE_STEP));
+}
 
 export interface ReadingPreferencesToolbarProps {
   preferences: ReadingPreferences;
@@ -75,17 +82,14 @@ export function ReadingPreferencesToggleButton({
   onToggle: () => void;
 }) {
   return (
-    <Button
-      variant={open ? 'secondary' : 'ghost'}
-      size="sm"
-      aria-label="Reading appearance"
-      aria-pressed={open}
+    <ToolbarButton
+      icon={Type}
+      label="Reading appearance"
+      command="view.appearance"
+      pressed={open}
       disabled={disabled}
       onClick={onToggle}
-    >
-      <Type />
-      Appearance
-    </Button>
+    />
   );
 }
 
@@ -98,7 +102,7 @@ export function ReadingPreferencesBar({
   const canIncreaseFont = preferences.fontSize < MAX_FONT_SIZE;
 
   const stepFontSize = (delta: number) => {
-    const next = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, preferences.fontSize + delta));
+    const next = steppedFontSize(preferences.fontSize, delta > 0 ? 1 : -1);
     if (next !== preferences.fontSize) {
       onChange({ fontSize: next });
     }
@@ -109,6 +113,7 @@ export function ReadingPreferencesBar({
       role="region"
       aria-label="Appearance settings"
       data-testid="reading-preferences-bar"
+      data-reader-popover=""
       className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-b bg-background px-3 py-1.5 text-xs text-foreground"
     >
       <div role="group" aria-label="Theme" className="flex items-center gap-1">
@@ -229,5 +234,6 @@ export function useReadingPreferencesPanel() {
   return {
     open,
     toggle: () => setOpen((current) => !current),
+    close: () => setOpen(false),
   };
 }

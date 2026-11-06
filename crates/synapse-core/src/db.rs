@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0003_bookmarks.sql"),
     include_str!("../migrations/0004_independent_annotations.sql"),
     include_str!("../migrations/0005_workspace_session.sql"),
+    include_str!("../migrations/0006_workspace_immersive.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -828,15 +829,16 @@ impl Database {
     // ---- Workspace Session -----------------------------------------------
 
     pub fn get_workspace_session(&self) -> CoreResult<WorkspaceSession> {
-        let raw: Option<(Vec<String>, Option<String>)> = self
+        let raw: Option<(Vec<String>, Option<String>, bool)> = self
             .conn
             .query_row(
-                "SELECT open_document_ids, active_document_id FROM workspace_session WHERE id = 1",
+                "SELECT open_document_ids, active_document_id, immersive
+                 FROM workspace_session WHERE id = 1",
                 [],
-                |row| Ok((json_column(row, 0)?, row.get(1)?)),
+                |row| Ok((json_column(row, 0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let Some((stored_ids, stored_active)) = raw else {
+        let Some((stored_ids, stored_active, immersive)) = raw else {
             return Ok(WorkspaceSession::default());
         };
         let mut open_document_ids = Vec::new();
@@ -851,6 +853,7 @@ impl Database {
         Ok(WorkspaceSession {
             open_document_ids,
             active_document_id,
+            immersive,
         })
     }
 
@@ -872,13 +875,15 @@ impl Database {
             .or_else(|| open_document_ids.last().cloned());
         let open_json = serde_json::to_string(&open_document_ids)?;
         self.conn.execute(
-            "INSERT INTO workspace_session (id, open_document_ids, active_document_id, updated_at)
-             VALUES (1, ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "INSERT INTO workspace_session
+                 (id, open_document_ids, active_document_id, immersive, updated_at)
+             VALUES (1, ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (id) DO UPDATE SET
                  open_document_ids = excluded.open_document_ids,
                  active_document_id = excluded.active_document_id,
+                 immersive = excluded.immersive,
                  updated_at = excluded.updated_at",
-            params![open_json, active_document_id],
+            params![open_json, active_document_id, session.immersive],
         )?;
         self.get_workspace_session()
     }
@@ -1302,6 +1307,7 @@ mod tests {
                     "open_document_ids",
                     "active_document_id",
                     "updated_at",
+                    "immersive",
                 ],
             ),
         ];
@@ -2056,6 +2062,7 @@ mod tests {
                         first.id.clone(),
                     ],
                     active_document_id: Some("missing-doc".to_owned()),
+                    immersive: true,
                 })
                 .unwrap();
             assert_eq!(
@@ -2063,6 +2070,7 @@ mod tests {
                 WorkspaceSession {
                     open_document_ids: vec![first.id.clone(), second.id.clone()],
                     active_document_id: Some(second.id.clone()),
+                    immersive: true,
                 }
             );
 
@@ -2077,6 +2085,7 @@ mod tests {
             WorkspaceSession {
                 open_document_ids: vec![first_id, second_id.clone()],
                 active_document_id: Some(second_id),
+                immersive: true,
             }
         );
     }

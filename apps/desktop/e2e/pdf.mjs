@@ -191,15 +191,34 @@ export async function pdfFlow(page) {
     `[...document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="reader-toc"] button')].some((b) => b.textContent.trim() === 'Blue Box Section')`,
     'PDF outline to render nested entries from the document',
   );
+  // Opening the outline narrows the pane, and fit width rescales the pages around
+  // the reading position: the same place now sits at a new offset.
+  await page.waitFor(
+    `Math.abs(${visibleScroller}?.scrollTop - 1500) > 40`,
+    'the outline to re-anchor',
+  );
+  await new Promise((done) => setTimeout(done, 400));
+  const beforeOutlineJump = await page.evaluate(`${visibleScroller}.scrollTop`);
   await page.clickButton('Part Two');
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '4'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '4'`,
     'PDF outline jump to page 4',
   );
   await page.clickButton('Return to previous location');
   await page.waitFor(
-    `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
+    `Math.abs(${visibleScroller}?.scrollTop - ${beforeOutlineJump}) < 40`,
     'returning from PDF outline jump to previous scroll offset',
+  );
+  // Forward retraces the jump.
+  await page.clickButton('Go forward');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '4'`,
+    'going forward to the outline target again',
+  );
+  await page.clickButton('Return to previous location');
+  await page.waitFor(
+    `Math.abs(${visibleScroller}?.scrollTop - ${beforeOutlineJump}) < 40`,
+    'returning again',
   );
 
   // Zoom modes, explicit zoom, and highlight alignment on page 1.
@@ -210,7 +229,7 @@ export async function pdfFlow(page) {
     'Actual size zoom mode (100%)',
   );
   await page.evaluate(
-    `document.querySelector('[data-testid="pdf-viewer"] button[aria-label="Zoom in"]')?.click()`,
+    `document.querySelector('[data-testid="unified-toolbar"] button[aria-label="Zoom in"]')?.click()`,
   );
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.zoomMode === 'custom' && document.querySelector('[data-testid="pdf-zoom-level"]')?.textContent === '125%'`,
@@ -261,7 +280,7 @@ export async function pdfFlow(page) {
     'PDF search result location for page 5',
   );
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '5'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '5'`,
     'PDF search jump to page 5',
   );
   await page.waitFor(
@@ -270,7 +289,7 @@ export async function pdfFlow(page) {
   );
   await page.clickButton('Return to previous location');
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '1'`,
     'returning from PDF search jump to page 1',
   );
   await page.clickButton('Close search');
@@ -278,17 +297,17 @@ export async function pdfFlow(page) {
   // Independent bookmarks in PDF: bookmark page 4 via outline jump, return to page 1, jump to bookmark, and remove.
   await page.clickButton('Part Two');
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '4'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '4'`,
     'PDF jump to page 4 before bookmarking',
   );
   await page.clickButton('Bookmark current location');
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmarks-count"]')?.textContent === '1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')?.textContent === '1'`,
     'PDF bookmark badge count',
   );
   await scrollToPage(page, 0);
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '1'`,
     'PDF scroll back to page 1',
   );
   await page.clickButton('Bookmarks');
@@ -300,14 +319,14 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmark-jump-button"]').click()`,
   );
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '4'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '4'`,
     'jumping to PDF bookmark on page 4',
   );
   await page.evaluate(
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmark-remove-button"]').click()`,
   );
   await page.waitFor(
-    `!document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmarks-count"]')`,
+    `!document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')`,
     'removing PDF bookmark',
   );
   await page.clickButton('Bookmarks');
@@ -324,7 +343,7 @@ export async function pdfFlow(page) {
   await page.waitFor(excerptEnabled, 'selecting text on page 4 for independent highlight');
   await page.clickButton('Highlight selection');
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="annotations-count"]')?.textContent === '3'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="annotations-count"]')?.textContent === '3'`,
     'PDF independent highlight count (2 existing excerpts + 1 independent)',
   );
   const cardCountAfter = await page.evaluate(
@@ -357,7 +376,7 @@ export async function pdfFlow(page) {
 
   // Lazy thumbnails, embedded PDF annotations, internal links, display modes, and rotation.
   await page.evaluate(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnails-toggle"]').click()`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-thumbnails-toggle"]').click()`,
   );
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnail-3"]')?.getAttribute('aria-current') === 'page'`,
@@ -367,7 +386,7 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnail-0"]').click()`,
   );
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '1'`,
     'jumping to page 1 via PDF thumbnail click',
   );
   await page.waitFor(
@@ -382,30 +401,30 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-internal-link"]').click()`,
   );
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '4'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '4'`,
     'PDF internal link jump to page 4',
   );
   await page.clickButton('Return to previous location');
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '1'`,
     'returning from PDF internal link jump to page 1',
   );
   await page.evaluate(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-mode-single"]').click()`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-mode-single"]').click()`,
   );
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'single' && document.querySelectorAll('[data-page-index]').length === 1`,
     'PDF single-page display mode',
   );
   await page.evaluate(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-mode-two-page"]').click()`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-mode-two-page"]').click()`,
   );
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'two-page' && document.querySelector('[data-page-index="1"]') !== null`,
     'PDF two-page display mode',
   );
   await page.evaluate(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-rotate-button"]').click()`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-rotate-button"]').click()`,
   );
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.rotation === '90'`,
@@ -413,7 +432,7 @@ export async function pdfFlow(page) {
   );
   for (let step = 0; step < 3; step += 1) {
     await page.evaluate(
-      `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-rotate-button"]').click()`,
+      `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-rotate-button"]').click()`,
     );
   }
   await page.waitFor(
@@ -421,13 +440,13 @@ export async function pdfFlow(page) {
     'PDF view rotation restored to 0 degrees',
   );
   await page.evaluate(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-mode-continuous"]').click()`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-mode-continuous"]').click()`,
   );
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'continuous'`,
     'PDF continuous display mode restored',
   );
   await page.evaluate(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnails-toggle"]').click()`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-thumbnails-toggle"]').click()`,
   );
 }
