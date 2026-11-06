@@ -65,6 +65,21 @@ export interface StudyDocument {
   createdAt: string;
 }
 
+export type DocumentSourceState = 'ok' | 'missing' | 'changed';
+
+export interface DocumentSourceStatus {
+  documentId: string;
+  state: DocumentSourceState;
+  currentFileHash: string | null;
+  fileSizeBytes: number | null;
+}
+
+export interface RelinkDocumentResult {
+  document: StudyDocument;
+  contentChanged: boolean;
+  previousFileHash: string;
+}
+
 export interface WorkspaceSession {
   openDocumentIds: string[];
   activeDocumentId: string | null;

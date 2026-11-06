@@ -12,7 +12,7 @@ use tauri::test::{
 use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, WebviewWindow, WebviewWindowBuilder};
 
-use crate::access::{grant_all, register_and_grant, register_dropped_paths};
+use crate::access::{grant_all, register_and_grant, register_dropped_paths, relink_and_grant};
 use crate::state::AppState;
 
 /// Where bundled app content is served from on the mock runtime.
@@ -741,4 +741,46 @@ fn workspace_session_and_touch_document_opened_persist_across_relaunch() {
             "activeDocumentId": second_id,
         })
     );
+}
+
+#[test]
+fn verify_and_relink_document_source_grants_asset_scope_and_preserves_annotations() {
+    let h = Harness::new();
+    let doc = h.register("source.txt", "original text");
+    let doc_id = doc["id"].as_str().unwrap();
+
+    let status = h.ok("verify_document_source", json!({ "documentId": doc_id }));
+    assert_eq!(status["state"], "ok");
+    assert_eq!(status["currentFileHash"], doc["fileHash"]);
+
+    // Modify file in-place: `verify_document_source` reports `changed`, and `relink_document`
+    // with `confirmInPlace: true` updates the hash without needing a native picker.
+    let source_path = h.dir.path().join("source.txt");
+    std::fs::write(&source_path, "updated text content").unwrap();
+    let changed = h.ok("verify_document_source", json!({ "documentId": doc_id }));
+    assert_eq!(changed["state"], "changed");
+
+    let confirmed = h.ok(
+        "relink_document",
+        json!({ "documentId": doc_id, "confirmInPlace": true }),
+    );
+    assert_eq!(confirmed["contentChanged"], true);
+    assert_eq!(confirmed["previousFileHash"], doc["fileHash"]);
+    assert_eq!(
+        confirmed["document"]["fileHash"],
+        changed["currentFileHash"]
+    );
+
+    // Move file to a new path and relink via `relink_and_grant`: asset scope is granted to new path.
+    let moved_path = h.dir.path().join("relocated.txt");
+    std::fs::rename(&source_path, &moved_path).unwrap();
+    let missing = h.ok("verify_document_source", json!({ "documentId": doc_id }));
+    assert_eq!(missing["state"], "missing");
+
+    let relinked =
+        serde_json::to_value(relink_and_grant(h.app.handle(), doc_id, &moved_path).unwrap())
+            .unwrap();
+    assert_eq!(relinked["contentChanged"], false);
+    assert_eq!(relinked["document"]["title"], "relocated");
+    assert!(h.asset_allowed(&moved_path));
 }

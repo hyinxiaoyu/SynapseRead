@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use synapse_core::domain::Document;
+use synapse_core::domain::{Document, RelinkDocumentResult};
 use tauri::{Manager, Runtime};
 
 use crate::error::{IpcError, IpcResult};
@@ -61,6 +61,21 @@ pub fn register_and_grant<R: Runtime>(app: &impl Manager<R>, path: &Path) -> Ipc
         .register_document(path)?;
     grant_documents(app, std::slice::from_ref(&document))?;
     Ok(document)
+}
+
+/// Relinks an existing document to a replacement path from the native picker,
+/// then grants asset-protocol access to the new file.
+pub fn relink_and_grant<R: Runtime>(
+    app: &impl Manager<R>,
+    document_id: &str,
+    path: &Path,
+) -> IpcResult<RelinkDocumentResult> {
+    let result = app
+        .state::<AppState>()
+        .database()?
+        .relink_document(document_id, path)?;
+    grant_documents(app, std::slice::from_ref(&result.document))?;
+    Ok(result)
 }
 
 /// Registers every supported file dropped onto the window from the OS and

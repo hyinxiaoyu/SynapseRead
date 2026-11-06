@@ -9,12 +9,14 @@ import type {
   CreatedExcerpt,
   CreateExcerptInput,
   DocumentContentReader,
+  DocumentSourceStatus,
   IpcError,
   MindMapEdge,
   NodeLayoutPatch,
   NoteCard,
   NotebookGraph,
   ReadingPreferences,
+  RelinkDocumentResult,
   StudyDocument,
   StudyNotebook,
   Viewport,
@@ -54,6 +56,11 @@ export interface StudyBackend extends DocumentContentReader {
   listDocuments(): Promise<StudyDocument[]>;
   updateDocumentCursor(documentId: string, anchor: AnchorLocation): Promise<void>;
   touchDocumentOpened(documentId: string): Promise<StudyDocument>;
+  verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus>;
+  relinkDocument(
+    documentId: string,
+    confirmInPlace?: boolean,
+  ): Promise<RelinkDocumentResult | null>;
   getWorkspaceSession(): Promise<WorkspaceSession>;
   saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;
 

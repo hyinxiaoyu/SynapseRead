@@ -28,6 +28,19 @@ export type MemoryFile = Uint8Array | (() => Promise<Uint8Array>);
 /** The PNG signature, in base64. */
 const PNG_BASE64_PREFIX = 'iVBORw0KGgo';
 
+function hashBytes(bytes: Uint8Array): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0xcbf29ce4;
+  for (const byte of bytes) {
+    h1 = Math.imul(h1 ^ byte, 0x01000193);
+    h2 = Math.imul(h2 ^ byte, 0x01000193);
+  }
+  const hex1 = (h1 >>> 0).toString(16).padStart(8, '0');
+  const hex2 = (h2 >>> 0).toString(16).padStart(8, '0');
+  const lenHex = bytes.byteLength.toString(16).padStart(8, '0');
+  return `memory:${lenHex}:${hex1}${hex2}`;
+}
+
 const encodePreview = (text: string) => new TextEncoder().encode(text);
 
 const fetchBytes = (url: string) => async () =>
@@ -161,25 +174,53 @@ export function createMemoryBackend({
   const inNotebook = <T extends { notebookId: string }>(map: Map<string, T>, notebookId: string) =>
     [...map.values()].filter((value) => value.notebookId === notebookId);
 
-  const registerDocument = (path: string): StudyDocument => {
-    const existing = [...documents.values()].find((document) => document.filePath === path);
-    if (existing) {
-      const touched: StudyDocument = { ...existing, lastOpenedAt: monotonicNow() };
-      documents.set(touched.id, touched);
-      return touched;
-    }
+  const parseExtensionFormat = (path: string): { title: string; format: DocumentFormat } => {
     const fileName = path.split('/').pop() ?? path;
     const extension = fileName.includes('.')
       ? (fileName.split('.').pop()?.toLowerCase() ?? '')
       : '';
     const format = FORMAT_BY_EXTENSION[extension];
     if (!format) throw fail('unsupported_format', `unsupported document format: ${extension}`);
+    return { title: fileName.replace(/\.[^.]+$/, ''), format };
+  };
+
+  const readFile = async (path: string): Promise<Uint8Array> => {
+    const file = files[path];
+    if (file === undefined) throw fail('io', `no such file: ${path}`);
+    return typeof file === 'function' ? file() : file;
+  };
+
+  const resolveHash = async (path: string): Promise<string> => {
+    try {
+      const bytes = await readFile(path);
+      return hashBytes(bytes);
+    } catch {
+      return `memory:${path}`;
+    }
+  };
+
+  const registerDocument = async (path: string): Promise<StudyDocument> => {
+    const { title, format } = parseExtensionFormat(path);
+    const fileHash = await resolveHash(path);
+    const existing = [...documents.values()].find(
+      (document) => document.fileHash === fileHash || document.filePath === path,
+    );
+    if (existing) {
+      const touched: StudyDocument = {
+        ...existing,
+        filePath: path,
+        fileHash,
+        lastOpenedAt: monotonicNow(),
+      };
+      documents.set(touched.id, touched);
+      return touched;
+    }
     const timestamp = monotonicNow();
     const document: StudyDocument = {
       id: crypto.randomUUID(),
-      title: fileName.replace(/\.[^.]+$/, ''),
+      title,
       filePath: path,
-      fileHash: `memory:${path}`,
+      fileHash,
       format,
       encoding: 'utf-8',
       lastCursorAnchor: null,
@@ -188,12 +229,6 @@ export function createMemoryBackend({
     };
     documents.set(document.id, document);
     return document;
-  };
-
-  const readFile = async (path: string): Promise<Uint8Array> => {
-    const file = files[path];
-    if (file === undefined) throw fail('io', `no such file: ${path}`);
-    return typeof file === 'function' ? file() : file;
   };
 
   return {
@@ -213,8 +248,8 @@ export function createMemoryBackend({
         const path = `/dropped/${file.name}`;
         try {
           const bytes = new Uint8Array(await file.arrayBuffer());
-          const document = registerDocument(path);
           files[path] = bytes;
+          const document = await registerDocument(path);
           opened.push(document);
         } catch (err) {
           error ??= err as IpcError;
@@ -236,6 +271,107 @@ export function createMemoryBackend({
       const updated: StudyDocument = { ...existing, lastOpenedAt: monotonicNow() };
       documents.set(documentId, updated);
       return updated;
+    },
+
+    async verifyDocumentSource(documentId) {
+      const existing = require(documents, documentId, 'document');
+      const file = files[existing.filePath];
+      if (file === undefined) {
+        return {
+          documentId: existing.id,
+          state: 'missing',
+          currentFileHash: null,
+          fileSizeBytes: null,
+        };
+      }
+      if (typeof file !== 'function') {
+        const currentFileHash = hashBytes(file);
+        return {
+          documentId: existing.id,
+          state: currentFileHash === existing.fileHash ? 'ok' : 'changed',
+          currentFileHash,
+          fileSizeBytes: file.byteLength,
+        };
+      }
+      try {
+        const bytes = await file();
+        const currentFileHash = hashBytes(bytes);
+        return {
+          documentId: existing.id,
+          state:
+            currentFileHash === existing.fileHash ||
+            existing.fileHash === `memory:${existing.filePath}`
+              ? 'ok'
+              : 'changed',
+          currentFileHash,
+          fileSizeBytes: bytes.byteLength,
+        };
+      } catch (err) {
+        if (err instanceof TypeError) {
+          // Relative preview URL in a test runner without an HTTP server: treat the preview loader as intact.
+          return {
+            documentId: existing.id,
+            state: 'ok',
+            currentFileHash: existing.fileHash,
+            fileSizeBytes: null,
+          };
+        }
+        return {
+          documentId: existing.id,
+          state: 'missing',
+          currentFileHash: null,
+          fileSizeBytes: null,
+        };
+      }
+    },
+
+    async relinkDocument(documentId, confirmInPlace = false) {
+      const existing = require(documents, documentId, 'document');
+      let targetPath: string;
+      if (confirmInPlace) {
+        targetPath = existing.filePath;
+      } else {
+        const currentKeys = Object.keys(files);
+        const picked = currentKeys[picks % currentKeys.length];
+        if (picked === undefined) return null;
+        picks += 1;
+        targetPath = picked;
+      }
+
+      const { title, format } = parseExtensionFormat(targetPath);
+      if (format !== existing.format) {
+        throw fail(
+          'unsupported_format',
+          `cannot relink a ${existing.format} document to a ${format} file`,
+        );
+      }
+
+      const newHash = await resolveHash(targetPath);
+      const collision = [...documents.values()].find(
+        (doc) => doc.id !== documentId && doc.fileHash === newHash,
+      );
+      if (collision) {
+        throw fail(
+          'invalid_graph',
+          'that file is already registered as another document in your library',
+        );
+      }
+
+      const contentChanged = newHash !== existing.fileHash;
+      const updated: StudyDocument = {
+        ...existing,
+        title,
+        filePath: targetPath,
+        fileHash: newHash,
+        lastCursorAnchor: contentChanged ? null : existing.lastCursorAnchor,
+        lastOpenedAt: monotonicNow(),
+      };
+      documents.set(documentId, updated);
+      return {
+        document: updated,
+        contentChanged,
+        previousFileHash: existing.fileHash,
+      };
     },
 
     async getWorkspaceSession() {

@@ -6,10 +6,12 @@ import type {
   Annotation,
   Bookmark,
   CreatedExcerpt,
+  DocumentSourceStatus,
   MindMapEdge,
   NoteCard,
   NotebookGraph,
   ReadingPreferences,
+  RelinkDocumentResult,
   StudyDocument,
   StudyNotebook,
   TextChunk,
@@ -58,6 +60,13 @@ export function createTauriBackend(): StudyBackend {
       invoke('update_document_cursor', { documentId, anchor }),
     touchDocumentOpened: (documentId) =>
       invoke<StudyDocument>('touch_document_opened', { documentId }),
+    verifyDocumentSource: (documentId) =>
+      invoke<DocumentSourceStatus>('verify_document_source', { documentId }),
+    relinkDocument: (documentId, confirmInPlace) =>
+      invoke<RelinkDocumentResult | null>('relink_document', {
+        documentId,
+        confirmInPlace: confirmInPlace ?? false,
+      }),
     getWorkspaceSession: () => invoke<WorkspaceSession>('get_workspace_session'),
     saveWorkspaceSession: (session) =>
       invoke<WorkspaceSession>('save_workspace_session', { session }),

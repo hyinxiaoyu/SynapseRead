@@ -5,14 +5,14 @@ use synapse_core::domain::DocumentFormat;
 
 use synapse_core::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
-    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, MindMapEdge,
-    NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, StudyNotebook, Viewport,
-    WorkspaceSession,
+    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentSourceStatus,
+    MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences,
+    RelinkDocumentResult, StudyNotebook, Viewport, WorkspaceSession,
 };
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::access::register_and_grant;
+use crate::access::{register_and_grant, relink_and_grant};
 use crate::error::{IpcError, IpcResult};
 use crate::state::AppState;
 
@@ -216,4 +216,53 @@ pub fn save_workspace_session(
     state: State<'_, AppState>,
 ) -> IpcResult<WorkspaceSession> {
     Ok(state.database()?.save_workspace_session(&session)?)
+}
+
+#[tauri::command]
+pub async fn verify_document_source(
+    document_id: String,
+    app: AppHandle<impl Runtime>,
+) -> IpcResult<DocumentSourceStatus> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(app
+            .state::<AppState>()
+            .database()?
+            .verify_document_source(&document_id)?)
+    })
+    .await
+    .map_err(|error| IpcError::internal(error.to_string()))?
+}
+
+/// Shows the native file picker to explicitly relink `document_id` to a new file
+/// (or confirm an in-place modified file when `confirm_in_place` is true).
+#[tauri::command]
+pub async fn relink_document<R: Runtime>(
+    document_id: String,
+    confirm_in_place: Option<bool>,
+    app: AppHandle<R>,
+) -> IpcResult<Option<RelinkDocumentResult>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let existing = app
+            .state::<AppState>()
+            .database()?
+            .get_document(&document_id)?;
+        let path = if confirm_in_place.unwrap_or(false) {
+            PathBuf::from(&existing.file_path)
+        } else {
+            let picked = app
+                .dialog()
+                .file()
+                .add_filter("Documents", &[existing.format.as_str()])
+                .blocking_pick_file();
+            let Some(picked) = picked else {
+                return Ok(None);
+            };
+            picked
+                .into_path()
+                .map_err(|error| IpcError::internal(error.to_string()))?
+        };
+        relink_and_grant(&app, &document_id, &path).map(Some)
+    })
+    .await
+    .map_err(|error| IpcError::internal(error.to_string()))?
 }

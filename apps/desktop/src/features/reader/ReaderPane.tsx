@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock, FolderOpen, Quote, X } from 'lucide-react';
+import { AlertTriangle, Clock, FileCheck, FolderOpen, Link2, Quote, X } from 'lucide-react';
 import {
   Component,
   type ComponentType,
@@ -21,8 +21,10 @@ import {
 } from '@/stores/useStudySyncStore';
 import {
   type AnchorLocation,
+  type Annotation,
   type AnnotationPatch,
   defaultBookmarkLabel,
+  type DocumentSourceStatus,
   type DocumentViewerProps,
   type StudyDocument,
 } from '@/types/domain';
@@ -251,7 +253,11 @@ export function ReaderPane() {
               inert={!isActive}
             >
               <TabErrorBoundary document={document} onCloseTab={() => closeDocument(document.id)}>
-                <DocumentTab document={document} isActive={isActive} />
+                <DocumentTab
+                  document={document}
+                  isActive={isActive}
+                  onCloseTab={() => closeDocument(document.id)}
+                />
               </TabErrorBoundary>
             </div>
           );
@@ -299,8 +305,118 @@ export function ReaderPane() {
   );
 }
 
-function DocumentTab({ document, isActive }: { document: StudyDocument; isActive: boolean }) {
+function SourceRecoveryDialog({
+  document,
+  status,
+  annotations,
+  bookmarksCount,
+  onRelinkFile,
+  onConfirmChangedInPlace,
+  onCloseTab,
+}: {
+  document: StudyDocument;
+  status: DocumentSourceStatus;
+  annotations: readonly Annotation[];
+  bookmarksCount: number;
+  onRelinkFile: () => void;
+  onConfirmChangedInPlace: () => void;
+  onCloseTab: () => void;
+}) {
+  const isMissing = status.state === 'missing';
+  return (
+    <div
+      role="alert"
+      data-testid="source-recovery-dialog"
+      data-source-state={status.state}
+      className="flex h-full flex-col items-center justify-center gap-4 overflow-y-auto p-6 text-center text-sm"
+    >
+      <AlertTriangle className="size-7 text-amber-500" />
+      <div className="max-w-lg space-y-1.5">
+        <h3 className="font-semibold text-foreground">
+          {isMissing
+            ? `${document.title} could not be found at its original location`
+            : `${document.title} has changed on disk`}
+        </h3>
+        <p className="text-xs text-muted-foreground">
+          {isMissing
+            ? 'The source file was moved, renamed, or deleted. Relink it to continue reading. Your saved notes, highlights, and MindMap cards are preserved.'
+            : 'The file content no longer matches the SHA-256 fingerprint recorded when your notes were created. Stale anchors are never silently applied to a changed file.'}
+        </p>
+        <p className="font-mono text-[11px] break-all text-muted-foreground">
+          Path: {document.filePath}
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <Button size="sm" data-testid="relink-file-button" onClick={onRelinkFile}>
+          <Link2 />
+          Relink file…
+        </Button>
+        {!isMissing && (
+          <Button
+            variant="secondary"
+            size="sm"
+            data-testid="confirm-changed-file-button"
+            onClick={onConfirmChangedInPlace}
+          >
+            <FileCheck />
+            Use updated file
+          </Button>
+        )}
+        <Button variant="outline" size="sm" onClick={onCloseTab}>
+          Close tab
+        </Button>
+      </div>
+      {(annotations.length > 0 || bookmarksCount > 0) && (
+        <div
+          data-testid="preserved-notes-summary"
+          className="w-full max-w-lg rounded-md border bg-muted/20 p-3 text-left text-xs"
+        >
+          <p className="mb-1.5 font-medium text-foreground">
+            Preserved study records ({annotations.length} annotations, {bookmarksCount} bookmarks)
+          </p>
+          {annotations.length > 0 && (
+            <ul className="max-h-40 divide-y overflow-y-auto">
+              {annotations.map((annotation) => (
+                <li
+                  key={annotation.id}
+                  data-testid="preserved-annotation-item"
+                  className="py-1.5 text-xs"
+                >
+                  {annotation.excerptText && (
+                    <p className="truncate font-medium text-foreground">
+                      “{annotation.excerptText}”
+                    </p>
+                  )}
+                  {annotation.note && (
+                    <p className="truncate text-muted-foreground">{annotation.note}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DocumentTab({
+  document,
+  isActive,
+  onCloseTab,
+}: {
+  document: StudyDocument;
+  isActive: boolean;
+  onCloseTab: () => void;
+}) {
   const content = useStudySyncStore((state) => state.content);
+  const sourceStatus = useStudySyncStore(
+    (state) => state.documentSourceStatuses[document.id] ?? null,
+  );
+  const relinkedNonce = useStudySyncStore(
+    (state) => state.relinkedNonceByDocumentId[document.id] ?? 0,
+  );
+  const relinkDocument = useStudySyncStore((state) => state.relinkDocument);
   const annotations = useStudySyncStore((state) => state.annotations);
   const deletedAnnotationHistory = useStudySyncStore((state) => state.deletedAnnotationHistory);
   const allBookmarks = useStudySyncStore((state) => state.bookmarks);
@@ -377,10 +493,25 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
     void undoRemoveAnnotation();
   }, [undoRemoveAnnotation]);
 
+  if (sourceStatus && sourceStatus.state !== 'ok') {
+    return (
+      <SourceRecoveryDialog
+        document={document}
+        status={sourceStatus}
+        annotations={documentAnnotations}
+        bookmarksCount={bookmarks.length}
+        onRelinkFile={() => void relinkDocument(document.id, false)}
+        onConfirmChangedInPlace={() => void relinkDocument(document.id, true)}
+        onCloseTab={onCloseTab}
+      />
+    );
+  }
+
   // Safe: the entry is looked up by this document's own format.
   const Viewer = viewerRegistry[document.format] as ComponentType<DocumentViewerProps>;
   return (
     <Viewer
+      key={`${document.id}:${relinkedNonce}`}
       document={document}
       isActive={isActive}
       content={content}

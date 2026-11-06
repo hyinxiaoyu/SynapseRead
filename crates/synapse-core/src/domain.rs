@@ -226,6 +226,33 @@ pub struct Document {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocumentSourceState {
+    Ok,
+    Missing,
+    Changed,
+}
+
+/// On-disk verification status of a registered document's source file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DocumentSourceStatus {
+    pub document_id: String,
+    pub state: DocumentSourceState,
+    pub current_file_hash: Option<String>,
+    pub file_size_bytes: Option<u64>,
+}
+
+/// Result of explicitly relinking a document to a replacement file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RelinkDocumentResult {
+    pub document: Document,
+    pub content_changed: bool,
+    pub previous_file_hash: String,
+}
+
 /// Persisted reader tab session across application restarts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

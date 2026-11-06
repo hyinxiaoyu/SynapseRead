@@ -315,4 +315,70 @@ describe('StudyWorkspace', () => {
     fireEvent.keyDown(window, { key: 'w', metaKey: true });
     await waitFor(() => expect(screen.queryByRole('tab')).not.toBeInTheDocument());
   });
+
+  it('shows source recovery dialog for missing and changed files, preserves notes, and recovers on relink', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    const tab = await screen.findByRole('tab');
+    const docTitle = tab.textContent ?? '';
+    const docId = useStudySyncStore.getState().activeDocumentId as string;
+
+    // Create an excerpt so there is a preserved annotation to display in the recovery view.
+    fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+    await screen.findByRole('region', { name: 'Highlights' });
+
+    // Simulate the source file becoming missing on disk: viewer is replaced by SourceRecoveryDialog,
+    // and preserved notes are shown.
+    act(() => {
+      useStudySyncStore.setState((prev) => ({
+        documentSourceStatuses: {
+          ...prev.documentSourceStatuses,
+          [docId]: {
+            documentId: docId,
+            state: 'missing',
+            currentFileHash: null,
+            fileSizeBytes: null,
+          },
+        },
+      }));
+    });
+
+    const missingDialog = await screen.findByTestId('source-recovery-dialog');
+    expect(missingDialog).toHaveAttribute('data-source-state', 'missing');
+    expect(missingDialog).toHaveTextContent(
+      `${docTitle} could not be found at its original location`,
+    );
+    expect(screen.getByTestId('preserved-notes-summary')).toHaveTextContent(
+      `Excerpt from ${docTitle}`,
+    );
+    expect(screen.queryByTestId('confirm-changed-file-button')).not.toBeInTheDocument();
+
+    // Simulate the source file being modified in-place on disk (`changed` state):
+    // both `Relink file…` and `Use updated file` are offered, and stale anchors are not silently applied.
+    act(() => {
+      useStudySyncStore.setState((prev) => ({
+        documentSourceStatuses: {
+          ...prev.documentSourceStatuses,
+          [docId]: {
+            documentId: docId,
+            state: 'changed',
+            currentFileHash: 'modified-hash',
+            fileSizeBytes: 512,
+          },
+        },
+      }));
+    });
+
+    const changedDialog = await screen.findByTestId('source-recovery-dialog');
+    expect(changedDialog).toHaveAttribute('data-source-state', 'changed');
+    expect(changedDialog).toHaveTextContent(`${docTitle} has changed on disk`);
+    const confirmBtn = screen.getByTestId('confirm-changed-file-button');
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('source-recovery-dialog')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('heading', { name: docTitle })).toBeVisible();
+  });
 });

@@ -43,7 +43,10 @@ describe('useStudySyncStore', () => {
   beforeEach(async () => {
     backend = createMemoryBackend({
       library: Object.fromEntries(
-        ['a.pdf', 'b.epub', 'c.txt', 'd.md'].map((name) => [`/test/${name}`, new Uint8Array()]),
+        ['a.pdf', 'b.epub', 'c.txt', 'd.md'].map((name) => [
+          `/test/${name}`,
+          new TextEncoder().encode(`content:${name}`),
+        ]),
       ),
     });
     store = createStudySyncStore(backend);
@@ -666,6 +669,78 @@ describe('useStudySyncStore', () => {
         theme: 'dark',
         fontSize: 130,
       });
+    });
+
+    it('detects missing, moved, and changed sources across PDF, EPUB, and TXT, and relinks while preserving notes', async () => {
+      let pdfBytes = new TextEncoder().encode('pdf-v1');
+      let epubBytes = new TextEncoder().encode('epub-v1');
+      let txtBytes: Uint8Array | null = new TextEncoder().encode('txt-v1');
+
+      const mutableBackend = createMemoryBackend({
+        library: {
+          '/lib/paper.pdf': async () => pdfBytes,
+          '/lib/book.epub': async () => epubBytes,
+          '/lib/notes.txt': async () => {
+            if (!txtBytes) throw new Error('missing file');
+            return txtBytes;
+          },
+          '/lib/notes-moved.txt': new TextEncoder().encode('txt-v1'),
+        },
+      });
+      const recoveryStore = createStudySyncStore(mutableBackend);
+      await recoveryStore.getState().initialize();
+
+      // Open PDF, EPUB, and TXT.
+      await recoveryStore.getState().openDocument();
+      const pdfId = recoveryStore.getState().activeDocumentId as string;
+      await recoveryStore.getState().openDocument();
+      const epubId = recoveryStore.getState().activeDocumentId as string;
+      await recoveryStore.getState().openDocument();
+      const txtId = recoveryStore.getState().activeDocumentId as string;
+
+      // Create an annotation on the TXT document and record a reading cursor on PDF.
+      recoveryStore.getState().setSelection({
+        documentId: txtId,
+        anchor: txtAnchor,
+        text: 'txt-v1',
+        imagePng: null,
+      });
+      await recoveryStore.getState().createAnnotationFromSelection({ note: 'important txt note' });
+      recoveryStore.getState().reportCursor(pdfId, pdfAnchor as ReaderSelection['anchor']);
+
+      // 1. Delete `/lib/notes.txt` -> verify reports `missing`, relink to `/lib/notes-moved.txt` (identical hash).
+      txtBytes = null;
+      const missingStatus = await recoveryStore.getState().verifyDocumentSource(txtId);
+      expect(missingStatus?.state).toBe('missing');
+      expect(recoveryStore.getState().documentSourceStatuses[txtId]?.state).toBe('missing');
+      // Annotations remain preserved even while source is missing.
+      expect(selectDocumentAnnotations(recoveryStore.getState().annotations, txtId)).toHaveLength(
+        1,
+      );
+
+      const movedRelink = await recoveryStore.getState().relinkDocument(txtId, false);
+      expect(movedRelink?.contentChanged).toBe(false);
+      expect(movedRelink?.document.title).toBe('notes-moved');
+      expect(recoveryStore.getState().documentSourceStatuses[txtId]?.state).toBe('ok');
+      expect(recoveryStore.getState().relinkedNonceByDocumentId[txtId]).toBe(1);
+
+      // 2. Modify PDF and EPUB in place -> verify reports `changed`, confirm in-place relink clears stale cursor.
+      pdfBytes = new TextEncoder().encode('pdf-v2-revised');
+      epubBytes = new TextEncoder().encode('epub-v2-revised');
+
+      const pdfStatus = await recoveryStore.getState().verifyDocumentSource(pdfId);
+      const epubStatus = await recoveryStore.getState().verifyDocumentSource(epubId);
+      expect(pdfStatus?.state).toBe('changed');
+      expect(epubStatus?.state).toBe('changed');
+
+      const pdfRelinked = await recoveryStore.getState().relinkDocument(pdfId, true);
+      expect(pdfRelinked?.contentChanged).toBe(true);
+      expect(pdfRelinked?.document.lastCursorAnchor).toBeNull();
+      expect(recoveryStore.getState().documentSourceStatuses[pdfId]?.state).toBe('ok');
+
+      const epubRelinked = await recoveryStore.getState().relinkDocument(epubId, true);
+      expect(epubRelinked?.contentChanged).toBe(true);
+      expect(recoveryStore.getState().documentSourceStatuses[epubId]?.state).toBe('ok');
     });
   });
 });

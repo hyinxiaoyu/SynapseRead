@@ -11,6 +11,7 @@ import {
   type CardPatch,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
+  type DocumentSourceStatus,
   type JumpRequest,
   type MindMapEdge,
   type MindMapNode,
@@ -18,6 +19,7 @@ import {
   type ReaderHighlight,
   type ReaderSelection,
   type ReadingPreferences,
+  type RelinkDocumentResult,
   type StudyDocument,
   type StudyNotebook,
   type Viewport,
@@ -46,6 +48,8 @@ export interface StudySyncState {
   content: DocumentContentReader;
 
   documents: StudyDocument[];
+  documentSourceStatuses: Record<string, DocumentSourceStatus>;
+  relinkedNonceByDocumentId: Record<string, number>;
   openDocumentIds: string[];
   activeDocumentId: string | null;
   isDraggingFile: boolean;
@@ -71,6 +75,11 @@ export interface StudySyncState {
 
   openDocument(): Promise<void>;
   reopenRecentDocument(documentId: string): Promise<void>;
+  verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus | null>;
+  relinkDocument(
+    documentId: string,
+    confirmInPlace?: boolean,
+  ): Promise<RelinkDocumentResult | null>;
   dropFiles(files: readonly File[]): Promise<void>;
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
@@ -179,19 +188,47 @@ export function createStudySyncStore(backend: StudyBackend) {
       });
     };
 
+    const checkDocumentSource = async (
+      documentId: string,
+    ): Promise<DocumentSourceStatus | null> => {
+      if (!get().documents.some((doc) => doc.id === documentId)) return null;
+      let status: DocumentSourceStatus | null = null;
+      await guarded(async () => {
+        status = await backend.verifyDocumentSource(documentId);
+        if (status) {
+          const resolved = status;
+          set((state) => ({
+            documentSourceStatuses: {
+              ...state.documentSourceStatuses,
+              [documentId]: resolved,
+            },
+          }));
+        }
+      });
+      return status;
+    };
+
     const applyOpenedDocuments = (opened: readonly StudyDocument[], error?: unknown) => {
       set((state) => {
         let documents = state.documents;
         let openDocumentIds = state.openDocumentIds;
+        const documentSourceStatuses = { ...state.documentSourceStatuses };
         for (const document of opened) {
           documents = [...documents.filter((d) => d.id !== document.id), document];
           if (!openDocumentIds.includes(document.id)) {
             openDocumentIds = [...openDocumentIds, document.id];
           }
+          documentSourceStatuses[document.id] = {
+            documentId: document.id,
+            state: 'ok',
+            currentFileHash: document.fileHash,
+            fileSizeBytes: null,
+          };
         }
         const lastOpened = opened.at(-1);
         return {
           documents,
+          documentSourceStatuses,
           openDocumentIds,
           activeDocumentId: lastOpened ? lastOpened.id : state.activeDocumentId,
           selection: opened.length > 0 ? null : state.selection,
@@ -222,6 +259,8 @@ export function createStudySyncStore(backend: StudyBackend) {
           backend.readTextStream(documentId, encoding, onChunk),
       },
       documents: [],
+      documentSourceStatuses: {},
+      relinkedNonceByDocumentId: {},
       openDocumentIds: [],
       activeDocumentId: null,
       isDraggingFile: false,
@@ -257,9 +296,17 @@ export function createStudySyncStore(backend: StudyBackend) {
             session.activeDocumentId && openDocumentIds.includes(session.activeDocumentId)
               ? session.activeDocumentId
               : (openDocumentIds.at(-1) ?? null);
+          const verifiedStatuses = await Promise.all(
+            openDocumentIds.map((id) => backend.verifyDocumentSource(id).catch(() => null)),
+          );
+          const documentSourceStatuses: Record<string, DocumentSourceStatus> = {};
+          for (const status of verifiedStatuses) {
+            if (status) documentSourceStatuses[status.documentId] = status;
+          }
           set({
             status: 'ready',
             documents,
+            documentSourceStatuses,
             openDocumentIds,
             activeDocumentId,
             readingPreferences,
@@ -284,9 +331,16 @@ export function createStudySyncStore(backend: StudyBackend) {
       async reopenRecentDocument(documentId) {
         if (!get().documents.some((doc) => doc.id === documentId)) return;
         await guarded(async () => {
-          const touched = await backend.touchDocumentOpened(documentId);
+          const [touched, status] = await Promise.all([
+            backend.touchDocumentOpened(documentId),
+            backend.verifyDocumentSource(documentId),
+          ]);
           set((state) => ({
             documents: state.documents.map((doc) => (doc.id === documentId ? touched : doc)),
+            documentSourceStatuses: {
+              ...state.documentSourceStatuses,
+              [documentId]: status,
+            },
             openDocumentIds: state.openDocumentIds.includes(documentId)
               ? state.openDocumentIds
               : [...state.openDocumentIds, documentId],
@@ -295,6 +349,40 @@ export function createStudySyncStore(backend: StudyBackend) {
           }));
           persistSession();
         });
+      },
+
+      verifyDocumentSource(documentId) {
+        return checkDocumentSource(documentId);
+      },
+
+      async relinkDocument(documentId, confirmInPlace = false) {
+        if (!get().documents.some((doc) => doc.id === documentId)) return null;
+        let relinked: RelinkDocumentResult | null = null;
+        await guarded(async () => {
+          const result = await backend.relinkDocument(documentId, confirmInPlace);
+          if (!result) return;
+          relinked = result;
+          set((state) => ({
+            documents: state.documents.map((doc) =>
+              doc.id === documentId ? result.document : doc,
+            ),
+            documentSourceStatuses: {
+              ...state.documentSourceStatuses,
+              [documentId]: {
+                documentId,
+                state: 'ok',
+                currentFileHash: result.document.fileHash,
+                fileSizeBytes: null,
+              },
+            },
+            relinkedNonceByDocumentId: {
+              ...state.relinkedNonceByDocumentId,
+              [documentId]: (state.relinkedNonceByDocumentId[documentId] ?? 0) + 1,
+            },
+            selection: state.selection?.documentId === documentId ? null : state.selection,
+          }));
+        });
+        return relinked;
       },
 
       async dropFiles(files) {
@@ -309,6 +397,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (documentId === get().activeDocumentId) return;
         set({ activeDocumentId: documentId, selection: null });
         persistSession();
+        void checkDocumentSource(documentId);
       },
 
       closeDocument(documentId) {
@@ -501,6 +590,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           },
         }));
         persistSession();
+        void checkDocumentSource(annotation.documentId);
       },
 
       jumpToNode(nodeId, annotationId) {
@@ -531,6 +621,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           },
         }));
         persistSession();
+        void checkDocumentSource(annotation.documentId);
       },
 
       completeJump(nonce) {
@@ -674,6 +765,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           },
         }));
         persistSession();
+        void checkDocumentSource(bookmark.documentId);
       },
     };
   });

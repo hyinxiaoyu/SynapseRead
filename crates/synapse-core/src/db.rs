@@ -10,9 +10,10 @@ use uuid::Uuid;
 use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
-    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentFormat, MindMapEdge,
-    MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, StudyNotebook,
-    Viewport, WorkspaceSession,
+    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentFormat,
+    DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard,
+    NotebookGraph, ReadingPreferences, RelinkDocumentResult, StudyNotebook, Viewport,
+    WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -156,6 +157,124 @@ impl Database {
             params![document_id, serde_json::to_string(anchor)?],
         )?;
         expect_changed(changed, "document", document_id)
+    }
+
+    pub fn get_document(&self, document_id: &str) -> CoreResult<Document> {
+        self.conn
+            .query_row(
+                &format!("{DOCUMENT_SELECT} WHERE id = ?1"),
+                [document_id],
+                map_document,
+            )
+            .optional()?
+            .ok_or_else(|| not_found("document", document_id))
+    }
+
+    /// Checks whether a registered document's file is present and matches its
+    /// recorded SHA-256 `file_hash`, without mutating the database.
+    pub fn verify_document_source(&self, document_id: &str) -> CoreResult<DocumentSourceStatus> {
+        let document = self.get_document(document_id)?;
+        let path = Path::new(&document.file_path);
+        let metadata = match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => meta,
+            _ => {
+                return Ok(DocumentSourceStatus {
+                    document_id: document.id,
+                    state: DocumentSourceState::Missing,
+                    current_file_hash: None,
+                    file_size_bytes: None,
+                });
+            }
+        };
+        let current_hash = hash_file(path)?;
+        let state = if current_hash == document.file_hash {
+            DocumentSourceState::Ok
+        } else {
+            DocumentSourceState::Changed
+        };
+        Ok(DocumentSourceStatus {
+            document_id: document.id,
+            state,
+            current_file_hash: Some(current_hash),
+            file_size_bytes: Some(metadata.len()),
+        })
+    }
+
+    /// Explicitly relinks an existing document to `new_path`, updating its stored
+    /// `file_path`, `file_hash`, and `title` while keeping all existing annotations,
+    /// bookmarks, and MindMap cards attached.
+    ///
+    /// Rejects format changes and hash collisions with another registered document.
+    /// When `file_hash` changes, `last_cursor_anchor` is cleared so stale offsets
+    /// are never silently applied on reopen.
+    pub fn relink_document(
+        &self,
+        document_id: &str,
+        new_path: &Path,
+    ) -> CoreResult<RelinkDocumentResult> {
+        let existing = self.get_document(document_id)?;
+        let extension = new_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let format = DocumentFormat::from_extension(extension)?;
+        if format != existing.format {
+            return Err(CoreError::UnsupportedFormat(format!(
+                "cannot relink a {} document to a {} file",
+                existing.format.as_str(),
+                format.as_str()
+            )));
+        }
+
+        let new_hash = hash_file(new_path)?;
+        let duplicate_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM documents WHERE file_hash = ?1 AND id != ?2",
+                params![new_hash, document_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if duplicate_id.is_some() {
+            return Err(CoreError::InvalidGraph(
+                "that file is already registered as another document in your library".to_owned(),
+            ));
+        }
+
+        let content_changed = new_hash != existing.file_hash;
+        let file_path = new_path.to_string_lossy();
+        let title = new_path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file_path.clone().into_owned());
+
+        if content_changed {
+            self.conn.execute(
+                "UPDATE documents SET
+                     title = ?2,
+                     file_path = ?3,
+                     file_hash = ?4,
+                     last_cursor_anchor = NULL,
+                     last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1",
+                params![document_id, title, file_path, new_hash],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE documents SET
+                     title = ?2,
+                     file_path = ?3,
+                     last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 WHERE id = ?1",
+                params![document_id, title, file_path],
+            )?;
+        }
+
+        Ok(RelinkDocumentResult {
+            document: self.get_document(document_id)?,
+            content_changed,
+            previous_file_hash: existing.file_hash,
+        })
     }
 
     // ---- Notebooks -------------------------------------------------------
@@ -1960,5 +2079,83 @@ mod tests {
                 active_document_id: Some(second_id),
             }
         );
+    }
+
+    #[test]
+    fn verify_and_relink_document_source_handles_missing_moved_and_changed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&dir.path().join("recovery.sqlite")).unwrap();
+        let original = dir.path().join("paper-v1.txt");
+        std::fs::write(&original, "original version content").unwrap();
+
+        let doc = db.register_document(&original).unwrap();
+        db.update_document_cursor(&doc.id, &txt_anchor()).unwrap();
+        let notebook = db.create_notebook("Notes").unwrap();
+        let annotation = db
+            .create_annotation(&CreateAnnotationInput {
+                document_id: doc.id.clone(),
+                notebook_id: notebook.id.clone(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("original".to_owned()),
+                excerpt_image_png: None,
+                note: Some("preserved note".to_owned()),
+                color: "#fde047".to_owned(),
+            })
+            .unwrap();
+
+        // 1. Source is intact (`Ok`).
+        let status = db.verify_document_source(&doc.id).unwrap();
+        assert_eq!(status.state, DocumentSourceState::Ok);
+        assert_eq!(
+            status.current_file_hash.as_deref(),
+            Some(doc.file_hash.as_str())
+        );
+        assert_eq!(status.file_size_bytes, Some(24));
+
+        // 2. Source moved to a new path (`Missing` at original path, then relinked with identical content).
+        let moved = dir.path().join("paper-moved.txt");
+        std::fs::rename(&original, &moved).unwrap();
+        let missing_status = db.verify_document_source(&doc.id).unwrap();
+        assert_eq!(missing_status.state, DocumentSourceState::Missing);
+        assert_eq!(missing_status.current_file_hash, None);
+
+        let moved_relink = db.relink_document(&doc.id, &moved).unwrap();
+        assert!(!moved_relink.content_changed);
+        assert_eq!(moved_relink.document.file_hash, doc.file_hash);
+        assert_eq!(moved_relink.document.title, "paper-moved");
+        assert_eq!(moved_relink.document.last_cursor_anchor, Some(txt_anchor()));
+
+        // 3. In-place modification (`Changed`), then explicit relink to a revised edition.
+        std::fs::write(&moved, "revised edition with different bytes").unwrap();
+        let changed_status = db.verify_document_source(&doc.id).unwrap();
+        assert_eq!(changed_status.state, DocumentSourceState::Changed);
+        assert_ne!(
+            changed_status.current_file_hash.as_deref(),
+            Some(doc.file_hash.as_str())
+        );
+
+        let revised_relink = db.relink_document(&doc.id, &moved).unwrap();
+        assert!(revised_relink.content_changed);
+        assert_eq!(revised_relink.previous_file_hash, doc.file_hash);
+        // Stale cursor anchor is cleared when content hash changes, while notes/annotations are preserved.
+        assert_eq!(revised_relink.document.last_cursor_anchor, None);
+        let graph = db.load_notebook_graph(&notebook.id).unwrap();
+        assert_eq!(graph.annotations, vec![annotation]);
+
+        // 4. Rejects format mismatch and duplicate document hash collision.
+        let wrong_format = dir.path().join("other.pdf");
+        std::fs::write(&wrong_format, "pdf bytes").unwrap();
+        assert!(matches!(
+            db.relink_document(&doc.id, &wrong_format),
+            Err(CoreError::UnsupportedFormat(_))
+        ));
+
+        let other_txt = dir.path().join("other.txt");
+        std::fs::write(&other_txt, "distinct other document").unwrap();
+        let _other_doc = db.register_document(&other_txt).unwrap();
+        assert!(matches!(
+            db.relink_document(&doc.id, &other_txt),
+            Err(CoreError::InvalidGraph(_))
+        ));
     }
 }
