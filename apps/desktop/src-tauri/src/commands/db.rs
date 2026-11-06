@@ -7,6 +7,7 @@ use synapse_core::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
     CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, MindMapEdge,
     NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, StudyNotebook, Viewport,
+    WorkspaceSession,
 };
 use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
@@ -194,4 +195,25 @@ pub fn create_bookmark(
 #[tauri::command]
 pub fn delete_bookmark(bookmark_id: String, state: State<'_, AppState>) -> IpcResult<()> {
     Ok(state.database()?.delete_bookmark(&bookmark_id)?)
+}
+
+#[tauri::command]
+pub fn touch_document_opened(
+    document_id: String,
+    state: State<'_, AppState>,
+) -> IpcResult<Document> {
+    Ok(state.database()?.touch_document_opened(&document_id)?)
+}
+
+#[tauri::command]
+pub fn get_workspace_session(state: State<'_, AppState>) -> IpcResult<WorkspaceSession> {
+    Ok(state.database()?.get_workspace_session()?)
+}
+
+#[tauri::command]
+pub fn save_workspace_session(
+    session: WorkspaceSession,
+    state: State<'_, AppState>,
+) -> IpcResult<WorkspaceSession> {
+    Ok(state.database()?.save_workspace_session(&session)?)
 }

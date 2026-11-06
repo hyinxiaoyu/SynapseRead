@@ -12,7 +12,7 @@ use crate::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
     CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentFormat, MindMapEdge,
     MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, StudyNotebook,
-    Viewport,
+    Viewport, WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -23,6 +23,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0002_reading_preferences.sql"),
     include_str!("../migrations/0003_bookmarks.sql"),
     include_str!("../migrations/0004_independent_annotations.sql"),
+    include_str!("../migrations/0005_workspace_session.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -85,9 +86,11 @@ impl Database {
             .unwrap_or_else(|| file_path.clone().into_owned());
 
         self.conn.execute(
-            "INSERT INTO documents (id, title, file_path, file_hash, format, encoding)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT (file_hash) DO UPDATE SET file_path = excluded.file_path",
+            "INSERT INTO documents (id, title, file_path, file_hash, format, encoding, last_opened_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT (file_hash) DO UPDATE SET
+                 file_path = excluded.file_path,
+                 last_opened_at = excluded.last_opened_at",
             params![
                 new_id(),
                 title,
@@ -100,6 +103,20 @@ impl Database {
         Ok(self.conn.query_row(
             &format!("{DOCUMENT_SELECT} WHERE file_hash = ?1"),
             [&file_hash],
+            map_document,
+        )?)
+    }
+
+    pub fn touch_document_opened(&self, document_id: &str) -> CoreResult<Document> {
+        let changed = self.conn.execute(
+            "UPDATE documents SET last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+            [document_id],
+        )?;
+        expect_changed(changed, "document", document_id)?;
+        Ok(self.conn.query_row(
+            &format!("{DOCUMENT_SELECT} WHERE id = ?1"),
+            [document_id],
             map_document,
         )?)
     }
@@ -688,6 +705,76 @@ impl Database {
             .execute("DELETE FROM bookmarks WHERE id = ?1", [bookmark_id])?;
         expect_changed(changed, "bookmark", bookmark_id)
     }
+
+    // ---- Workspace Session -----------------------------------------------
+
+    pub fn get_workspace_session(&self) -> CoreResult<WorkspaceSession> {
+        let raw: Option<(Vec<String>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT open_document_ids, active_document_id FROM workspace_session WHERE id = 1",
+                [],
+                |row| Ok((json_column(row, 0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored_ids, stored_active)) = raw else {
+            return Ok(WorkspaceSession::default());
+        };
+        let mut open_document_ids = Vec::new();
+        for id in stored_ids {
+            if !open_document_ids.contains(&id) && self.document_exists(&id)? {
+                open_document_ids.push(id);
+            }
+        }
+        let active_document_id = stored_active
+            .filter(|id| open_document_ids.contains(id))
+            .or_else(|| open_document_ids.last().cloned());
+        Ok(WorkspaceSession {
+            open_document_ids,
+            active_document_id,
+        })
+    }
+
+    pub fn save_workspace_session(
+        &self,
+        session: &WorkspaceSession,
+    ) -> CoreResult<WorkspaceSession> {
+        let mut open_document_ids = Vec::new();
+        for id in &session.open_document_ids {
+            if !open_document_ids.contains(id) && self.document_exists(id)? {
+                open_document_ids.push(id.clone());
+            }
+        }
+        let active_document_id = session
+            .active_document_id
+            .as_ref()
+            .filter(|id| open_document_ids.contains(id))
+            .cloned()
+            .or_else(|| open_document_ids.last().cloned());
+        let open_json = serde_json::to_string(&open_document_ids)?;
+        self.conn.execute(
+            "INSERT INTO workspace_session (id, open_document_ids, active_document_id, updated_at)
+             VALUES (1, ?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT (id) DO UPDATE SET
+                 open_document_ids = excluded.open_document_ids,
+                 active_document_id = excluded.active_document_id,
+                 updated_at = excluded.updated_at",
+            params![open_json, active_document_id],
+        )?;
+        self.get_workspace_session()
+    }
+
+    fn document_exists(&self, document_id: &str) -> CoreResult<bool> {
+        let found: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM documents WHERE id = ?1",
+                [document_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
+    }
 }
 
 fn migrate(conn: &mut Connection) -> CoreResult<()> {
@@ -841,7 +928,7 @@ fn optional_json_column<T: DeserializeOwned>(
 }
 
 const DOCUMENT_SELECT: &str = "SELECT id, title, file_path, file_hash, format, encoding,
-    last_cursor_anchor, created_at FROM documents";
+    last_cursor_anchor, last_opened_at, created_at FROM documents";
 
 fn map_document(row: &Row<'_>) -> rusqlite::Result<Document> {
     let format: String = row.get(4)?;
@@ -853,7 +940,8 @@ fn map_document(row: &Row<'_>) -> rusqlite::Result<Document> {
         format: DocumentFormat::parse(&format).map_err(|error| conversion_failure(4, error))?,
         encoding: row.get(5)?,
         last_cursor_anchor: optional_json_column(row, 6)?,
-        created_at: row.get(7)?,
+        last_opened_at: row.get(7)?,
+        created_at: row.get(8)?,
     })
 }
 
@@ -1015,6 +1103,7 @@ mod tests {
                     "encoding",
                     "last_cursor_anchor",
                     "created_at",
+                    "last_opened_at",
                 ],
             ),
             (
@@ -1085,6 +1174,15 @@ mod tests {
                     "location_key",
                     "label",
                     "created_at",
+                ],
+            ),
+            (
+                "workspace_session",
+                &[
+                    "id",
+                    "open_document_ids",
+                    "active_document_id",
+                    "updated_at",
                 ],
             ),
         ];
@@ -1806,5 +1904,61 @@ mod tests {
         assert_eq!(graph_after.cards[0].id, created_excerpt.card.id);
         assert!(graph_after.cards[0].annotation_ids.is_empty());
         assert_eq!(graph_after.nodes.len(), 1);
+    }
+
+    #[test]
+    fn workspace_session_and_recent_document_timestamps_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("session.sqlite");
+        let first_file = dir.path().join("first.txt");
+        let second_file = dir.path().join("second.txt");
+        std::fs::write(&first_file, "first").unwrap();
+        std::fs::write(&second_file, "second").unwrap();
+
+        let (first_id, second_id) = {
+            let db = Database::open(&db_path).unwrap();
+            assert_eq!(
+                db.get_workspace_session().unwrap(),
+                WorkspaceSession::default()
+            );
+
+            let first = db.register_document(&first_file).unwrap();
+            let second = db.register_document(&second_file).unwrap();
+            assert!(first.last_opened_at.is_some());
+            assert!(second.last_opened_at.is_some());
+
+            // Saving deduplicates, drops unknown document ids, and normalizes active_document_id.
+            let saved = db
+                .save_workspace_session(&WorkspaceSession {
+                    open_document_ids: vec![
+                        first.id.clone(),
+                        "missing-doc".to_owned(),
+                        second.id.clone(),
+                        first.id.clone(),
+                    ],
+                    active_document_id: Some("missing-doc".to_owned()),
+                })
+                .unwrap();
+            assert_eq!(
+                saved,
+                WorkspaceSession {
+                    open_document_ids: vec![first.id.clone(), second.id.clone()],
+                    active_document_id: Some(second.id.clone()),
+                }
+            );
+
+            let touched = db.touch_document_opened(&first.id).unwrap();
+            assert!(touched.last_opened_at.is_some());
+            (first.id, second.id)
+        };
+
+        let reopened = Database::open(&db_path).unwrap();
+        assert_eq!(
+            reopened.get_workspace_session().unwrap(),
+            WorkspaceSession {
+                open_document_ids: vec![first_id, second_id.clone()],
+                active_document_id: Some(second_id),
+            }
+        );
     }
 }

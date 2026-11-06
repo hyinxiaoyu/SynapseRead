@@ -1,21 +1,88 @@
-import { FolderOpen, Quote, X } from 'lucide-react';
-import { type ComponentType, useCallback, useMemo } from 'react';
+import { AlertTriangle, Clock, FolderOpen, Quote, X } from 'lucide-react';
+import {
+  Component,
+  type ComponentType,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 
 import { Button } from '@/components/ui/button';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
-import { cn } from '@/lib/utils';
+import { cn, describeError } from '@/lib/utils';
 import {
   selectBookmarks,
   selectDocumentAnnotations,
   selectHighlights,
+  selectRecentDocuments,
   useStudySyncStore,
 } from '@/stores/useStudySyncStore';
-import type {
-  AnchorLocation,
-  AnnotationPatch,
-  DocumentViewerProps,
-  StudyDocument,
+import {
+  type AnchorLocation,
+  type AnnotationPatch,
+  defaultBookmarkLabel,
+  type DocumentViewerProps,
+  type StudyDocument,
 } from '@/types/domain';
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : null;
+  if (!element) return false;
+  const tag = element.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || element.isContentEditable) {
+    return true;
+  }
+  return element.closest('[contenteditable="true"], [role="textbox"]') !== null;
+}
+
+function describeResumeLocation(document: StudyDocument): string {
+  if (!document.lastCursorAnchor) return 'Start reading';
+  return `Continue reading · ${defaultBookmarkLabel(document.lastCursorAnchor)}`;
+}
+
+interface TabErrorBoundaryProps {
+  document: StudyDocument;
+  onCloseTab: () => void;
+  children: ReactNode;
+}
+
+interface TabErrorBoundaryState {
+  error: Error | null;
+}
+
+class TabErrorBoundary extends Component<TabErrorBoundaryProps, TabErrorBoundaryState> {
+  override state: TabErrorBoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error): TabErrorBoundaryState {
+    return { error };
+  }
+
+  override render() {
+    const { error } = this.state;
+    const { document, onCloseTab, children } = this.props;
+    if (error) {
+      return (
+        <div
+          role="alert"
+          data-testid="broken-document-fallback"
+          className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center text-sm"
+        >
+          <AlertTriangle className="size-6 text-destructive" />
+          <div className="space-y-1">
+            <p className="font-medium text-foreground">Could not render {document.title}</p>
+            <p className="max-w-md text-xs text-muted-foreground">{describeError(error)}</p>
+          </div>
+          <Button variant="outline" size="sm" onClick={onCloseTab}>
+            Close tab
+          </Button>
+        </div>
+      );
+    }
+    return children;
+  }
+}
 
 export function ReaderPane() {
   const documents = useStudySyncStore((state) => state.documents);
@@ -24,9 +91,11 @@ export function ReaderPane() {
   const selection = useStudySyncStore((state) => state.selection);
   const isExcerpting = useStudySyncStore((state) => state.isExcerpting);
   const openDocument = useStudySyncStore((state) => state.openDocument);
+  const reopenRecentDocument = useStudySyncStore((state) => state.reopenRecentDocument);
   const activateDocument = useStudySyncStore((state) => state.activateDocument);
   const closeDocument = useStudySyncStore((state) => state.closeDocument);
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
+  const [recentMenuOpen, setRecentMenuOpen] = useState(false);
 
   const openDocuments = useMemo(
     () =>
@@ -35,11 +104,39 @@ export function ReaderPane() {
         .filter((document) => document !== undefined),
     [openDocumentIds, documents],
   );
+  const recentDocuments = useMemo(() => selectRecentDocuments(documents), [documents]);
   const activeDocument = openDocuments.find((document) => document.id === activeDocumentId);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.altKey || event.shiftKey) return;
+      if (!(event.metaKey || event.ctrlKey)) return;
+      const key = event.key.toLowerCase();
+      if (key !== 'o' && key !== 'w') return;
+      if (isEditableShortcutTarget(event.target)) return;
+      if (key === 'o') {
+        event.preventDefault();
+        void openDocument();
+      } else if (key === 'w' && activeDocumentId !== null) {
+        event.preventDefault();
+        closeDocument(activeDocumentId);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeDocumentId, closeDocument, openDocument]);
+
+  const handleOpenRecent = useCallback(
+    (documentId: string) => {
+      setRecentMenuOpen(false);
+      void reopenRecentDocument(documentId);
+    },
+    [reopenRecentDocument],
+  );
 
   return (
     <section aria-label="Document reader" className="flex h-full flex-col">
-      <header className="flex h-11 shrink-0 items-center gap-1 border-b px-2">
+      <header className="relative flex h-11 shrink-0 items-center gap-1 border-b px-2">
         <div
           role="tablist"
           aria-label="Open documents"
@@ -76,6 +173,19 @@ export function ReaderPane() {
             );
           })}
         </div>
+        {recentDocuments.length > 0 && (
+          <Button
+            variant={recentMenuOpen ? 'secondary' : 'ghost'}
+            size="sm"
+            aria-label="Recent documents"
+            aria-pressed={recentMenuOpen}
+            data-testid="recent-documents-toggle"
+            onClick={() => setRecentMenuOpen((open) => !open)}
+          >
+            <Clock />
+            Recent
+          </Button>
+        )}
         <Button variant="ghost" size="sm" onClick={() => void openDocument()}>
           <FolderOpen />
           Open
@@ -90,6 +200,39 @@ export function ReaderPane() {
           <Quote />
           Excerpt to MindMap
         </Button>
+        {recentMenuOpen && recentDocuments.length > 0 && (
+          <div
+            role="region"
+            aria-label="Recent documents"
+            data-testid="recent-documents-menu"
+            className="absolute top-11 right-2 z-30 w-80 rounded-md border bg-background p-1.5 shadow-md"
+          >
+            <p className="px-2 py-1 text-xs font-medium text-muted-foreground">Recent documents</p>
+            <ol data-testid="recent-documents-list" className="max-h-60 divide-y overflow-y-auto">
+              {recentDocuments.map((document) => (
+                <li key={document.id}>
+                  <button
+                    type="button"
+                    data-testid="recent-document-item"
+                    data-document-format={document.format}
+                    onClick={() => handleOpenRecent(document.id)}
+                    className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-medium text-foreground">{document.title}</p>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        {describeResumeLocation(document)}
+                      </p>
+                    </div>
+                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
+                      {document.format}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
       </header>
 
       <div className="relative min-h-0 flex-1">
@@ -107,13 +250,48 @@ export function ReaderPane() {
               style={{ visibility: isActive ? 'visible' : 'hidden' }}
               inert={!isActive}
             >
-              <DocumentTab document={document} isActive={isActive} />
+              <TabErrorBoundary document={document} onCloseTab={() => closeDocument(document.id)}>
+                <DocumentTab document={document} isActive={isActive} />
+              </TabErrorBoundary>
             </div>
           );
         })}
         {!activeDocument && (
-          <div className="flex h-full items-center justify-center p-6 text-center text-sm text-muted-foreground">
-            Open a PDF, EPUB, or TXT file to start reading.
+          <div className="flex h-full flex-col items-center justify-center gap-5 p-6 text-center text-sm text-muted-foreground">
+            <p>Open a PDF, EPUB, or TXT file to start reading.</p>
+            {recentDocuments.length > 0 && (
+              <div
+                role="region"
+                aria-label="Recent documents"
+                data-testid="empty-state-recent-documents"
+                className="w-full max-w-md rounded-md border bg-background p-3 text-left shadow-xs"
+              >
+                <p className="mb-2 text-xs font-medium text-muted-foreground">Continue reading</p>
+                <ol data-testid="recent-documents-list" className="divide-y">
+                  {recentDocuments.map((document) => (
+                    <li key={document.id}>
+                      <button
+                        type="button"
+                        data-testid="recent-document-item"
+                        data-document-format={document.format}
+                        onClick={() => handleOpenRecent(document.id)}
+                        className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-medium text-foreground">{document.title}</p>
+                          <p className="truncate text-[11px] text-muted-foreground">
+                            {describeResumeLocation(document)}
+                          </p>
+                        </div>
+                        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
+                          {document.format}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
           </div>
         )}
       </div>

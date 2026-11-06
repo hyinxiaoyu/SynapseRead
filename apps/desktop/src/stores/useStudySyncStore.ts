@@ -70,6 +70,7 @@ export interface StudySyncState {
   dismissError(): void;
 
   openDocument(): Promise<void>;
+  reopenRecentDocument(documentId: string): Promise<void>;
   dropFiles(files: readonly File[]): Promise<void>;
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
@@ -142,6 +143,16 @@ export function selectBookmarks(bookmarks: readonly Bookmark[], documentId: stri
   return bookmarks.filter((bookmark) => bookmark.documentId === documentId);
 }
 
+/** Most recently opened documents first, falling back to `createdAt`. */
+export function selectRecentDocuments(documents: readonly StudyDocument[]): StudyDocument[] {
+  return [...documents].sort((a, b) => {
+    const aTime = a.lastOpenedAt ?? a.createdAt;
+    const bTime = b.lastOpenedAt ?? b.createdAt;
+    if (aTime !== bTime) return bTime.localeCompare(aTime);
+    return b.id.localeCompare(a.id);
+  });
+}
+
 /**
  * The bi-directional bus between the Reader and the MindMap. Neither side knows
  * the other exists: readers publish selections and consume jump requests, the
@@ -159,6 +170,13 @@ export function createStudySyncStore(backend: StudyBackend) {
         rollback?.();
         set({ error: describeError(error) });
       }
+    };
+
+    const persistSession = () => {
+      const { openDocumentIds, activeDocumentId } = get();
+      void guarded(async () => {
+        await backend.saveWorkspaceSession({ openDocumentIds, activeDocumentId });
+      });
     };
 
     const applyOpenedDocuments = (opened: readonly StudyDocument[], error?: unknown) => {
@@ -180,6 +198,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           ...(error !== undefined && error !== null ? { error: describeError(error) } : {}),
         };
       });
+      if (opened.length > 0) persistSession();
     };
 
     backend.onFileDrop((event) => {
@@ -223,15 +242,30 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().status === 'loading' || get().status === 'ready') return;
         set({ status: 'loading', error: null });
         try {
-          const [documents, notebooks, readingPreferences, bookmarks] = await Promise.all([
+          const [documents, notebooks, readingPreferences, bookmarks, session] = await Promise.all([
             backend.listDocuments(),
             backend.listNotebooks(),
             backend.getReadingPreferences(),
             backend.listBookmarks(),
+            backend.getWorkspaceSession(),
           ]);
           const notebook = notebooks[0] ?? (await backend.createNotebook(DEFAULT_NOTEBOOK_TITLE));
           const graph = await backend.loadNotebookGraph(notebook.id);
-          set({ status: 'ready', documents, readingPreferences, bookmarks, ...graph });
+          const knownIds = new Set(documents.map((doc) => doc.id));
+          const openDocumentIds = session.openDocumentIds.filter((id) => knownIds.has(id));
+          const activeDocumentId =
+            session.activeDocumentId && openDocumentIds.includes(session.activeDocumentId)
+              ? session.activeDocumentId
+              : (openDocumentIds.at(-1) ?? null);
+          set({
+            status: 'ready',
+            documents,
+            openDocumentIds,
+            activeDocumentId,
+            readingPreferences,
+            bookmarks,
+            ...graph,
+          });
         } catch (error) {
           set({ status: 'error', error: describeError(error) });
         }
@@ -247,6 +281,22 @@ export function createStudySyncStore(backend: StudyBackend) {
         });
       },
 
+      async reopenRecentDocument(documentId) {
+        if (!get().documents.some((doc) => doc.id === documentId)) return;
+        await guarded(async () => {
+          const touched = await backend.touchDocumentOpened(documentId);
+          set((state) => ({
+            documents: state.documents.map((doc) => (doc.id === documentId ? touched : doc)),
+            openDocumentIds: state.openDocumentIds.includes(documentId)
+              ? state.openDocumentIds
+              : [...state.openDocumentIds, documentId],
+            activeDocumentId: documentId,
+            selection: state.activeDocumentId === documentId ? state.selection : null,
+          }));
+          persistSession();
+        });
+      },
+
       async dropFiles(files) {
         if (files.length === 0) return;
         await guarded(async () => {
@@ -258,9 +308,11 @@ export function createStudySyncStore(backend: StudyBackend) {
       activateDocument(documentId) {
         if (documentId === get().activeDocumentId) return;
         set({ activeDocumentId: documentId, selection: null });
+        persistSession();
       },
 
       closeDocument(documentId) {
+        if (!get().openDocumentIds.includes(documentId)) return;
         set((state) => {
           const index = state.openDocumentIds.indexOf(documentId);
           if (index === -1) return state;
@@ -276,6 +328,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             jumpRequest: state.jumpRequest?.documentId === documentId ? null : state.jumpRequest,
           };
         });
+        persistSession();
       },
 
       reportCursor(documentId, anchor) {
@@ -447,6 +500,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             anchor: annotation.anchor,
           },
         }));
+        persistSession();
       },
 
       jumpToNode(nodeId, annotationId) {
@@ -476,6 +530,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             anchor: annotation.anchor,
           },
         }));
+        persistSession();
       },
 
       completeJump(nonce) {
@@ -618,6 +673,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             anchor: bookmark.anchor,
           },
         }));
+        persistSession();
       },
     };
   });

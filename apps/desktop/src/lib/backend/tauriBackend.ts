@@ -13,6 +13,7 @@ import type {
   StudyDocument,
   StudyNotebook,
   TextChunk,
+  WorkspaceSession,
 } from '@/types/domain';
 
 const DOCUMENTS_DROPPED_EVENT = 'synapse://documents-dropped';
@@ -55,6 +56,11 @@ export function createTauriBackend(): StudyBackend {
     listDocuments: () => invoke<StudyDocument[]>('list_documents'),
     updateDocumentCursor: (documentId, anchor) =>
       invoke('update_document_cursor', { documentId, anchor }),
+    touchDocumentOpened: (documentId) =>
+      invoke<StudyDocument>('touch_document_opened', { documentId }),
+    getWorkspaceSession: () => invoke<WorkspaceSession>('get_workspace_session'),
+    saveWorkspaceSession: (session) =>
+      invoke<WorkspaceSession>('save_workspace_session', { session }),
 
     createNotebook: (title) => invoke<StudyNotebook>('create_notebook', { title }),
     listNotebooks: () => invoke<StudyNotebook[]>('list_notebooks'),

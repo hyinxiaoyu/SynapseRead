@@ -61,7 +61,13 @@ export interface StudyDocument {
   format: DocumentFormat;
   encoding: string;
   lastCursorAnchor: AnchorLocation | null;
+  lastOpenedAt?: string | null;
   createdAt: string;
+}
+
+export interface WorkspaceSession {
+  openDocumentIds: string[];
+  activeDocumentId: string | null;
 }
 
 export interface Viewport {

@@ -18,6 +18,7 @@ import type {
   StudyDocument,
   StudyNotebook,
   Viewport,
+  WorkspaceSession,
 } from '@/types/domain';
 
 export interface DroppedDocumentsPayload {
@@ -52,6 +53,9 @@ export interface StudyBackend extends DocumentContentReader {
   onFileDrop(listener: (event: FileDropEvent) => void): () => void;
   listDocuments(): Promise<StudyDocument[]>;
   updateDocumentCursor(documentId: string, anchor: AnchorLocation): Promise<void>;
+  touchDocumentOpened(documentId: string): Promise<StudyDocument>;
+  getWorkspaceSession(): Promise<WorkspaceSession>;
+  saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;
 
   createNotebook(title: string): Promise<StudyNotebook>;
   listNotebooks(): Promise<StudyNotebook[]>;

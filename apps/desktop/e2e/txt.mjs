@@ -74,13 +74,20 @@ export async function txtFlow(page) {
   await page.evaluate(`${tabs()}[0].click()`);
   await page.waitFor(`${visibleScroller}?.scrollTop === 1500`, 'the scroll position to survive');
 
-  // Reopen: close the tab and open the file again, from a clean mount.
+  // Reopen: close the tab and reopen it from the Recent documents list, from a clean mount.
   const before = await page.evaluate(scrollTop);
   assert(before === 1500, `scroll position before closing: ${before}`);
   await page.evaluate(`document.querySelector('[aria-label^="Close sample"]').click()`);
   await page.waitFor(`!${visibleScroller}`, 'the tab to close');
-  // The fake picker cycles through its library back to the text file.
-  await page.openUntil(visibleScroller, 'the text file');
+  await page.clickButton('Recent documents');
+  await page.waitFor(
+    `document.querySelector('[data-testid="recent-documents-menu"]')`,
+    'recent documents menu to open',
+  );
+  await page.evaluate(
+    `[...document.querySelectorAll('[data-testid="recent-document-item"]')].find((b) => b.dataset.documentFormat === 'txt').click()`,
+  );
+  await page.waitFor(visibleScroller, 'the recent text document to reopen');
   await page.waitFor(
     `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
     'reopening at the last position',

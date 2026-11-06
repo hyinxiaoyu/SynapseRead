@@ -221,7 +221,17 @@ pub struct Document {
     pub format: DocumentFormat,
     pub encoding: String,
     pub last_cursor_anchor: Option<AnchorLocation>,
+    #[serde(default)]
+    pub last_opened_at: Option<String>,
     pub created_at: String,
+}
+
+/// Persisted reader tab session across application restarts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspaceSession {
+    pub open_document_ids: Vec<String>,
+    pub active_document_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

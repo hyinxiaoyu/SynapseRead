@@ -47,6 +47,17 @@ export function findSubstringMatches(
 
 const collapseWhitespace = (value: string) => value.replace(/\s+/g, ' ');
 
+function isEditableSearchTarget(target: EventTarget | null): boolean {
+  const element = target instanceof HTMLElement ? target : null;
+  if (!element) return false;
+  if (element.dataset.testid === 'search-input') return false;
+  const tag = element.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || element.isContentEditable) {
+    return true;
+  }
+  return element.closest('[contenteditable="true"], [role="textbox"]') !== null;
+}
+
 /** Context snippet around `[matchStart, matchEnd]` for search result lists. */
 export function buildSearchSnippet(
   text: string,
@@ -250,6 +261,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
         !event.shiftKey &&
         event.key.toLowerCase() === 'f'
       ) {
+        if (isEditableSearchTarget(event.target)) return false;
         event.preventDefault();
         openSearch();
         return true;

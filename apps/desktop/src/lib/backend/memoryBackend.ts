@@ -19,6 +19,7 @@ import {
   type ReadingPreferences,
   type StudyDocument,
   type StudyNotebook,
+  type WorkspaceSession,
 } from '@/types/domain';
 
 /** A file the fake picker can offer, or a loader for one. */
@@ -76,7 +77,13 @@ export function createMemoryBackend({
   const captures = new Map<string, string>();
   const bookmarks = new Map<string, Bookmark>();
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
+  let workspaceSession: WorkspaceSession = { openDocumentIds: [], activeDocumentId: null };
   let picks = 0;
+  let clockSeq = 0;
+  const monotonicNow = () => {
+    clockSeq += 1;
+    return new Date(Date.now() + clockSeq).toISOString();
+  };
 
   const validateAnchor = (anchor: AnchorLocation): void => {
     switch (anchor.format) {
@@ -156,13 +163,18 @@ export function createMemoryBackend({
 
   const registerDocument = (path: string): StudyDocument => {
     const existing = [...documents.values()].find((document) => document.filePath === path);
-    if (existing) return existing;
+    if (existing) {
+      const touched: StudyDocument = { ...existing, lastOpenedAt: monotonicNow() };
+      documents.set(touched.id, touched);
+      return touched;
+    }
     const fileName = path.split('/').pop() ?? path;
     const extension = fileName.includes('.')
       ? (fileName.split('.').pop()?.toLowerCase() ?? '')
       : '';
     const format = FORMAT_BY_EXTENSION[extension];
     if (!format) throw fail('unsupported_format', `unsupported document format: ${extension}`);
+    const timestamp = monotonicNow();
     const document: StudyDocument = {
       id: crypto.randomUUID(),
       title: fileName.replace(/\.[^.]+$/, ''),
@@ -171,7 +183,8 @@ export function createMemoryBackend({
       format,
       encoding: 'utf-8',
       lastCursorAnchor: null,
-      createdAt: now(),
+      lastOpenedAt: timestamp,
+      createdAt: timestamp,
     };
     documents.set(document.id, document);
     return document;
@@ -216,6 +229,38 @@ export function createMemoryBackend({
 
     async updateDocumentCursor(documentId, anchor) {
       require(documents, documentId, 'document').lastCursorAnchor = anchor;
+    },
+
+    async touchDocumentOpened(documentId) {
+      const existing = require(documents, documentId, 'document');
+      const updated: StudyDocument = { ...existing, lastOpenedAt: monotonicNow() };
+      documents.set(documentId, updated);
+      return updated;
+    },
+
+    async getWorkspaceSession() {
+      const openDocumentIds = workspaceSession.openDocumentIds.filter((id) => documents.has(id));
+      const activeDocumentId =
+        workspaceSession.activeDocumentId &&
+        openDocumentIds.includes(workspaceSession.activeDocumentId)
+          ? workspaceSession.activeDocumentId
+          : (openDocumentIds.at(-1) ?? null);
+      return { openDocumentIds, activeDocumentId };
+    },
+
+    async saveWorkspaceSession(session) {
+      const openDocumentIds: string[] = [];
+      for (const id of session.openDocumentIds) {
+        if (!openDocumentIds.includes(id) && documents.has(id)) {
+          openDocumentIds.push(id);
+        }
+      }
+      const activeDocumentId =
+        session.activeDocumentId && openDocumentIds.includes(session.activeDocumentId)
+          ? session.activeDocumentId
+          : (openDocumentIds.at(-1) ?? null);
+      workspaceSession = { openDocumentIds, activeDocumentId };
+      return { ...workspaceSession };
     },
 
     async createNotebook(title) {

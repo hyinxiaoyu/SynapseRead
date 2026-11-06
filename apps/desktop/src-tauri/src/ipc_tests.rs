@@ -697,3 +697,48 @@ fn independent_annotations_round_trip_and_preserve_shared_cards() {
     );
     assert_eq!(graph_after["annotations"].as_array().unwrap().len(), 0);
 }
+
+#[test]
+fn workspace_session_and_touch_document_opened_persist_across_relaunch() {
+    let h = Harness::new();
+    let first = h.register("first.pdf", "pdf bytes 1");
+    let second = h.register("second.txt", "txt bytes 2");
+    assert!(first["lastOpenedAt"].is_string());
+
+    let touched = h.ok(
+        "touch_document_opened",
+        json!({ "documentId": first["id"] }),
+    );
+    assert!(touched["lastOpenedAt"].is_string());
+
+    let saved = h.ok(
+        "save_workspace_session",
+        json!({
+            "session": {
+                "openDocumentIds": [first["id"], second["id"]],
+                "activeDocumentId": second["id"],
+            }
+        }),
+    );
+    assert_eq!(
+        saved,
+        json!({
+            "openDocumentIds": [first["id"], second["id"]],
+            "activeDocumentId": second["id"],
+        })
+    );
+
+    let first_id = first["id"].clone();
+    let second_id = second["id"].clone();
+    let Harness { dir, app, .. } = h;
+    drop(app);
+
+    let next = Harness::in_dir(dir);
+    assert_eq!(
+        next.ok("get_workspace_session", json!({})),
+        json!({
+            "openDocumentIds": [first_id, second_id.clone()],
+            "activeDocumentId": second_id,
+        })
+    );
+}

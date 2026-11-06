@@ -11,6 +11,7 @@ import {
   selectBookmarks,
   selectDocumentAnnotations,
   selectHighlights,
+  selectRecentDocuments,
 } from './useStudySyncStore';
 
 const pdfAnchor = { format: 'pdf', pageIndex: 2, rects: [{ x: 0, y: 0, width: 0.5, height: 0.1 }] };
@@ -614,6 +615,57 @@ describe('useStudySyncStore', () => {
         note: 'Updated note text',
       });
       expect(selectDocumentAnnotations(state().annotations, documentId)).toHaveLength(1);
+    });
+  });
+
+  describe('recent documents and workspace session restoration', () => {
+    it('orders recent documents by lastOpenedAt and reopens closed recent documents', async () => {
+      const firstId = await openDocument();
+      const secondId = await openDocument();
+      expect(state().openDocumentIds).toEqual([firstId, secondId]);
+      expect(state().activeDocumentId).toBe(secondId);
+
+      // Record cursor on first document and close both tabs.
+      state().reportCursor(firstId, txtAnchor);
+      state().closeDocument(firstId);
+      state().closeDocument(secondId);
+      expect(state().openDocumentIds).toEqual([]);
+      expect(state().activeDocumentId).toBeNull();
+
+      // Reopen first document from the recent list: it moves to the top of recent documents and preserves cursor.
+      await state().reopenRecentDocument(firstId);
+      expect(state().openDocumentIds).toEqual([firstId]);
+      expect(state().activeDocumentId).toBe(firstId);
+      const recent = selectRecentDocuments(state().documents);
+      expect(recent[0]?.id).toBe(firstId);
+      expect(recent[0]?.lastCursorAnchor).toEqual(txtAnchor);
+      expect(recent[0]?.lastOpenedAt).toBeTruthy();
+    });
+
+    it('restores open tabs, active document, and reading preferences on restart while ignoring unknown document ids', async () => {
+      const firstId = await openDocument();
+      const secondId = await openDocument();
+      state().activateDocument(firstId);
+      await state().updateReadingPreferences({
+        theme: 'dark',
+        fontSize: 130,
+      });
+
+      // Inject an unknown document id into the saved session to verify defensive filtering on restart.
+      await backend.saveWorkspaceSession({
+        openDocumentIds: [firstId, 'deleted-doc-id', secondId],
+        activeDocumentId: firstId,
+      });
+
+      const restarted = createStudySyncStore(backend);
+      await restarted.getState().initialize();
+
+      expect(restarted.getState().openDocumentIds).toEqual([firstId, secondId]);
+      expect(restarted.getState().activeDocumentId).toBe(firstId);
+      expect(restarted.getState().readingPreferences).toMatchObject({
+        theme: 'dark',
+        fontSize: 130,
+      });
     });
   });
 });

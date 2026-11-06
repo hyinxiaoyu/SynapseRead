@@ -1067,7 +1067,9 @@ function PdfPages({
     }
     if (sizes.length <= pageIndex) return;
     setCurrentPageIndex(pageIndex);
-    virtualizer.scrollToOffset(offsetWithin(pageIndex, initialCursor.rects[0]?.y ?? 0));
+    const nextTop = offsetWithin(pageIndex, initialCursor.rects[0]?.y ?? 0);
+    virtualizer.scrollToOffset(nextTop);
+    lastScrollTop.current = scrollRef.current?.scrollTop ?? nextTop;
     restored.current = true;
   }, [engine, initialCursor, offsetWithin, sizes, virtualizer, width]);
 

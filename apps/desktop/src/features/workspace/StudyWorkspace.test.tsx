@@ -32,6 +32,9 @@ function FakeViewer({
     const timer = window.setTimeout(() => onJumpHandled(jumpRequest.nonce), 1000);
     return () => window.clearTimeout(timer);
   }, [jumpRequest, onJumpHandled]);
+  if (document.title.includes('corrupted-crash')) {
+    throw new Error('corrupted document stream');
+  }
   return (
     <div>
       <h2>{document.title}</h2>
@@ -74,6 +77,9 @@ const initialState = useStudySyncStore.getState();
 
 describe('StudyWorkspace', () => {
   beforeEach(() => {
+    for (const id of [...useStudySyncStore.getState().openDocumentIds]) {
+      useStudySyncStore.getState().closeDocument(id);
+    }
     useStudySyncStore.setState(initialState, true);
   });
 
@@ -217,5 +223,96 @@ describe('StudyWorkspace', () => {
       'true',
     );
     expect(screen.getByRole('heading', { name: 'dropped-note' })).toBeInTheDocument();
+  });
+
+  it('lists recent documents with continue-reading progress and reopens them on click', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    const firstTab = await screen.findByRole('tab');
+    const firstTitle = firstTab.textContent ?? '';
+    const firstDocId = useStudySyncStore.getState().activeDocumentId as string;
+
+    act(() => {
+      useStudySyncStore.getState().reportCursor(firstDocId, {
+        format: 'txt',
+        startByteOffset: 120,
+        endByteOffset: 160,
+        lineIndex: 14,
+      });
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: `Close ${firstTitle}` }));
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+
+    const emptyRecent = screen.getByTestId('empty-state-recent-documents');
+    expect(emptyRecent).toHaveTextContent(firstTitle);
+    expect(emptyRecent).toHaveTextContent('Continue reading · Line 15');
+
+    const recentButtons = screen.getAllByTestId('recent-document-item');
+    const targetButton = recentButtons.find((btn) => btn.textContent?.includes(firstTitle));
+    expect(targetButton).toBeDefined();
+    fireEvent.click(targetButton as HTMLElement);
+
+    expect(await screen.findByRole('tab', { name: firstTitle })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+  });
+
+  it('isolates a broken document tab behind an error boundary without blocking other open tabs', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await renderReady();
+      const main = screen.getByRole('main');
+      const healthy = new File(['healthy content'], 'healthy-doc.txt', { type: 'text/plain' });
+      const broken = new File(['corrupt'], 'corrupted-crash.txt', { type: 'text/plain' });
+
+      fireEvent.drop(main, {
+        dataTransfer: { files: [healthy, broken], types: ['Files'] },
+      });
+
+      const fallback = await screen.findByTestId('broken-document-fallback');
+      expect(fallback).toHaveTextContent('Could not render corrupted-crash');
+      expect(fallback).toHaveTextContent('corrupted document stream');
+
+      // Switching to the healthy tab works normally despite the broken sibling tab.
+      fireEvent.click(screen.getByRole('tab', { name: 'healthy-doc' }));
+      expect(screen.getByRole('heading', { name: 'healthy-doc' })).toBeVisible();
+
+      // Switch back to the broken tab and close it via the fallback button.
+      fireEvent.click(screen.getByRole('tab', { name: 'corrupted-crash' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Close tab' }));
+      await waitFor(() =>
+        expect(screen.queryByRole('tab', { name: 'corrupted-crash' })).not.toBeInTheDocument(),
+      );
+      expect(screen.getByRole('heading', { name: 'healthy-doc' })).toBeVisible();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('supports Cmd/Ctrl+O and Cmd/Ctrl+W shortcuts and ignores them inside editable fields', async () => {
+    await renderReady();
+    expect(screen.queryByRole('tab')).not.toBeInTheDocument();
+
+    // Cmd+O opens a document.
+    fireEvent.keyDown(window, { key: 'o', metaKey: true });
+    const tab = await screen.findByRole('tab');
+    expect(tab).toBeInTheDocument();
+
+    // Open a selection and excerpt so the card inspector shows editable inputs.
+    fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+    const titleInput = await screen.findByLabelText('Title');
+
+    // Pressing Cmd+W or Ctrl+O inside an input must be ignored by workspace shortcuts.
+    const tabCountBefore = screen.getAllByRole('tab').length;
+    fireEvent.keyDown(titleInput, { key: 'w', metaKey: true });
+    fireEvent.keyDown(titleInput, { key: 'o', ctrlKey: true });
+    expect(screen.getAllByRole('tab')).toHaveLength(tabCountBefore);
+
+    // Pressing Cmd+W outside editable fields closes the active document tab.
+    fireEvent.keyDown(window, { key: 'w', metaKey: true });
+    await waitFor(() => expect(screen.queryByRole('tab')).not.toBeInTheDocument());
   });
 });
