@@ -1,5 +1,5 @@
 import { Network, PanelRight, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { type DragEvent, useEffect, useRef, useState } from 'react';
 import { usePanelRef } from 'react-resizable-panels';
 
 import { Button } from '@/components/ui/button';
@@ -9,19 +9,27 @@ import { MindMapPane } from '@/features/mindmap/MindMapPane';
 import { ReaderPane } from '@/features/reader/ReaderPane';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 
+const isFileDrag = (event: DragEvent): boolean =>
+  Array.from(event.dataTransfer?.types ?? []).includes('Files') ||
+  (event.dataTransfer?.files?.length ?? 0) > 0;
+
 /** Reader | MindMap | Inspector. MindMap and Inspector start collapsed for full-screen reading. */
 export function StudyWorkspace() {
   const status = useStudySyncStore((state) => state.status);
   const error = useStudySyncStore((state) => state.error);
   const backendKind = useStudySyncStore((state) => state.backendKind);
   const notebookTitle = useStudySyncStore((state) => state.notebook?.title);
+  const isDraggingFile = useStudySyncStore((state) => state.isDraggingFile);
   const initialize = useStudySyncStore((state) => state.initialize);
   const dismissError = useStudySyncStore((state) => state.dismissError);
+  const dropFiles = useStudySyncStore((state) => state.dropFiles);
 
   const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
+  const dragDepthRef = useRef(0);
   const [mindMapOpen, setMindMapOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [htmlDragging, setHtmlDragging] = useState(false);
 
   useEffect(() => {
     void initialize();
@@ -51,8 +59,60 @@ export function StudyWorkspace() {
     }
   };
 
+  const handleDragEnter = (event: DragEvent<HTMLElement>) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setHtmlDragging(true);
+  };
+
+  const handleDragOver = (event: DragEvent<HTMLElement>) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  };
+
+  const handleDragLeave = (event: DragEvent<HTMLElement>) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setHtmlDragging(false);
+    }
+  };
+
+  const handleDrop = (event: DragEvent<HTMLElement>) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setHtmlDragging(false);
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (files.length > 0) {
+      void dropFiles(files);
+    }
+  };
+
+  const showDropOverlay = isDraggingFile || htmlDragging;
+
   return (
-    <main className="flex h-full flex-col">
+    <main
+      className="relative flex h-full flex-col"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {showDropOverlay && (
+        <div
+          role="status"
+          aria-label="Drop files to open"
+          className="pointer-events-none absolute inset-2 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-background/80 text-sm font-medium text-foreground backdrop-blur-xs"
+        >
+          Drop PDF, EPUB, TXT, or Markdown files to open
+        </div>
+      )}
       <header className="flex h-10 shrink-0 items-center gap-2 border-b px-3 text-sm">
         <span className="font-semibold">SynapseRead</span>
         {notebookTitle && <span className="text-muted-foreground">{notebookTitle}</span>}

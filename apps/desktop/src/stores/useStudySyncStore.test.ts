@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
-import type { StudyBackend } from '@/lib/backend/types';
+import type { FileDropEvent, StudyBackend } from '@/lib/backend/types';
 import type { ReaderSelection, TxtAnchor } from '@/types/domain';
 
 import {
@@ -303,6 +303,73 @@ describe('useStudySyncStore', () => {
       select(first);
       state().closeDocument(first);
       expect(state().selection).toBeNull();
+    });
+
+    it('opens dropped files, activates the latest one, and avoids duplicate tabs', async () => {
+      const first = new File(['hello'], 'first.txt', { type: 'text/plain' });
+      const second = new File(['world'], 'second.md', { type: 'text/markdown' });
+
+      await state().dropFiles([first, second]);
+      expect(state().documents.map((d) => d.title)).toEqual(['first', 'second']);
+      const [firstId, secondId] = state().openDocumentIds;
+      expect(state().openDocumentIds).toHaveLength(2);
+      expect(state().activeDocumentId).toBe(secondId);
+
+      await state().dropFiles([first]);
+      expect(state().openDocumentIds).toEqual([firstId, secondId]);
+      expect(state().activeDocumentId).toBe(firstId);
+    });
+
+    it('reports an error when a dropped file has an unsupported extension', async () => {
+      const valid = new File(['hello'], 'notes.txt', { type: 'text/plain' });
+      const invalid = new File(['archive'], 'archive.zip', { type: 'application/zip' });
+
+      await state().dropFiles([valid, invalid]);
+
+      expect(state().documents.map((d) => d.title)).toEqual(['notes']);
+      expect(state().openDocumentIds).toHaveLength(1);
+      expect(state().error).toMatch(/unsupported document format: zip/);
+    });
+
+    it('tracks native window drag state and opens documents from onFileDrop events', async () => {
+      let emitDrop: ((event: FileDropEvent) => void) | undefined;
+      const customBackend: StudyBackend = {
+        ...backend,
+        onFileDrop(listener) {
+          emitDrop = listener;
+          return () => undefined;
+        },
+      };
+      const nativeStore = createStudySyncStore(customBackend);
+      await nativeStore.getState().initialize();
+
+      emitDrop?.({ type: 'enter' });
+      expect(nativeStore.getState().isDraggingFile).toBe(true);
+
+      emitDrop?.({ type: 'leave' });
+      expect(nativeStore.getState().isDraggingFile).toBe(false);
+
+      emitDrop?.({ type: 'enter' });
+      emitDrop?.({
+        type: 'drop',
+        documents: [
+          {
+            id: 'doc-native-1',
+            title: 'native-book',
+            filePath: '/native/native-book.pdf',
+            fileHash: 'hash-1',
+            format: 'pdf',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        error: null,
+      });
+
+      expect(nativeStore.getState().isDraggingFile).toBe(false);
+      expect(nativeStore.getState().activeDocumentId).toBe('doc-native-1');
+      expect(nativeStore.getState().openDocumentIds).toEqual(['doc-native-1']);
     });
   });
 

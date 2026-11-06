@@ -38,6 +38,7 @@ export interface StudySyncState {
   documents: StudyDocument[];
   openDocumentIds: string[];
   activeDocumentId: string | null;
+  isDraggingFile: boolean;
 
   notebook: StudyNotebook | null;
   annotations: Annotation[];
@@ -56,6 +57,7 @@ export interface StudySyncState {
   dismissError(): void;
 
   openDocument(): Promise<void>;
+  dropFiles(files: readonly File[]): Promise<void>;
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
   reportCursor(documentId: string, anchor: StudyDocument['lastCursorAnchor']): void;
@@ -121,6 +123,38 @@ export function createStudySyncStore(backend: StudyBackend) {
       }
     };
 
+    const applyOpenedDocuments = (opened: readonly StudyDocument[], error?: unknown) => {
+      set((state) => {
+        let documents = state.documents;
+        let openDocumentIds = state.openDocumentIds;
+        for (const document of opened) {
+          documents = [...documents.filter((d) => d.id !== document.id), document];
+          if (!openDocumentIds.includes(document.id)) {
+            openDocumentIds = [...openDocumentIds, document.id];
+          }
+        }
+        const lastOpened = opened.at(-1);
+        return {
+          documents,
+          openDocumentIds,
+          activeDocumentId: lastOpened ? lastOpened.id : state.activeDocumentId,
+          selection: opened.length > 0 ? null : state.selection,
+          ...(error !== undefined && error !== null ? { error: describeError(error) } : {}),
+        };
+      });
+    };
+
+    backend.onFileDrop((event) => {
+      if (event.type === 'enter') {
+        set({ isDraggingFile: true });
+      } else if (event.type === 'leave') {
+        set({ isDraggingFile: false });
+      } else {
+        set({ isDraggingFile: false });
+        applyOpenedDocuments(event.documents, event.error);
+      }
+    });
+
     return {
       status: 'idle',
       error: null,
@@ -133,6 +167,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       documents: [],
       openDocumentIds: [],
       activeDocumentId: null,
+      isDraggingFile: false,
       notebook: null,
       annotations: [],
       cards: [],
@@ -165,14 +200,15 @@ export function createStudySyncStore(backend: StudyBackend) {
         await guarded(async () => {
           const document = await backend.pickDocument();
           if (document === null) return;
-          set((state) => ({
-            documents: [...state.documents.filter((d) => d.id !== document.id), document],
-            openDocumentIds: state.openDocumentIds.includes(document.id)
-              ? state.openDocumentIds
-              : [...state.openDocumentIds, document.id],
-            activeDocumentId: document.id,
-            selection: null,
-          }));
+          applyOpenedDocuments([document]);
+        });
+      },
+
+      async dropFiles(files) {
+        if (files.length === 0) return;
+        await guarded(async () => {
+          const { documents, error } = await backend.dropFiles(files);
+          applyOpenedDocuments(documents, error);
         });
       },
 

@@ -59,7 +59,8 @@ export function createMemoryBackend({
   library = PREVIEW_LIBRARY,
   chunkBytes = DEFAULT_CHUNK_BYTES,
 }: MemoryBackendOptions = {}): StudyBackend {
-  const paths = Object.keys(library);
+  const files: Record<string, MemoryFile> = { ...library };
+  const paths = Object.keys(files);
   const documents = new Map<string, StudyDocument>();
   const notebooks = new Map<string, StudyNotebook>();
   const annotations = new Map<string, Annotation>();
@@ -82,7 +83,9 @@ export function createMemoryBackend({
     const existing = [...documents.values()].find((document) => document.filePath === path);
     if (existing) return existing;
     const fileName = path.split('/').pop() ?? path;
-    const extension = fileName.split('.').pop()?.toLowerCase() ?? '';
+    const extension = fileName.includes('.')
+      ? (fileName.split('.').pop()?.toLowerCase() ?? '')
+      : '';
     const format = FORMAT_BY_EXTENSION[extension];
     if (!format) throw fail('unsupported_format', `unsupported document format: ${extension}`);
     const document: StudyDocument = {
@@ -100,7 +103,7 @@ export function createMemoryBackend({
   };
 
   const readFile = async (path: string): Promise<Uint8Array> => {
-    const file = library[path];
+    const file = files[path];
     if (file === undefined) throw fail('io', `no such file: ${path}`);
     return typeof file === 'function' ? file() : file;
   };
@@ -114,6 +117,25 @@ export function createMemoryBackend({
       picks += 1;
       return registerDocument(path);
     },
+
+    async dropFiles(droppedFiles) {
+      const opened: StudyDocument[] = [];
+      let error: IpcError | null = null;
+      for (const file of droppedFiles) {
+        const path = `/dropped/${file.name}`;
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          const document = registerDocument(path);
+          files[path] = bytes;
+          opened.push(document);
+        } catch (err) {
+          error ??= err as IpcError;
+        }
+      }
+      return { documents: opened, error };
+    },
+
+    onFileDrop: () => () => undefined,
 
     listDocuments: async () => [...documents.values()],
 

@@ -1,6 +1,7 @@
 import { Channel, convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen, TauriEvent, type UnlistenFn } from '@tauri-apps/api/event';
 
-import type { StudyBackend } from '@/lib/backend/types';
+import type { DroppedDocumentsPayload, StudyBackend } from '@/lib/backend/types';
 import type {
   CreatedExcerpt,
   MindMapEdge,
@@ -11,11 +12,43 @@ import type {
   TextChunk,
 } from '@/types/domain';
 
+const DOCUMENTS_DROPPED_EVENT = 'synapse://documents-dropped';
+
 export function createTauriBackend(): StudyBackend {
   return {
     kind: 'tauri',
 
     pickDocument: () => invoke<StudyDocument | null>('pick_document'),
+    dropFiles: async () => ({ documents: [], error: null }),
+    onFileDrop(listener) {
+      let disposed = false;
+      const unlisteners: UnlistenFn[] = [];
+      const bind = <T>(event: string, handler: (payload: T) => void) => {
+        void listen<T>(event, (target) => {
+          if (!disposed) handler(target.payload);
+        }).then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            unlisteners.push(unlisten);
+          }
+        });
+      };
+      bind(TauriEvent.DRAG_ENTER, () => listener({ type: 'enter' }));
+      bind(TauriEvent.DRAG_LEAVE, () => listener({ type: 'leave' }));
+      bind(TauriEvent.DRAG_DROP, () => listener({ type: 'leave' }));
+      bind<DroppedDocumentsPayload>(DOCUMENTS_DROPPED_EVENT, (payload) => {
+        listener({
+          type: 'drop',
+          documents: payload.documents,
+          error: payload.error,
+        });
+      });
+      return () => {
+        disposed = true;
+        for (const unlisten of unlisteners) unlisten();
+      };
+    },
     listDocuments: () => invoke<StudyDocument[]>('list_documents'),
     updateDocumentCursor: (documentId, anchor) =>
       invoke('update_document_cursor', { documentId, anchor }),

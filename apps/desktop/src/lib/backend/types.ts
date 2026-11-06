@@ -4,6 +4,7 @@ import type {
   CreatedExcerpt,
   CreateExcerptInput,
   DocumentContentReader,
+  IpcError,
   MindMapEdge,
   NodeLayoutPatch,
   NoteCard,
@@ -12,6 +13,14 @@ import type {
   StudyNotebook,
   Viewport,
 } from '@/types/domain';
+
+export interface DroppedDocumentsPayload {
+  documents: StudyDocument[];
+  error: IpcError | null;
+}
+
+export type FileDropEvent =
+  { type: 'enter' } | { type: 'leave' } | ({ type: 'drop' } & DroppedDocumentsPayload);
 
 /**
  * Everything the UI needs from the host. Components and stores depend on this
@@ -27,6 +36,14 @@ export interface StudyBackend extends DocumentContentReader {
    * The UI never handles a path: see `docs/adr/0001-path-scope.md`.
    */
   pickDocument(): Promise<StudyDocument | null>;
+  /**
+   * Registers files dropped via HTML5 drag-and-drop in the browser/memory
+   * backend. In Tauri, native OS file drops are handled in Rust and delivered
+   * through `onFileDrop`.
+   */
+  dropFiles(files: readonly File[]): Promise<DroppedDocumentsPayload>;
+  /** Subscribes to native window file-drag and drop events. */
+  onFileDrop(listener: (event: FileDropEvent) => void): () => void;
   listDocuments(): Promise<StudyDocument[]>;
   updateDocumentCursor(documentId: string, anchor: AnchorLocation): Promise<void>;
 

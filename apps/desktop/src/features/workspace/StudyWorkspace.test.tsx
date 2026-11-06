@@ -196,4 +196,26 @@ describe('StudyWorkspace', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss error' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
+
+  it('shows a drop indicator on file drag and opens dropped files automatically', async () => {
+    await renderReady();
+    const main = screen.getByRole('main');
+    const file = new File(['dropped text content'], 'dropped-note.txt', { type: 'text/plain' });
+
+    fireEvent.dragEnter(main, {
+      dataTransfer: { files: [file], types: ['Files'] },
+    });
+    expect(screen.getByRole('status', { name: 'Drop files to open' })).toBeInTheDocument();
+
+    fireEvent.drop(main, {
+      dataTransfer: { files: [file], types: ['Files'] },
+    });
+    expect(screen.queryByRole('status', { name: 'Drop files to open' })).not.toBeInTheDocument();
+
+    expect(await screen.findByRole('tab', { name: 'dropped-note' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByRole('heading', { name: 'dropped-note' })).toBeInTheDocument();
+  });
 });

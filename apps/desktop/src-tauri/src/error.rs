@@ -2,7 +2,7 @@ use serde::Serialize;
 use synapse_core::CoreError;
 
 /// Error shape received by the frontend: see `IpcError` in `types/domain.ts`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IpcError {
     code: &'static str,
     message: String,

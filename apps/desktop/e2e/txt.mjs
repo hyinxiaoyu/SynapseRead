@@ -85,4 +85,21 @@ export async function txtFlow(page) {
     `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
     'reopening at the last position',
   );
+
+  // Drag and drop a file onto the workspace and verify it opens and renders automatically.
+  await page.evaluate(`(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(['Dropped E2E document content'], 'dropped-e2e.txt', { type: 'text/plain' }));
+    const main = document.querySelector('main');
+    main.dispatchEvent(new DragEvent('dragenter', { bubbles: true, cancelable: true, dataTransfer: dt }));
+    main.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+  })()`);
+  await page.waitFor(
+    `[...document.querySelectorAll('[role="tab"]')].some((t) => t.textContent.includes('dropped-e2e') && t.getAttribute('aria-selected') === 'true')`,
+    'the dropped file tab to open and activate',
+  );
+  await page.waitFor(
+    `[...document.querySelectorAll(${JSON.stringify(SEGMENT)})].some((e) => e.textContent.includes('Dropped E2E document content'))`,
+    'the dropped file content to render',
+  );
 }

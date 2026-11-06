@@ -43,6 +43,16 @@ pub fn run() {
             app.manage(state);
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                let app = window.app_handle().clone();
+                let paths = paths.clone();
+                tauri::async_runtime::spawn_blocking(move || {
+                    let payload = access::register_dropped_paths(&app, &paths);
+                    let _ = tauri::Emitter::emit(&app, access::DOCUMENTS_DROPPED_EVENT, &payload);
+                });
+            }
+        })
         .run(tauri::generate_context!())
         .expect("failed to run SynapseRead");
 }

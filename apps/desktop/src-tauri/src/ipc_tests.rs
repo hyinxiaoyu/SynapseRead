@@ -12,7 +12,7 @@ use tauri::test::{
 use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, WebviewWindow, WebviewWindowBuilder};
 
-use crate::access::{grant_all, register_and_grant};
+use crate::access::{grant_all, register_and_grant, register_dropped_paths};
 use crate::state::AppState;
 
 /// Where bundled app content is served from on the mock runtime.
@@ -270,6 +270,37 @@ fn asset_scope_is_exactly_the_registered_documents() {
     assert!(h.asset_allowed(&h.dir.path().join("book.pdf")));
     assert!(!h.asset_allowed(&sibling));
     assert!(!h.asset_allowed(&h.dir.path().join("test.sqlite3")));
+}
+
+#[test]
+fn dropped_paths_register_supported_files_and_report_errors() {
+    let h = Harness::new();
+    let pdf = h.dir.path().join("dropped.pdf");
+    let txt = h.dir.path().join("notes.txt");
+    let bad = h.dir.path().join("archive.zip");
+    std::fs::write(&pdf, "pdf bytes").unwrap();
+    std::fs::write(&txt, "plain text").unwrap();
+    std::fs::write(&bad, "zip bytes").unwrap();
+
+    let payload = serde_json::to_value(register_dropped_paths(
+        h.app.handle(),
+        &[pdf.clone(), bad.clone(), txt.clone()],
+    ))
+    .unwrap();
+
+    let documents = payload["documents"].as_array().unwrap();
+    assert_eq!(documents.len(), 2);
+    assert_eq!(documents[0]["title"], "dropped");
+    assert_eq!(documents[1]["title"], "notes");
+    assert_eq!(payload["error"]["code"], "unsupported_format");
+
+    assert!(h.asset_allowed(&pdf));
+    assert!(h.asset_allowed(&txt));
+    assert!(!h.asset_allowed(&bad));
+    assert_eq!(
+        h.ok("list_documents", json!({})).as_array().unwrap().len(),
+        2
+    );
 }
 
 #[test]
