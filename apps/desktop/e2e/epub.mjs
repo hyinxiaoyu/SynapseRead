@@ -176,6 +176,16 @@ export async function epubFlow(page) {
     (await page.evaluate(`${visibleViewer}.dataset.readingMode`)) === 'spread',
     'defaults to two-page spread mode',
   );
+  // Collapse MindMap and verify the EPUB host expands across the full reader pane without wide side margins.
+  await page.clickButton('Hide MindMap');
+  await page.waitFor(
+    `(() => {
+      const reader = document.getElementById('reader').getBoundingClientRect().width;
+      const host = ${visibleHost}.getBoundingClientRect().width;
+      return reader >= window.innerWidth - 4 && host >= reader - 32;
+    })()`,
+    'EPUB host to fill the full-screen reader pane in spread mode',
+  );
   await page.clickButton('Single page');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'paged'`, 'single-page mode');
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in single-page mode');

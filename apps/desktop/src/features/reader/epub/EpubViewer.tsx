@@ -354,21 +354,21 @@ export function EpubViewer({
           That excerpt could not be found in this book. The file may have changed.
         </p>
       )}
-      <div className="relative flex min-h-0 flex-1 justify-center overflow-hidden bg-muted/40 px-4 py-3">
+      <div className="relative flex min-h-0 flex-1 justify-center overflow-hidden bg-muted/30 px-2 py-1.5">
         <div
           ref={hostRef}
           data-testid="epub-host"
           className={cn(
             'relative h-full w-full overflow-hidden rounded-sm bg-[#fbfaf7] shadow-sm ring-1 ring-black/5',
-            readingMode === 'spread' && 'max-w-6xl',
-            readingMode === 'paged' && 'max-w-3xl',
-            readingMode === 'scroll' && 'max-w-4xl',
+            readingMode === 'spread' && 'max-w-none',
+            readingMode === 'paged' && 'max-w-6xl',
+            readingMode === 'scroll' && 'max-w-7xl',
           )}
         />
         {readingMode === 'spread' && (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-y-5 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
+            className="pointer-events-none absolute inset-y-3 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
           />
         )}
       </div>

@@ -324,7 +324,9 @@ describe('EpubViewer', () => {
     await opened();
 
     const viewer = screen.getByTestId('epub-viewer');
+    const host = screen.getByTestId('epub-host');
     expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
+    expect(host).toHaveClass('max-w-none');
     expect(screen.getByRole('button', { name: 'Two pages' })).toHaveAttribute(
       'aria-pressed',
       'true',
@@ -332,10 +334,12 @@ describe('EpubViewer', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Single page' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'paged');
+    expect(host).toHaveClass('max-w-6xl');
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('paged');
 
     fireEvent.click(screen.getByRole('button', { name: 'Scroll' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
+    expect(host).toHaveClass('max-w-7xl');
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('scroll');
   });
 

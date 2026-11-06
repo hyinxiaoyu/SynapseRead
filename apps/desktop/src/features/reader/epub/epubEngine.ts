@@ -39,6 +39,14 @@ export interface EpubHandle {
 }
 
 const MIN_SPREAD_WIDTH = 640;
+/**
+ * Default column/page gutter in pixels for paginated EPUB layouts.
+ * epub.js otherwise defaults to `Math.floor(width / 12)` (~150px+ on wide viewports),
+ * which wastes horizontal screen space in full-screen reading.
+ */
+const PAGINATED_GAP_PX = 48;
+/** Horizontal padding inside scrolled chapters (epub.js defaults to `width / 12` per side). */
+const SCROLLED_HORIZONTAL_PADDING = 'clamp(24px, 4vw, 56px)';
 
 const MODE_LAYOUT: Record<
   EpubReadingMode,
@@ -53,6 +61,9 @@ const BOOK_TYPOGRAPHY_CSS = `
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
+}
+body.epubjs-scrolled {
+  padding: 24px ${SCROLLED_HORIZONTAL_PADDING} !important;
 }
 body {
   color: #1c1917;
@@ -144,16 +155,18 @@ export async function openEpubDocument(
     height: '100%',
     spread: initialLayout.spread,
     minSpreadWidth: MIN_SPREAD_WIDTH,
+    gap: PAGINATED_GAP_PX,
     // Without this, WebKit never fires the listeners epub.js needs: see
     // `docs/adr/0005-epub-sandbox.md`, which also covers why it is safe here.
     allowScriptedContent: true,
-  });
+  } as Parameters<typeof book.renderTo>[1] & { gap: number });
 
   let selectionListener: (selection: EpubSelection | null) => void = () => undefined;
   let locationListener: (location: EpubLocation) => void = () => undefined;
   let keyDownListener: (event: KeyboardEvent) => void = () => undefined;
 
   rendition.hooks.content.register((contents: Contents) => {
+    contents.document.body?.classList.toggle('epubjs-scrolled', currentMode === 'scroll');
     // `selected` only reports new selections, not one that has been cleared.
     contents.document.addEventListener('selectionchange', () => {
       const selection = contents.window.getSelection();
