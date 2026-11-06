@@ -102,4 +102,16 @@ export async function txtFlow(page) {
     `[...document.querySelectorAll(${JSON.stringify(SEGMENT)})].some((e) => e.textContent.includes('Dropped E2E document content'))`,
     'the dropped file content to render',
   );
+
+  // Reading appearance controls in TXT viewer.
+  const visibleTxtViewer = `[...document.querySelectorAll('[data-testid="txt-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `${visibleTxtViewer}.querySelector('[data-testid="reading-preferences-bar"]')`,
+    'TXT reading preferences bar',
+  );
+  await page.clickButton('Dark');
+  await page.waitFor(`${visibleTxtViewer}.dataset.readingTheme === 'dark'`, 'TXT dark theme');
+  await page.clickButton('Light');
+  await page.waitFor(`${visibleTxtViewer}.dataset.readingTheme === 'light'`, 'TXT light theme');
 }

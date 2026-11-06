@@ -11,13 +11,16 @@ use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
     AnchorLocation, Annotation, CardPatch, CreateExcerptInput, CreatedExcerpt, Document,
     DocumentFormat, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph,
-    StudyNotebook, Viewport,
+    ReadingPreferences, StudyNotebook, Viewport,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
 
 /// Ordered and append-only: a migration's position is its schema version.
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_reading_preferences.sql"),
+];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
 
@@ -439,6 +442,37 @@ impl Database {
             .execute("DELETE FROM mindmap_edges WHERE id = ?1", [edge_id])?;
         expect_changed(changed, "edge", edge_id)
     }
+
+    // ---- Reading Preferences ---------------------------------------------
+
+    pub fn get_reading_preferences(&self) -> CoreResult<ReadingPreferences> {
+        let prefs: Option<ReadingPreferences> = self
+            .conn
+            .query_row(
+                "SELECT preferences_json FROM reading_preferences WHERE id = 1",
+                [],
+                |row| json_column(row, 0),
+            )
+            .optional()?;
+        Ok(prefs.unwrap_or_default())
+    }
+
+    pub fn save_reading_preferences(
+        &self,
+        preferences: &ReadingPreferences,
+    ) -> CoreResult<ReadingPreferences> {
+        preferences.validate()?;
+        let json = serde_json::to_string(preferences)?;
+        self.conn.execute(
+            "INSERT INTO reading_preferences (id, preferences_json, updated_at)
+             VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+             ON CONFLICT (id) DO UPDATE SET
+                 preferences_json = excluded.preferences_json,
+                 updated_at = excluded.updated_at",
+            params![json],
+        )?;
+        self.get_reading_preferences()
+    }
 }
 
 fn migrate(conn: &mut Connection) -> CoreResult<()> {
@@ -789,6 +823,10 @@ mod tests {
                     "target_node_id",
                     "label",
                 ],
+            ),
+            (
+                "reading_preferences",
+                &["id", "preferences_json", "updated_at"],
             ),
         ];
         for (table, columns) in expected {
@@ -1266,6 +1304,32 @@ mod tests {
         assert!(matches!(
             db.load_notebook_graph("missing"),
             Err(CoreError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn reading_preferences_round_trip_and_validate() {
+        let db = Database::open_in_memory().unwrap();
+        let default_prefs = db.get_reading_preferences().unwrap();
+        assert_eq!(default_prefs, ReadingPreferences::default());
+
+        let updated = ReadingPreferences {
+            theme: crate::domain::ReadingTheme::Sepia,
+            font_family: crate::domain::ReadingFontFamily::Sans,
+            font_size: 125,
+            line_spacing: 1.9,
+            reading_width: crate::domain::ReadingWidth::Wide,
+            epub_reading_mode: crate::domain::EpubReadingMode::Scroll,
+        };
+        let saved = db.save_reading_preferences(&updated).unwrap();
+        assert_eq!(saved, updated);
+        assert_eq!(db.get_reading_preferences().unwrap(), updated);
+
+        let mut invalid = updated;
+        invalid.font_size = 300;
+        assert!(matches!(
+            db.save_reading_preferences(&invalid),
+            Err(CoreError::InvalidPreferences(_))
         ));
     }
 }

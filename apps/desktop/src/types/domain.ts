@@ -152,6 +152,31 @@ export interface NodeLayoutPatch {
   isCollapsed: boolean;
 }
 
+export type ReadingTheme = 'light' | 'sepia' | 'dark';
+export type ReadingFontFamily = 'serif' | 'sans' | 'mono';
+export type ReadingWidth = 'narrow' | 'medium' | 'wide' | 'full';
+export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
+
+export interface ReadingPreferences {
+  theme: ReadingTheme;
+  fontFamily: ReadingFontFamily;
+  /** Font size percentage (`75..=200`). */
+  fontSize: number;
+  /** Line height multiplier (`1.2..=2.4`). */
+  lineSpacing: number;
+  readingWidth: ReadingWidth;
+  epubReadingMode: EpubReadingMode;
+}
+
+export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
+  theme: 'light',
+  fontFamily: 'serif',
+  fontSize: 100,
+  lineSpacing: 1.75,
+  readingWidth: 'medium',
+  epubReadingMode: 'spread',
+};
+
 /**
  * Where decoded text is not byte-identical to the source file. Text outside
  * every span is. See `docs/adr/0002-txt-anchor-drift.md`.
@@ -241,6 +266,10 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   onJumpHandled: (nonce: number) => void;
   /** Reports reading position so the document can reopen where it was left. */
   onCursorChange: (anchor: AnchorOf<F>) => void;
+  /** User-configurable appearance and layout preferences (EPUB and TXT). */
+  preferences?: ReadingPreferences;
+  /** Updates and persists reading preferences. */
+  onPreferencesChange?: (patch: Partial<ReadingPreferences>) => void;
 }
 
 const isFiniteNumber = (value: unknown): value is number =>

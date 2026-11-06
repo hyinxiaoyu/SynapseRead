@@ -114,6 +114,8 @@ export function ReaderPane() {
 function DocumentTab({ document, isActive }: { document: StudyDocument; isActive: boolean }) {
   const content = useStudySyncStore((state) => state.content);
   const annotations = useStudySyncStore((state) => state.annotations);
+  const readingPreferences = useStudySyncStore((state) => state.readingPreferences);
+  const updateReadingPreferences = useStudySyncStore((state) => state.updateReadingPreferences);
   const jumpRequest = useStudySyncStore((state) =>
     state.jumpRequest?.documentId === document.id ? state.jumpRequest : null,
   );
@@ -129,6 +131,12 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
     (anchor: AnchorLocation) => reportCursor(document.id, anchor),
     [reportCursor, document.id],
   );
+  const onPreferencesChange = useCallback(
+    (patch: Partial<typeof readingPreferences>) => {
+      void updateReadingPreferences(patch);
+    },
+    [updateReadingPreferences],
+  );
 
   // Safe: the entry is looked up by this document's own format.
   const Viewer = viewerRegistry[document.format] as ComponentType<DocumentViewerProps>;
@@ -142,6 +150,8 @@ function DocumentTab({ document, isActive }: { document: StudyDocument; isActive
       onSelectionChange={setSelection}
       onJumpHandled={completeJump}
       onCursorChange={onCursorChange}
+      preferences={readingPreferences}
+      onPreferencesChange={onPreferencesChange}
     />
   );
 }

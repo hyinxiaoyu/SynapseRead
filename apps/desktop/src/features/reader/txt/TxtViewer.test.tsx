@@ -35,6 +35,8 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
       onSelectionChange={state.setSelection}
       onJumpHandled={state.completeJump}
       onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
+      preferences={state.readingPreferences}
+      onPreferencesChange={(patch) => void state.updateReadingPreferences(patch)}
     />
   );
 }
@@ -279,6 +281,49 @@ describe('TxtViewer', () => {
       await waitFor(() => expect(scroller().querySelector('[data-index="100"]')).not.toBeNull());
       expect(selected).toBeInTheDocument();
       expect(store.getState().selection?.text).toBe('SynapseRead sample');
+    });
+
+    it('applies appearance preferences, preserves reading location, and persists across reopen', async () => {
+      const { backend, store, documentId } = await setup(bytes);
+      const first = render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('SynapseRead sample text');
+
+      scrollTo(40 * ROW_PX);
+      await act(async () => {
+        screen.getByRole('button', { name: 'Reading appearance' }).click();
+      });
+      await act(async () => {
+        screen.getByRole('button', { name: 'Dark' }).click();
+      });
+      await act(async () => {
+        screen.getByRole('button', { name: 'Mono' }).click();
+      });
+      await act(async () => {
+        screen.getByRole('button', { name: 'Increase font size' }).click();
+      });
+      await act(async () => {
+        screen.getByRole('button', { name: 'Relaxed' }).click();
+      });
+      await act(async () => {
+        screen.getByRole('button', { name: 'Narrow' }).click();
+      });
+
+      const viewer = screen.getByTestId('txt-viewer');
+      expect(viewer).toHaveAttribute('data-reading-theme', 'dark');
+      expect(viewer).toHaveAttribute('data-reading-width', 'narrow');
+      expect(scroller().scrollTop).toBe(40 * ROW_PX);
+      const docEl = screen.getByRole('document');
+      expect(docEl.style.fontSize).toBe('1.1rem');
+      expect(docEl.style.lineHeight).toBe('2.1');
+      first.unmount();
+
+      const reopened = createStudySyncStore(backend);
+      await reopened.getState().initialize();
+      await reopened.getState().openDocument();
+      render(<Harness store={reopened} documentId={documentId} />);
+      await waitFor(() => expect(scroller().scrollTop).toBe(40 * ROW_PX));
+      expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-theme', 'dark');
+      expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-width', 'narrow');
     });
   });
 

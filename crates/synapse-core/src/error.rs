@@ -28,6 +28,9 @@ pub enum CoreError {
     #[error("invalid graph operation: {0}")]
     InvalidGraph(String),
 
+    #[error("invalid reading preferences: {0}")]
+    InvalidPreferences(String),
+
     #[error("{entity} not found: {id}")]
     NotFound { entity: &'static str, id: String },
 
@@ -48,6 +51,7 @@ impl CoreError {
             Self::InvalidAnchor(_) => "invalid_anchor",
             Self::InvalidCapture(_) => "invalid_capture",
             Self::InvalidGraph(_) => "invalid_graph",
+            Self::InvalidPreferences(_) => "invalid_preferences",
             Self::NotFound { .. } => "not_found",
             Self::StreamCancelled => "stream_cancelled",
         }

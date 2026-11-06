@@ -9,6 +9,7 @@ import type {
   NodeLayoutPatch,
   NoteCard,
   NotebookGraph,
+  ReadingPreferences,
   StudyDocument,
   StudyNotebook,
   Viewport,
@@ -65,4 +66,7 @@ export interface StudyBackend extends DocumentContentReader {
 
   /** A loadable URL for an annotation's capture, or `null` if it has no image. */
   captureUrl(annotationId: string): Promise<string | null>;
+
+  getReadingPreferences(): Promise<ReadingPreferences>;
+  saveReadingPreferences(preferences: ReadingPreferences): Promise<ReadingPreferences>;
 }

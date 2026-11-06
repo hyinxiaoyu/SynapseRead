@@ -13,6 +13,7 @@ import { EpubViewer } from './EpubViewer';
 // and `pnpm e2e` drives the real one. Everything above that seam here is real.
 const engine = vi.hoisted(() => ({
   toc: [] as EpubTocItem[],
+  isFixedLayout: false,
   displayed: [] as (string | undefined)[],
   highlighted: new Map<string, string>(),
   removed: [] as string[],
@@ -26,12 +27,16 @@ const engine = vi.hoisted(() => ({
   next: vi.fn(async () => undefined),
   previous: vi.fn(async () => undefined),
   setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
+  setPreferences: vi.fn(),
 }));
 
 vi.mock('./epubEngine', () => ({
   openEpubDocument: vi.fn(async () => ({
     get toc() {
       return engine.toc;
+    },
+    get isFixedLayout() {
+      return engine.isFixedLayout;
     },
     async display(target?: string) {
       if (target && target === engine.failCfi) throw new Error('no such location');
@@ -40,6 +45,7 @@ vi.mock('./epubEngine', () => ({
     next: engine.next,
     previous: engine.previous,
     setReadingMode: engine.setReadingMode,
+    setPreferences: engine.setPreferences,
     highlight: (annotationId: string, cfiRange: string) =>
       void engine.highlighted.set(annotationId, cfiRange),
     removeHighlight: (cfiRange: string) => void engine.removed.push(cfiRange),
@@ -98,6 +104,8 @@ function Harness({
       onSelectionChange={state.setSelection}
       onJumpHandled={state.completeJump}
       onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
+      preferences={state.readingPreferences}
+      onPreferencesChange={(patch) => void state.updateReadingPreferences(patch)}
     />
   );
 }
@@ -146,6 +154,7 @@ describe('EpubViewer', () => {
     engine.next.mockClear();
     engine.previous.mockClear();
     engine.setReadingMode.mockClear();
+    engine.setPreferences.mockClear();
   });
 
   it('runs selection -> CFI anchor -> persist -> reopen', async () => {
@@ -354,8 +363,50 @@ describe('EpubViewer', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Scroll' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
-    expect(host).toHaveClass('max-w-7xl');
+    expect(host).toHaveClass('max-w-6xl');
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('scroll');
+  });
+
+  it('persists reading mode and appearance preferences across restart', async () => {
+    const { backend, store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sepia' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sans' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Increase font size' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Wide' }));
+
+    await waitFor(() =>
+      expect(store.getState().readingPreferences).toEqual({
+        theme: 'sepia',
+        fontFamily: 'sans',
+        fontSize: 110,
+        lineSpacing: 1.75,
+        readingWidth: 'wide',
+        epubReadingMode: 'paged',
+      }),
+    );
+    expect(engine.setPreferences).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        theme: 'sepia',
+        fontFamily: 'sans',
+        fontSize: 110,
+        readingWidth: 'wide',
+      }),
+    );
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-theme', 'sepia');
+    expect(screen.getByTestId('epub-host')).toHaveClass('max-w-7xl');
+    view.unmount();
+
+    const reopened = await reopen(backend);
+    render(<Harness store={reopened} documentId={documentId} />);
+    await opened();
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-mode', 'paged');
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-theme', 'sepia');
+    expect(screen.getByTestId('epub-host')).toHaveClass('max-w-7xl');
   });
 
   it('distinguishes chapter-local pages from whole-book progress', async () => {

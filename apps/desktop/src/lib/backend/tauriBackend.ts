@@ -7,6 +7,7 @@ import type {
   MindMapEdge,
   NoteCard,
   NotebookGraph,
+  ReadingPreferences,
   StudyDocument,
   StudyNotebook,
   TextChunk,
@@ -70,6 +71,10 @@ export function createTauriBackend(): StudyBackend {
       const path = await invoke<string | null>('capture_path', { annotationId });
       return path === null ? null : convertFileSrc(path);
     },
+
+    getReadingPreferences: () => invoke<ReadingPreferences>('get_reading_preferences'),
+    saveReadingPreferences: (preferences) =>
+      invoke<ReadingPreferences>('save_reading_preferences', { preferences }),
 
     // The asset protocol enforces its scope in Rust, whatever this URL names.
     loadDocumentSource: async (document) => ({

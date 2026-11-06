@@ -449,6 +449,36 @@ describe('useStudySyncStore', () => {
       expect((await backend.listDocuments())[0]?.lastCursorAnchor).toEqual(txtAnchor);
     });
   });
+
+  describe('reading preferences', () => {
+    it('persists reading preferences and rolls back on validation failure', async () => {
+      await state().updateReadingPreferences({
+        theme: 'sepia',
+        fontFamily: 'sans',
+        fontSize: 120,
+        epubReadingMode: 'paged',
+      });
+      expect(state().readingPreferences).toMatchObject({
+        theme: 'sepia',
+        fontFamily: 'sans',
+        fontSize: 120,
+        epubReadingMode: 'paged',
+      });
+
+      const reopened = createStudySyncStore(backend);
+      await reopened.getState().initialize();
+      expect(reopened.getState().readingPreferences).toMatchObject({
+        theme: 'sepia',
+        fontFamily: 'sans',
+        fontSize: 120,
+        epubReadingMode: 'paged',
+      });
+
+      await state().updateReadingPreferences({ fontSize: 300 });
+      expect(state().readingPreferences.fontSize).toBe(120);
+      expect(state().error).toMatch(/fontSize/);
+    });
+  });
 });
 
 describe('nextNodePosition', () => {

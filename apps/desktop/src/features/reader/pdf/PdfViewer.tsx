@@ -50,18 +50,23 @@ const asPdfAnchor = (anchor: { format: string } | null | undefined): PdfAnchor |
 /** Follows an element's width, settling first so a dragged pane does not re-render pages. */
 function useSettledWidth(ref: React.RefObject<HTMLElement | null>): number {
   const [width, setWidth] = useState(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
     let timer: number | undefined;
-    const initial = window.setTimeout(() => setWidth(element.clientWidth), 0);
+    let current = element.clientWidth;
+    setWidth(current);
     const observer = new ResizeObserver(() => {
+      const next = element.clientWidth;
+      if (next === current) return;
       window.clearTimeout(timer);
-      timer = window.setTimeout(() => setWidth(element.clientWidth), 150);
+      timer = window.setTimeout(() => {
+        current = element.clientWidth;
+        setWidth(current);
+      }, 150);
     });
     observer.observe(element);
     return () => {
-      window.clearTimeout(initial);
       window.clearTimeout(timer);
       observer.disconnect();
     };

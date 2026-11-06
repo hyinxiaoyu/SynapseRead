@@ -278,9 +278,123 @@ pub struct NodeLayoutPatch {
     pub is_collapsed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadingTheme {
+    Light,
+    Sepia,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadingFontFamily {
+    Serif,
+    Sans,
+    Mono,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadingWidth {
+    Narrow,
+    Medium,
+    Wide,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EpubReadingMode {
+    Spread,
+    Paged,
+    Scroll,
+}
+
+/// User-configurable appearance and layout preferences for EPUB and TXT readers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadingPreferences {
+    pub theme: ReadingTheme,
+    pub font_family: ReadingFontFamily,
+    /// Font size percentage (`75..=200`).
+    pub font_size: u32,
+    /// Line height multiplier (`1.2..=2.4`).
+    pub line_spacing: f64,
+    pub reading_width: ReadingWidth,
+    pub epub_reading_mode: EpubReadingMode,
+}
+
+impl Default for ReadingPreferences {
+    fn default() -> Self {
+        Self {
+            theme: ReadingTheme::Light,
+            font_family: ReadingFontFamily::Serif,
+            font_size: 100,
+            line_spacing: 1.75,
+            reading_width: ReadingWidth::Medium,
+            epub_reading_mode: EpubReadingMode::Spread,
+        }
+    }
+}
+
+impl ReadingPreferences {
+    pub const MIN_FONT_SIZE: u32 = 75;
+    pub const MAX_FONT_SIZE: u32 = 200;
+    pub const MIN_LINE_SPACING: f64 = 1.2;
+    pub const MAX_LINE_SPACING: f64 = 2.4;
+
+    pub fn validate(&self) -> CoreResult<()> {
+        if !(Self::MIN_FONT_SIZE..=Self::MAX_FONT_SIZE).contains(&self.font_size) {
+            return Err(CoreError::InvalidPreferences(format!(
+                "fontSize must be between {} and {}",
+                Self::MIN_FONT_SIZE,
+                Self::MAX_FONT_SIZE
+            )));
+        }
+        if !self.line_spacing.is_finite()
+            || !(Self::MIN_LINE_SPACING..=Self::MAX_LINE_SPACING).contains(&self.line_spacing)
+        {
+            return Err(CoreError::InvalidPreferences(format!(
+                "lineSpacing must be between {:.1} and {:.1}",
+                Self::MIN_LINE_SPACING,
+                Self::MAX_LINE_SPACING
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_preferences_defaults_and_validates() {
+        let prefs = ReadingPreferences::default();
+        assert!(prefs.validate().is_ok());
+
+        let mut bad_size = prefs.clone();
+        bad_size.font_size = 50;
+        assert!(matches!(
+            bad_size.validate(),
+            Err(CoreError::InvalidPreferences(_))
+        ));
+
+        let mut bad_spacing = prefs.clone();
+        bad_spacing.line_spacing = 3.0;
+        assert!(matches!(
+            bad_spacing.validate(),
+            Err(CoreError::InvalidPreferences(_))
+        ));
+
+        let mut nan_spacing = prefs;
+        nan_spacing.line_spacing = f64::NAN;
+        assert!(matches!(
+            nan_spacing.validate(),
+            Err(CoreError::InvalidPreferences(_))
+        ));
+    }
 
     #[test]
     fn contract_fixture_parses_and_validates() {

@@ -4,15 +4,17 @@ import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-
 import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
 import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
 
-import type {
-  Annotation,
-  DocumentFormat,
-  IpcError,
-  MindMapEdge,
-  MindMapNode,
-  NoteCard,
-  StudyDocument,
-  StudyNotebook,
+import {
+  type Annotation,
+  DEFAULT_READING_PREFERENCES,
+  type DocumentFormat,
+  type IpcError,
+  type MindMapEdge,
+  type MindMapNode,
+  type NoteCard,
+  type ReadingPreferences,
+  type StudyDocument,
+  type StudyNotebook,
 } from '@/types/domain';
 
 /** A file the fake picker can offer, or a loader for one. */
@@ -68,6 +70,7 @@ export function createMemoryBackend({
   const nodes = new Map<string, MindMapNode>();
   const edges = new Map<string, MindMapEdge>();
   const captures = new Map<string, string>();
+  let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
   let picks = 0;
 
   const require = <T>(map: Map<string, T>, id: string, entity: string): T => {
@@ -281,6 +284,29 @@ export function createMemoryBackend({
       require(annotations, annotationId, 'annotation');
       const png = captures.get(annotationId);
       return png === undefined ? null : `data:image/png;base64,${png}`;
+    },
+
+    async getReadingPreferences() {
+      return { ...readingPreferences };
+    },
+
+    async saveReadingPreferences(preferences) {
+      if (
+        !Number.isInteger(preferences.fontSize) ||
+        preferences.fontSize < 75 ||
+        preferences.fontSize > 200
+      ) {
+        throw fail('invalid_preferences', 'fontSize must be between 75 and 200');
+      }
+      if (
+        !Number.isFinite(preferences.lineSpacing) ||
+        preferences.lineSpacing < 1.2 ||
+        preferences.lineSpacing > 2.4
+      ) {
+        throw fail('invalid_preferences', 'lineSpacing must be between 1.2 and 2.4');
+      }
+      readingPreferences = { ...preferences };
+      return { ...readingPreferences };
     },
 
     loadDocumentSource: async (document) => ({

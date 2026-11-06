@@ -12,8 +12,20 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
 import { PULSE_MS } from '@/features/reader/pulse';
+import {
+  READING_WIDTH_CLASSES,
+  ReadingPreferencesBar,
+  ReadingPreferencesToggleButton,
+  THEME_SURFACE_CLASSES,
+  useReadingPreferencesPanel,
+} from '@/features/reader/ReadingPreferencesBar';
 import { cn, describeError } from '@/lib/utils';
-import type { DocumentViewerProps, EpubAnchor } from '@/types/domain';
+import {
+  DEFAULT_READING_PREFERENCES,
+  type DocumentViewerProps,
+  type EpubAnchor,
+  type ReadingPreferences,
+} from '@/types/domain';
 
 import {
   type EpubHandle,
@@ -77,12 +89,24 @@ export function EpubViewer({
   onSelectionChange,
   onJumpHandled,
   onCursorChange,
+  preferences,
+  onPreferencesChange,
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
-  const [readingMode, setReadingMode] = useState<EpubReadingMode>('spread');
+  const [localPreferences, setLocalPreferences] = useState<ReadingPreferences>(
+    () => preferences ?? DEFAULT_READING_PREFERENCES,
+  );
+  const effectivePreferences = preferences ?? localPreferences;
+  const readingMode = effectivePreferences.epubReadingMode;
+  const preferencesPanel = useReadingPreferencesPanel();
   const [tocOpen, setTocOpen] = useState(false);
+
+  const updatePreferences = (patch: Partial<ReadingPreferences>) => {
+    setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
+    onPreferencesChange?.(patch);
+  };
   const [currentHref, setCurrentHref] = useState<string | null>(null);
   const [pageInfo, setPageInfo] = useState<{ page: number; totalPages: number } | null>(null);
   const [bookProgress, setBookProgress] = useState<{
@@ -133,7 +157,12 @@ export function EpubViewer({
       try {
         const source = await content.loadDocumentSource(document);
         if (cancelled) return;
-        const engine = await openEpubDocument(source, host);
+        const engine = await openEpubDocument(
+          source,
+          host,
+          effectivePreferences.epubReadingMode,
+          effectivePreferences,
+        );
         if (cancelled) {
           engine.destroy();
           return;
@@ -301,6 +330,11 @@ export function EpubViewer({
     void handle.setReadingMode(readingMode);
   }, [handle, readingMode]);
 
+  useEffect(() => {
+    if (!handle) return;
+    handle.setPreferences(effectivePreferences);
+  }, [handle, effectivePreferences]);
+
   useLayoutEffect(() => {
     if (!handle || !isActive) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -345,7 +379,7 @@ export function EpubViewer({
       window.clearTimeout(timer);
       observer.disconnect();
     };
-  }, [handle, readingMode]);
+  }, [handle, readingMode, effectivePreferences.readingWidth]);
 
   const outlineItems = useMemo(() => toOutlineNodes(handle?.toc ?? []), [handle]);
 
@@ -389,8 +423,14 @@ export function EpubViewer({
   }
 
   return (
-    <div className="flex h-full flex-col" data-testid="epub-viewer" data-reading-mode={readingMode}>
-      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b px-3">
+    <div
+      className="flex h-full flex-col"
+      data-testid="epub-viewer"
+      data-reading-mode={readingMode}
+      data-reading-theme={effectivePreferences.theme}
+      data-reading-width={effectivePreferences.readingWidth}
+    >
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b bg-background px-3 text-foreground">
         <div className="flex items-center gap-1">
           <Button
             variant={tocOpen ? 'secondary' : 'ghost'}
@@ -425,7 +465,7 @@ export function EpubViewer({
                   size="sm"
                   aria-pressed={active}
                   disabled={!handle}
-                  onClick={() => setReadingMode(mode)}
+                  onClick={() => updatePreferences({ epubReadingMode: mode })}
                 >
                   <Icon />
                   {label}
@@ -433,6 +473,11 @@ export function EpubViewer({
               );
             })}
           </div>
+          <ReadingPreferencesToggleButton
+            open={preferencesPanel.open}
+            disabled={!handle}
+            onToggle={preferencesPanel.toggle}
+          />
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
           {readingMode !== 'scroll' && pageInfo && (
@@ -462,6 +507,13 @@ export function EpubViewer({
           </Button>
         </div>
       </div>
+      {preferencesPanel.open && (
+        <ReadingPreferencesBar
+          preferences={effectivePreferences}
+          disabled={!handle}
+          onChange={updatePreferences}
+        />
+      )}
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt could not be found in this book. The file may have changed.
@@ -481,10 +533,11 @@ export function EpubViewer({
             ref={hostRef}
             data-testid="epub-host"
             className={cn(
-              'relative h-full w-full overflow-hidden rounded-sm bg-[#fbfaf7] shadow-sm ring-1 ring-black/5',
-              readingMode === 'spread' && 'max-w-none',
-              readingMode === 'paged' && 'max-w-6xl',
-              readingMode === 'scroll' && 'max-w-7xl',
+              'relative h-full w-full overflow-hidden rounded-sm shadow-sm ring-1 ring-black/5',
+              THEME_SURFACE_CLASSES[effectivePreferences.theme],
+              readingMode === 'spread'
+                ? 'max-w-none'
+                : READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
             )}
           />
           {readingMode === 'spread' && (

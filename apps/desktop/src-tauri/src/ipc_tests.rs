@@ -489,3 +489,52 @@ fn commands_are_unreachable_from_remote_origins() {
     let result = h.call_from("https://example.com", "list_documents", json!({}));
     assert!(result.is_err());
 }
+
+#[test]
+fn reading_preferences_round_trip_and_reject_invalid_values() {
+    let h = Harness::new();
+    let initial = h.ok("get_reading_preferences", json!({}));
+    assert_eq!(
+        initial,
+        json!({
+            "theme": "light",
+            "fontFamily": "serif",
+            "fontSize": 100,
+            "lineSpacing": 1.75,
+            "readingWidth": "medium",
+            "epubReadingMode": "spread",
+        })
+    );
+
+    let updated = json!({
+        "theme": "dark",
+        "fontFamily": "sans",
+        "fontSize": 125,
+        "lineSpacing": 1.9,
+        "readingWidth": "wide",
+        "epubReadingMode": "paged",
+    });
+    let saved = h.ok(
+        "save_reading_preferences",
+        json!({ "preferences": updated }),
+    );
+    assert_eq!(saved, updated);
+    assert_eq!(h.ok("get_reading_preferences", json!({})), updated);
+
+    let bad = h
+        .call(
+            "save_reading_preferences",
+            json!({
+                "preferences": {
+                    "theme": "dark",
+                    "fontFamily": "sans",
+                    "fontSize": 40,
+                    "lineSpacing": 1.9,
+                    "readingWidth": "wide",
+                    "epubReadingMode": "paged",
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(bad["code"], "invalid_preferences");
+}

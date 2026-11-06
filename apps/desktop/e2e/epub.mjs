@@ -222,4 +222,18 @@ export async function epubFlow(page) {
   await page.clickButton('Scroll');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'scroll mode');
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in scroll mode');
+
+  // Reading appearance preferences: theme, font family, font size, line spacing, and reading width.
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `${visibleViewer}.querySelector('[data-testid="reading-preferences-bar"]')`,
+    'EPUB reading preferences bar',
+  );
+  await page.clickButton('Sepia');
+  await page.waitFor(`${visibleViewer}.dataset.readingTheme === 'sepia'`, 'sepia theme');
+  const sepiaBg = await page.evaluate(`getComputedStyle(${frameDocument}.body).backgroundColor`);
+  assert(sepiaBg === 'rgb(244, 236, 216)', `EPUB frame body applies sepia background: ${sepiaBg}`);
+  await page.clickButton('Light');
+  await page.waitFor(`${visibleViewer}.dataset.readingTheme === 'light'`, 'restore light theme');
+  await page.clickButton('Reading appearance');
 }

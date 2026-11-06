@@ -1,10 +1,17 @@
 import ePub, { type Contents, type Location, type NavItem } from 'epubjs';
 
-import type { DocumentSource } from '@/types/domain';
+import {
+  DEFAULT_READING_PREFERENCES,
+  type DocumentSource,
+  type EpubReadingMode,
+  type ReadingFontFamily,
+  type ReadingPreferences,
+  type ReadingTheme,
+} from '@/types/domain';
 
 import { sanitizeChapter } from './sanitizeChapter';
 
-export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
+export type { EpubReadingMode } from '@/types/domain';
 
 export interface EpubTocItem {
   id: string;
@@ -32,11 +39,13 @@ export interface EpubLocation {
 /** The whole of what the reader needs from epub.js; nothing else imports it. */
 export interface EpubHandle {
   readonly toc: readonly EpubTocItem[];
+  readonly isFixedLayout: boolean;
   /** Shows a CFI or chapter, or the first chapter with no target. Rejects if it cannot. */
   display(target?: string): Promise<void>;
   next(): Promise<void>;
   previous(): Promise<void>;
   setReadingMode(mode: EpubReadingMode): Promise<void>;
+  setPreferences(preferences: ReadingPreferences): void;
   highlight(annotationId: string, cfiRange: string, color: string): void;
   removeHighlight(cfiRange: string): void;
   /** Whether a highlight's marks are on screen; the marks draw after `display` resolves. */
@@ -66,6 +75,19 @@ const MODE_LAYOUT: Record<
   spread: { flow: 'paginated', spread: 'auto' },
   paged: { flow: 'paginated', spread: 'none' },
   scroll: { flow: 'scrolled-doc', spread: 'none' },
+};
+
+const THEME_COLORS: Record<ReadingTheme, { background: string; text: string; border: string }> = {
+  light: { background: '#fbfaf7', text: '#1c1917', border: 'rgba(28, 25, 23, 0.2)' },
+  sepia: { background: '#f4ecd8', text: '#433422', border: 'rgba(67, 52, 34, 0.25)' },
+  dark: { background: '#18181b', text: '#e4e4e7', border: 'rgba(228, 228, 231, 0.25)' },
+};
+
+const FONT_STACKS: Record<ReadingFontFamily, string> = {
+  serif:
+    "Charter, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Songti SC', 'PingFang SC', serif",
+  sans: "-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Helvetica Neue', sans-serif",
+  mono: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'PingFang SC', monospace",
 };
 
 const BOOK_TYPOGRAPHY_CSS = `
@@ -125,6 +147,53 @@ pre {
 `;
 
 /**
+ * Precedence between book styles and user appearance preferences:
+ * 1. Base defaults (`data-synapse-typography`) are prepended before the book's own
+ *    stylesheets so unstyled chapters read cleanly while book structural rules
+ *    (`h1`–`h6`, `pre`, `code`, `blockquote`, tables, figures) win the cascade.
+ * 2. User appearance preferences (`data-synapse-preferences`) are appended at the
+ *    end of `<head>` so user-chosen theme colors, font family, font size, and line
+ *    spacing take precedence on reflowable prose (`html`, `body`, `p`, `li`, `dd`,
+ *    `dt`, `blockquote`), while preserving monospace `pre`/`code` and heading scale.
+ * 3. Fixed-layout (`rendition:layout === 'pre-paginated'`) chapters skip reflowable
+ *    font/line-spacing overrides so fixed coordinates and page geometry stay intact.
+ */
+function buildPreferencesCss(preferences: ReadingPreferences, isFixedLayout: boolean): string {
+  const palette = THEME_COLORS[preferences.theme];
+  if (isFixedLayout) {
+    return `
+html, body {
+  background-color: ${palette.background};
+}
+`;
+  }
+  const fontStack = FONT_STACKS[preferences.fontFamily];
+  const fontRem = ((1.05 * preferences.fontSize) / 100).toFixed(3);
+  const lineSpacing = preferences.lineSpacing.toFixed(2);
+  return `
+html, body {
+  background-color: ${palette.background} !important;
+  color: ${palette.text} !important;
+}
+body {
+  font-family: ${fontStack} !important;
+  font-size: ${fontRem}rem !important;
+  line-height: ${lineSpacing} !important;
+}
+p, li, dd, dt, blockquote {
+  font-family: inherit !important;
+  line-height: ${lineSpacing} !important;
+}
+a {
+  color: inherit;
+}
+blockquote {
+  border-left-color: ${palette.border} !important;
+}
+`;
+}
+
+/**
  * Prepends iBooks-like reflow defaults before the chapter's own stylesheets so
  * unstyled books read cleanly while author-supplied rules still win the cascade.
  */
@@ -138,6 +207,25 @@ function applyBookTypography(chapter: Document): void {
   style.setAttribute('data-synapse-typography', 'true');
   style.textContent = BOOK_TYPOGRAPHY_CSS;
   head.insertBefore(style, head.firstChild);
+}
+
+function applyUserPreferencesToDocument(
+  chapter: Document,
+  preferences: ReadingPreferences,
+  isFixedLayout: boolean,
+): void {
+  const head = chapter.querySelector('head') ?? chapter.documentElement;
+  if (!head) return;
+  let style = chapter.querySelector('style[data-synapse-preferences="true"]');
+  if (!style) {
+    const namespace = chapter.documentElement?.namespaceURI;
+    style = namespace
+      ? chapter.createElementNS(namespace, 'style')
+      : chapter.createElement('style');
+    style.setAttribute('data-synapse-preferences', 'true');
+    head.appendChild(style);
+  }
+  style.textContent = buildPreferencesCss(preferences, isFixedLayout);
 }
 
 function mapToc(items: readonly NavItem[], prefix = 'toc'): EpubTocItem[] {
@@ -162,11 +250,23 @@ export async function openEpubDocument(
   source: DocumentSource,
   element: HTMLElement,
   initialMode: EpubReadingMode = 'spread',
+  initialPreferences: ReadingPreferences = DEFAULT_READING_PREFERENCES,
 ): Promise<EpubHandle> {
   const book = ePub(await toBuffer(source));
   await book.ready;
+  const metadataLayout = (
+    book.packaging as unknown as { metadata?: { layout?: string } } | undefined
+  )?.metadata?.layout;
+  const isFixedLayout = metadataLayout === 'pre-paginated';
+  let currentPreferences: ReadingPreferences = { ...initialPreferences };
+
   book.spine.hooks.content.register(sanitizeChapter);
-  book.spine.hooks.content.register(applyBookTypography);
+  if (!isFixedLayout) {
+    book.spine.hooks.content.register(applyBookTypography);
+  }
+  book.spine.hooks.content.register((chapter: Document) => {
+    applyUserPreferencesToDocument(chapter, currentPreferences, isFixedLayout);
+  });
 
   const toc = mapToc(book.navigation?.toc ?? []);
   const spineItems =
@@ -253,6 +353,7 @@ export async function openEpubDocument(
 
   return {
     toc,
+    isFixedLayout,
     async display(target) {
       const resolved = resolveTarget(target);
       if (resolved?.startsWith('epubcfi(')) currentCfi = resolved;
@@ -300,6 +401,29 @@ export async function openEpubDocument(
       await (rendition.display(target) as unknown as Promise<void>).catch(
         () => rendition.display() as unknown as Promise<void>,
       );
+    },
+
+    setPreferences(preferences) {
+      const typographyChanged =
+        preferences.fontFamily !== currentPreferences.fontFamily ||
+        preferences.fontSize !== currentPreferences.fontSize ||
+        preferences.lineSpacing !== currentPreferences.lineSpacing;
+      currentPreferences = { ...preferences };
+      for (const contents of contentsList()) {
+        applyUserPreferencesToDocument(contents.document, currentPreferences, isFixedLayout);
+      }
+      if (
+        typographyChanged &&
+        !isFixedLayout &&
+        element.clientWidth > 0 &&
+        element.clientHeight > 0
+      ) {
+        const target = currentCfi;
+        rendition.resize(element.clientWidth, element.clientHeight);
+        if (target && currentMode !== 'scroll') {
+          void (rendition.display(target) as unknown as Promise<void>).catch(() => undefined);
+        }
+      }
     },
 
     highlight(annotationId, cfiRange, color) {

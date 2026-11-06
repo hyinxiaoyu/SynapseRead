@@ -5,7 +5,7 @@ use synapse_core::domain::DocumentFormat;
 
 use synapse_core::domain::{
     AnchorLocation, CardPatch, CreateExcerptInput, CreatedExcerpt, Document, MindMapEdge,
-    NodeLayoutPatch, NoteCard, NotebookGraph, StudyNotebook, Viewport,
+    NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, StudyNotebook, Viewport,
 };
 use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
@@ -138,4 +138,17 @@ pub fn create_edge(
 #[tauri::command]
 pub fn delete_edge(edge_id: String, state: State<'_, AppState>) -> IpcResult<()> {
     Ok(state.database()?.delete_edge(&edge_id)?)
+}
+
+#[tauri::command]
+pub fn get_reading_preferences(state: State<'_, AppState>) -> IpcResult<ReadingPreferences> {
+    Ok(state.database()?.get_reading_preferences()?)
+}
+
+#[tauri::command]
+pub fn save_reading_preferences(
+    preferences: ReadingPreferences,
+    state: State<'_, AppState>,
+) -> IpcResult<ReadingPreferences> {
+    Ok(state.database()?.save_reading_preferences(&preferences)?)
 }

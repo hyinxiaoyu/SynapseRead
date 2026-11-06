@@ -2,19 +2,21 @@ import { create } from 'zustand';
 
 import { createDefaultBackend, type StudyBackend } from '@/lib/backend';
 import { describeError } from '@/lib/utils';
-import type {
-  Annotation,
-  CardPatch,
-  DocumentContentReader,
-  JumpRequest,
-  MindMapEdge,
-  MindMapNode,
-  NoteCard,
-  ReaderHighlight,
-  ReaderSelection,
-  StudyDocument,
-  StudyNotebook,
-  Viewport,
+import {
+  type Annotation,
+  type CardPatch,
+  DEFAULT_READING_PREFERENCES,
+  type DocumentContentReader,
+  type JumpRequest,
+  type MindMapEdge,
+  type MindMapNode,
+  type NoteCard,
+  type ReaderHighlight,
+  type ReaderSelection,
+  type ReadingPreferences,
+  type StudyDocument,
+  type StudyNotebook,
+  type Viewport,
 } from '@/types/domain';
 
 export const DEFAULT_NOTEBOOK_TITLE = 'My Notebook';
@@ -39,6 +41,7 @@ export interface StudySyncState {
   openDocumentIds: string[];
   activeDocumentId: string | null;
   isDraggingFile: boolean;
+  readingPreferences: ReadingPreferences;
 
   notebook: StudyNotebook | null;
   annotations: Annotation[];
@@ -79,6 +82,7 @@ export interface StudySyncState {
   removeEdge(edgeId: string): Promise<void>;
   updateCard(cardId: string, patch: CardPatch): Promise<void>;
   saveViewport(viewport: Viewport): Promise<void>;
+  updateReadingPreferences(patch: Partial<ReadingPreferences>): Promise<void>;
 }
 
 /** Children stack to the right of their parent; roots cascade from the origin. */
@@ -168,6 +172,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       openDocumentIds: [],
       activeDocumentId: null,
       isDraggingFile: false,
+      readingPreferences: { ...DEFAULT_READING_PREFERENCES },
       notebook: null,
       annotations: [],
       cards: [],
@@ -182,13 +187,14 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().status === 'loading' || get().status === 'ready') return;
         set({ status: 'loading', error: null });
         try {
-          const [documents, notebooks] = await Promise.all([
+          const [documents, notebooks, readingPreferences] = await Promise.all([
             backend.listDocuments(),
             backend.listNotebooks(),
+            backend.getReadingPreferences(),
           ]);
           const notebook = notebooks[0] ?? (await backend.createNotebook(DEFAULT_NOTEBOOK_TITLE));
           const graph = await backend.loadNotebookGraph(notebook.id);
-          set({ status: 'ready', documents, ...graph });
+          set({ status: 'ready', documents, readingPreferences, ...graph });
         } catch (error) {
           set({ status: 'error', error: describeError(error) });
         }
@@ -366,6 +372,19 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (!notebook) return;
         set({ notebook: { ...notebook, viewport } });
         await guarded(() => backend.saveNotebookViewport(notebook.id, viewport));
+      },
+
+      async updateReadingPreferences(patch) {
+        const previous = get().readingPreferences;
+        const next: ReadingPreferences = { ...previous, ...patch };
+        set({ readingPreferences: next });
+        await guarded(
+          async () => {
+            const saved = await backend.saveReadingPreferences(next);
+            set({ readingPreferences: saved });
+          },
+          () => set({ readingPreferences: previous }),
+        );
       },
     };
   });

@@ -14,12 +14,22 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { PULSE_MS } from '@/features/reader/pulse';
+import {
+  FONT_FAMILY_CSS,
+  READING_WIDTH_CLASSES,
+  ReadingPreferencesBar,
+  ReadingPreferencesToggleButton,
+  THEME_SURFACE_CLASSES,
+  useReadingPreferencesPanel,
+} from '@/features/reader/ReadingPreferencesBar';
 import { cn, describeError } from '@/lib/utils';
-import type {
-  DocumentContentReader,
-  DocumentViewerProps,
-  ReaderHighlight,
-  TxtAnchor,
+import {
+  DEFAULT_READING_PREFERENCES,
+  type DocumentContentReader,
+  type DocumentViewerProps,
+  type ReaderHighlight,
+  type ReadingPreferences,
+  type TxtAnchor,
 } from '@/types/domain';
 
 import { UNIT_ATTRIBUTE, unitAtBoundary } from './selectionMapping';
@@ -185,11 +195,24 @@ export function TxtViewer({
   onSelectionChange,
   onJumpHandled,
   onCursorChange,
+  preferences,
+  onPreferencesChange,
 }: DocumentViewerProps<'txt'>) {
   const load = useTextStream(content, document.id, document.encoding);
   const { model, rowCount, complete } = load;
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const [localPreferences, setLocalPreferences] = useState<ReadingPreferences>(
+    () => preferences ?? DEFAULT_READING_PREFERENCES,
+  );
+  const effectivePreferences = preferences ?? localPreferences;
+  const preferencesPanel = useReadingPreferencesPanel();
+
+  const updatePreferences = (patch: Partial<ReadingPreferences>) => {
+    setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
+    onPreferencesChange?.(patch);
+  };
 
   // Rows holding the selection's ends stay rendered: if the browser's selection
   // endpoints left the DOM, scrolling away would silently destroy the selection.
@@ -291,6 +314,42 @@ export function TxtViewer({
 
   // Recorded while scrolling: by the time an unmount flush runs, the ref is detached.
   const lastScrollTop = useRef(0);
+  const layoutSnapshot = useRef({
+    fontFamily: effectivePreferences.fontFamily,
+    fontSize: effectivePreferences.fontSize,
+    lineSpacing: effectivePreferences.lineSpacing,
+    readingWidth: effectivePreferences.readingWidth,
+  });
+
+  useLayoutEffect(() => {
+    const prev = layoutSnapshot.current;
+    const changed =
+      prev.fontFamily !== effectivePreferences.fontFamily ||
+      prev.fontSize !== effectivePreferences.fontSize ||
+      prev.lineSpacing !== effectivePreferences.lineSpacing ||
+      prev.readingWidth !== effectivePreferences.readingWidth;
+    if (!changed) return;
+    layoutSnapshot.current = {
+      fontFamily: effectivePreferences.fontFamily,
+      fontSize: effectivePreferences.fontSize,
+      lineSpacing: effectivePreferences.lineSpacing,
+      readingWidth: effectivePreferences.readingWidth,
+    };
+    const anchorRow = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
+    const frame = window.requestAnimationFrame(() => {
+      virtualizer.measure();
+      if (anchorRow > 0) {
+        virtualizer.scrollToIndex(anchorRow, { align: 'start' });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    effectivePreferences.fontFamily,
+    effectivePreferences.fontSize,
+    effectivePreferences.lineSpacing,
+    effectivePreferences.readingWidth,
+    virtualizer,
+  ]);
   const reportCursor = useCallback(() => {
     if (!restored.current) return;
     const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
@@ -406,22 +465,39 @@ export function TxtViewer({
   }
 
   return (
-    <div className="flex h-full flex-col">
-      {returnStack.length > 0 && (
-        <div className="flex h-9 shrink-0 items-center border-b px-3">
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label="Return to previous location"
-            onClick={handleReturnBack}
-          >
-            <RotateCcw />
-            Back
-          </Button>
+    <div
+      className={cn(
+        'relative flex h-full flex-col',
+        THEME_SURFACE_CLASSES[effectivePreferences.theme],
+      )}
+      data-testid="txt-viewer"
+      data-reading-theme={effectivePreferences.theme}
+      data-reading-width={effectivePreferences.readingWidth}
+    >
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b bg-background px-3 text-foreground">
+        <div className="flex items-center gap-1">
+          {returnStack.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Return to previous location"
+              onClick={handleReturnBack}
+            >
+              <RotateCcw />
+              Back
+            </Button>
+          )}
+          <ReadingPreferencesToggleButton
+            open={preferencesPanel.open}
+            onToggle={preferencesPanel.toggle}
+          />
         </div>
+      </div>
+      {preferencesPanel.open && (
+        <ReadingPreferencesBar preferences={effectivePreferences} onChange={updatePreferences} />
       )}
       {(load.hadReplacements || missedJump) && (
-        <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
+        <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs text-foreground">
           {missedJump
             ? 'That excerpt is past the end of this file, which may have changed since it was saved.'
             : 'This file has bytes that are not valid UTF-8. They are shown as �.'}
@@ -436,15 +512,24 @@ export function TxtViewer({
         <div
           role="document"
           aria-label={document.title}
-          className="relative w-full"
-          style={{ height: virtualizer.getTotalSize() }}
+          className={cn(
+            'relative mx-auto w-full',
+            READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
+          )}
+          style={{
+            height: virtualizer.getTotalSize(),
+            fontFamily: FONT_FAMILY_CSS[effectivePreferences.fontFamily],
+            fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
+            lineHeight:
+              effectivePreferences.lineSpacing === 1.75 ? 1.625 : effectivePreferences.lineSpacing,
+          }}
         >
           {virtualizer.getVirtualItems().map((item) => (
             <div
               key={item.key}
               data-index={item.index}
               ref={virtualizer.measureElement}
-              className="absolute top-0 left-0 min-h-[1lh] w-full px-6 text-base leading-relaxed break-words whitespace-pre-wrap"
+              className="absolute top-0 left-0 min-h-[1lh] w-full px-6 break-words whitespace-pre-wrap"
               style={{ transform: `translateY(${item.start}px)` }}
             >
               <TxtRow
