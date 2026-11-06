@@ -7,11 +7,17 @@ import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
 import type { PdfAnchor } from '@/types/domain';
 
+import type { PdfOutlineItem } from './pdfEngine';
 import { PdfViewer } from './PdfViewer';
 
 // jsdom cannot run pdf.js or draw a canvas: this replaces only the engine seam, and
 // `pnpm e2e` drives the real one. Everything above that seam here is real.
-const engineState = vi.hoisted(() => ({ usesRealWorker: true, opened: 0, destroyed: 0 }));
+const engineState = vi.hoisted(() => ({
+  usesRealWorker: true,
+  opened: 0,
+  destroyed: 0,
+  outline: [] as PdfOutlineItem[],
+}));
 
 const PNG = 'iVBORw0KGgoAAAA';
 
@@ -25,6 +31,7 @@ vi.mock('./pdfEngine', () => ({
       get usesRealWorker() {
         return engineState.usesRealWorker;
       },
+      getOutline: async () => engineState.outline,
       pageSize: async (index: number) =>
         index === 3 ? { width: 306, height: 400 } : { width: 612, height: 800 },
       renderPage: done,
@@ -125,6 +132,15 @@ describe('PdfViewer', () => {
     engineState.usesRealWorker = true;
     engineState.opened = 0;
     engineState.destroyed = 0;
+    engineState.outline = [
+      {
+        id: 'outline-0',
+        title: 'Part One',
+        pageIndex: 0,
+        children: [{ id: 'outline-0-0', title: 'Blue Box Section', pageIndex: 2, children: [] }],
+      },
+      { id: 'outline-1', title: 'Part Two', pageIndex: 3, children: [] },
+    ];
     vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(PANE_PX);
     vi.spyOn(Element.prototype, 'clientHeight', 'get').mockReturnValue(VIEWPORT_PX);
     vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(100_000);
@@ -453,5 +469,65 @@ describe('PdfViewer', () => {
     expect(engineState.opened).toBe(1);
     view.unmount();
     expect(engineState.destroyed).toBe(1);
+  });
+
+  it('validates page input, navigates to valid pages, and returns to previous locations', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+
+    const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+    expect(pageInput).toHaveValue('1');
+    expect(screen.getByTestId('pdf-page-count')).toHaveTextContent('of 5');
+
+    // Invalid page inputs are rejected and marked aria-invalid.
+    fireEvent.change(pageInput, { target: { value: '99' } });
+    fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+    expect(pageInput).toHaveAttribute('aria-invalid', 'true');
+    expect((await scroller()).scrollTop).toBe(0);
+
+    fireEvent.blur(pageInput);
+    expect(pageInput).toHaveValue('1');
+    expect(pageInput).toHaveAttribute('aria-invalid', 'false');
+
+    // Valid page input scrolls to page 3 (0-based index 2) and enables returning back.
+    fireEvent.change(pageInput, { target: { value: '3' } });
+    fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+    expect(pageInput).toHaveAttribute('aria-invalid', 'false');
+    expect((await scroller()).scrollTop).toBeCloseTo(2 * (PAGE_PX + GAP_PX), 0);
+
+    const backButton = await screen.findByRole('button', { name: 'Return to previous location' });
+    fireEvent.click(backButton);
+    expect((await scroller()).scrollTop).toBeCloseTo(0, 0);
+    expect(pageInput).toHaveValue('1');
+  });
+
+  it('renders nested PDF outlines, jumps to outline destinations, and handles empty outlines', async () => {
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    expect(screen.getByTestId('reader-toc')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Part One' })).toHaveAttribute(
+      'aria-current',
+      'location',
+    );
+    const nested = screen.getByRole('button', { name: 'Blue Box Section' });
+    expect(nested).toBeInTheDocument();
+
+    fireEvent.click(nested);
+    expect((await scroller()).scrollTop).toBeCloseTo(2 * (PAGE_PX + GAP_PX), 0);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Return to previous location' }));
+    expect((await scroller()).scrollTop).toBeCloseTo(0, 0);
+    view.unmount();
+
+    // Empty outline state
+    engineState.outline = [];
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    expect(screen.getByTestId('reader-toc')).toHaveTextContent('No outline in this document.');
   });
 });

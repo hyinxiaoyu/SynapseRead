@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Crop } from 'lucide-react';
+import { Crop, ListTree, RotateCcw } from 'lucide-react';
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -13,6 +13,7 @@ import {
 } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { cn, describeError } from '@/lib/utils';
 import type {
@@ -28,6 +29,7 @@ import {
   openPdfDocument,
   type PageSize,
   type PdfDocumentHandle,
+  type PdfOutlineItem,
 } from './pdfEngine';
 import { mergeLineRects, normalizeBoxes } from './pdfGeometry';
 
@@ -87,6 +89,40 @@ function usePageSizes(engine: PdfDocumentHandle): PageSize[] {
     };
   }, [engine]);
   return sizes;
+}
+
+function usePdfOutline(engine: PdfDocumentHandle, enabled: boolean): readonly PdfOutlineItem[] {
+  const [outline, setOutline] = useState<readonly PdfOutlineItem[]>([]);
+  useEffect(() => {
+    if (!enabled || !engine.getOutline) return;
+    let cancelled = false;
+    engine
+      .getOutline()
+      .then((items) => {
+        if (!cancelled) setOutline(items);
+      })
+      .catch(() => {
+        if (!cancelled) setOutline([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engine, enabled]);
+  return outline;
+}
+
+function toPdfOutlineNodes(items: readonly PdfOutlineItem[]): OutlineNode<number>[] {
+  return items.map((item) => ({
+    id: item.id,
+    label: item.title,
+    target: item.pageIndex,
+    children: toPdfOutlineNodes(item.children),
+  }));
+}
+
+interface PdfReturnLocation {
+  pageIndex: number;
+  fraction: number;
 }
 
 function runCancellable(start: () => Cancellable): () => void {
@@ -285,6 +321,9 @@ function PdfPages({
   const scrollRef = useRef<HTMLDivElement>(null);
   const width = useSettledWidth(scrollRef);
   const sizes = usePageSizes(engine);
+  const [tocOpen, setTocOpen] = useState(false);
+  const outline = usePdfOutline(engine, tocOpen);
+  const outlineNodes = useMemo(() => toPdfOutlineNodes(outline), [outline]);
   const contentWidth = Math.max(width - SIDE_PADDING_PX * 2, 1);
 
   const sizeOf = useCallback(
@@ -304,6 +343,7 @@ function PdfPages({
   const [captureMode, setCaptureMode] = useState(false);
   const [capture, setCapture] = useState<(CaptureBox & { highlightCount: number }) | null>(null);
   const [missedJump, setMissedJump] = useState(false);
+  const [returnStack, setReturnStack] = useState<PdfReturnLocation[]>([]);
 
   // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
   const virtualizer = useVirtualizer({
@@ -419,10 +459,20 @@ function PdfPages({
 
   const [initialCursor] = useState(() => asPdfAnchor(document.lastCursorAnchor));
   const [initialJump] = useState(jumpRequest);
+  const [currentPageIndex, setCurrentPageIndex] = useState(() =>
+    initialCursor && initialCursor.pageIndex < engine.pageCount ? initialCursor.pageIndex : 0,
+  );
+  const [pageInput, setPageInput] = useState(() => String(currentPageIndex + 1));
+  const [pageInputInvalid, setPageInputInvalid] = useState(false);
   const restored = useRef(initialCursor === null || initialJump !== null);
   const lastReported = useRef(
     initialCursor ? `${initialCursor.pageIndex}:${initialCursor.rects[0]?.y ?? 0}` : `0:0`,
   );
+
+  useEffect(() => {
+    setPageInput(String(currentPageIndex + 1));
+    setPageInputInvalid(false);
+  }, [currentPageIndex]);
 
   const offsetWithin = useCallback(
     (pageIndex: number, fraction: number) => {
@@ -440,6 +490,7 @@ function PdfPages({
       return;
     }
     if (sizes.length <= pageIndex) return;
+    setCurrentPageIndex(pageIndex);
     virtualizer.scrollToOffset(offsetWithin(pageIndex, initialCursor.rects[0]?.y ?? 0));
     restored.current = true;
   }, [engine, initialCursor, offsetWithin, sizes, virtualizer, width]);
@@ -447,6 +498,47 @@ function PdfPages({
   // ---- Reporting the reading position --------------------------------------
 
   const lastScrollTop = useRef(0);
+  const currentReturnLocation = useCallback((): PdfReturnLocation => {
+    const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
+    if (!item) return { pageIndex: currentPageIndex, fraction: 0 };
+    const height = pageHeight(item.index);
+    const fraction =
+      height > 0 ? Math.min(Math.max((lastScrollTop.current - item.start) / height, 0), 0.99) : 0;
+    return { pageIndex: item.index, fraction };
+  }, [virtualizer, pageHeight, currentPageIndex]);
+
+  const navigateToPage = useCallback(
+    (targetPageIndex: number) => {
+      if (targetPageIndex < 0 || targetPageIndex >= engine.pageCount) return;
+      const previous = currentReturnLocation();
+      if (previous.pageIndex !== targetPageIndex || previous.fraction > 0.05) {
+        setReturnStack((stack) => [...stack, previous]);
+      }
+      setCurrentPageIndex(targetPageIndex);
+      virtualizer.scrollToOffset(offsetWithin(targetPageIndex, 0));
+    },
+    [engine.pageCount, currentReturnLocation, offsetWithin, virtualizer],
+  );
+
+  const handleReturnBack = () => {
+    const target = returnStack.at(-1);
+    if (!target) return;
+    setReturnStack((stack) => stack.slice(0, -1));
+    setCurrentPageIndex(target.pageIndex);
+    virtualizer.scrollToOffset(offsetWithin(target.pageIndex, target.fraction));
+  };
+
+  const submitPageInput = () => {
+    const trimmed = pageInput.trim();
+    const parsed = Number(trimmed);
+    if (!trimmed || !Number.isInteger(parsed) || parsed < 1 || parsed > engine.pageCount) {
+      setPageInputInvalid(true);
+      return;
+    }
+    setPageInputInvalid(false);
+    navigateToPage(parsed - 1);
+  };
+
   const reportCursor = useCallback(() => {
     if (!restored.current) return;
     const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
@@ -472,6 +564,10 @@ function PdfPages({
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     lastScrollTop.current = event.currentTarget.scrollTop;
+    const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
+    if (item && item.index !== currentPageIndex) {
+      setCurrentPageIndex(item.index);
+    }
     if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
     pendingCursor.current = window.setTimeout(() => {
       pendingCursor.current = null;
@@ -535,8 +631,21 @@ function PdfPages({
   const pulsingAnnotationId = jumpReady ? (jumpRequest?.annotationId ?? null) : null;
 
   const viewportHeight = scrollRef.current?.clientHeight;
+  const lastHandledJumpNonce = useRef<number | null>(null);
   useLayoutEffect(() => {
-    if (!jumpReady || !jumpAnchor) return;
+    if (!jumpReady || !jumpAnchor || jumpNonce === null) return;
+    if (lastHandledJumpNonce.current !== jumpNonce) {
+      lastHandledJumpNonce.current = jumpNonce;
+      const previous = currentReturnLocation();
+      const targetFraction = jumpAnchor.rects[0]?.y ?? 0;
+      if (
+        previous.pageIndex !== jumpAnchor.pageIndex ||
+        Math.abs(previous.fraction - targetFraction) > 0.02
+      ) {
+        setReturnStack((stack) => [...stack, previous]);
+      }
+    }
+    setCurrentPageIndex(jumpAnchor.pageIndex);
     const top = offsetWithin(jumpAnchor.pageIndex, jumpAnchor.rects[0]?.y ?? 0);
     virtualizer.scrollToOffset(Math.max(top - (viewportHeight ?? 0) / 3, 0));
     // Only a new jump, or the layout it depends on, should move the page.
@@ -574,10 +683,66 @@ function PdfPages({
       data-testid="pdf-viewer"
       data-pdf-worker={engine.usesRealWorker ? 'worker' : 'main-thread'}
     >
-      <div className="flex h-9 shrink-0 items-center justify-between border-b px-3 text-xs text-muted-foreground">
-        <span>
-          {engine.pageCount} {engine.pageCount === 1 ? 'page' : 'pages'}
-        </span>
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b px-3 text-xs text-muted-foreground">
+        <div className="flex items-center gap-1.5">
+          <Button
+            variant={tocOpen ? 'secondary' : 'ghost'}
+            size="sm"
+            aria-label="Table of contents"
+            aria-pressed={tocOpen}
+            onClick={() => setTocOpen((open) => !open)}
+          >
+            <ListTree />
+            Contents
+          </Button>
+          {returnStack.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Return to previous location"
+              onClick={handleReturnBack}
+            >
+              <RotateCcw />
+              Back
+            </Button>
+          )}
+        </div>
+        <form
+          className="flex items-center gap-1.5"
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitPageInput();
+          }}
+        >
+          <label htmlFor={`pdf-page-input-${documentId}`} className="text-xs text-muted-foreground">
+            Page
+          </label>
+          <input
+            id={`pdf-page-input-${documentId}`}
+            type="text"
+            inputMode="numeric"
+            aria-label="Page number"
+            aria-invalid={pageInputInvalid}
+            value={pageInput}
+            onChange={(event) => {
+              setPageInput(event.target.value);
+              if (pageInputInvalid) setPageInputInvalid(false);
+            }}
+            onBlur={() => {
+              if (pageInputInvalid) {
+                setPageInput(String(currentPageIndex + 1));
+                setPageInputInvalid(false);
+              }
+            }}
+            className={cn(
+              'h-6 w-12 rounded border bg-background px-1.5 text-center text-xs text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              pageInputInvalid && 'border-destructive text-destructive',
+            )}
+          />
+          <span data-testid="pdf-page-count" className="text-xs text-muted-foreground tabular-nums">
+            of {engine.pageCount}
+          </span>
+        </form>
         <Button
           variant={captureMode ? 'secondary' : 'ghost'}
           size="sm"
@@ -593,43 +758,55 @@ function PdfPages({
           That excerpt is on a page this file does not have. The file may have changed.
         </p>
       )}
-      {/*
-        The scrollbar is always present. If it appeared once page sizes loaded, the pane
-        would narrow, every page would re-render at a new scale, and that destroys any
-        selection already made.
-      */}
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        data-testid="pdf-scroll"
-        className="min-h-0 flex-1 overflow-x-auto overflow-y-scroll bg-muted"
-      >
-        <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
-          {width > 0 &&
-            virtualizer.getVirtualItems().map((item) => (
-              <div
-                key={item.key}
-                className="absolute"
-                style={{
-                  top: 0,
-                  left: SIDE_PADDING_PX,
-                  width: contentWidth,
-                  height: pageHeight(item.index),
-                  transform: `translateY(${item.start}px)`,
-                }}
-              >
-                <PdfPage
-                  engine={engine}
-                  pageIndex={item.index}
-                  scale={scaleOf(item.index)}
-                  highlights={byPage.get(item.index) ?? EMPTY_HIGHLIGHTS}
-                  pulsingAnnotationId={pulsingAnnotationId}
-                  captureMode={captureMode}
-                  captureBox={visibleCapture?.pageIndex === item.index ? visibleCapture.rect : null}
-                  onCapture={(canvas, rect) => onCapture(item.index, canvas, rect)}
-                />
-              </div>
-            ))}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {tocOpen && (
+          <OutlineSidebar
+            items={outlineNodes}
+            isActive={(targetPage) => targetPage === currentPageIndex}
+            emptyMessage="No outline in this document."
+            onSelect={navigateToPage}
+          />
+        )}
+        {/*
+          The scrollbar is always present. If it appeared once page sizes loaded, the pane
+          would narrow, every page would re-render at a new scale, and that destroys any
+          selection already made.
+        */}
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          data-testid="pdf-scroll"
+          className="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-scroll bg-muted"
+        >
+          <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+            {width > 0 &&
+              virtualizer.getVirtualItems().map((item) => (
+                <div
+                  key={item.key}
+                  className="absolute"
+                  style={{
+                    top: 0,
+                    left: SIDE_PADDING_PX,
+                    width: contentWidth,
+                    height: pageHeight(item.index),
+                    transform: `translateY(${item.start}px)`,
+                  }}
+                >
+                  <PdfPage
+                    engine={engine}
+                    pageIndex={item.index}
+                    scale={scaleOf(item.index)}
+                    highlights={byPage.get(item.index) ?? EMPTY_HIGHLIGHTS}
+                    pulsingAnnotationId={pulsingAnnotationId}
+                    captureMode={captureMode}
+                    captureBox={
+                      visibleCapture?.pageIndex === item.index ? visibleCapture.rect : null
+                    }
+                    onCapture={(canvas, rect) => onCapture(item.index, canvas, rect)}
+                  />
+                </div>
+              ))}
+          </div>
         </div>
       </div>
     </div>

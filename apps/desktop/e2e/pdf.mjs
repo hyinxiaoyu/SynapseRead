@@ -184,4 +184,21 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-page-index] .textLayer span')`,
     'the reopened document to render',
   );
+
+  // Embedded PDF outline (with nested entry), jump return, and validated page input.
+  await page.clickButton('Table of contents');
+  await page.waitFor(
+    `[...document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="reader-toc"] button')].some((b) => b.textContent.trim() === 'Blue Box Section')`,
+    'PDF outline to render nested entries from the document',
+  );
+  await page.clickButton('Part Two');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '4'`,
+    'PDF outline jump to page 4',
+  );
+  await page.clickButton('Return to previous location');
+  await page.waitFor(
+    `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
+    'returning from PDF outline jump to previous scroll offset',
+  );
 }

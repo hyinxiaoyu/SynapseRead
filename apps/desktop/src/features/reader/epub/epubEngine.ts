@@ -1,10 +1,17 @@
-import ePub, { type Contents, type Location } from 'epubjs';
+import ePub, { type Contents, type Location, type NavItem } from 'epubjs';
 
 import type { DocumentSource } from '@/types/domain';
 
 import { sanitizeChapter } from './sanitizeChapter';
 
 export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
+
+export interface EpubTocItem {
+  id: string;
+  label: string;
+  href: string;
+  children: readonly EpubTocItem[];
+}
 
 export interface EpubSelection {
   cfiRange: string;
@@ -17,10 +24,14 @@ export interface EpubLocation {
   href: string;
   page?: number;
   totalPages?: number;
+  chapterIndex?: number;
+  totalChapters?: number;
+  bookProgress?: number;
 }
 
 /** The whole of what the reader needs from epub.js; nothing else imports it. */
 export interface EpubHandle {
+  readonly toc: readonly EpubTocItem[];
   /** Shows a CFI or chapter, or the first chapter with no target. Rejects if it cannot. */
   display(target?: string): Promise<void>;
   next(): Promise<void>;
@@ -129,6 +140,18 @@ function applyBookTypography(chapter: Document): void {
   head.insertBefore(style, head.firstChild);
 }
 
+function mapToc(items: readonly NavItem[], prefix = 'toc'): EpubTocItem[] {
+  return items.map((item, index) => {
+    const id = item.id?.trim() || `${prefix}-${index}`;
+    return {
+      id,
+      label: item.label.trim(),
+      href: item.href.trim(),
+      children: item.subitems ? mapToc(item.subitems, id) : [],
+    };
+  });
+}
+
 const toBuffer = async (source: DocumentSource): Promise<ArrayBuffer> => {
   if (source.kind === 'url') return (await fetch(source.url)).arrayBuffer();
   // A copy, because the archive reader may hold on to it after this tab closes.
@@ -144,6 +167,26 @@ export async function openEpubDocument(
   await book.ready;
   book.spine.hooks.content.register(sanitizeChapter);
   book.spine.hooks.content.register(applyBookTypography);
+
+  const toc = mapToc(book.navigation?.toc ?? []);
+  const spineItems =
+    (book.spine as unknown as { spineItems?: { href: string; canonical?: string }[] }).spineItems ??
+    [];
+  const resolveTarget = (target?: string): string | undefined => {
+    if (!target || target.startsWith('epubcfi(')) return target;
+    if (book.spine.get(target)) return target;
+    const [rawPath = '', fragment] = target.split('#');
+    const cleanPath = rawPath.replace(/^(\.\/|\/)+/, '');
+    const matched = spineItems.find(
+      (item) =>
+        item.href === cleanPath ||
+        item.canonical === cleanPath ||
+        item.href.endsWith(`/${cleanPath}`) ||
+        cleanPath.endsWith(`/${item.href}`),
+    );
+    if (!matched) return target;
+    return fragment ? `${matched.href}#${fragment}` : matched.href;
+  };
 
   let currentMode: EpubReadingMode = initialMode;
   let currentCfi: string | undefined;
@@ -185,9 +228,23 @@ export async function openEpubDocument(
   rendition.on('relocated', (location: Location) => {
     currentCfi = location.start.cfi;
     const displayed = location.start.displayed;
+    const totalChapters = Math.max(spineItems.length, 1);
+    const rawIndex =
+      typeof location.start.index === 'number'
+        ? location.start.index
+        : spineItems.findIndex((item) => item.href === location.start.href);
+    const chapterIndex = Math.min(Math.max(rawIndex >= 0 ? rawIndex : 0, 0), totalChapters - 1);
+    const chapterFraction =
+      displayed && displayed.total > 0
+        ? Math.min(Math.max(displayed.page / displayed.total, 0), 1)
+        : 1;
+    const bookProgress = Math.round(((chapterIndex + chapterFraction) / totalChapters) * 100);
     locationListener({
       cfi: location.start.cfi,
       href: location.start.href,
+      chapterIndex,
+      totalChapters,
+      bookProgress,
       ...(displayed ? { page: displayed.page, totalPages: displayed.total } : {}),
     });
   });
@@ -195,9 +252,11 @@ export async function openEpubDocument(
   const contentsList = () => rendition.getContents() as unknown as Contents[];
 
   return {
+    toc,
     async display(target) {
-      if (target) currentCfi = target;
-      await (rendition.display(target) as unknown as Promise<void>);
+      const resolved = resolveTarget(target);
+      if (resolved?.startsWith('epubcfi(')) currentCfi = resolved;
+      await (rendition.display(resolved) as unknown as Promise<void>);
     },
     async next() {
       if (currentMode === 'scroll') {

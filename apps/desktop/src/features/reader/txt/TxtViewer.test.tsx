@@ -235,6 +235,11 @@ describe('TxtViewer', () => {
         await act(async () => void vi.advanceTimersByTime(PULSE_MS + 10));
         expect(store.getState().jumpRequest).toBeNull();
         expect(await segmentWith('final target sentence')).not.toHaveClass('anchor-pulse');
+
+        // Return to the previous location before the jump.
+        const backButton = screen.getByRole('button', { name: 'Return to previous location' });
+        act(() => backButton.click());
+        expect(scroller().scrollTop).toBe(0);
       } finally {
         vi.useRealTimers();
       }

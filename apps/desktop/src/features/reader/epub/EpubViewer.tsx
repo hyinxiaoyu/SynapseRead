@@ -1,7 +1,16 @@
-import { BookOpen, ChevronLeft, ChevronRight, FileText, ScrollText } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import {
+  BookOpen,
+  ChevronLeft,
+  ChevronRight,
+  FileText,
+  ListTree,
+  RotateCcw,
+  ScrollText,
+} from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { cn, describeError } from '@/lib/utils';
 import type { DocumentViewerProps, EpubAnchor } from '@/types/domain';
@@ -10,6 +19,7 @@ import {
   type EpubHandle,
   type EpubLocation,
   type EpubReadingMode,
+  type EpubTocItem,
   openEpubDocument,
 } from './epubEngine';
 
@@ -31,6 +41,15 @@ const READING_MODES: readonly {
 
 const asEpubAnchor = (anchor: { format: string } | null | undefined): EpubAnchor | null =>
   anchor?.format === 'epub' ? (anchor as EpubAnchor) : null;
+
+function toOutlineNodes(items: readonly EpubTocItem[]): OutlineNode<string>[] {
+  return items.map((item) => ({
+    id: item.id,
+    label: item.label,
+    target: item.href || null,
+    children: toOutlineNodes(item.children),
+  }));
+}
 
 function shouldIgnoreKeyEvent(event: KeyboardEvent): boolean {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
@@ -63,12 +82,21 @@ export function EpubViewer({
   const hostRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
   const [readingMode, setReadingMode] = useState<EpubReadingMode>('spread');
+  const [tocOpen, setTocOpen] = useState(false);
+  const [currentHref, setCurrentHref] = useState<string | null>(null);
   const [pageInfo, setPageInfo] = useState<{ page: number; totalPages: number } | null>(null);
+  const [bookProgress, setBookProgress] = useState<{
+    chapter: number;
+    totalChapters: number;
+    percent: number;
+  } | null>(null);
+  const [returnStack, setReturnStack] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [missedJump, setMissedJump] = useState(false);
   // Taken once: the store feeds every cursor report back through this prop.
   const [initialCursor] = useState(() => asEpubAnchor(document.lastCursorAnchor));
   const [initialJump] = useState(jumpRequest);
+  const currentLocationRef = useRef<EpubLocation | null>(null);
 
   // Callbacks and flags the long-lived engine listeners read at the time they fire.
   const latest = useRef({ isActive, onSelectionChange, onCursorChange });
@@ -133,8 +161,24 @@ export function EpubViewer({
           });
         });
         engine.onLocation((location) => {
+          currentLocationRef.current = location;
+          setCurrentHref(location.href);
           if (location.page !== undefined && location.totalPages !== undefined) {
             setPageInfo({ page: location.page, totalPages: location.totalPages });
+          }
+          if (
+            location.chapterIndex !== undefined &&
+            location.totalChapters !== undefined &&
+            location.totalChapters > 0
+          ) {
+            const percent =
+              location.bookProgress ??
+              Math.round(((location.chapterIndex + 1) / location.totalChapters) * 100);
+            setBookProgress({
+              chapter: location.chapterIndex + 1,
+              totalChapters: location.totalChapters,
+              percent,
+            });
           }
           // Layout during opening reports positions the reader never chose.
           if (!restored.current) return;
@@ -214,6 +258,7 @@ export function EpubViewer({
     };
 
     void (async () => {
+      const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
       try {
         if (!anchor) throw new Error('not an EPUB anchor');
         await handle.display(anchor.cfiRange);
@@ -222,6 +267,9 @@ export function EpubViewer({
         return;
       }
       if (cancelled) return;
+      if (previous && previous !== anchor.cfiRange) {
+        setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+      }
       const waitedSince = performance.now();
       const startPulse = () => {
         if (cancelled) return;
@@ -253,7 +301,7 @@ export function EpubViewer({
     void handle.setReadingMode(readingMode);
   }, [handle, readingMode]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!handle || !isActive) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (shouldIgnoreKeyEvent(event)) return;
@@ -299,6 +347,39 @@ export function EpubViewer({
     };
   }, [handle, readingMode]);
 
+  const outlineItems = useMemo(() => toOutlineNodes(handle?.toc ?? []), [handle]);
+
+  const isTocTargetActive = (target: string): boolean => {
+    if (!currentHref || target.includes('#')) return false;
+    const cleanTarget = target.replace(/^(\.\/|\/)+/, '');
+    const cleanHref = currentHref.replace(/^(\.\/|\/)+/, '');
+    return (
+      cleanHref === cleanTarget ||
+      cleanHref.endsWith(`/${cleanTarget}`) ||
+      cleanTarget.endsWith(`/${cleanHref}`)
+    );
+  };
+
+  const handleTocSelect = (target: string) => {
+    if (!handle) return;
+    const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+    void handle
+      .display(target)
+      .then(() => {
+        if (previous && previous !== target) {
+          setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+        }
+      })
+      .catch(() => undefined);
+  };
+
+  const handleReturnBack = () => {
+    const target = returnStack.at(-1);
+    if (!handle || !target) return;
+    setReturnStack((stack) => stack.slice(0, -1));
+    void handle.display(target).catch(() => undefined);
+  };
+
   if (error) {
     return (
       <div role="alert" className="p-6 text-sm text-destructive">
@@ -310,29 +391,61 @@ export function EpubViewer({
   return (
     <div className="flex h-full flex-col" data-testid="epub-viewer" data-reading-mode={readingMode}>
       <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b px-3">
-        <div role="group" aria-label="Reading mode" className="flex items-center gap-0.5">
-          {READING_MODES.map(({ mode, label, icon: Icon }) => {
-            const active = readingMode === mode;
-            return (
-              <Button
-                key={mode}
-                variant={active ? 'secondary' : 'ghost'}
-                size="sm"
-                aria-pressed={active}
-                disabled={!handle}
-                onClick={() => setReadingMode(mode)}
-              >
-                <Icon />
-                {label}
-              </Button>
-            );
-          })}
+        <div className="flex items-center gap-1">
+          <Button
+            variant={tocOpen ? 'secondary' : 'ghost'}
+            size="sm"
+            aria-label="Table of contents"
+            aria-pressed={tocOpen}
+            disabled={!handle}
+            onClick={() => setTocOpen((open) => !open)}
+          >
+            <ListTree />
+            Contents
+          </Button>
+          {returnStack.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-label="Return to previous location"
+              disabled={!handle}
+              onClick={handleReturnBack}
+            >
+              <RotateCcw />
+              Back
+            </Button>
+          )}
+          <div role="group" aria-label="Reading mode" className="flex items-center gap-0.5">
+            {READING_MODES.map(({ mode, label, icon: Icon }) => {
+              const active = readingMode === mode;
+              return (
+                <Button
+                  key={mode}
+                  variant={active ? 'secondary' : 'ghost'}
+                  size="sm"
+                  aria-pressed={active}
+                  disabled={!handle}
+                  onClick={() => setReadingMode(mode)}
+                >
+                  <Icon />
+                  {label}
+                </Button>
+              );
+            })}
+          </div>
         </div>
-        {readingMode !== 'scroll' && pageInfo && (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            Page {pageInfo.page} of {pageInfo.totalPages}
-          </span>
-        )}
+        <div className="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
+          {readingMode !== 'scroll' && pageInfo && (
+            <span data-testid="epub-chapter-page">
+              Chapter page {pageInfo.page} of {pageInfo.totalPages}
+            </span>
+          )}
+          {bookProgress && (
+            <span data-testid="epub-book-progress">
+              Book {bookProgress.percent}% (Ch. {bookProgress.chapter}/{bookProgress.totalChapters})
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"
@@ -354,23 +467,33 @@ export function EpubViewer({
           That excerpt could not be found in this book. The file may have changed.
         </p>
       )}
-      <div className="relative flex min-h-0 flex-1 justify-center overflow-hidden bg-muted/30 px-2 py-1.5">
-        <div
-          ref={hostRef}
-          data-testid="epub-host"
-          className={cn(
-            'relative h-full w-full overflow-hidden rounded-sm bg-[#fbfaf7] shadow-sm ring-1 ring-black/5',
-            readingMode === 'spread' && 'max-w-none',
-            readingMode === 'paged' && 'max-w-6xl',
-            readingMode === 'scroll' && 'max-w-7xl',
-          )}
-        />
-        {readingMode === 'spread' && (
-          <div
-            aria-hidden="true"
-            className="pointer-events-none absolute inset-y-3 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        {tocOpen && (
+          <OutlineSidebar
+            items={outlineItems}
+            isActive={isTocTargetActive}
+            emptyMessage="No table of contents in this book."
+            onSelect={handleTocSelect}
           />
         )}
+        <div className="relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden bg-muted/30 px-2 py-1.5">
+          <div
+            ref={hostRef}
+            data-testid="epub-host"
+            className={cn(
+              'relative h-full w-full overflow-hidden rounded-sm bg-[#fbfaf7] shadow-sm ring-1 ring-black/5',
+              readingMode === 'spread' && 'max-w-none',
+              readingMode === 'paged' && 'max-w-6xl',
+              readingMode === 'scroll' && 'max-w-7xl',
+            )}
+          />
+          {readingMode === 'spread' && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-y-3 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
+            />
+          )}
+        </div>
       </div>
     </div>
   );

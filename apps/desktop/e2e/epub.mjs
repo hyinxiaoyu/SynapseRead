@@ -189,6 +189,36 @@ export async function epubFlow(page) {
   await page.clickButton('Single page');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'paged'`, 'single-page mode');
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in single-page mode');
+  assert(
+    await page.evaluate(
+      `${visibleViewer}.querySelector('[data-testid="epub-chapter-page"]')?.textContent.includes('Chapter page')`,
+    ),
+    'distinguishes chapter-local pages',
+  );
+  assert(
+    await page.evaluate(
+      `${visibleViewer}.querySelector('[data-testid="epub-book-progress"]')?.textContent.includes('Ch. 2/2')`,
+    ),
+    'shows whole-book progress separately from chapter pages',
+  );
+
+  // Table of contents: nested items, chapter jump, and return to previous location.
+  await page.clickButton('Table of contents');
+  await page.waitFor(
+    `${visibleViewer}.querySelector('[data-testid="reader-toc"]')`,
+    'EPUB table of contents sidebar',
+  );
+  assert(
+    await page.evaluate(
+      `[...${visibleViewer}.querySelectorAll('[data-testid="reader-toc"] button')].some((b) => b.textContent.trim() === 'Section 1.1')`,
+    ),
+    'EPUB TOC renders nested entries',
+  );
+  await page.clickButton('One');
+  await page.waitFor(chapterIs('Chapter One'), 'TOC jump to Chapter One');
+  await page.clickButton('Return to previous location');
+  await page.waitFor(chapterIs('Chapter Two'), 'return to Chapter Two after TOC jump');
+
   await page.clickButton('Scroll');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'scroll mode');
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in scroll mode');

@@ -6,12 +6,13 @@ import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
 
-import type { EpubLocation, EpubReadingMode, EpubSelection } from './epubEngine';
+import type { EpubLocation, EpubReadingMode, EpubSelection, EpubTocItem } from './epubEngine';
 import { EpubViewer } from './EpubViewer';
 
 // jsdom has no layout for epub.js to render into: this replaces only the engine seam,
 // and `pnpm e2e` drives the real one. Everything above that seam here is real.
 const engine = vi.hoisted(() => ({
+  toc: [] as EpubTocItem[],
   displayed: [] as (string | undefined)[],
   highlighted: new Map<string, string>(),
   removed: [] as string[],
@@ -29,6 +30,9 @@ const engine = vi.hoisted(() => ({
 
 vi.mock('./epubEngine', () => ({
   openEpubDocument: vi.fn(async () => ({
+    get toc() {
+      return engine.toc;
+    },
     async display(target?: string) {
       if (target && target === engine.failCfi) throw new Error('no such location');
       engine.displayed.push(target);
@@ -121,6 +125,17 @@ const select = (cfiRange = CFI, text = 'quick brown fox') =>
 
 describe('EpubViewer', () => {
   beforeEach(() => {
+    engine.toc = [
+      {
+        id: 'toc-1',
+        label: 'One',
+        href: 'OEBPS/chapter1.xhtml',
+        children: [
+          { id: 'toc-1-1', label: 'Section 1.1', href: 'OEBPS/chapter1.xhtml#s1', children: [] },
+        ],
+      },
+      { id: 'toc-2', label: 'Two', href: 'OEBPS/chapter2.xhtml', children: [] },
+    ];
     engine.displayed = [];
     engine.highlighted = new Map();
     engine.removed = [];
@@ -341,6 +356,77 @@ describe('EpubViewer', () => {
     expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
     expect(host).toHaveClass('max-w-7xl');
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('scroll');
+  });
+
+  it('distinguishes chapter-local pages from whole-book progress', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 2,
+        totalPages: 4,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 25,
+      }),
+    );
+
+    expect(screen.getByTestId('epub-chapter-page')).toHaveTextContent('Chapter page 2 of 4');
+    expect(screen.getByTestId('epub-book-progress')).toHaveTextContent('Book 25% (Ch. 1/2)');
+
+    // Scroll mode hides chapter pages while keeping whole-book progress visible.
+    fireEvent.click(screen.getByRole('button', { name: 'Scroll' }));
+    expect(screen.queryByTestId('epub-chapter-page')).not.toBeInTheDocument();
+    expect(screen.getByTestId('epub-book-progress')).toHaveTextContent('Book 25% (Ch. 1/2)');
+  });
+
+  it('navigates nested TOC entries, handles empty TOCs, and returns to previous locations', async () => {
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 1,
+        totalPages: 3,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 17,
+      }),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    const toc = screen.getByTestId('reader-toc');
+    expect(toc).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'One' })).toHaveAttribute('aria-current', 'location');
+    expect(screen.getByRole('button', { name: 'Section 1.1' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Two' }));
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+
+    const backButton = await screen.findByRole('button', { name: 'Return to previous location' });
+    fireEvent.click(backButton);
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe(CFI));
+    expect(
+      screen.queryByRole('button', { name: 'Return to previous location' }),
+    ).not.toBeInTheDocument();
+
+    view.unmount();
+
+    // Empty outline state
+    engine.toc = [];
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    expect(screen.getByTestId('reader-toc')).toHaveTextContent(
+      'No table of contents in this book.',
+    );
   });
 
   it('shows why a book could not open', async () => {

@@ -22,6 +22,13 @@ export interface PageSize {
   height: number;
 }
 
+export interface PdfOutlineItem {
+  id: string;
+  title: string;
+  pageIndex: number | null;
+  children: readonly PdfOutlineItem[];
+}
+
 export interface Cancellable {
   promise: Promise<unknown>;
   cancel(): void;
@@ -32,11 +39,66 @@ export interface PdfDocumentHandle {
   readonly pageCount: number;
   /** False if pdf.js fell back to parsing on the main thread. */
   readonly usesRealWorker: boolean;
+  /** Embedded PDF outline tree, or an empty array when the document has none. */
+  getOutline?(): Promise<readonly PdfOutlineItem[]>;
   /** Size in CSS pixels at scale 1, including the page's user unit. */
   pageSize(pageIndex: number): Promise<PageSize>;
   renderPage(pageIndex: number, canvas: HTMLCanvasElement, scale: number): Cancellable;
   renderTextLayer(pageIndex: number, container: HTMLElement, scale: number): Cancellable;
   destroy(): void;
+}
+
+interface RawOutlineNode {
+  title?: string;
+  dest?: unknown;
+  items?: readonly RawOutlineNode[];
+}
+
+async function resolveDestPageIndex(pdf: PDFDocumentProxy, dest: unknown): Promise<number | null> {
+  try {
+    const resolved = typeof dest === 'string' ? await pdf.getDestination(dest) : dest;
+    if (!Array.isArray(resolved) || resolved.length === 0) return null;
+    const target = resolved[0] as unknown;
+    if (
+      typeof target === 'number' &&
+      Number.isInteger(target) &&
+      target >= 0 &&
+      target < pdf.numPages
+    ) {
+      return target;
+    }
+    if (typeof target === 'object' && target !== null) {
+      const index = await pdf.getPageIndex(
+        target as Parameters<PDFDocumentProxy['getPageIndex']>[0],
+      );
+      return index >= 0 && index < pdf.numPages ? index : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function mapPdfOutline(
+  pdf: PDFDocumentProxy,
+  nodes: readonly RawOutlineNode[],
+  prefix = 'outline',
+): Promise<PdfOutlineItem[]> {
+  const items: PdfOutlineItem[] = [];
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index];
+    if (!node) continue;
+    const id = `${prefix}-${index}`;
+    const pageIndex = await resolveDestPageIndex(pdf, node.dest);
+    const children = node.items ? await mapPdfOutline(pdf, node.items, id) : [];
+    items.push({
+      id,
+      title: (node.title ?? '').trim() || `Section ${index + 1}`,
+      pageIndex,
+      children,
+    });
+  }
+  return items;
 }
 
 /** Runs `render` once the page has loaded, unless already cancelled. */
@@ -82,6 +144,11 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
   return {
     pageCount: pdf.numPages,
     usesRealWorker,
+
+    async getOutline() {
+      const raw = (await pdf.getOutline()) as readonly RawOutlineNode[] | null;
+      return raw ? mapPdfOutline(pdf, raw) : [];
+    },
 
     async pageSize(pageIndex) {
       const { width, height } = (await pdf.getPage(pageIndex + 1)).getViewport({ scale: 1 });

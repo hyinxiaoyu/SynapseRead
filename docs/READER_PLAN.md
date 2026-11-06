@@ -157,7 +157,7 @@ they are not included in the reader estimate.
 Tracking issue: https://github.com/hyinxiaoyu/SynapseRead/issues/7
 
 - [x] https://github.com/hyinxiaoyu/SynapseRead/issues/8 — **R01**: Establish macOS baseline and acceptance fixtures (1 sessions; 1–2 engineer days) — verified on `macOS 15.6.1 (24G90, arm64)`, `AppleWebKit/605.1.15`, `Node v24.14.1`, `pnpm 12.16.1`, `rustc 1.99.1`; zero CSP violations or runtime blockers; estimates for R02–R04 unchanged.
-- [ ] https://github.com/hyinxiaoyu/SynapseRead/issues/9 — **R02**: Navigation sidebar, progress, and jump history (1–2 sessions; 1–2 engineer days)
+- [x] https://github.com/hyinxiaoyu/SynapseRead/issues/9 — **R02**: Navigation sidebar, progress, and jump history (1–2 sessions; 1–2 engineer days) — completed: nested EPUB/PDF outline sidebar with empty-outline states, validated PDF page input, separate EPUB chapter-page vs whole-book progress indicators, and return-location history stack across directory/page/source jumps.
 - [ ] https://github.com/hyinxiaoyu/SynapseRead/issues/10 — **R03**: Persistent reading preferences (1 sessions; 1–2 engineer days)
 - [ ] https://github.com/hyinxiaoyu/SynapseRead/issues/11 — **R04**: PDF zoom and viewport behavior (1 sessions; 1–2 engineer days)
 - [ ] https://github.com/hyinxiaoyu/SynapseRead/issues/12 — **R05**: In-document search across PDF, EPUB, and TXT (2–3 sessions; 2–3 engineer days)

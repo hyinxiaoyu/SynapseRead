@@ -1,4 +1,5 @@
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
+import { RotateCcw } from 'lucide-react';
 import {
   type CSSProperties,
   memo,
@@ -11,6 +12,7 @@ import {
   type UIEvent,
 } from 'react';
 
+import { Button } from '@/components/ui/button';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { cn, describeError } from '@/lib/utils';
 import type {
@@ -193,6 +195,7 @@ export function TxtViewer({
   // endpoints left the DOM, scrolling away would silently destroy the selection.
   const [pinnedRows, setPinnedRows] = useState<readonly number[]>([]);
   const [missedJump, setMissedJump] = useState(false);
+  const [returnStack, setReturnStack] = useState<number[]>([]);
 
   // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
   const virtualizer = useVirtualizer({
@@ -330,10 +333,24 @@ export function TxtViewer({
   const jumpResolved = jumpRange !== null;
   const jumpRow = jumpRange ? model.rowAtUnit(jumpRange.startUnit) : null;
   const pulsingAnnotationId = jumpResolved ? (jumpRequest?.annotationId ?? null) : null;
+  const lastHandledJumpNonce = useRef<number | null>(null);
 
   useLayoutEffect(() => {
-    if (jumpRow !== null) virtualizer.scrollToIndex(jumpRow, { align: 'center' });
+    if (jumpRow === null || jumpNonce === null) return;
+    if (lastHandledJumpNonce.current !== jumpNonce) {
+      lastHandledJumpNonce.current = jumpNonce;
+      const previousTop = lastScrollTop.current;
+      setReturnStack((stack) => [...stack, previousTop]);
+    }
+    virtualizer.scrollToIndex(jumpRow, { align: 'center' });
   }, [jumpNonce, jumpRow, virtualizer]);
+
+  const handleReturnBack = () => {
+    const targetTop = returnStack.at(-1);
+    if (targetTop === undefined) return;
+    setReturnStack((stack) => stack.slice(0, -1));
+    scrollRef.current?.scrollTo({ top: targetTop });
+  };
 
   useEffect(() => {
     if (jumpNonce === null) return;
@@ -390,6 +407,19 @@ export function TxtViewer({
 
   return (
     <div className="flex h-full flex-col">
+      {returnStack.length > 0 && (
+        <div className="flex h-9 shrink-0 items-center border-b px-3">
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label="Return to previous location"
+            onClick={handleReturnBack}
+          >
+            <RotateCcw />
+            Back
+          </Button>
+        </div>
+      )}
       {(load.hadReplacements || missedJump) && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           {missedJump
