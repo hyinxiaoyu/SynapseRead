@@ -5,9 +5,11 @@ inspired by MarginNote. Read on one side, and excerpts become connected cards on
 infinite mind map on the other. Every card links back to the exact passage it came
 from.
 
-> **Status: Phase 2 (reader engines) complete.** PDF, EPUB, and TXT documents can be
-> read, excerpted, and jumped back to. It has been tested on Linux WebKit but not yet
-> on macOS, so treat this as pre-release. See the [roadmap](docs/ROADMAP.md).
+> **Status: Reader experience milestone (R01–R12) complete.** PDF, EPUB, and TXT
+> documents support full local reading, search, bookmarks, independent highlights and
+> notes, session restoration, source recovery, and excerpting to the MindMap, verified
+> on macOS (`arm64`, `WKWebView`). See the [roadmap](docs/ROADMAP.md) and
+> [reader implementation plan](docs/READER_PLAN.md).
 
 ## Features
 
@@ -15,15 +17,29 @@ from.
 
 - Resizable workspace: document tabs, mind map canvas, and card inspector
 - Excerpt workflow that saves an annotation, card, and node in one transaction
-- Jump from any card back to its source, with a pulse highlight
+- Independent highlights and notes with session-scoped deletion undo, plus independent
+  bookmarks (`Cmd/Ctrl+D`) without creating MindMap cards
+- In-document search (`Cmd/Ctrl+F`) across unrendered PDF pages, EPUB chapters, and
+  TXT rows, with return-to-previous-location history
+- Persistent reading appearance preferences (`light`/`sepia`/`dark`, font family/size,
+  line spacing, reading width, and EPUB `spread`/`paged`/`scroll` modes)
+- Jump from any card, bookmark, annotation, or search result back to its source, with
+  a pulse highlight
 - Draggable nodes, parent-child nesting, and cross-link edges, with layout saved
-- Format-agnostic anchors covering PDF, EPUB, TXT, and (reserved) Markdown
+- Format-agnostic anchors covering PDF (including cross-page excerpts), EPUB, TXT, and
+  (reserved) Markdown
 - TXT reader: virtualized rendering, highlights that stay on the right bytes even in
-  damaged files, jump with pulse, and reopening where you left off
-- PDF reader: pages rendered off the main thread, text selection, and rectangle
-  captures saved as images
-- EPUB reader: chapters addressed by CFI, with book scripts kept from running
-- Tabs that keep their scroll position and loaded content
+  damaged files, cancellable backend streaming when tabs close, and reopening where
+  you left off
+- PDF reader: pages rendered off the main thread, `fit-width`/`fit-page`/`actual-size`
+  and explicit zoom (`25%`–`400%`), `continuous`/`single`/`two-page` display modes,
+  `90°` view rotation, lazy page thumbnails, internal links, embedded annotation
+  rendering/disclosure, text selection, cross-page excerpts, and rectangle captures
+- EPUB reader: nested table of contents, chapter-page vs whole-book progress, chapters
+  addressed by CFI, and book scripts kept from running
+- Recent documents (`Continue reading`), workspace session restoration across restarts,
+  per-tab error isolation, and source change detection (`missing`/`moved`/`changed`)
+  with explicit file relinking (`Cmd/Ctrl+O`, `Cmd/Ctrl+W`)
 - Streaming UTF-8 text pipeline with a pluggable decoder interface
 - Local SQLite storage, with no accounts and no network access
 

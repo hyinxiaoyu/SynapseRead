@@ -381,4 +381,54 @@ describe('StudyWorkspace', () => {
     );
     expect(screen.getByRole('heading', { name: docTitle })).toBeVisible();
   });
+
+  it('supports keyboard-only tab navigation, roving tabIndex, tabpanel ARIA linkage, and Escape menu dismissal', async () => {
+    await renderReady();
+    // Open three tabs.
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(2));
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(3));
+
+    const tabs = screen.getAllByRole('tab');
+    const [tab0, tab1, tab2] = tabs as [HTMLElement, HTMLElement, HTMLElement];
+
+    // Active tab (tab2) has tabIndex=0 and aria-selected=true; inactive tabs have tabIndex=-1.
+    expect(tab2).toHaveAttribute('aria-selected', 'true');
+    expect(tab2).toHaveAttribute('tabIndex', '0');
+    expect(tab0).toHaveAttribute('tabIndex', '-1');
+    expect(tab1).toHaveAttribute('tabIndex', '-1');
+
+    // Verify tab <-> tabpanel ARIA linkage.
+    const controlledPanelId = tab2.getAttribute('aria-controls') as string;
+    const controlledPanel = document.getElementById(controlledPanelId);
+    expect(controlledPanel).not.toBeNull();
+    expect(controlledPanel).toHaveAttribute('role', 'tabpanel');
+    expect(controlledPanel).toHaveAttribute('aria-labelledby', tab2.id);
+
+    // ArrowRight wraps from tab2 -> tab0 and focuses tab0.
+    tab2.focus();
+    fireEvent.keyDown(tab2, { key: 'ArrowRight' });
+    expect(tab0).toHaveAttribute('aria-selected', 'true');
+    expect(document.activeElement).toBe(tab0);
+
+    // ArrowLeft wraps from tab0 -> tab2.
+    fireEvent.keyDown(tab0, { key: 'ArrowLeft' });
+    expect(tab2).toHaveAttribute('aria-selected', 'true');
+    expect(document.activeElement).toBe(tab2);
+
+    // Home jumps to tab0; End jumps to tab2.
+    fireEvent.keyDown(tab2, { key: 'Home' });
+    expect(tab0).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(tab0, { key: 'End' });
+    expect(tab2).toHaveAttribute('aria-selected', 'true');
+
+    // Recent documents menu closes on Escape.
+    fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+    expect(await screen.findByTestId('recent-documents-menu')).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByTestId('recent-documents-menu')).not.toBeInTheDocument();
+  });
 });

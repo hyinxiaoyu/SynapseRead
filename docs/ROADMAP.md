@@ -53,31 +53,25 @@ before implementation; the fifth came up while building the EPUB engine.
 
 - [x] Run the [whole-app self-test](adr/0004-pdfjs-worker-csp.md#whole-app-check) on macOS
       WKWebView (`macOS 15.6.1`, `arm64`, `AppleWebKit/605.1.15`).
-- Click through the native file picker. `pick_document` is the one command no test runs.
-- Large files: TXT holds the whole file in memory, a closed tab does not stop the Rust
-  read, and PDFs load whole rather than by range.
-- A file edited in place still opens, and its anchors can drift, because `file_hash` is
-  not re-checked on open.
+- [x] Native file picker and drag-and-drop registration (`pick_document`, `relink_document`,
+      `register_dropped_paths`).
+- [x] Large files: closed-tab TXT streams cancel immediately through `cancel_text_stream`,
+      and PDF/DOM resources are bounded via per-document LRU caches and canvas bitmap zeroing.
+- [x] Source change detection (`verify_document_source`) and explicit relinking
+      (`relink_document`) prevent stale anchors from silently applying to modified files.
 
-## Reader experience: next priority
+## Reader experience (R01–R12), complete
 
-Complete the principal local reading workflows before expanding card operations:
-EPUB targets Apple Books, PDF targets macOS Preview, and TXT shares applicable
-controls. See [the reader implementation plan](READER_PLAN.md) for task IDs,
-dependencies, acceptance criteria, and estimates.
+Completed the principal local reading workflows across EPUB (Apple Books parity),
+PDF (macOS Preview parity), and TXT. See [the reader implementation plan](READER_PLAN.md)
+for task IDs, acceptance evidence, and measurements.
 
-- Daily reading core (R01–R07): native baseline, navigation/progress, preferences,
-  PDF zoom, document search, bookmarks, and independent annotations.
-- Desktop parity and hardening (R08–R12): PDF thumbnails/display modes/links,
-  recent documents/session restoration, source recovery, resource limits, and
-  native acceptance.
-- Planning estimate: 17–23 implementation sessions, 18–33 engineer days; reserve
-  approximately 5–9 working weeks including contingency. Re-estimate after the
-  native baseline, search, and annotation milestones. Release packaging is extra.
-
-These tasks are planned, not complete. Relevant M2 carryovers and M4 recovery,
-performance, and accessibility work are executed here and should not be counted
-twice. Optional scope such as additional TXT encodings is estimated separately.
+- [x] Daily reading core (R01–R07): native baseline, navigation/progress, preferences,
+      PDF zoom, document search, bookmarks, and independent annotations (including
+      cross-page PDF anchors).
+- [x] Desktop parity and hardening (R08–R12): PDF thumbnails/display modes/rotation/links
+      and embedded annotations, recent documents/session restoration, source recovery,
+      stream cancellation and bounded resource limits, and native/accessibility acceptance.
 
 ## M3: Card operations (after reader experience)
 

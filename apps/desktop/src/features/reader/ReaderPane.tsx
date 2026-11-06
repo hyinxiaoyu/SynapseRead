@@ -2,6 +2,7 @@ import { AlertTriangle, Clock, FileCheck, FolderOpen, Link2, Quote, X } from 'lu
 import {
   Component,
   type ComponentType,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -111,7 +112,13 @@ export function ReaderPane() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.altKey || event.shiftKey) return;
+      if (event.defaultPrevented) return;
+      if (event.key === 'Escape' && recentMenuOpen) {
+        event.preventDefault();
+        setRecentMenuOpen(false);
+        return;
+      }
+      if (event.altKey || event.shiftKey) return;
       if (!(event.metaKey || event.ctrlKey)) return;
       const key = event.key.toLowerCase();
       if (key !== 'o' && key !== 'w') return;
@@ -126,7 +133,33 @@ export function ReaderPane() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeDocumentId, closeDocument, openDocument]);
+  }, [activeDocumentId, closeDocument, openDocument, recentMenuOpen]);
+
+  const handleTabKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
+      if (openDocuments.length <= 1) return;
+      let nextIndex: number | null = null;
+      if (event.key === 'ArrowRight') {
+        nextIndex = (currentIndex + 1) % openDocuments.length;
+      } else if (event.key === 'ArrowLeft') {
+        nextIndex = (currentIndex - 1 + openDocuments.length) % openDocuments.length;
+      } else if (event.key === 'Home') {
+        nextIndex = 0;
+      } else if (event.key === 'End') {
+        nextIndex = openDocuments.length - 1;
+      }
+      if (nextIndex === null) return;
+      event.preventDefault();
+      const targetDoc = openDocuments[nextIndex];
+      if (!targetDoc) return;
+      activateDocument(targetDoc.id);
+      const tabButton = window.document.getElementById(`reader-tab-${targetDoc.id}`);
+      if (tabButton instanceof HTMLElement) {
+        tabButton.focus();
+      }
+    },
+    [activateDocument, openDocuments],
+  );
 
   const handleOpenRecent = useCallback(
     (documentId: string) => {
@@ -144,7 +177,7 @@ export function ReaderPane() {
           aria-label="Open documents"
           className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
         >
-          {openDocuments.map((document) => {
+          {openDocuments.map((document, index) => {
             const isActive = document.id === activeDocumentId;
             return (
               <div
@@ -155,11 +188,15 @@ export function ReaderPane() {
                 )}
               >
                 <button
+                  id={`reader-tab-${document.id}`}
                   type="button"
                   role="tab"
                   aria-selected={isActive}
+                  aria-controls={`reader-tabpanel-${document.id}`}
+                  tabIndex={isActive ? 0 : -1}
                   className="truncate py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => activateDocument(document.id)}
+                  onKeyDown={(event) => handleTabKeyDown(event, index)}
                 >
                   {document.title}
                 </button>
@@ -248,6 +285,9 @@ export function ReaderPane() {
           return (
             <div
               key={document.id}
+              id={`reader-tabpanel-${document.id}`}
+              role="tabpanel"
+              aria-labelledby={`reader-tab-${document.id}`}
               className="absolute inset-0"
               style={{ visibility: isActive ? 'visible' : 'hidden' }}
               inert={!isActive}
