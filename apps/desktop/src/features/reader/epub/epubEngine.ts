@@ -13,6 +13,11 @@ import {
   findSubstringMatches,
 } from '@/features/reader/DocumentSearch';
 import {
+  isOverContent,
+  type PageGestureSample,
+  type WheelSample,
+} from '@/features/reader/paging/pageTurn';
+import {
   DEFAULT_READING_PREFERENCES,
   type DocumentSource,
   type EpubReadingMode,
@@ -50,6 +55,8 @@ export interface EpubLocation {
   chapterIndex?: number;
   totalChapters?: number;
   bookProgress?: number;
+  /** Where this page starts in the book, `0..1`, by spine chapter and page. */
+  fraction?: number;
 }
 
 /** The whole of what the reader needs from epub.js; nothing else imports it. */
@@ -65,6 +72,15 @@ export interface EpubHandle {
   ): Promise<readonly EpubSearchMatch[]>;
   /** Shows a CFI or chapter, or the first chapter with no target. Rejects if it cannot. */
   display(target?: string): Promise<void>;
+  /** The spine position of a chapter file, or -1. */
+  spineIndexOf(href: string): number;
+  /** The chapter file at a spine position. */
+  spineHref(index: number): string | undefined;
+  /**
+   * Shows the page holding a point part-way through a chapter's text (`0` its
+   * start, `1` its end), whether or not the chapter is rendered.
+   */
+  displayChapterFraction(index: number, fraction: number): Promise<void>;
   next(): Promise<void>;
   previous(): Promise<void>;
   setReadingMode(mode: EpubReadingMode): Promise<void>;
@@ -84,6 +100,12 @@ export interface EpubHandle {
   onSelection(listener: (selection: EpubSelection | null) => void): void;
   onLocation(listener: (location: EpubLocation) => void): void;
   onKeyDown(listener: (event: KeyboardEvent) => void): void;
+  /** Pointer events in a chapter frame, in the top window's coordinates. */
+  onGesture(listener: (sample: PageGestureSample) => void): void;
+  /** Wheel events in a chapter frame; the listener reports whether it used one. */
+  onWheel(listener: (wheel: WheelSample) => boolean): void;
+  /** The cursor over the chapter frames, such as a page-turn hint. */
+  setCursor(cursor: string): void;
   destroy(): void;
 }
 
@@ -304,6 +326,46 @@ function findTocLabel(items: readonly EpubTocItem[], href: string): string | nul
   return null;
 }
 
+/** A chapter's readable text, with the text node behind each stretch of it. */
+function collectText(chapterDoc: Document): {
+  fullText: string;
+  nodes: { node: Text; start: number; end: number }[];
+} {
+  const root = chapterDoc.body ?? chapterDoc.documentElement;
+  const nodes: { node: Text; start: number; end: number }[] = [];
+  let fullText = '';
+  if (!root) return { fullText, nodes };
+  const walker = chapterDoc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+    const textNode = current as Text;
+    const parentTag = textNode.parentElement?.tagName.toLowerCase();
+    if (
+      parentTag === 'style' ||
+      parentTag === 'script' ||
+      parentTag === 'noscript' ||
+      parentTag === 'title' ||
+      textNode.parentElement?.closest('head, style, script, noscript')
+    ) {
+      continue;
+    }
+    const value = textNode.data;
+    if (!value) continue;
+    const start = fullText.length;
+    fullText += value;
+    nodes.push({ node: textNode, start, end: fullText.length });
+  }
+  return { fullText, nodes };
+}
+
+interface LoadableSection {
+  href: string;
+  document?: Document;
+  contents?: Element;
+  load(request: unknown): Promise<Element>;
+  unload(): void;
+  cfiFromRange(range: Range): string;
+}
+
 const toBuffer = async (source: DocumentSource): Promise<ArrayBuffer> => {
   if (source.kind === 'url') return (await fetch(source.url)).arrayBuffer();
   // A copy, because the archive reader may hold on to it after this tab closes.
@@ -377,6 +439,9 @@ export async function openEpubDocument(
   let selectionListener: (selection: EpubSelection | null) => void = () => undefined;
   let locationListener: (location: EpubLocation) => void = () => undefined;
   let keyDownListener: (event: KeyboardEvent) => void = () => undefined;
+  let gestureListener: (sample: PageGestureSample) => void = () => undefined;
+  let wheelListener: (wheel: WheelSample) => boolean = () => false;
+  let frameCursor = '';
 
   rendition.hooks.content.register((contents: Contents) => {
     contents.document.body?.classList.toggle('epubjs-scrolled', currentMode === 'scroll');
@@ -388,6 +453,59 @@ export async function openEpubDocument(
     contents.document.addEventListener('keydown', (event: KeyboardEvent) => {
       keyDownListener(event);
     });
+    // Page turns are decided outside the frame, in the top window's coordinates.
+    const chapterDoc = contents.document;
+    const offset = () => {
+      const frame = contents.window.frameElement;
+      const rect = frame?.getBoundingClientRect();
+      return { left: rect?.left ?? 0, top: rect?.top ?? 0 };
+    };
+    const hasSelection = () => {
+      const selection = contents.window.getSelection();
+      return selection !== null && !selection.isCollapsed;
+    };
+    chapterDoc.documentElement.style.cursor = frameCursor;
+    chapterDoc.addEventListener('pointerdown', (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      const { left, top } = offset();
+      gestureListener({
+        kind: 'down',
+        x: left + event.clientX,
+        y: top + event.clientY,
+        hasSelection: hasSelection(),
+      });
+    });
+    chapterDoc.addEventListener('pointermove', (event: PointerEvent) => {
+      if (event.buttons !== 0) return;
+      const { left, top } = offset();
+      gestureListener({
+        kind: 'move',
+        x: left + event.clientX,
+        y: top + event.clientY,
+        overContent: isOverContent(event.target, event.clientX, event.clientY),
+      });
+    });
+    chapterDoc.documentElement.addEventListener('pointerleave', () => {
+      gestureListener({ kind: 'leave' });
+    });
+    chapterDoc.addEventListener('click', (event: MouseEvent) => {
+      if (event.button !== 0 || event.detail > 1 || event.defaultPrevented) return;
+      const { left, top } = offset();
+      gestureListener({
+        kind: 'click',
+        x: left + event.clientX,
+        y: top + event.clientY,
+        overContent: isOverContent(event.target, event.clientX, event.clientY),
+        hasSelection: hasSelection(),
+      });
+    });
+    chapterDoc.addEventListener(
+      'wheel',
+      (event: WheelEvent) => {
+        if (wheelListener(event)) event.preventDefault();
+      },
+      { passive: false },
+    );
   });
   rendition.on('selected', (cfiRange: string, contents: Contents) => {
     const text = contents.window.getSelection()?.toString().trim() ?? '';
@@ -409,17 +527,46 @@ export async function openEpubDocument(
         ? Math.min(Math.max(displayed.page / displayed.total, 0), 1)
         : 1;
     const bookProgress = Math.round(((chapterIndex + chapterFraction) / totalChapters) * 100);
+    // The page's start, so the first page of a chapter sits on its scrubber tick.
+    const pageStart =
+      displayed && displayed.total > 0
+        ? Math.min(Math.max((displayed.page - 1) / displayed.total, 0), 1)
+        : 0;
     locationListener({
       cfi: location.start.cfi,
       href: location.start.href,
       chapterIndex,
       totalChapters,
       bookProgress,
+      fraction: (chapterIndex + pageStart) / totalChapters,
       ...(displayed ? { page: displayed.page, totalPages: displayed.total } : {}),
     });
   });
 
   const contentsList = () => rendition.getContents() as unknown as Contents[];
+
+  const display = async (target?: string) => {
+    const resolved = resolveTarget(target);
+    if (resolved?.startsWith('epubcfi(')) currentCfi = resolved;
+    await (rendition.display(resolved) as unknown as Promise<void>);
+  };
+
+  /** Runs `read` on a spine chapter's document, loading it only for the call. */
+  const withSection = async <T>(
+    index: number,
+    read: (section: LoadableSection, chapterDoc: Document) => T,
+    fallback: T,
+  ): Promise<T> => {
+    const section = book.spine.get(index) as unknown as LoadableSection | null;
+    if (!section) return fallback;
+    const wasLoaded = Boolean(section.document && section.contents);
+    if (!wasLoaded) await section.load(book.load.bind(book));
+    try {
+      return section.document ? read(section, section.document) : fallback;
+    } finally {
+      if (!wasLoaded) section.unload();
+    }
+  };
 
   return {
     toc,
@@ -427,85 +574,79 @@ export async function openEpubDocument(
     chapterCount: spineItems.length,
     async searchChapter(chapterIndex, query, options) {
       if (query.trim() === '') return [];
-      const section = book.spine.get(chapterIndex) as unknown as {
-        href: string;
-        document?: Document;
-        contents?: Element;
-        load(request: unknown): Promise<Element>;
-        unload(): void;
-        cfiFromRange(range: Range): string;
-      } | null;
-      if (!section) return [];
-      const wasLoaded = Boolean(section.document && section.contents);
-      if (!wasLoaded) {
-        await section.load(book.load.bind(book));
-      }
-      try {
-        const chapterDoc = section.document;
-        const root = chapterDoc?.body ?? chapterDoc?.documentElement;
-        if (!chapterDoc || !root) return [];
+      return withSection(
+        chapterIndex,
+        (section, chapterDoc) => {
+          const { fullText, nodes } = collectText(chapterDoc);
+          const caseSensitive = options?.caseSensitive ?? false;
+          const rawMatches = findSubstringMatches(fullText, query, caseSensitive);
+          const locationLabel = findTocLabel(toc, section.href) ?? `Ch. ${chapterIndex + 1}`;
+          const matches: EpubSearchMatch[] = [];
 
-        const walker = chapterDoc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-        let fullText = '';
-        const nodes: { node: Text; start: number; end: number }[] = [];
-        for (let current = walker.nextNode(); current; current = walker.nextNode()) {
-          const textNode = current as Text;
-          const parentTag = textNode.parentElement?.tagName.toLowerCase();
-          if (
-            parentTag === 'style' ||
-            parentTag === 'script' ||
-            parentTag === 'noscript' ||
-            parentTag === 'title' ||
-            textNode.parentElement?.closest('head, style, script, noscript')
-          ) {
-            continue;
+          for (let index = 0; index < rawMatches.length; index += 1) {
+            const match = rawMatches[index];
+            if (!match) continue;
+            const startEntry = nodes.find((entry) => entry.end > match.start);
+            const endEntry = nodes.findLast((entry) => entry.start < match.end);
+            if (!startEntry || !endEntry) continue;
+            const startOffset = Math.max(0, match.start - startEntry.start);
+            const endOffset = Math.min(endEntry.node.data.length, match.end - endEntry.start);
+            const range = chapterDoc.createRange();
+            range.setStart(startEntry.node, startOffset);
+            range.setEnd(endEntry.node, endOffset);
+            const cfiRange = section.cfiFromRange(range);
+            const snippet = buildSearchSnippet(fullText, match.start, match.end);
+            matches.push({
+              id: `epub-${chapterIndex}-${index}`,
+              cfiRange,
+              chapterHref: section.href,
+              chapterIndex,
+              locationLabel,
+              ...snippet,
+            });
           }
-          const value = textNode.data;
-          if (!value) continue;
-          const start = fullText.length;
-          fullText += value;
-          const end = fullText.length;
-          nodes.push({ node: textNode, start, end });
-        }
-
-        const caseSensitive = options?.caseSensitive ?? false;
-        const rawMatches = findSubstringMatches(fullText, query, caseSensitive);
-        const locationLabel = findTocLabel(toc, section.href) ?? `Ch. ${chapterIndex + 1}`;
-        const matches: EpubSearchMatch[] = [];
-
-        for (let index = 0; index < rawMatches.length; index += 1) {
-          const match = rawMatches[index];
-          if (!match) continue;
-          const startEntry = nodes.find((entry) => entry.end > match.start);
-          const endEntry = nodes.findLast((entry) => entry.start < match.end);
-          if (!startEntry || !endEntry) continue;
-          const startOffset = Math.max(0, match.start - startEntry.start);
-          const endOffset = Math.min(endEntry.node.data.length, match.end - endEntry.start);
-          const range = chapterDoc.createRange();
-          range.setStart(startEntry.node, startOffset);
-          range.setEnd(endEntry.node, endOffset);
-          const cfiRange = section.cfiFromRange(range);
-          const snippet = buildSearchSnippet(fullText, match.start, match.end);
-          matches.push({
-            id: `epub-${chapterIndex}-${index}`,
-            cfiRange,
-            chapterHref: section.href,
-            chapterIndex,
-            locationLabel,
-            ...snippet,
-          });
-        }
-        return matches;
-      } finally {
-        if (!wasLoaded) {
-          section.unload();
-        }
-      }
+          return matches;
+        },
+        [],
+      );
     },
-    async display(target) {
-      const resolved = resolveTarget(target);
-      if (resolved?.startsWith('epubcfi(')) currentCfi = resolved;
-      await (rendition.display(resolved) as unknown as Promise<void>);
+    display,
+    spineIndexOf(href) {
+      const clean = (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+      if (!clean) return -1;
+      return spineItems.findIndex(
+        (item) =>
+          item.href === clean ||
+          item.canonical === clean ||
+          item.href.endsWith(`/${clean}`) ||
+          clean.endsWith(`/${item.href}`),
+      );
+    },
+    spineHref: (index) => spineItems[index]?.href,
+    async displayChapterFraction(index, fraction) {
+      const href = spineItems[index]?.href;
+      if (href === undefined) throw new Error(`no chapter ${index}`);
+      if (fraction <= 0) {
+        await display(href);
+        return;
+      }
+      const cfi = await withSection(
+        index,
+        (section, chapterDoc) => {
+          const { fullText, nodes } = collectText(chapterDoc);
+          if (nodes.length === 0) return null;
+          const target = Math.min(Math.floor(fraction * fullText.length), fullText.length - 1);
+          const entry = nodes.find((candidate) => candidate.end > target) ?? nodes.at(-1);
+          if (!entry) return null;
+          const range = chapterDoc.createRange();
+          const at = Math.min(Math.max(target - entry.start, 0), entry.node.length);
+          range.setStart(entry.node, at);
+          range.setEnd(entry.node, at);
+          return section.cfiFromRange(range);
+        },
+        null,
+      );
+      await display(cfi ?? href);
     },
     async next() {
       if (currentMode === 'scroll') {
@@ -618,6 +759,19 @@ export async function openEpubDocument(
     },
     onKeyDown(listener) {
       keyDownListener = listener;
+    },
+    onGesture(listener) {
+      gestureListener = listener;
+    },
+    onWheel(listener) {
+      wheelListener = listener;
+    },
+    setCursor(cursor) {
+      if (cursor === frameCursor) return;
+      frameCursor = cursor;
+      for (const contents of contentsList()) {
+        contents.document.documentElement.style.cursor = cursor;
+      }
     },
     destroy() {
       book.destroy();

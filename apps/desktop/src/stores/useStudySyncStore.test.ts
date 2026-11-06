@@ -466,6 +466,7 @@ describe('useStudySyncStore', () => {
         justify: false,
         dimImages: true,
         epubReadingMode: 'paged',
+        pageTransition: 'fade',
       });
       expect(state().readingPreferences).toMatchObject({
         theme: 'sepia',
@@ -475,6 +476,7 @@ describe('useStudySyncStore', () => {
         justify: false,
         dimImages: true,
         epubReadingMode: 'paged',
+        pageTransition: 'fade',
       });
 
       const reopened = createStudySyncStore(backend);
@@ -487,6 +489,7 @@ describe('useStudySyncStore', () => {
         justify: false,
         dimImages: true,
         epubReadingMode: 'paged',
+        pageTransition: 'fade',
       });
 
       await state().updateReadingPreferences({ fontSize: 300 });

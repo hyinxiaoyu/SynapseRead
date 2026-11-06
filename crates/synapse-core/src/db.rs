@@ -1807,6 +1807,7 @@ mod tests {
             justify: false,
             dim_images: true,
             epub_reading_mode: crate::domain::EpubReadingMode::Scroll,
+            page_transition: crate::domain::PageTransition::Fade,
         };
         let saved = db.save_reading_preferences(&updated).unwrap();
         assert_eq!(saved, updated);
@@ -1868,6 +1869,7 @@ mod tests {
             assert_eq!(prefs.margins, margins);
             assert!(prefs.justify);
             assert!(!prefs.dim_images);
+            assert_eq!(prefs.page_transition, crate::domain::PageTransition::Slide);
             assert!(prefs.validate().is_ok());
             if theme == ReadingTheme::Sepia {
                 assert_eq!(prefs.font_size, 110);

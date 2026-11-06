@@ -19,6 +19,11 @@ export interface CommandHandler {
   enabled?: boolean;
   /** A context title for the menu item, such as "Remove Bookmark". */
   title?: string;
+  /**
+   * Leaves the command's keyboard-only aliases (Space, Page Up, Page Down) to the
+   * browser, for a view that scrolls natively, such as PDF continuous scroll.
+   */
+  nativeAliases?: boolean;
 }
 
 export type CommandHandlers = Partial<Record<CommandId, CommandHandler>>;
@@ -142,9 +147,15 @@ export function isEditableShortcutTarget(target: EventTarget | null): boolean {
   return (element as Element).closest('[contenteditable="true"], [role="textbox"]') !== null;
 }
 
-/** Widgets that use bare arrow keys themselves; `data-arrow-keys` marks the rest (sidebar lists). */
+/**
+ * Widgets that use bare arrow keys (and Home, End, Page Up, Page Down) themselves;
+ * `data-arrow-keys` marks the rest (sidebar lists).
+ */
 const ARROW_KEY_WIDGETS =
   '[role="slider"], [role="separator"], [role="tablist"], [role="radiogroup"], [role="menu"], [role="tree"], [data-arrow-keys], .react-flow';
+/** Space presses a focused control, so it turns the page only from the page itself. */
+const SPACE_KEY_WIDGETS =
+  'button, a[href], summary, [role="button"], [role="checkbox"], [role="switch"], [role="radio"], [role="tab"], [role="menuitem"], [role="menuitemcheckbox"], [role="option"], [role="treeitem"]';
 
 function isSearchField(target: EventTarget | null): boolean {
   const element = target as { dataset?: DOMStringMap } | null;
@@ -159,7 +170,10 @@ function blocksShortcut(event: KeyboardEvent, definition: CommandDefinition): bo
   const unmodified = !event.metaKey && !event.ctrlKey && !event.altKey;
   if (!unmodified) return false;
   const element = target as { closest?: (selector: string) => Element | null } | null;
-  return typeof element?.closest === 'function' && element.closest(ARROW_KEY_WIDGETS) !== null;
+  if (typeof element?.closest !== 'function') return false;
+  const widgets =
+    event.key === ' ' ? `${ARROW_KEY_WIDGETS}, ${SPACE_KEY_WIDGETS}` : ARROW_KEY_WIDGETS;
+  return element.closest(widgets) !== null;
 }
 
 /**
@@ -170,10 +184,12 @@ export function dispatchCommandKeydown(event: KeyboardEvent): boolean {
   if (event.defaultPrevented || event.isComposing) return false;
   for (const id of COMMAND_IDS) {
     const definition = commandDefinition(id);
-    if (!commandBindings(definition).some((binding) => shortcutMatches(event, binding))) {
-      continue;
-    }
+    const binding = commandBindings(definition).find((candidate) =>
+      shortcutMatches(event, candidate),
+    );
+    if (binding === undefined) continue;
     if (blocksShortcut(event, definition)) return false;
+    if (binding !== definition.shortcut && resolve(id)?.nativeAliases) return false;
     if (!runCommand(id, 'keyboard')) return false;
     event.preventDefault();
     return true;

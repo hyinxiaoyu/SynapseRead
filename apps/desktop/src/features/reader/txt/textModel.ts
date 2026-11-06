@@ -111,6 +111,11 @@ export class TxtTextModel {
     }
   }
 
+  /** Source bytes loaded so far: the whole file once `complete`. */
+  get loadedBytes(): number {
+    return this.endByte;
+  }
+
   get rowCount(): number {
     return this.rowStarts.length;
   }

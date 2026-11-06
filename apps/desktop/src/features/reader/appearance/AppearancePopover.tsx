@@ -17,7 +17,12 @@ import {
 } from '@/features/reader/appearance/themes';
 import { ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
-import type { ReadingMargins, ReadingPreferences, ReadingTheme } from '@/types/domain';
+import type {
+  PageTransition,
+  ReadingMargins,
+  ReadingPreferences,
+  ReadingTheme,
+} from '@/types/domain';
 
 const FONT_SIZE_STEP = 10;
 const MIN_FONT_SIZE = 75;
@@ -46,6 +51,12 @@ const MARGINS: readonly { value: ReadingMargins; label: string }[] = [
   { value: 'narrow', label: 'Narrow' },
   { value: 'normal', label: 'Normal' },
   { value: 'wide', label: 'Wide' },
+];
+
+const PAGE_TRANSITIONS: readonly { value: PageTransition; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'slide', label: 'Slide' },
+  { value: 'fade', label: 'Fade' },
 ];
 
 export function useAppearancePanel() {
@@ -385,6 +396,14 @@ function AppearancePanel({
               options={MARGINS}
               checkedIndex={MARGINS.findIndex((margin) => margin.value === preferences.margins)}
               onSelect={(margins) => onChange({ margins })}
+            />
+            <TextChoices
+              label="Page turn"
+              options={PAGE_TRANSITIONS}
+              checkedIndex={PAGE_TRANSITIONS.findIndex(
+                (transition) => transition.value === preferences.pageTransition,
+              )}
+              onSelect={(pageTransition) => onChange({ pageTransition })}
             />
             <div className="flex flex-col gap-1">
               <Switch

@@ -230,6 +230,47 @@ describe('command registry', () => {
     expect(arrow.defaultPrevented).toBe(false);
   });
 
+  it('turns pages with Space and Page keys, leaving Space to a focused control', () => {
+    const next = vi.fn();
+    const previous = vi.fn();
+    register(() => ({
+      'go.nextPage': { run: next },
+      'go.previousPage': { run: previous },
+    }));
+    document.body.innerHTML = `<button id="button"></button><div id="page" tabindex="-1"></div>`;
+    const page = document.getElementById('page');
+    page?.dispatchEvent(key({ key: ' ', code: 'Space', bubbles: true }));
+    page?.dispatchEvent(key({ key: 'PageDown', code: 'PageDown', bubbles: true }));
+    page?.dispatchEvent(key({ key: ' ', code: 'Space', shiftKey: true, bubbles: true }));
+    page?.dispatchEvent(key({ key: 'PageUp', code: 'PageUp', bubbles: true }));
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(previous).toHaveBeenCalledTimes(2);
+
+    const space = key({ key: ' ', code: 'Space', bubbles: true });
+    document.getElementById('button')?.dispatchEvent(space);
+    expect(space.defaultPrevented).toBe(false);
+    expect(next).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves keyboard-only aliases to a view that scrolls natively', () => {
+    const next = vi.fn();
+    register(() => ({ 'go.nextPage': { run: next, nativeAliases: true } }));
+    const space = key({ key: ' ', code: 'Space' });
+    expect(dispatchCommandKeydown(space)).toBe(false);
+    expect(space.defaultPrevented).toBe(false);
+    expect(dispatchCommandKeydown(key({ key: 'ArrowRight' }))).toBe(true);
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it('formats the page and chapter keys for each platform', () => {
+    expect(formatShortcut('Alt+ArrowDown', 'mac')).toBe('⌥↓');
+    expect(formatShortcut('Home', 'mac')).toBe('↖');
+    expect(formatShortcut('PageDown', 'other')).toBe('PgDn');
+    expect(shortcutMatches(key({ key: 'Home', code: 'Home' }), 'Home')).toBe(true);
+    expect(shortcutMatches(key({ key: ' ' }), 'Space')).toBe(true);
+    expect(shortcutMatches(key({ key: ' ', shiftKey: true }), 'Space')).toBe(false);
+  });
+
   it('leaves arrows to the outline tree and sidebar lists, and ⌘Z to text fields', () => {
     const nextPage = vi.fn();
     const undoDelete = vi.fn();

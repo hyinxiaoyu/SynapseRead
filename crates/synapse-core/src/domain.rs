@@ -471,6 +471,16 @@ pub enum EpubReadingMode {
     Scroll,
 }
 
+/// How a paged reader animates a page turn. Reduced motion always turns instantly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PageTransition {
+    None,
+    #[default]
+    Slide,
+    Fade,
+}
+
 /// User-configurable appearance and layout preferences for EPUB and TXT readers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -487,6 +497,10 @@ pub struct ReadingPreferences {
     /// Dims images in the Dark theme.
     pub dim_images: bool,
     pub epub_reading_mode: EpubReadingMode,
+    /// Also used by PDF single and two-page modes. Rows saved before it existed
+    /// take the default, so it needs no migration.
+    #[serde(default)]
+    pub page_transition: PageTransition,
 }
 
 impl Default for ReadingPreferences {
@@ -500,6 +514,7 @@ impl Default for ReadingPreferences {
             justify: true,
             dim_images: false,
             epub_reading_mode: EpubReadingMode::Spread,
+            page_transition: PageTransition::Slide,
         }
     }
 }

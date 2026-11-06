@@ -76,6 +76,9 @@ const CHROME_UNDER_TEST: readonly [string, ChromePalette][] = [
 describe('reading theme contrast (WCAG AA)', () => {
   it.each(Object.entries(PAGE_PALETTES))('%s page text', (_theme, palette) => {
     expect(contrastRatio(palette.text, palette.background)).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrastRatio(palette.secondaryText, palette.background)).toBeGreaterThanOrEqual(
+      AA_TEXT,
+    );
   });
 
   it.each(CHROME_UNDER_TEST)('%s chrome text', (_theme, chrome) => {

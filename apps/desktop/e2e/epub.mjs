@@ -127,17 +127,31 @@ export async function epubFlow(page) {
   // Multibyte text in another paragraph.
   await excerpt(page, '汉字');
 
-  // Move to the second chapter using the Right arrow key and Next control.
-  await page.evaluate(
-    `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`,
+  // Page turns: a click in the right edge of the page (inside the chapter frame),
+  // a real Space press, and the edge chevron, until the second chapter shows.
+  const location = `${visibleHost}.querySelector('.epub-container')?.scrollLeft ?? 0`;
+  const edge = await page.evaluate(`(() => {
+    const r = ${visibleHost}.getBoundingClientRect();
+    return { x: r.right - 6, y: r.top + r.height - 12 };
+  })()`);
+  // The excerpts above leave a selection, and the click that dismisses one only does that.
+  await page.evaluate(`${frameDocument}.getSelection().removeAllRanges()`);
+  const before = await page.evaluate(`${location}`);
+  await page.click(edge);
+  await page.waitFor(
+    `${chapterIs('Chapter Two')} || (${location}) !== ${before}`,
+    'a click in the page edge to turn the page',
   );
-  await new Promise((done) => setTimeout(done, 150));
+  await page.evaluate(`${visibleHost}.focus()`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (await page.evaluate(chapterIs('Chapter Two'))) break;
-    await page.clickButton('Next');
+    if (attempt % 2 === 0) await page.press(' ', 'Space');
+    else await page.clickButton('Next Page');
     await new Promise((done) => setTimeout(done, 120));
   }
   await page.waitFor(chapterIs('Chapter Two'), 'the second chapter');
+  // The page slides in as it turns; text moves until the transition ends.
+  await page.waitFor(`${visibleHost}.getAnimations().length === 0`, 'the page turn to settle');
   await excerpt(page, 'final target sentence');
 
   // Jump across chapters: the frame's chapter changes, and the highlight pulses.
@@ -196,17 +210,29 @@ export async function epubFlow(page) {
   await page.clickButton('Single page');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'paged'`, 'single-page mode');
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in single-page mode');
-  assert(
-    await page.evaluate(
-      `document.querySelector('[data-testid="unified-toolbar"] [data-testid="epub-chapter-page"]')?.textContent.includes('Chapter page')`,
-    ),
-    'distinguishes chapter-local pages',
+  // Progress lives in the footer under the page; the toolbar names the chapter.
+  await page.waitFor(
+    `${visibleViewer}.querySelector('[data-testid="reader-footer-readout"]')?.textContent.match(/in chapter|% of book/)`,
+    'the footer to show progress',
   );
   assert(
     await page.evaluate(
-      `document.querySelector('[data-testid="unified-toolbar"] [data-testid="epub-book-progress"]')?.textContent.includes('Ch. 2/2')`,
+      `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-subtitle"]')?.textContent.length > 0`,
     ),
-    'shows whole-book progress separately from chapter pages',
+    'the toolbar subtitle names the chapter',
+  );
+  const footer = await page.evaluate(`(() => {
+    const readout = ${visibleViewer}.querySelector('[data-testid="reader-footer-readout"]');
+    const slider = ${visibleViewer}.querySelector('[role="slider"]');
+    return {
+      fontSize: parseFloat(getComputedStyle(readout).fontSize),
+      valueText: slider?.getAttribute('aria-valuetext') ?? '',
+    };
+  })()`);
+  assert(footer.fontSize >= 11, `footer text is at least 11 pt: ${footer.fontSize}`);
+  assert(
+    /^Chapter 2 of 2, \d+%$/.test(footer.valueText),
+    `the scrubber speaks the chapter and percentage: ${footer.valueText}`,
   );
 
   // Table of contents: nested items, chapter jump, and return to previous location.

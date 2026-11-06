@@ -259,6 +259,8 @@ export type ReadingFontFamily =
 /** Page padding; the text column is capped by the reading measure instead. */
 export type ReadingMargins = 'narrow' | 'normal' | 'wide';
 export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
+/** How a paged reader animates a page turn; reduced motion always turns instantly. */
+export type PageTransition = 'none' | 'slide' | 'fade';
 
 export interface ReadingPreferences {
   theme: ReadingTheme;
@@ -273,6 +275,8 @@ export interface ReadingPreferences {
   /** Dims images in the Dark theme. */
   dimImages: boolean;
   epubReadingMode: EpubReadingMode;
+  /** Also used by PDF single and two-page modes. */
+  pageTransition: PageTransition;
 }
 
 export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
@@ -284,6 +288,7 @@ export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
   justify: true,
   dimImages: false,
   epubReadingMode: 'spread',
+  pageTransition: 'slide',
 };
 
 /**

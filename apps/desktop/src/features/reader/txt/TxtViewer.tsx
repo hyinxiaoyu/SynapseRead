@@ -45,9 +45,19 @@ import {
 import {
   DEFAULT_SERIF_STACK,
   fontStack,
+  pageFooterStyle,
   pageSurfaceStyle,
 } from '@/features/reader/appearance/themes';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
+import {
+  animatePageTurn,
+  type TurnDirection,
+  usePageTurnGestures,
+  zoneCursor,
+} from '@/features/reader/paging/pageTurn';
+import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import { useBackChip } from '@/features/reader/progress/useBackChip';
 import { useJumpHistory } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
@@ -67,6 +77,8 @@ import { UNIT_ATTRIBUTE, unitAtBoundary } from './selectionMapping';
 import { type TxtSearchMatch, TxtTextModel } from './textModel';
 
 export const ROW_ESTIMATE_PX = 26;
+/** Plain text has no chapters: Page Up and Page Down on the scrubber move a tenth. */
+const SCRUB_STEP = 0.1;
 const OVERSCAN_ROWS = 12;
 const CURSOR_DEBOUNCE_MS = 400;
 /** A long file should fill in steadily, not re-render for every 64 KiB chunk. */
@@ -275,8 +287,10 @@ export function TxtViewer({
   const [missedJump, setMissedJump] = useState(false);
   const history = useJumpHistory<number>();
   const pushHistory = history.push;
+  const backChip = useBackChip(history.canGoBack);
   const markup = useMarkupToolbar();
   const [currentRow, setCurrentRow] = useState(0);
+  const pageRef = useRef<HTMLDivElement>(null);
   const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
   const annotationPulseTimerRef = useRef<number | null>(null);
 
@@ -659,11 +673,13 @@ export function TxtViewer({
   }, [pushHistory, jumpNonce, jumpRow, virtualizer]);
 
   const handleReturnBack = () => {
+    backChip.dismiss();
     const targetTop = history.goBack(scrollRef.current?.scrollTop ?? lastScrollTop.current);
     if (targetTop !== undefined) scrollRef.current?.scrollTo({ top: targetTop });
   };
 
   const handleForward = () => {
+    backChip.dismiss();
     const targetTop = history.goForward(scrollRef.current?.scrollTop ?? lastScrollTop.current);
     if (targetTop !== undefined) scrollRef.current?.scrollTo({ top: targetTop });
   };
@@ -683,6 +699,70 @@ export function TxtViewer({
     scroller.scrollBy({ top: direction * scroller.clientHeight * 0.9 });
   };
 
+  const turnPage = (direction: TurnDirection) => {
+    backChip.dismiss();
+    pageBy(direction);
+    animatePageTurn(pageRef.current, direction, effectivePreferences.pageTransition);
+  };
+
+  const scrollToEdge = (edge: 'start' | 'end') => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    backChip.dismiss();
+    scroller.scrollTo({ top: edge === 'start' ? 0 : scroller.scrollHeight });
+  };
+
+  // ---- Progress: by source byte, so it does not depend on row heights ----------
+
+  // `rowCount` and `complete` stand in for the mutable model's loaded length.
+  const loadedBytes = useMemo(
+    () => model.loadedBytes,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [model, rowCount, complete],
+  );
+  const currentByte = model.cursorAnchorForRow(currentRow)?.startByteOffset ?? 0;
+  const fraction = loadedBytes > 0 ? Math.min(currentByte / loadedBytes, 1) : 0;
+  const percent = Math.round(fraction * 100);
+  const rowAtFraction = (at: number) => {
+    const byte = Math.floor(Math.min(Math.max(at, 0), 1) * loadedBytes);
+    return model.rowAtUnit(model.unitAtSourceOffset(byte, 'down') ?? 0);
+  };
+  const showRow = (row: number) => {
+    setCurrentRow(row);
+    virtualizer.scrollToIndex(row, { align: 'start' });
+  };
+  const scrubber: ScrubberModel | null =
+    loadedBytes > 0
+      ? {
+          value: fraction,
+          valueText: `Line ${currentRow + 1} of ${rowCount}, ${percent}%`,
+          ticks: [],
+          describe: (at) => `Line ${rowAtFraction(at) + 1} · ${Math.round(at * 100)}%`,
+          onCommit: (at) => {
+            const origin = currentRow + 1;
+            pushHistory(lastScrollTop.current);
+            showRow(rowAtFraction(at));
+            backChip.offer(`Back to line ${origin}`);
+          },
+          onStepPage: turnPage,
+          onStepChapter: (direction) => {
+            backChip.dismiss();
+            showRow(rowAtFraction(fraction + direction * SCRUB_STEP));
+          },
+        }
+      : null;
+
+  const gestures = usePageTurnGestures({
+    enabled: isActive,
+    areaRef: scrollRef,
+    pageRef,
+    onTurn: turnPage,
+    canSwipe: () => {
+      const scroller = scrollRef.current;
+      return !scroller || scroller.scrollWidth <= scroller.clientWidth + 1;
+    },
+  });
+
   useReaderCommands({
     isActive,
     chromeHidden,
@@ -698,8 +778,11 @@ export function TxtViewer({
       panel: preferencesPanel,
     },
     extra: {
-      'go.previousPage': { run: () => pageBy(-1) },
-      'go.nextPage': { run: () => pageBy(1) },
+      'go.previousPage': { run: () => turnPage(-1) },
+      'go.nextPage': { run: () => turnPage(1) },
+      // A text file is one chapter: Home and End go to its start and end.
+      'go.chapterStart': { run: () => scrollToEdge('start'), title: 'Start of Document' },
+      'go.chapterEnd': { run: () => scrollToEdge('end'), title: 'End of Document' },
       'go.back': { run: handleReturnBack, enabled: history.canGoBack },
       'go.forward': { run: handleForward, enabled: history.canGoForward },
     },
@@ -796,17 +879,7 @@ export function TxtViewer({
             />
           </>
         }
-        center={
-          <ToolbarTitle
-            title={document.title}
-            subtitle={
-              <span data-testid="txt-progress">
-                Line {currentRow + 1} of {rowCount}
-                {!complete && '…'}
-              </span>
-            }
-          />
-        }
+        center={<ToolbarTitle title={document.title} />}
         trailing={
           <>
             <AppearanceMenu
@@ -862,57 +935,72 @@ export function TxtViewer({
               </p>
             )}
           </ReaderPopoverLayer>
-          <div
-            ref={scrollRef}
-            onScroll={onScroll}
-            tabIndex={-1}
-            data-testid="txt-scroll"
-            className="min-h-0 flex-1 overflow-auto outline-none"
-            style={pageSurfaceStyle(theme)}
-          >
+          <div className="group/page relative flex min-h-0 flex-1 flex-col">
             <div
-              role="document"
-              aria-label={document.title}
-              // Hyphenation needs a language; a text file declares none.
-              lang={window.navigator.language || undefined}
-              className="relative mx-auto w-full"
-              style={{
-                height: virtualizer.getTotalSize(),
-                maxWidth: page.maxWidth,
-                fontFamily,
-                fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
-                lineHeight:
-                  effectivePreferences.lineSpacing === 1.75
-                    ? 1.625
-                    : effectivePreferences.lineSpacing,
-              }}
+              ref={scrollRef}
+              onScroll={onScroll}
+              tabIndex={-1}
+              data-testid="txt-scroll"
+              data-turn-zone={gestures.zone ?? undefined}
+              className="min-h-0 flex-1 overflow-auto outline-none"
+              style={{ ...pageSurfaceStyle(theme), cursor: zoneCursor(gestures.zone) || undefined }}
             >
-              {virtualizer.getVirtualItems().map((item) => (
-                <div
-                  key={item.key}
-                  data-index={item.index}
-                  ref={virtualizer.measureElement}
-                  className="absolute top-0 left-0 min-h-[1lh] w-full break-words whitespace-pre-wrap"
-                  style={{
-                    transform: `translateY(${item.start}px)`,
-                    paddingInline: page.sidePadding,
-                    ...(effectivePreferences.justify
-                      ? { textAlign: 'justify', hyphens: 'auto' }
-                      : { textAlign: 'start', hyphens: 'manual' }),
-                  }}
-                >
-                  <TxtRow
-                    segments={segmentRow(
-                      model.rowStart(item.index),
-                      model.rowText(item.index),
-                      ranges,
-                    )}
-                    pulsingAnnotationId={pulsingAnnotationId}
-                  />
-                </div>
-              ))}
+              <div
+                ref={pageRef}
+                role="document"
+                aria-label={document.title}
+                // Hyphenation needs a language; a text file declares none.
+                lang={window.navigator.language || undefined}
+                className="relative mx-auto w-full"
+                style={{
+                  height: virtualizer.getTotalSize(),
+                  maxWidth: page.maxWidth,
+                  fontFamily,
+                  fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
+                  lineHeight:
+                    effectivePreferences.lineSpacing === 1.75
+                      ? 1.625
+                      : effectivePreferences.lineSpacing,
+                }}
+              >
+                {virtualizer.getVirtualItems().map((item) => (
+                  <div
+                    key={item.key}
+                    data-index={item.index}
+                    ref={virtualizer.measureElement}
+                    className="absolute top-0 left-0 min-h-[1lh] w-full break-words whitespace-pre-wrap"
+                    style={{
+                      transform: `translateY(${item.start}px)`,
+                      paddingInline: page.sidePadding,
+                      ...(effectivePreferences.justify
+                        ? { textAlign: 'justify', hyphens: 'auto' }
+                        : { textAlign: 'start', hyphens: 'manual' }),
+                    }}
+                  >
+                    <TxtRow
+                      segments={segmentRow(
+                        model.rowStart(item.index),
+                        model.rowText(item.index),
+                        ranges,
+                      )}
+                      pulsingAnnotationId={pulsingAnnotationId}
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
+            <PageTurnChevrons onPrevious={() => turnPage(-1)} onNext={() => turnPage(1)} />
           </div>
+          <ReaderFooter
+            readouts={{
+              position: `Line ${currentRow + 1} of ${rowCount}${complete ? '' : '…'}`,
+              percent: `${percent}%${complete ? '' : '…'}`,
+            }}
+            scrubber={scrubber}
+            backLabel={backChip.label}
+            onBack={handleReturnBack}
+            style={pageFooterStyle(theme)}
+          />
         </div>
       </div>
     </div>

@@ -414,6 +414,28 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'single' && document.querySelectorAll('[data-page-index]').length === 1`,
     'PDF single-page display mode',
   );
+  // Page turns in single-page mode: edge clicks, Space, and Page Up, as in Preview.
+  const pageField = `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value`;
+  const edges = await page.evaluate(`(() => {
+    const r = ${visibleScroller}.getBoundingClientRect();
+    return {
+      left: { x: r.left + 6, y: r.top + r.height / 2 },
+      right: { x: r.right - 24, y: r.top + r.height / 2 },
+    };
+  })()`);
+  await page.click(edges.right);
+  await page.waitFor(`${pageField} === '2'`, 'a click in the right page edge to turn the page');
+  await page.evaluate(`${visibleScroller}.focus()`);
+  await page.press(' ', 'Space');
+  await page.waitFor(`${pageField} === '3'`, 'Space to turn the page');
+  await page.press('PageUp');
+  await page.waitFor(`${pageField} === '2'`, 'Page Up to turn back');
+  await page.click(edges.left);
+  await page.waitFor(`${pageField} === '1'`, 'a click in the left page edge to turn back');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="reader-footer-readout"]')?.textContent.length > 0`,
+    'the PDF footer to show progress',
+  );
   await page.evaluate(
     `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-mode-two-page"]').click()`,
   );

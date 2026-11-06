@@ -55,6 +55,16 @@ import {
   ToolbarOverflowMenu,
   ToolbarSeparator,
 } from '@/features/reader/ReaderToolbar';
+import {
+  animatePageTurn,
+  type TurnDirection,
+  usePageTurnGestures,
+  zoneCursor,
+} from '@/features/reader/paging/pageTurn';
+import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import { useBackChip } from '@/features/reader/progress/useBackChip';
+import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
 import { useJumpHistory } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
@@ -756,6 +766,7 @@ function PdfPages({
   onSelectionChange,
   onJumpHandled,
   onCursorChange,
+  preferences,
   bookmarks,
   onAddBookmark,
   onRemoveBookmark,
@@ -771,8 +782,8 @@ function PdfPages({
   const { width, height } = useSettledSize(scrollRef);
   const sizes = usePageSizes(engine);
   const navigator = useNavigator('pdf', ['thumbnails', 'contents', 'notes', 'bookmarks']);
-  // Loaded once the sidebar first opens; highlights group under its chapters too.
-  const outline = usePdfOutline(engine, navigator.open);
+  // Chapters group highlights, name the toolbar subtitle, and tick the scrubber.
+  const outline = usePdfOutline(engine, true);
   const outlineNodes = useMemo(() => toPdfOutlineNodes(outline), [outline]);
   const [zoomMode, setZoomMode] = useState<PdfZoomMode>('fit-width');
   const [customScale, setCustomScale] = useState(1);
@@ -824,7 +835,9 @@ function PdfPages({
   const [missedJump, setMissedJump] = useState(false);
   const history = useJumpHistory<PdfReturnLocation>(isSamePdfLocation);
   const pushHistory = history.push;
+  const backChip = useBackChip(history.canGoBack);
   const markup = useMarkupToolbar();
+  const pageContentRef = useRef<HTMLDivElement>(null);
   const pageInputRef = useRef<HTMLInputElement>(null);
   const pendingZoomTarget = useRef<PdfReturnLocation | null>(null);
 
@@ -1206,12 +1219,14 @@ function PdfPages({
   );
 
   const handleReturnBack = () => {
+    backChip.dismiss();
     const target = history.goBack(currentReturnLocation());
     if (target)
       scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
   };
 
   const handleForward = () => {
+    backChip.dismiss();
     const target = history.goForward(currentReturnLocation());
     if (target)
       scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
@@ -1549,10 +1564,108 @@ function PdfPages({
         ? currentPageIndex
         : (pagesInRow(virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0)[0] ??
           currentPageIndex);
-    const target = currentPage + direction;
-    if (target < 0 || target >= engine.pageCount) return;
+    // Two pages turn a whole spread.
+    const target = currentPage + direction * (displayMode === 'two-page' ? 2 : 1);
+    if (target < 0 || target >= engine.pageCount) return false;
+    scrollToPageOffset(target, offsetWithin(target, 0));
+    return true;
+  };
+
+  const paged = displayMode !== 'continuous';
+  const turnPage = (direction: TurnDirection) => {
+    backChip.dismiss();
+    if (stepPage(direction) && paged) {
+      animatePageTurn(pageContentRef.current, direction, preferences?.pageTransition ?? 'slide');
+    }
+  };
+
+  /** Where each top-level outline chapter starts, in page order. */
+  const chapterStarts = useMemo(
+    () =>
+      [...new Set(outlineNodes.flatMap((node) => (node.target === null ? [] : [node.target])))]
+        .filter((page) => page >= 0 && page < engine.pageCount)
+        .sort((a, b) => a - b),
+    [outlineNodes, engine.pageCount],
+  );
+  const chapterTitle = chapterOfPage(outlineNodes, currentPageIndex);
+  const chapterStartOf = (page: number) => chapterStarts.findLast((start) => start <= page) ?? 0;
+  const nextChapterStart = (page: number) => chapterStarts.find((start) => start > page);
+
+  const showPage = (page: number) => {
+    backChip.dismiss();
+    const target = Math.min(Math.max(page, 0), engine.pageCount - 1);
     scrollToPageOffset(target, offsetWithin(target, 0));
   };
+
+  /** A big jump (contents, thumbnails, scrubber), with a chip that leads back. */
+  const jumpToPage = (page: number) => {
+    const target = Math.min(Math.max(page, 0), engine.pageCount - 1);
+    const origin = currentPageIndex + 1;
+    navigateToPage(target);
+    if (target !== currentPageIndex) backChip.offer(`Back to page ${origin}`);
+  };
+
+  const lastPage = Math.max(engine.pageCount - 1, 0);
+  const pagePercent = Math.round(((currentPageIndex + 1) / Math.max(engine.pageCount, 1)) * 100);
+  const describePage = (page: number) => {
+    const chapter = chapterOfPage(outlineNodes, page);
+    return chapter ? `${chapter} · p. ${page + 1}` : `Page ${page + 1}`;
+  };
+  const pageAt = (fraction: number) => Math.round(Math.min(Math.max(fraction, 0), 1) * lastPage);
+  const scrubber: ScrubberModel | null =
+    engine.pageCount > 1
+      ? {
+          value: currentPageIndex / lastPage,
+          valueText: `Page ${currentPageIndex + 1} of ${engine.pageCount}${
+            chapterTitle ? `, ${chapterTitle}` : ''
+          }, ${pagePercent}%`,
+          ticks: chapterStarts
+            .filter((start) => start > 0)
+            .map((start) => ({
+              position: start / lastPage,
+              label: chapterOfPage(outlineNodes, start) ?? `Page ${start + 1}`,
+            })),
+          describe: (fraction) => describePage(pageAt(fraction)),
+          onCommit: (fraction) => jumpToPage(pageAt(fraction)),
+          onStepPage: turnPage,
+          onStepChapter: (direction) =>
+            showPage(
+              direction > 0
+                ? (nextChapterStart(currentPageIndex) ?? lastPage)
+                : chapterStartOf(currentPageIndex - 1),
+            ),
+        }
+      : null;
+
+  const pagesLeft =
+    (chapterStarts.length > 0
+      ? (nextChapterStart(currentPageIndex) ?? engine.pageCount)
+      : engine.pageCount) -
+    currentPageIndex -
+    1;
+  const readouts: FooterReadouts = {
+    remaining:
+      pagesLeft <= 0
+        ? chapterStarts.length > 0
+          ? 'Last page in chapter'
+          : 'Last page'
+        : `${pagesLeft} ${pagesLeft === 1 ? 'page' : 'pages'} left${
+            chapterStarts.length > 0 ? ' in chapter' : ''
+          }`,
+    position: `Page ${currentPageIndex + 1} of ${engine.pageCount}`,
+    percent: `${pagePercent}%`,
+  };
+
+  const gestures = usePageTurnGestures({
+    enabled: isActive && paged && !captureMode,
+    areaRef: scrollRef,
+    onTurn: turnPage,
+    // A page zoomed wider than the pane scrolls sideways instead.
+    canSwipe: () => {
+      const scroller = scrollRef.current;
+      return !scroller || scroller.scrollWidth <= scroller.clientWidth + 1;
+    },
+  });
 
   const goToPage = () => {
     const input = pageInputRef.current;
@@ -1591,8 +1704,21 @@ function PdfPages({
       'view.zoomToWidth': { run: () => applyZoom('fit-width') },
       'view.rotateLeft': { run: () => rotateBy(-90) },
       'view.rotateRight': { run: () => rotateBy(90) },
-      'go.previousPage': { run: () => stepPage(-1) },
-      'go.nextPage': { run: () => stepPage(1) },
+      // Continuous scroll keeps Space and Page Up/Down as the browser scrolls them.
+      'go.previousPage': { run: () => turnPage(-1), nativeAliases: !paged },
+      'go.nextPage': { run: () => turnPage(1), nativeAliases: !paged },
+      'go.previousChapter': {
+        run: () => showPage(chapterStartOf(currentPageIndex - 1)),
+        enabled: chapterStarts.length > 0 && currentPageIndex > (chapterStarts[0] ?? 0),
+      },
+      'go.nextChapter': {
+        run: () => showPage(nextChapterStart(currentPageIndex) ?? lastPage),
+        enabled: nextChapterStart(currentPageIndex) !== undefined,
+      },
+      'go.chapterStart': { run: () => showPage(chapterStartOf(currentPageIndex)) },
+      'go.chapterEnd': {
+        run: () => showPage((nextChapterStart(currentPageIndex) ?? engine.pageCount) - 1),
+      },
       'go.page': { run: goToPage },
       'go.back': { run: handleReturnBack, enabled: history.canGoBack },
       'go.forward': { run: handleForward, enabled: history.canGoForward },
@@ -1696,12 +1822,21 @@ function PdfPages({
               {document.title}
             </span>
             <form
-              className="flex items-center gap-1 text-[11px] text-muted-foreground"
+              className="flex max-w-full min-w-0 items-center gap-1 text-[11px] text-muted-foreground"
               onSubmit={(event) => {
                 event.preventDefault();
                 submitPageInput();
               }}
             >
+              {chapterTitle && (
+                <span
+                  data-testid="reader-toolbar-subtitle"
+                  title={chapterTitle}
+                  className="max-w-48 min-w-0 truncate"
+                >
+                  {chapterTitle} ·
+                </span>
+              )}
               <label htmlFor={`pdf-page-input-${documentId}`}>Page</label>
               <input
                 ref={pageInputRef}
@@ -1856,7 +1991,7 @@ function PdfPages({
               items: outlineNodes,
               currentId: currentOutlineId(outlineNodes, currentPageIndex),
               emptyMessage: 'No outline in this document.',
-              onSelect: (pageIndex: number) => navigateToPage(pageIndex),
+              onSelect: (pageIndex: number) => jumpToPage(pageIndex),
             }}
             renderThumbnails={(filter) => (
               <PdfThumbnailsList
@@ -1865,7 +2000,7 @@ function PdfPages({
                 rotation={rotation}
                 currentPageIndex={currentPageIndex}
                 filter={filter}
-                onSelectPage={(pageIndex) => navigateToPage(pageIndex)}
+                onSelectPage={(pageIndex) => jumpToPage(pageIndex)}
               />
             )}
             annotationPlacement={(annotation): AnnotationPlacement => {
@@ -1880,7 +2015,7 @@ function PdfPages({
           />
         )}
         {/* Notices float over the page column only, never over the sidebar. */}
-        <div className="relative flex min-h-0 min-w-0 flex-1">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           <ReaderPopoverLayer>
             <SelectionNoteComposer
               hasSelection={activeSelection !== null}
@@ -1907,69 +2042,88 @@ function PdfPages({
             would narrow, every page would re-render at a new scale, and that destroys any
             selection already made.
           */}
-          <div
-            ref={scrollRef}
-            onScroll={onScroll}
-            tabIndex={-1}
-            data-testid="pdf-scroll"
-            className="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-scroll bg-muted outline-none"
-          >
+          <div className="group/page relative flex min-h-0 min-w-0 flex-1 flex-col">
             <div
-              className="relative"
-              style={{
-                width: innerMinWidth,
-                height: virtualizer.getTotalSize(),
-              }}
+              ref={scrollRef}
+              onScroll={onScroll}
+              tabIndex={-1}
+              data-testid="pdf-scroll"
+              data-turn-zone={gestures.zone ?? undefined}
+              className="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-scroll bg-muted outline-none"
+              style={{ cursor: zoneCursor(gestures.zone) || undefined }}
             >
-              {width > 0 &&
-                virtualItems.map((item) => {
-                  const pages = pagesInRow(item.index);
-                  const itemWidth = rowWidth(item.index);
-                  const itemHeight = rowHeight(item.index);
-                  const itemLeft = Math.max(SIDE_PADDING_PX, (width - itemWidth) / 2);
-                  return (
-                    <div
-                      key={`${displayMode}-${item.key}`}
-                      className="absolute flex items-start"
-                      style={{
-                        top: 0,
-                        left: itemLeft,
-                        width: itemWidth,
-                        height: itemHeight,
-                        gap: PAGE_GAP_PX,
-                        transform: `translateY(${item.start}px)`,
-                      }}
-                    >
-                      {pages.map((pageIndex) => (
-                        <div
-                          key={pageIndex}
-                          style={{
-                            width: pageWidth(pageIndex),
-                            height: pageHeight(pageIndex),
-                          }}
-                        >
-                          <PdfPage
-                            engine={engine}
-                            pageIndex={pageIndex}
-                            scale={scaleOf(pageIndex)}
-                            rotation={rotation}
-                            highlights={byPage.get(pageIndex) ?? EMPTY_HIGHLIGHTS}
-                            pulsingAnnotationId={pulsingAnnotationId}
-                            captureMode={captureMode}
-                            captureBox={
-                              visibleCapture?.pageIndex === pageIndex ? visibleCapture.rect : null
-                            }
-                            onCapture={(canvas, rect) => onCapture(pageIndex, canvas, rect)}
-                            onNavigateLink={navigateToInternalLink}
-                            onPageAnnotationsLoaded={handlePageAnnotationsLoaded}
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  );
-                })}
+              <div
+                ref={pageContentRef}
+                className="relative"
+                style={{
+                  width: innerMinWidth,
+                  height: virtualizer.getTotalSize(),
+                }}
+              >
+                {width > 0 &&
+                  virtualItems.map((item) => {
+                    const pages = pagesInRow(item.index);
+                    const itemWidth = rowWidth(item.index);
+                    const itemHeight = rowHeight(item.index);
+                    const itemLeft = Math.max(SIDE_PADDING_PX, (width - itemWidth) / 2);
+                    return (
+                      <div
+                        key={`${displayMode}-${item.key}`}
+                        className="absolute flex items-start"
+                        style={{
+                          top: 0,
+                          left: itemLeft,
+                          width: itemWidth,
+                          height: itemHeight,
+                          gap: PAGE_GAP_PX,
+                          transform: `translateY(${item.start}px)`,
+                        }}
+                      >
+                        {pages.map((pageIndex) => (
+                          <div
+                            key={pageIndex}
+                            style={{
+                              width: pageWidth(pageIndex),
+                              height: pageHeight(pageIndex),
+                            }}
+                          >
+                            <PdfPage
+                              engine={engine}
+                              pageIndex={pageIndex}
+                              scale={scaleOf(pageIndex)}
+                              rotation={rotation}
+                              highlights={byPage.get(pageIndex) ?? EMPTY_HIGHLIGHTS}
+                              pulsingAnnotationId={pulsingAnnotationId}
+                              captureMode={captureMode}
+                              captureBox={
+                                visibleCapture?.pageIndex === pageIndex ? visibleCapture.rect : null
+                              }
+                              onCapture={(canvas, rect) => onCapture(pageIndex, canvas, rect)}
+                              onNavigateLink={navigateToInternalLink}
+                              onPageAnnotationsLoaded={handlePageAnnotationsLoaded}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+              </div>
             </div>
+            {paged && (
+              <PageTurnChevrons
+                disabled={captureMode}
+                onPrevious={() => turnPage(-1)}
+                onNext={() => turnPage(1)}
+              />
+            )}
           </div>
+          <ReaderFooter
+            readouts={readouts}
+            scrubber={scrubber}
+            backLabel={backChip.label}
+            onBack={handleReturnBack}
+            className="border-t bg-background text-muted-foreground"
+          />
         </div>
       </div>
     </div>

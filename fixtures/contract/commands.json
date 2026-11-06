@@ -1,5 +1,5 @@
 {
-  "$comment": "The single list of app commands. The native menu (src-tauri/src/menu.rs) and the frontend command registry (features/commands) both read it, so a menu item, its key equivalent, and the toolbar tooltip cannot drift apart. Shortcuts use Tauri accelerator syntax. `shortcutOther` replaces `shortcut` off macOS; `aliases` are extra keyboard-only bindings; `accelerator: false` keeps a key out of the menu so it does not swallow it in text fields; `allowInSearch` lets a command run while the search field has focus. `edit.undoDelete` is keyboard-only because the predefined Edit ▸ Undo owns ⌘Z in the menu bar; the registry never takes ⌘Z from a text field.",
+  "$comment": "The single list of app commands. The native menu (src-tauri/src/menu.rs) and the frontend command registry (features/commands) both read it, so a menu item, its key equivalent, and the toolbar tooltip cannot drift apart. Shortcuts use Tauri accelerator syntax. `shortcutOther` replaces `shortcut` off macOS; `aliases` are extra keyboard-only bindings; `accelerator: false` keeps a key out of the menu so it does not swallow it in text fields; `allowInSearch` lets a command run while the search field has focus. Unmodified keys (arrows, Space, Page Up/Down, Home, End) never fire in a widget that uses them itself. `edit.undoDelete` is keyboard-only because the predefined Edit ▸ Undo owns ⌘Z in the menu bar; the registry never takes ⌘Z from a text field.",
   "menus": [
     {
       "id": "file",
@@ -57,7 +57,20 @@
     {
       "id": "go",
       "title": "Go",
-      "items": ["go.previousPage", "go.nextPage", "go.page", "separator", "go.back", "go.forward"]
+      "items": [
+        "go.previousPage",
+        "go.nextPage",
+        "separator",
+        "go.previousChapter",
+        "go.nextChapter",
+        "go.chapterStart",
+        "go.chapterEnd",
+        "separator",
+        "go.page",
+        "separator",
+        "go.back",
+        "go.forward"
+      ]
     },
     {
       "id": "bookmarks",
@@ -123,8 +136,30 @@
       "shortcut": "Ctrl+Cmd+F",
       "shortcutOther": "F11"
     },
-    "go.previousPage": { "title": "Previous Page", "shortcut": "ArrowLeft", "accelerator": false },
-    "go.nextPage": { "title": "Next Page", "shortcut": "ArrowRight", "accelerator": false },
+    "go.previousPage": {
+      "title": "Previous Page",
+      "shortcut": "ArrowLeft",
+      "aliases": ["Shift+Space", "PageUp"],
+      "accelerator": false
+    },
+    "go.nextPage": {
+      "title": "Next Page",
+      "shortcut": "ArrowRight",
+      "aliases": ["Space", "PageDown"],
+      "accelerator": false
+    },
+    "go.previousChapter": {
+      "title": "Previous Chapter",
+      "shortcut": "Alt+ArrowUp",
+      "accelerator": false
+    },
+    "go.nextChapter": {
+      "title": "Next Chapter",
+      "shortcut": "Alt+ArrowDown",
+      "accelerator": false
+    },
+    "go.chapterStart": { "title": "Start of Chapter", "shortcut": "Home", "accelerator": false },
+    "go.chapterEnd": { "title": "End of Chapter", "shortcut": "End", "accelerator": false },
     "go.page": { "title": "Go to Page…", "shortcut": "Alt+CmdOrCtrl+G" },
     "go.back": { "title": "Back", "shortcut": "CmdOrCtrl+[" },
     "go.forward": { "title": "Forward", "shortcut": "CmdOrCtrl+]" },

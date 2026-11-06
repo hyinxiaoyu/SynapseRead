@@ -6,6 +6,8 @@ import type { ReadingFontFamily, ReadingTheme, ResolvedReadingTheme } from '@/ty
 export interface PagePalette {
   background: string;
   text: string;
+  /** Quiet text on the page, such as the progress footer. Meets AA on `background`. */
+  secondaryText: string;
   /** Rules inside the page, such as a blockquote's left border. */
   border: string;
   /** The shadow along the spine between two pages. */
@@ -17,6 +19,7 @@ export const PAGE_PALETTES: Record<ResolvedReadingTheme, PagePalette> = {
   light: {
     background: '#fbfaf7',
     text: '#1c1917',
+    secondaryText: '#6b645c',
     border: 'rgba(28, 25, 23, 0.2)',
     spine: 'rgba(28, 25, 23, 0.08)',
     colorScheme: 'light',
@@ -24,6 +27,7 @@ export const PAGE_PALETTES: Record<ResolvedReadingTheme, PagePalette> = {
   sepia: {
     background: '#f4ecd8',
     text: '#433422',
+    secondaryText: '#6e5737',
     border: 'rgba(67, 52, 34, 0.25)',
     spine: 'rgba(67, 52, 34, 0.12)',
     colorScheme: 'light',
@@ -31,6 +35,7 @@ export const PAGE_PALETTES: Record<ResolvedReadingTheme, PagePalette> = {
   dark: {
     background: '#18181b',
     text: '#e4e4e7',
+    secondaryText: '#a1a1aa',
     border: 'rgba(228, 228, 231, 0.25)',
     spine: 'rgba(0, 0, 0, 0.55)',
     colorScheme: 'dark',
@@ -135,6 +140,16 @@ export function readerChromeStyle(theme: ResolvedReadingTheme): CSSProperties | 
     style[token] = palette[key as keyof ChromePalette];
   }
   return style as CSSProperties;
+}
+
+/** The progress footer under a reflowable page: the page's paper, quieter text. */
+export function pageFooterStyle(theme: ResolvedReadingTheme): CSSProperties {
+  const palette = PAGE_PALETTES[theme];
+  return {
+    backgroundColor: palette.background,
+    color: palette.secondaryText,
+    colorScheme: palette.colorScheme,
+  };
 }
 
 /** The page's own colors, for the page and the margins around it. */

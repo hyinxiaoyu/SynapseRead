@@ -575,6 +575,92 @@ describe('PdfViewer', () => {
     expect(pageInput).toHaveValue('1');
   });
 
+  it('shows page progress in a footer, chapter ticks, and the chapter as the toolbar subtitle', async () => {
+    window.localStorage.clear();
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+
+    expect(await screen.findByTestId('reader-toolbar-subtitle')).toHaveTextContent('Part One');
+    const readout = screen.getByTestId('reader-footer-readout');
+    // Part Two starts on page 4.
+    expect(readout).toHaveTextContent('2 pages left in chapter');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('20%');
+
+    const slider = screen.getByRole('slider', { name: 'Reading position' });
+    expect(slider).toHaveAttribute('aria-valuetext', 'Page 1 of 5, Part One, 20%');
+    const ticks = screen.getAllByTestId('progress-scrubber-tick');
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]).toHaveStyle({ left: '75%' });
+
+    vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 100, 20));
+    fireEvent.pointerMove(slider, { clientX: 100 });
+    expect(screen.getByTestId('progress-scrubber-tooltip')).toHaveTextContent('Part Two · p. 5');
+    fireEvent.pointerDown(slider, { clientX: 100, button: 0, pointerId: 1 });
+    fireEvent.pointerUp(slider, { clientX: 100, button: 0, pointerId: 1 });
+    expect(readout).toHaveTextContent('100%');
+    expect(screen.getByTestId('reader-toolbar-subtitle')).toHaveTextContent('Part Two');
+    const chip = screen.getByTestId('reader-back-chip');
+    expect(chip).toHaveTextContent('Back to page 1');
+    fireEvent.click(chip);
+    expect(readout).toHaveTextContent('20%');
+    expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
+  });
+
+  it('turns pages by edge click, swipe, and keys in single and two-page modes only', async () => {
+    window.localStorage.clear();
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    const pane = await scroller();
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+    const readout = screen.getByTestId('reader-footer-readout');
+    fireEvent.click(readout); // Page N of M
+    const edgeClick = (x: number) =>
+      fireEvent.click(pane, { clientX: x, clientY: 300, button: 0, detail: 1 });
+
+    // Continuous scroll keeps native scrolling: no zones, no chevrons, Space untouched.
+    edgeClick(PANE_PX - 10);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    expect(screen.queryByRole('button', { name: 'Next Page' })).not.toBeInTheDocument();
+    expect(fireEvent.keyDown(pane, { key: ' ', code: 'Space' })).toBe(true);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    edgeClick(PANE_PX - 10);
+    expect(readout).toHaveTextContent('Page 2 of 5');
+    edgeClick(10);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    edgeClick(PANE_PX / 2);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    expect(fireEvent.keyDown(pane, { key: ' ', code: 'Space' })).toBe(false);
+    expect(readout).toHaveTextContent('Page 2 of 5');
+    fireEvent.keyDown(pane, { key: 'PageUp', code: 'PageUp' });
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+    fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+    expect(readout).toHaveTextContent('Page 2 of 5');
+    fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+    expect(readout).toHaveTextContent('Page 3 of 5');
+
+    // Chapters: ⌥↓ to Part Two, End to its last page, Home back to its start.
+    fireEvent.keyDown(pane, { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+    expect(readout).toHaveTextContent('Page 4 of 5');
+    fireEvent.keyDown(pane, { key: 'End', code: 'End' });
+    expect(readout).toHaveTextContent('Page 5 of 5');
+    fireEvent.keyDown(pane, { key: 'Home', code: 'Home' });
+    expect(readout).toHaveTextContent('Page 4 of 5');
+    fireEvent.keyDown(pane, { key: 'ArrowUp', code: 'ArrowUp', altKey: true });
+    expect(readout).toHaveTextContent('Page 1 of 5');
+
+    // Two pages turn a whole spread.
+    fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+    edgeClick(PANE_PX - 10);
+    expect(readout).toHaveTextContent('Page 3 of 5');
+  });
+
   it('renders nested PDF outlines, jumps to outline destinations, and handles empty outlines', async () => {
     const { store, documentId } = await setup();
     const view = render(<Harness store={store} documentId={documentId} />);

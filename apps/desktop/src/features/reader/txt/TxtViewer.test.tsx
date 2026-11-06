@@ -137,6 +137,73 @@ describe('TxtViewer', () => {
     const bytes = documentFixture('sample.txt');
     const decoded = new TextDecoder().decode(bytes);
 
+    it('shows line and byte progress in the footer, and scrubs with a Back chip', async () => {
+      const { store, documentId } = await setup(bytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('SynapseRead sample text');
+
+      const readout = await screen.findByTestId('reader-footer-readout');
+      await waitFor(() => expect(readout).toHaveTextContent(/^Line 1 of \d+$/));
+      fireEvent.click(readout);
+      expect(readout).toHaveTextContent('0%');
+
+      const slider = screen.getByRole('slider', { name: 'Reading position' });
+      expect(slider).toHaveAttribute(
+        'aria-valuetext',
+        expect.stringMatching(/^Line 1 of \d+, 0%$/),
+      );
+      vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 100, 20));
+      fireEvent.pointerDown(slider, { clientX: 99, button: 0, pointerId: 1 });
+      fireEvent.pointerUp(slider, { clientX: 99, button: 0, pointerId: 1 });
+      await waitFor(() => expect(scroller().scrollTop).toBeGreaterThan(0));
+      const chip = await screen.findByTestId('reader-back-chip');
+      expect(chip).toHaveTextContent('Back to line 1');
+      fireEvent.click(chip);
+      expect(scroller().scrollTop).toBe(0);
+      expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
+    });
+
+    it('pages with edge clicks, Space, and Page Down, and goes to the ends with Home and End', async () => {
+      const scrollBy = vi.fn();
+      Element.prototype.scrollBy = scrollBy as unknown as Element['scrollBy'];
+      const { store, documentId } = await setup(bytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('SynapseRead sample text');
+      vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, VIEWPORT_PX),
+      );
+
+      fireEvent.click(scroller(), { clientX: 790, clientY: 100, button: 0, detail: 1 });
+      expect(scrollBy).toHaveBeenLastCalledWith({ top: VIEWPORT_PX * 0.9 });
+      fireEvent.click(scroller(), { clientX: 10, clientY: 100, button: 0, detail: 1 });
+      expect(scrollBy).toHaveBeenLastCalledWith({ top: -VIEWPORT_PX * 0.9 });
+      // The middle of the page never turns it.
+      fireEvent.click(scroller(), { clientX: 400, clientY: 100, button: 0, detail: 1 });
+      expect(scrollBy).toHaveBeenCalledTimes(2);
+
+      fireEvent.keyDown(scroller(), { key: ' ', code: 'Space' });
+      fireEvent.keyDown(scroller(), { key: 'PageDown', code: 'PageDown' });
+      fireEvent.keyDown(scroller(), { key: ' ', code: 'Space', shiftKey: true });
+      expect(scrollBy.mock.calls.map(([options]) => (options as ScrollToOptions).top)).toEqual([
+        VIEWPORT_PX * 0.9,
+        -VIEWPORT_PX * 0.9,
+        VIEWPORT_PX * 0.9,
+        VIEWPORT_PX * 0.9,
+        -VIEWPORT_PX * 0.9,
+      ]);
+      // Space on a focused button presses the button instead.
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Next Page' }), {
+        key: ' ',
+        code: 'Space',
+      });
+      expect(scrollBy).toHaveBeenCalledTimes(5);
+
+      fireEvent.keyDown(scroller(), { key: 'End', code: 'End' });
+      expect(scroller().scrollTop).toBe(ROW_PX * 10_000);
+      fireEvent.keyDown(scroller(), { key: 'Home', code: 'Home' });
+      expect(scroller().scrollTop).toBe(0);
+    });
+
     it('virtualizes: renders only rows near the viewport', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);

@@ -7,6 +7,7 @@ import {
   findSubstringMatches,
   SEARCH_HIGHLIGHT_ID,
 } from '@/features/reader/DocumentSearch';
+import type { PageGestureSample, WheelSample } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import {
@@ -55,6 +56,10 @@ const engine = vi.hoisted(() => ({
   emitSelection: (() => undefined) as (selection: unknown) => void,
   emitLocation: (() => undefined) as (location: unknown) => void,
   emitKeyDown: (() => undefined) as (event: KeyboardEvent) => void,
+  emitGesture: (() => undefined) as (sample: PageGestureSample) => void,
+  emitWheel: (() => false) as (wheel: WheelSample) => boolean,
+  cursor: '',
+  displayedFractions: [] as [number, number][],
   next: vi.fn(async () => undefined),
   previous: vi.fn(async () => undefined),
   setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
@@ -94,6 +99,13 @@ vi.mock('./epubEngine', () => ({
       if (target && target === engine.failCfi) throw new Error('no such location');
       engine.displayed.push(target);
     },
+    spineIndexOf: (href: string) =>
+      engine.chapters.findIndex((chapter) => chapter.href === href.split('#')[0]),
+    spineHref: (index: number) => engine.chapters[index]?.href,
+    async displayChapterFraction(index: number, fraction: number) {
+      engine.displayedFractions.push([index, fraction]);
+      engine.displayed.push(engine.chapters[index]?.href);
+    },
     next: engine.next,
     previous: engine.previous,
     setReadingMode: engine.setReadingMode,
@@ -119,6 +131,15 @@ vi.mock('./epubEngine', () => ({
     },
     onKeyDown(listener: (event: KeyboardEvent) => void) {
       engine.emitKeyDown = listener;
+    },
+    onGesture(listener: (sample: PageGestureSample) => void) {
+      engine.emitGesture = listener;
+    },
+    onWheel(listener: (wheel: WheelSample) => boolean) {
+      engine.emitWheel = listener;
+    },
+    setCursor(cursor: string) {
+      engine.cursor = cursor;
     },
     destroy() {
       engine.destroyed += 1;
@@ -196,7 +217,7 @@ const reopen = async (backend: ReturnType<typeof createMemoryBackend>) => {
 };
 
 const opened = () =>
-  waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+  waitFor(() => expect(screen.getByRole('button', { name: 'Next Page' })).toBeEnabled());
 
 const select = (cfiRange = CFI, text = 'quick brown fox') =>
   act(() => engine.emitSelection({ cfiRange, chapterHref: 'OEBPS/chapter1.xhtml', text }));
@@ -229,6 +250,9 @@ describe('EpubViewer', () => {
     engine.selectionCleared = 0;
     engine.destroyed = 0;
     engine.failCfi = null;
+    engine.displayedFractions = [];
+    engine.cursor = '';
+    window.localStorage.clear();
     engine.next.mockClear();
     engine.previous.mockClear();
     engine.setReadingMode.mockClear();
@@ -412,8 +436,8 @@ describe('EpubViewer', () => {
     const { store, documentId } = await setup();
     const view = render(<Harness store={store} documentId={documentId} />);
     await opened();
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
     expect(engine.next).toHaveBeenCalledOnce();
     expect(engine.previous).toHaveBeenCalledOnce();
 
@@ -503,6 +527,7 @@ describe('EpubViewer', () => {
         justify: false,
         dimImages: true,
         epubReadingMode: 'paged',
+        pageTransition: 'slide',
       }),
     );
     expect(engine.setPreferences).toHaveBeenLastCalledWith(
@@ -589,7 +614,7 @@ describe('EpubViewer', () => {
     }
   });
 
-  it('distinguishes chapter-local pages from whole-book progress', async () => {
+  it('shows progress in a footer whose readout cycles, and the chapter in the toolbar', async () => {
     const { store, documentId } = await setup();
     render(<Harness store={store} documentId={documentId} />);
     await opened();
@@ -603,16 +628,150 @@ describe('EpubViewer', () => {
         chapterIndex: 0,
         totalChapters: 2,
         bookProgress: 25,
+        fraction: 0.125,
       }),
     );
 
-    expect(screen.getByTestId('epub-chapter-page')).toHaveTextContent('Chapter page 2 of 4');
-    expect(screen.getByTestId('epub-book-progress')).toHaveTextContent('Book 25% (Ch. 1/2)');
+    expect(screen.getByTestId('reader-toolbar-subtitle')).toHaveTextContent('One');
+    const readout = screen.getByTestId('reader-footer-readout');
+    expect(readout).toHaveTextContent('2 pages left in chapter');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('Page 2 of 4 in chapter');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('25% of book');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('2 pages left in chapter');
 
-    // Scroll mode hides chapter pages while keeping whole-book progress visible.
+    // Scroll mode has no pages: only whole-book progress remains, and it is remembered.
+    fireEvent.click(readout);
+    fireEvent.click(readout);
     fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
-    expect(screen.queryByTestId('epub-chapter-page')).not.toBeInTheDocument();
-    expect(screen.getByTestId('epub-book-progress')).toHaveTextContent('Book 25% (Ch. 1/2)');
+    expect(screen.getByTestId('reader-footer-readout')).toHaveTextContent('25% of book');
+    expect(JSON.parse(window.localStorage.getItem('synapseread.footer.v1') ?? '{}')).toEqual({
+      readout: 'percent',
+    });
+  });
+
+  it('scrubs by chapter with ticks, a spoken position, keys, and a Back chip', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 3,
+        totalPages: 4,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 38,
+        fraction: 0.25,
+      }),
+    );
+
+    const slider = screen.getByRole('slider', { name: 'Reading position' });
+    expect(slider).toHaveAttribute('aria-valuenow', '25');
+    expect(slider).toHaveAttribute('aria-valuetext', 'Chapter 1 of 2, 38%');
+    // Chapter Two starts halfway through the spine.
+    const ticks = screen.getAllByTestId('progress-scrubber-tick');
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]).toHaveStyle({ left: '50%' });
+
+    vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 200, 20));
+    fireEvent.pointerMove(slider, { clientX: 150 });
+    expect(screen.getByTestId('progress-scrubber-tooltip')).toHaveTextContent('Two · 75%');
+    fireEvent.pointerDown(slider, { clientX: 150, button: 0, pointerId: 1 });
+    fireEvent.pointerUp(slider, { clientX: 150, button: 0, pointerId: 1 });
+    await waitFor(() => expect(engine.displayedFractions).toEqual([[1, 0.5]]));
+    const chip = await screen.findByTestId('reader-back-chip');
+    expect(chip).toHaveTextContent('Back to One, page 3');
+    fireEvent.click(chip);
+    expect(engine.displayed.at(-1)).toBe(CFI);
+    expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
+
+    // Arrow keys turn a page, Page Up and Page Down move a chapter.
+    fireEvent.keyDown(slider, { key: 'ArrowRight' });
+    expect(engine.next).toHaveBeenCalledOnce();
+    fireEvent.keyDown(slider, { key: 'PageDown' });
+    expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml');
+  });
+
+  it('turns pages from the page edges, swipes, and Space, never over text', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    vi.spyOn(screen.getByTestId('epub-host'), 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(100, 0, 1000, 800),
+    );
+
+    const click = (x: number, overContent = false, hasSelection = false) =>
+      act(() => {
+        engine.emitGesture({ kind: 'down', x, y: 300, hasSelection });
+        engine.emitGesture({ kind: 'click', x, y: 300, overContent, hasSelection });
+      });
+    click(1050);
+    expect(engine.next).toHaveBeenCalledOnce();
+    click(150);
+    expect(engine.previous).toHaveBeenCalledOnce();
+    // Text, a selection, and the middle of the page are the reader's.
+    click(1050, true);
+    click(1050, false, true);
+    click(600);
+    expect(engine.next).toHaveBeenCalledOnce();
+    expect(engine.previous).toHaveBeenCalledOnce();
+
+    act(() => engine.emitGesture({ kind: 'move', x: 1080, y: 300, overContent: false }));
+    expect(engine.cursor).toBe('e-resize');
+    act(() => engine.emitGesture({ kind: 'move', x: 1080, y: 300, overContent: true }));
+    expect(engine.cursor).toBe('');
+
+    // One swipe turns one page, however many events its momentum sends.
+    let used = false;
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        used = engine.emitWheel({ deltaX: 30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    expect(used).toBe(true);
+    expect(engine.next).toHaveBeenCalledTimes(2);
+    expect(engine.emitWheel({ deltaX: 0, deltaY: 40, ctrlKey: false })).toBe(false);
+
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' });
+    fireEvent.keyDown(window, { key: 'PageUp', code: 'PageUp' });
+    expect(engine.next).toHaveBeenCalledTimes(3);
+    expect(engine.previous).toHaveBeenCalledTimes(2);
+
+    // Scroll mode scrolls: no edge zones.
+    fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+    click(1050);
+    expect(engine.next).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole('button', { name: 'Next Page' })).not.toBeInTheDocument();
+  });
+
+  it('goes by chapter with Option-arrows and to chapter edges with Home and End', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 2,
+        totalPages: 4,
+        chapterIndex: 0,
+        totalChapters: 2,
+      }),
+    );
+    fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+    expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml');
+    fireEvent.keyDown(window, { key: 'End', code: 'End' });
+    fireEvent.keyDown(window, { key: 'Home', code: 'Home' });
+    await waitFor(() =>
+      expect(engine.displayedFractions).toEqual([
+        [0, 1],
+        [0, 0],
+      ]),
+    );
   });
 
   it('navigates nested TOC entries, handles empty TOCs, and returns to previous locations', async () => {

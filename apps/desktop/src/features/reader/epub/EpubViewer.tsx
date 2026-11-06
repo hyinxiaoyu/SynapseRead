@@ -1,4 +1,4 @@
-import { BookOpen, ChevronLeft, ChevronRight, FileText, PanelLeft, ScrollText } from 'lucide-react';
+import { BookOpen, FileText, PanelLeft, ScrollText } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmented-control';
@@ -31,6 +31,7 @@ import {
   DEFAULT_SERIF_STACK,
   fontStack,
   PAGE_PALETTES,
+  pageFooterStyle,
   pageSurfaceStyle,
 } from '@/features/reader/appearance/themes';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
@@ -42,6 +43,16 @@ import {
   ToolbarSeparator,
   ToolbarTitle,
 } from '@/features/reader/ReaderToolbar';
+import {
+  animatePageTurn,
+  type TurnDirection,
+  usePageTurnGestures,
+  zoneCursor,
+} from '@/features/reader/paging/pageTurn';
+import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import { useBackChip } from '@/features/reader/progress/useBackChip';
+import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { useJumpHistory } from '@/features/reader/useJumpHistory';
 import { cn, describeError } from '@/lib/utils';
@@ -113,6 +124,45 @@ function findOutlineItem(items: readonly EpubTocItem[], href: string): EpubTocIt
 function findOutlineLabel(items: readonly EpubTocItem[], href: string): string | null {
   return findOutlineItem(items, href)?.label ?? null;
 }
+
+function flattenToc(items: readonly EpubTocItem[]): EpubTocItem[] {
+  return items.flatMap((item) => [item, ...flattenToc(item.children)]);
+}
+
+/** The title to show for each spine chapter: the last TOC entry at or before it. */
+function chapterTitlesBySpine(handle: EpubHandle | null): readonly (string | null)[] {
+  const count = handle?.chapterCount ?? 0;
+  if (!handle || count === 0) return [];
+  const titles: (string | null)[] = Array.from({ length: count }, () => null);
+  for (const item of flattenToc(handle.toc)) {
+    const index = handle.spineIndexOf(item.href);
+    if (index >= 0 && titles[index] === null) titles[index] = item.label;
+  }
+  for (let index = 1; index < count; index += 1) titles[index] ??= titles[index - 1] ?? null;
+  return titles;
+}
+
+/** A tick where each top-level chapter starts, or each spine file without a TOC. */
+function chapterTicks(handle: EpubHandle | null): ScrubberModel['ticks'] {
+  const count = handle?.chapterCount ?? 0;
+  if (!handle || count <= 1) return [];
+  const starts = new Map<number, string>();
+  for (const item of handle.toc) {
+    const index = handle.spineIndexOf(item.href);
+    if (index > 0 && !starts.has(index)) starts.set(index, item.label);
+  }
+  if (handle.toc.length === 0) {
+    for (let index = 1; index < count; index += 1) starts.set(index, `Chapter ${index + 1}`);
+  }
+  return [...starts].map(([index, label]) => ({ position: index / count, label }));
+}
+
+const pagesLeftText = (left: number) =>
+  left <= 0
+    ? 'Last page in chapter'
+    : left === 1
+      ? '1 page left in chapter'
+      : `${left} pages left in chapter`;
 
 /**
  * The TOC entry for the chapter being read: one that names the chapter file
@@ -219,9 +269,11 @@ export function EpubViewer({
     chapter: number;
     totalChapters: number;
     percent: number;
+    fraction: number;
   } | null>(null);
   const history = useJumpHistory<string>();
   const pushHistory = history.push;
+  const backChip = useBackChip(history.canGoBack);
   const markup = useMarkupToolbar();
   const [error, setError] = useState<string | null>(null);
   const [missedJump, setMissedJump] = useState(false);
@@ -322,6 +374,7 @@ export function EpubViewer({
               chapter: location.chapterIndex + 1,
               totalChapters: location.totalChapters,
               percent,
+              fraction: location.fraction ?? location.chapterIndex / location.totalChapters,
             });
           }
           // Layout during opening reports positions the reader never chose.
@@ -739,30 +792,128 @@ export function EpubViewer({
     };
   };
 
-  const handleTocSelect = (target: string) => {
-    if (!handle) return;
+  const chapterTitles = useMemo(() => chapterTitlesBySpine(handle), [handle]);
+  const ticks = useMemo(() => chapterTicks(handle), [handle]);
+  const chapterCount = handle?.chapterCount ?? 0;
+  const currentChapterIndex = bookProgress ? bookProgress.chapter - 1 : 0;
+  const chapterTitle =
+    (currentHref ? findOutlineLabel(handle?.toc ?? [], currentHref) : null) ??
+    chapterTitles[currentChapterIndex] ??
+    (bookProgress ? `Chapter ${bookProgress.chapter}` : null);
+  const transition = effectivePreferences.pageTransition;
+  const paged = readingMode !== 'scroll';
+
+  /** Where the reader is, for "Back to …". */
+  const describeHere = () => {
+    const place = chapterTitle ?? 'previous location';
+    return paged && pageInfo ? `${place}, page ${pageInfo.page}` : place;
+  };
+
+  /** A big jump: remembered in history, with a chip that leads back. */
+  const jumpWithBackChip = (go: () => Promise<void>, target?: string) => {
     const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
-    void handle
-      .display(target)
+    const origin = describeHere();
+    void go()
       .then(() => {
         if (previous && previous !== target) {
           pushHistory(previous);
+          backChip.offer(`Back to ${origin}`);
         }
       })
       .catch(() => undefined);
   };
+
+  const handleTocSelect = (target: string) => {
+    if (!handle) return;
+    jumpWithBackChip(() => handle.display(target), target);
+  };
+
+  const turnPage = (direction: TurnDirection) => {
+    if (!handle) return;
+    backChip.dismiss();
+    void (direction > 0 ? handle.next() : handle.previous())
+      .then(() => {
+        if (paged) animatePageTurn(hostRef.current, direction, transition);
+      })
+      .catch(() => undefined);
+  };
+
+  const goToChapter = (index: number) => {
+    const href = handle?.spineHref(index);
+    if (!handle || href === undefined) return;
+    backChip.dismiss();
+    void handle.display(href).catch(() => undefined);
+  };
+
+  const goToChapterEdge = (edge: 'start' | 'end') => {
+    if (!handle || !bookProgress) return;
+    backChip.dismiss();
+    void handle
+      .displayChapterFraction(currentChapterIndex, edge === 'start' ? 0 : 1)
+      .catch(() => undefined);
+  };
+
+  const scrubber: ScrubberModel | null =
+    handle && chapterCount > 0 && bookProgress
+      ? {
+          value: Math.min(Math.max(bookProgress.fraction, 0), 1),
+          valueText: `Chapter ${bookProgress.chapter} of ${chapterCount}, ${bookProgress.percent}%`,
+          ticks,
+          describe: (fraction) => {
+            const index = Math.min(Math.floor(fraction * chapterCount), chapterCount - 1);
+            const title = chapterTitles[index] ?? `Chapter ${index + 1}`;
+            return `${title} · ${Math.round(fraction * 100)}%`;
+          },
+          onCommit: (fraction) => {
+            const scaled = Math.min(Math.max(fraction, 0), 1) * chapterCount;
+            const index = Math.min(Math.floor(scaled), chapterCount - 1);
+            jumpWithBackChip(() =>
+              handle.displayChapterFraction(index, Math.min(scaled - index, 1)),
+            );
+          },
+          onStepPage: turnPage,
+          onStepChapter: (direction) => goToChapter(currentChapterIndex + direction),
+        }
+      : null;
+
+  const readouts: FooterReadouts = {};
+  if (paged && pageInfo) {
+    readouts.remaining = pagesLeftText(pageInfo.totalPages - pageInfo.page);
+    readouts.position = `Page ${pageInfo.page} of ${pageInfo.totalPages} in chapter`;
+  }
+  if (bookProgress) readouts.percent = `${bookProgress.percent}% of book`;
+
+  // ---- Page-turn gestures: edge clicks and swipes, also from inside the frame ----
+
+  const gestures = usePageTurnGestures({
+    enabled: handle !== null && isActive && paged,
+    areaRef,
+    pageRef: hostRef,
+    onTurn: turnPage,
+  });
+  const { handleSample, handleWheel, zone } = gestures;
+  useEffect(() => {
+    if (!handle) return;
+    handle.onGesture(handleSample);
+    handle.onWheel(handleWheel);
+  }, [handle, handleSample, handleWheel]);
+  useEffect(() => {
+    handle?.setCursor(zoneCursor(zone));
+  }, [handle, zone]);
 
   const currentHistoryLocation = (): string =>
     currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? currentCfi ?? '';
 
   const handleReturnBack = () => {
     if (!handle) return;
+    backChip.dismiss();
     const target = history.goBack(currentHistoryLocation());
     if (target) void handle.display(target).catch(() => undefined);
   };
 
   const handleForward = () => {
     if (!handle) return;
+    backChip.dismiss();
     const target = history.goForward(currentHistoryLocation());
     if (target) void handle.display(target).catch(() => undefined);
   };
@@ -805,8 +956,18 @@ export function EpubViewer({
         run: () => updatePreferences({ epubReadingMode: 'scroll' }),
         enabled: ready,
       },
-      'go.previousPage': { run: () => void handle?.previous(), enabled: ready },
-      'go.nextPage': { run: () => void handle?.next(), enabled: ready },
+      'go.previousPage': { run: () => turnPage(-1), enabled: ready },
+      'go.nextPage': { run: () => turnPage(1), enabled: ready },
+      'go.previousChapter': {
+        run: () => goToChapter(currentChapterIndex - 1),
+        enabled: ready && currentChapterIndex > 0,
+      },
+      'go.nextChapter': {
+        run: () => goToChapter(currentChapterIndex + 1),
+        enabled: ready && currentChapterIndex < chapterCount - 1,
+      },
+      'go.chapterStart': { run: () => goToChapterEdge('start'), enabled: ready },
+      'go.chapterEnd': { run: () => goToChapterEdge('end'), enabled: ready },
       'go.back': { run: handleReturnBack, enabled: ready && history.canGoBack },
       'go.forward': { run: handleForward, enabled: ready && history.canGoForward },
     },
@@ -821,21 +982,6 @@ export function EpubViewer({
   }
 
   const showSidebar = navigator.open && !chromeHidden;
-  const progress = (
-    <>
-      {readingMode !== 'scroll' && pageInfo && (
-        <span data-testid="epub-chapter-page">
-          Chapter page {pageInfo.page} of {pageInfo.totalPages}
-        </span>
-      )}
-      {bookProgress && (
-        <span data-testid="epub-book-progress">
-          Book {bookProgress.percent}% (Ch. {bookProgress.chapter}/{bookProgress.totalChapters})
-        </span>
-      )}
-    </>
-  );
-
   return (
     <div
       className="flex h-full flex-col"
@@ -876,25 +1022,7 @@ export function EpubViewer({
             />
           </>
         }
-        center={
-          <>
-            <ToolbarButton
-              icon={ChevronLeft}
-              label="Previous"
-              command="go.previousPage"
-              disabled={!handle}
-              onClick={() => void handle?.previous()}
-            />
-            <ToolbarTitle title={document.title} subtitle={progress} />
-            <ToolbarButton
-              icon={ChevronRight}
-              label="Next"
-              command="go.nextPage"
-              disabled={!handle}
-              onClick={() => void handle?.next()}
-            />
-          </>
-        }
+        center={<ToolbarTitle title={document.title} subtitle={chapterTitle} />}
         trailing={
           <>
             <AppearanceMenu
@@ -945,7 +1073,7 @@ export function EpubViewer({
           />
         )}
         {/* Notices float over the page column only, never over the sidebar. */}
-        <div className="relative flex min-h-0 min-w-0 flex-1">
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
           <ReaderPopoverLayer>
             <SelectionNoteComposer
               hasSelection={activeSelection !== null}
@@ -964,8 +1092,9 @@ export function EpubViewer({
           <div
             ref={areaRef}
             data-testid="epub-page-area"
-            className="relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5 pb-3"
-            style={pageSurfaceStyle(theme)}
+            data-turn-zone={zone ?? undefined}
+            className="group/page relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5"
+            style={{ ...pageSurfaceStyle(theme), cursor: zoneCursor(zone) || undefined }}
           >
             <div
               ref={hostRef}
@@ -987,7 +1116,22 @@ export function EpubViewer({
                 }}
               />
             )}
+            {paged && (
+              <PageTurnChevrons
+                disabled={!handle}
+                onPrevious={() => turnPage(-1)}
+                onNext={() => turnPage(1)}
+              />
+            )}
           </div>
+          <ReaderFooter
+            readouts={readouts}
+            scrubber={scrubber}
+            backLabel={backChip.label}
+            onBack={handleReturnBack}
+            disabled={!handle}
+            style={pageFooterStyle(theme)}
+          />
         </div>
       </div>
     </div>

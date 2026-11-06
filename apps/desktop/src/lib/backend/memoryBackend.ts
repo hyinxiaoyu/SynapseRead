@@ -634,6 +634,9 @@ export function createMemoryBackend({
       ) {
         throw fail('invalid_preferences', 'lineSpacing must be between 1.2 and 2.4');
       }
+      if (!['none', 'slide', 'fade'].includes(preferences.pageTransition)) {
+        throw fail('invalid_preferences', 'pageTransition must be none, slide, or fade');
+      }
       readingPreferences = { ...preferences };
       return { ...readingPreferences };
     },

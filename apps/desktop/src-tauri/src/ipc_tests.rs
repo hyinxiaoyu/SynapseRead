@@ -535,6 +535,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
             "justify": true,
             "dimImages": false,
             "epubReadingMode": "spread",
+            "pageTransition": "slide",
         })
     );
 
@@ -547,6 +548,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         "justify": false,
         "dimImages": true,
         "epubReadingMode": "paged",
+        "pageTransition": "fade",
     });
     let saved = h.ok(
         "save_reading_preferences",
@@ -568,6 +570,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
                     "justify": true,
                     "dimImages": false,
                     "epubReadingMode": "paged",
+                    "pageTransition": "none",
                 }
             }),
         )

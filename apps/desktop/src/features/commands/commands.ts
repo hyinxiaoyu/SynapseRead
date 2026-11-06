@@ -121,6 +121,10 @@ const KEY_SYMBOLS: Record<string, string> = {
   ArrowRight: '→',
   ArrowUp: '↑',
   ArrowDown: '↓',
+  PageUp: '⇞',
+  PageDown: '⇟',
+  Home: '↖',
+  End: '↘',
   Plus: '+',
   '=': '+',
 };
@@ -130,6 +134,8 @@ const OTHER_KEY_NAMES: Record<string, string> = {
   ArrowRight: 'Right',
   ArrowUp: 'Up',
   ArrowDown: 'Down',
+  PageUp: 'PgUp',
+  PageDown: 'PgDn',
   Plus: '+',
   '=': '+',
 };
@@ -186,12 +192,13 @@ function keyCode(key: string): string | null {
     case 'Plus':
       return 'NumpadAdd';
     default:
-      return /^(Arrow\w+|F\d+)$/.test(key) ? key : null;
+      return /^(Arrow\w+|F\d+|Page(Up|Down)|Home|End|Space)$/.test(key) ? key : null;
   }
 }
 
 function keyMatches(event: KeyboardEvent, key: string): boolean {
   if (key === 'Plus') return event.key === '+' || event.code === 'NumpadAdd';
+  if (key === 'Space') return event.key === ' ' || event.code === 'Space';
   const code = keyCode(key);
   if (code !== null && event.code === code) return true;
   // Layouts that move a key keep its character; tests often send `key` alone.
