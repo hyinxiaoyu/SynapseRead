@@ -203,18 +203,18 @@ export async function epubFlow(page) {
   );
 
   // Table of contents: nested items, chapter jump, and return to previous location.
-  await page.clickButton('Table of contents');
+  await page.showSidebarTab('Table of Contents');
   await page.waitFor(
     `${visibleViewer}.querySelector('[data-testid="reader-toc"]')`,
     'EPUB table of contents sidebar',
   );
-  assert(
-    await page.evaluate(
-      `[...${visibleViewer}.querySelectorAll('[data-testid="reader-toc"] button')].some((b) => b.textContent.trim() === 'Section 1.1')`,
-    ),
+  // Only the current chapter's path starts expanded; open One to reach its section.
+  await page.expandTreeItem('One');
+  await page.waitFor(
+    `[...${visibleViewer}.querySelectorAll('[data-testid="reader-toc"] [role="treeitem"]')].some((b) => b.getAttribute('aria-label') === 'Section 1.1')`,
     'EPUB TOC renders nested entries',
   );
-  await page.clickButton('One');
+  await page.clickTreeItem('One');
   await page.waitFor(chapterIs('Chapter One'), 'TOC jump to Chapter One');
   await page.clickButton('Return to previous location');
   await page.waitFor(chapterIs('Chapter Two'), 'return to Chapter Two after TOC jump');
@@ -238,10 +238,9 @@ export async function epubFlow(page) {
   await page.clickButton('Reading appearance');
 
   // In-document search across unrendered EPUB chapters, CFI highlight, and return.
-  await page.clickButton('Find in document');
   await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');
   await page.waitFor(
-    `${visibleViewer}?.querySelector('[data-testid="search-status"]')?.textContent === '1 of 1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
     'EPUB search match in unrendered Chapter One',
   );
   await page.waitFor(
@@ -255,17 +254,17 @@ export async function epubFlow(page) {
   );
   await page.clickButton('Return to previous location');
   await page.waitFor(chapterIs('Chapter Two'), 'returning from EPUB search jump to Chapter Two');
-  await page.clickButton('Close search');
+  await page.leaveSearch();
 
   // Independent bookmarks in EPUB: bookmark Chapter Two, jump to Chapter One, jump back via bookmark, and remove.
   await page.clickButton('Bookmark current location');
   await page.waitFor(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')?.textContent === '1'`,
-    'EPUB bookmark badge count',
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="toggle-bookmark-button"]')?.getAttribute('aria-pressed') === 'true'`,
+    'EPUB bookmark toggle pressed',
   );
-  await page.clickButton('One');
+  await page.clickTreeItem('One');
   await page.waitFor(chapterIs('Chapter One'), 'EPUB jump to Chapter One before bookmark jump');
-  await page.clickButton('Bookmarks');
+  await page.showSidebarTab('Bookmarks');
   await page.waitFor(
     `${visibleViewer}?.querySelector('[data-testid="bookmark-jump-button"]')`,
     'EPUB bookmark item in list',
@@ -278,20 +277,21 @@ export async function epubFlow(page) {
     `${visibleViewer}.querySelector('[data-testid="bookmark-remove-button"]').click()`,
   );
   await page.waitFor(
-    `!document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')`,
+    `[...document.querySelectorAll('[data-testid="bookmarks-empty"]')].some((e) => e.checkVisibility({ visibilityProperty: true }))`,
     'removing EPUB bookmark',
   );
-  await page.clickButton('Bookmarks');
+  await page.hideSidebar();
 
   // Independent highlights & notes in EPUB: highlight without creating a MindMap card, delete, and undo.
   const epubPoints = await textPoints(page, 'final target sentence');
   await page.drag(epubPoints.start, epubPoints.end);
   await page.clickButton('Highlight selection');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="annotations-count"]')?.textContent === '4'`,
+    `[...document.querySelectorAll('[data-testid="annotation-item"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 4`,
     'EPUB independent highlight count (3 excerpts + 1 independent)',
   );
-  await page.clickButton('Annotations');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
     `${visibleViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 4`,
     'EPUB annotations list items',
@@ -310,5 +310,5 @@ export async function epubFlow(page) {
     `${visibleViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 4`,
     'undoing EPUB highlight deletion',
   );
-  await page.clickButton('Annotations');
+  await page.hideSidebar();
 }

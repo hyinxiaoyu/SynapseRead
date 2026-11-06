@@ -11,4 +11,8 @@ class ResizeObserverStub implements ResizeObserver {
 }
 globalThis.ResizeObserver = ResizeObserverStub;
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  // The reader sidebar remembers its tab and width per format; each test starts fresh.
+  localStorage.clear();
+});

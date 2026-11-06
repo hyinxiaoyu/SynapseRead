@@ -177,11 +177,96 @@ export class Page {
             && !b.disabled && b.checkVisibility({ visibilityProperty: true }));
         if (!button) return null;
         const r = button.getBoundingClientRect();
-        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        const point = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        // Only once it has stopped moving (the toolbar animates as the search field
+        // resizes) and nothing (a widened search field, a popover) covers it.
+        const key = JSON.stringify(point);
+        const settled = window.__e2eLastButtonPoint === key;
+        window.__e2eLastButtonPoint = key;
+        if (!settled) return null;
+        return button.contains(document.elementFromPoint(point.x, point.y)) ? point : null;
       })()`,
-      `an enabled, visible button named ${name}`,
+      `an enabled, visible, uncovered button named ${name}`,
     );
     await this.click(point);
+  }
+
+  /** A real key press (keydown and keyup) to whatever has focus. */
+  async press(key, code = key) {
+    for (const type of ['keyDown', 'keyUp']) {
+      await this.cdp.send('Input.dispatchKeyEvent', {
+        type,
+        key,
+        code,
+        windowsVirtualKeyCode: key === 'Escape' ? 27 : 0,
+      });
+    }
+  }
+
+  /** Leaves Find as a reader would: Esc in the field clears it and returns focus to the page. */
+  async leaveSearch() {
+    await this.evaluate(`document.querySelector('[data-testid="search-input"]').focus()`);
+    await this.press('Escape');
+    await this.waitFor(
+      `document.querySelector('[data-testid="search-input"]').value === ''
+        && !document.querySelector('[data-testid="document-search-field"]').contains(document.activeElement)
+        && document.activeElement !== document.body`,
+      'Esc to clear the search and return focus to the page',
+    );
+  }
+
+  /** Clicks a table-of-contents entry by its full title. */
+  async clickTreeItem(name) {
+    const point = await this.waitFor(
+      `(() => {
+        const item = [...document.querySelectorAll('[role="treeitem"]')].find(
+          (e) => e.getAttribute('aria-label') === ${JSON.stringify(name)}
+            && e.checkVisibility({ visibilityProperty: true }));
+        if (!item) return null;
+        item.scrollIntoView({ block: 'nearest' });
+        const r = item.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      })()`,
+      `a visible outline entry named ${name}`,
+    );
+    await this.click(point);
+  }
+
+  /** Expands a collapsed table-of-contents branch from its disclosure triangle. */
+  async expandTreeItem(name) {
+    await this.waitFor(
+      `(() => {
+        const item = [...document.querySelectorAll('[role="treeitem"]')].find(
+          (e) => e.getAttribute('aria-label') === ${JSON.stringify(name)}
+            && e.checkVisibility({ visibilityProperty: true }));
+        if (!item) return false;
+        if (item.getAttribute('aria-expanded') === 'false') {
+          item.querySelector('[data-testid="toc-disclosure"]').click();
+        }
+        return true;
+      })()`,
+      `a visible outline branch named ${name}`,
+    );
+  }
+
+  /** Opens the reader's Navigator sidebar if needed and selects the tab named `name`. */
+  async showSidebarTab(name) {
+    const tabVisible = await this.evaluate(
+      `[...document.querySelectorAll('[role="tab"]')].some(
+        (t) => t.getAttribute('aria-label') === ${JSON.stringify(name)}
+          && t.checkVisibility({ visibilityProperty: true }))`,
+    );
+    if (!tabVisible) await this.clickButton('Sidebar');
+    await this.clickButton(name);
+  }
+
+  /** Puts the reader's Navigator sidebar away if it is showing. */
+  async hideSidebar() {
+    const shown = await this.evaluate(
+      `[...document.querySelectorAll('[data-testid="navigator-sidebar"]')].some(
+        (e) => e.checkVisibility({ visibilityProperty: true }))`,
+    );
+    if (shown) await this.clickButton('Sidebar');
   }
 
   async setInputValue(selector, value) {

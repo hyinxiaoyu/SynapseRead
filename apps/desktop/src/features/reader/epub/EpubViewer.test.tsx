@@ -6,7 +6,7 @@ import {
   buildSearchSnippet,
   findSubstringMatches,
   SEARCH_HIGHLIGHT_ID,
-} from '@/features/reader/DocumentSearchBar';
+} from '@/features/reader/DocumentSearch';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import {
@@ -314,7 +314,7 @@ describe('EpubViewer', () => {
       }),
     );
     await waitFor(() => expect(store.getState().jumpRequest).toBeNull());
-    expect(await screen.findByRole('status')).toHaveTextContent(/could not be found/);
+    expect(await screen.findByText(/could not be found/)).toHaveAttribute('role', 'status');
   });
 
   it('reopens at the last reading position, without overwriting it first', async () => {
@@ -535,13 +535,18 @@ describe('EpubViewer', () => {
       }),
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    // The sidebar opens on Contents, with the current chapter's path expanded.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
     const toc = screen.getByTestId('reader-toc');
     expect(toc).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'One' })).toHaveAttribute('aria-current', 'location');
-    expect(screen.getByRole('button', { name: 'Section 1.1' })).toBeInTheDocument();
+    expect(screen.getByTestId('navigator-tab-contents')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByTestId('navigator-tab-thumbnails')).not.toBeInTheDocument();
+    const one = screen.getByRole('treeitem', { name: 'One' });
+    expect(one).toHaveAttribute('aria-current', 'location');
+    expect(one).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('treeitem', { name: 'Section 1.1' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Two' }));
+    fireEvent.click(screen.getByRole('treeitem', { name: 'Two' }));
     await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
 
     const backButton = await screen.findByRole('button', { name: 'Return to previous location' });
@@ -557,7 +562,7 @@ describe('EpubViewer', () => {
     engine.toc = [];
     render(<Harness store={store} documentId={documentId} />);
     await opened();
-    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    fireEvent.keyDown(window, { key: '3', code: 'Digit3', altKey: true, metaKey: true });
     expect(screen.getByTestId('reader-toc')).toHaveTextContent(
       'No table of contents in this book.',
     );
@@ -607,7 +612,8 @@ describe('EpubViewer', () => {
 
     // Case-sensitive search narrows to only Chapter Two's "Fox".
     fireEvent.change(searchInput, { target: { value: 'Fox' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Search options' }));
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Match case/ }));
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
     expect(screen.getByTestId('search-result-location')).toHaveTextContent('Two');
   });
@@ -655,8 +661,9 @@ describe('EpubViewer', () => {
     );
     expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
 
-    // Open the bookmarks panel and jump back to Chapter One's bookmark.
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    // Show Bookmarks in the sidebar and jump back to Chapter One's bookmark.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
+    fireEvent.click(screen.getByTestId('navigator-tab-bookmarks'));
     expect(await screen.findByTestId('bookmark-label')).toHaveTextContent('One · Page 1');
     fireEvent.click(screen.getByTestId('bookmark-jump-button'));
     await waitFor(() => expect(engine.displayed.at(-1)).toBe(CFI));
@@ -683,14 +690,18 @@ describe('EpubViewer', () => {
     const jumpButtons = screen.getAllByTestId('bookmark-jump-button');
     fireEvent.click(jumpButtons[1] as HTMLElement);
     expect(await screen.findByTestId('bookmark-stale')).toHaveTextContent('Stale');
-    expect(await screen.findByRole('status')).toHaveTextContent(/could not be found in this book/);
+    expect(await screen.findByText(/could not be found in this book/)).toHaveAttribute(
+      'role',
+      'status',
+    );
 
     // Persist across reopen and remove bookmarks.
     first.unmount();
     const reopened = await reopen(backend);
     render(<Harness store={reopened} documentId={documentId} />);
     await opened();
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    // The Bookmarks tab is remembered for EPUB documents.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
     expect(await screen.findAllByTestId('bookmark-item')).toHaveLength(2);
 
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
@@ -713,9 +724,12 @@ describe('EpubViewer', () => {
     const annotationId = store.getState().annotations[0]?.id as string;
     expect(engine.highlighted.get(annotationId)).toBe(CFI);
 
-    fireEvent.click(screen.getByTestId('annotations-toggle-button'));
+    fireEvent.keyDown(window, { key: '4', code: 'Digit4', altKey: true, metaKey: true });
     expect(await screen.findByTestId('annotation-item')).toHaveTextContent('quick brown fox');
+    // Grouped under the chapter's TOC title.
+    expect(screen.getByTestId('annotation-group')).toHaveTextContent('One');
 
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
     const noteInput = screen.getByTestId('annotation-note-input');
     fireEvent.change(noteInput, { target: { value: 'EPUB chapter note' } });
     fireEvent.blur(noteInput);

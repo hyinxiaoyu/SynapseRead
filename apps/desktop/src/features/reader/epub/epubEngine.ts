@@ -4,7 +4,7 @@ import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
   findSubstringMatches,
-} from '@/features/reader/DocumentSearchBar';
+} from '@/features/reader/DocumentSearch';
 import {
   DEFAULT_READING_PREFERENCES,
   type DocumentSource,

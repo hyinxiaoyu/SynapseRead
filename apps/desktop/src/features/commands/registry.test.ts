@@ -69,7 +69,13 @@ describe('command contract', () => {
     const mac = (id: (typeof COMMAND_IDS)[number]) =>
       formatShortcut(commandDefinition(id, 'mac').shortcut ?? '', 'mac');
     expect(mac('view.toggleSidebar')).toBe('⌥⌘S');
-    expect(mac('view.sidebarContents')).toBe('⌥⌘1');
+    // Preview's sidebar mapping.
+    expect(mac('view.hideSidebar')).toBe('⌥⌘1');
+    expect(mac('view.sidebarThumbnails')).toBe('⌥⌘2');
+    expect(mac('view.sidebarContents')).toBe('⌥⌘3');
+    expect(mac('view.sidebarAnnotations')).toBe('⌥⌘4');
+    expect(mac('view.sidebarBookmarks')).toBe('⌥⌘5');
+    expect(mac('edit.useSelectionForFind')).toBe('⌘E');
     expect(mac('view.zoomIn')).toBe('⌘+');
     expect(mac('view.rotateLeft')).toBe('⌘L');
     expect(mac('go.page')).toBe('⌥⌘G');
@@ -222,6 +228,33 @@ describe('command registry', () => {
     const arrow = key({ key: 'ArrowRight', bubbles: true });
     document.getElementById('segment')?.dispatchEvent(arrow);
     expect(arrow.defaultPrevented).toBe(false);
+  });
+
+  it('leaves arrows to the outline tree and sidebar lists, and ⌘Z to text fields', () => {
+    const nextPage = vi.fn();
+    const undoDelete = vi.fn();
+    register(() => ({
+      'go.nextPage': { run: nextPage },
+      'edit.undoDelete': { run: undoDelete },
+    }));
+    document.body.innerHTML = `
+      <ul role="tree"><li role="treeitem" id="item" tabindex="0"></li></ul>
+      <ol data-arrow-keys=""><li><button id="row"></button></li></ol>
+      <input id="note" />`;
+    for (const id of ['item', 'row']) {
+      const arrow = key({ key: 'ArrowRight', bubbles: true });
+      document.getElementById(id)?.dispatchEvent(arrow);
+      expect(arrow.defaultPrevented).toBe(false);
+    }
+    expect(nextPage).not.toHaveBeenCalled();
+
+    const undoInField = key({ key: 'z', code: 'KeyZ', metaKey: true, bubbles: true });
+    document.getElementById('note')?.dispatchEvent(undoInField);
+    expect(undoDelete).not.toHaveBeenCalled();
+    document
+      .getElementById('row')
+      ?.dispatchEvent(key({ key: 'z', code: 'KeyZ', metaKey: true, bubbles: true }));
+    expect(undoDelete).toHaveBeenCalledTimes(1);
   });
 
   it('runs a key equivalent once when the menu also reports it', () => {

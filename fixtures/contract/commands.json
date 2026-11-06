@@ -1,5 +1,5 @@
 {
-  "$comment": "The single list of app commands. The native menu (src-tauri/src/menu.rs) and the frontend command registry (features/commands) both read it, so a menu item, its key equivalent, and the toolbar tooltip cannot drift apart. Shortcuts use Tauri accelerator syntax. `shortcutOther` replaces `shortcut` off macOS; `aliases` are extra keyboard-only bindings; `accelerator: false` keeps a key out of the menu so it does not swallow it in text fields; `allowInSearch` lets a command run while the search field has focus.",
+  "$comment": "The single list of app commands. The native menu (src-tauri/src/menu.rs) and the frontend command registry (features/commands) both read it, so a menu item, its key equivalent, and the toolbar tooltip cannot drift apart. Shortcuts use Tauri accelerator syntax. `shortcutOther` replaces `shortcut` off macOS; `aliases` are extra keyboard-only bindings; `accelerator: false` keeps a key out of the menu so it does not swallow it in text fields; `allowInSearch` lets a command run while the search field has focus. `edit.undoDelete` is keyboard-only because the predefined Edit ▸ Undo owns ⌘Z in the menu bar; the registry never takes ⌘Z from a text field.",
   "menus": [
     {
       "id": "file",
@@ -13,6 +13,9 @@
         "edit.find",
         "edit.findNext",
         "edit.findPrevious",
+        "edit.useSelectionForFind",
+        "separator",
+        "edit.undoDelete",
         "separator",
         "edit.highlight",
         "edit.addNote",
@@ -24,9 +27,11 @@
       "title": "View",
       "items": [
         "view.toggleSidebar",
-        "view.sidebarContents",
+        "view.hideSidebar",
         "view.sidebarThumbnails",
+        "view.sidebarContents",
         "view.sidebarAnnotations",
+        "view.sidebarBookmarks",
         "view.sidebarSearch",
         "separator",
         "view.layoutSingle",
@@ -57,7 +62,7 @@
     {
       "id": "bookmarks",
       "title": "Bookmarks",
-      "items": ["bookmarks.toggle", "view.sidebarBookmarks"]
+      "items": ["bookmarks.toggle"]
     },
     {
       "id": "window",
@@ -80,6 +85,8 @@
       "shortcut": "Shift+CmdOrCtrl+G",
       "allowInSearch": true
     },
+    "edit.useSelectionForFind": { "title": "Use Selection for Find", "shortcut": "CmdOrCtrl+E" },
+    "edit.undoDelete": { "title": "Undo Delete", "shortcut": "CmdOrCtrl+Z", "accelerator": false },
     "edit.highlight": {
       "title": "Highlight Selection",
       "shortcut": "Ctrl+Cmd+H",
@@ -88,11 +95,12 @@
     "edit.addNote": { "title": "Add Note to Selection" },
     "edit.excerpt": { "title": "Excerpt to MindMap", "shortcut": "Shift+CmdOrCtrl+E" },
     "view.toggleSidebar": { "title": "Toggle Sidebar", "shortcut": "Alt+CmdOrCtrl+S" },
-    "view.sidebarContents": { "title": "Table of Contents", "shortcut": "Alt+CmdOrCtrl+1" },
+    "view.hideSidebar": { "title": "Hide Sidebar", "shortcut": "Alt+CmdOrCtrl+1" },
     "view.sidebarThumbnails": { "title": "Thumbnails", "shortcut": "Alt+CmdOrCtrl+2" },
-    "view.sidebarBookmarks": { "title": "Show Bookmarks", "shortcut": "Alt+CmdOrCtrl+3" },
-    "view.sidebarAnnotations": { "title": "Annotations", "shortcut": "Alt+CmdOrCtrl+4" },
-    "view.sidebarSearch": { "title": "Search Results", "shortcut": "Alt+CmdOrCtrl+5" },
+    "view.sidebarContents": { "title": "Table of Contents", "shortcut": "Alt+CmdOrCtrl+3" },
+    "view.sidebarAnnotations": { "title": "Highlights and Notes", "shortcut": "Alt+CmdOrCtrl+4" },
+    "view.sidebarBookmarks": { "title": "Bookmarks", "shortcut": "Alt+CmdOrCtrl+5" },
+    "view.sidebarSearch": { "title": "Search Results" },
     "view.layoutSingle": { "title": "Single Page" },
     "view.layoutTwoPage": { "title": "Two Pages" },
     "view.layoutScroll": { "title": "Continuous Scroll" },

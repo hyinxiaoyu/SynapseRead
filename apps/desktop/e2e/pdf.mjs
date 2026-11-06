@@ -186,9 +186,11 @@ export async function pdfFlow(page) {
   );
 
   // Embedded PDF outline (with nested entry), jump return, and validated page input.
-  await page.clickButton('Table of contents');
+  await page.showSidebarTab('Table of Contents');
+  // Only the current chapter's path starts expanded; open Part One to reach its section.
+  await page.expandTreeItem('Part One');
   await page.waitFor(
-    `[...document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="reader-toc"] button')].some((b) => b.textContent.trim() === 'Blue Box Section')`,
+    `[...document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="reader-toc"] [role="treeitem"]')].some((b) => b.getAttribute('aria-label') === 'Blue Box Section')`,
     'PDF outline to render nested entries from the document',
   );
   // Opening the outline narrows the pane, and fit width rescales the pages around
@@ -199,7 +201,7 @@ export async function pdfFlow(page) {
   );
   await new Promise((done) => setTimeout(done, 400));
   const beforeOutlineJump = await page.evaluate(`${visibleScroller}.scrollTop`);
-  await page.clickButton('Part Two');
+  await page.clickTreeItem('Part Two');
   await page.waitFor(
     `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '4'`,
     'PDF outline jump to page 4',
@@ -269,10 +271,9 @@ export async function pdfFlow(page) {
   );
 
   // In-document search across unrendered PDF pages, match highlight, and return.
-  await page.clickButton('Find in document');
   await page.setInputValue('[data-testid="search-input"]', '汉字');
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
     'PDF search match on unrendered page 5',
   );
   await page.waitFor(
@@ -292,25 +293,25 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '1'`,
     'returning from PDF search jump to page 1',
   );
-  await page.clickButton('Close search');
+  await page.leaveSearch();
 
   // Independent bookmarks in PDF: bookmark page 4 via outline jump, return to page 1, jump to bookmark, and remove.
-  await page.clickButton('Part Two');
+  await page.clickTreeItem('Part Two');
   await page.waitFor(
     `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '4'`,
     'PDF jump to page 4 before bookmarking',
   );
   await page.clickButton('Bookmark current location');
   await page.waitFor(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')?.textContent === '1'`,
-    'PDF bookmark badge count',
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="toggle-bookmark-button"]')?.getAttribute('aria-pressed') === 'true'`,
+    'PDF bookmark toggle pressed',
   );
   await scrollToPage(page, 0);
   await page.waitFor(
     `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '1'`,
     'PDF scroll back to page 1',
   );
-  await page.clickButton('Bookmarks');
+  await page.showSidebarTab('Bookmarks');
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmark-jump-button"]')`,
     'PDF bookmark item in list',
@@ -326,10 +327,9 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="bookmark-remove-button"]').click()`,
   );
   await page.waitFor(
-    `!document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')`,
+    `[...document.querySelectorAll('[data-testid="bookmarks-empty"]')].some((e) => e.checkVisibility({ visibilityProperty: true }))`,
     'removing PDF bookmark',
   );
-  await page.clickButton('Bookmarks');
 
   // Independent highlights & notes in PDF: highlight on page 4 without creating a MindMap node, delete, and undo.
   await page.waitFor(
@@ -342,8 +342,9 @@ export async function pdfFlow(page) {
   await page.selectText('[data-page-index="3"] .textLayer span', 'final target sentence');
   await page.waitFor(excerptEnabled, 'selecting text on page 4 for independent highlight');
   await page.clickButton('Highlight selection');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="annotations-count"]')?.textContent === '3'`,
+    `[...document.querySelectorAll('[data-testid="annotation-item"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 3`,
     'PDF independent highlight count (2 existing excerpts + 1 independent)',
   );
   const cardCountAfter = await page.evaluate(
@@ -353,7 +354,7 @@ export async function pdfFlow(page) {
     cardCountAfter === cardCountBefore,
     'independent PDF highlight must not create a MindMap card',
   );
-  await page.clickButton('Annotations');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
     `document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="annotation-item"]').length === 3`,
     'PDF annotations list items',
@@ -372,12 +373,9 @@ export async function pdfFlow(page) {
     `document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="annotation-item"]').length === 3`,
     'undoing PDF highlight deletion',
   );
-  await page.clickButton('Annotations');
 
   // Lazy thumbnails, embedded PDF annotations, internal links, display modes, and rotation.
-  await page.evaluate(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-thumbnails-toggle"]').click()`,
-  );
+  await page.showSidebarTab('Thumbnails');
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnail-3"]')?.getAttribute('aria-current') === 'page'`,
     'PDF thumbnails sidebar active page 4',
@@ -446,7 +444,5 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'continuous'`,
     'PDF continuous display mode restored',
   );
-  await page.evaluate(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-thumbnails-toggle"]').click()`,
-  );
+  await page.hideSidebar();
 }

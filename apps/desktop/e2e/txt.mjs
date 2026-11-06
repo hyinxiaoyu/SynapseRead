@@ -95,10 +95,9 @@ export async function txtFlow(page) {
 
   // In-document search across virtualized TXT rows, active match highlight, and return.
   const visibleTxtViewer = `[...document.querySelectorAll('[data-testid="txt-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
-  await page.clickButton('Find in document');
   await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');
   await page.waitFor(
-    `${visibleTxtViewer}?.querySelector('[data-testid="search-status"]')?.textContent === '1 of 1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
     'TXT search match count',
   );
   await page.waitFor(
@@ -114,17 +113,17 @@ export async function txtFlow(page) {
     `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
     'returning from TXT search jump to previous scroll offset',
   );
-  await page.clickButton('Close search');
+  await page.leaveSearch();
 
   // Independent bookmarks in TXT: bookmark at scrollTop 1500, scroll to top, jump back, and remove.
   await page.clickButton('Bookmark current location');
   await page.waitFor(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')?.textContent === '1'`,
-    'TXT bookmark badge count',
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="toggle-bookmark-button"]')?.getAttribute('aria-pressed') === 'true'`,
+    'TXT bookmark toggle pressed',
   );
   await page.evaluate(`${visibleScroller}.scrollTop = 0`);
   await page.waitFor(`${visibleScroller}.scrollTop === 0`, 'scrolling TXT to top');
-  await page.clickButton('Bookmarks');
+  await page.showSidebarTab('Bookmarks');
   await page.waitFor(
     `${visibleTxtViewer}?.querySelector('[data-testid="bookmark-jump-button"]')`,
     'TXT bookmark item in list',
@@ -140,10 +139,10 @@ export async function txtFlow(page) {
     `${visibleTxtViewer}.querySelector('[data-testid="bookmark-remove-button"]').click()`,
   );
   await page.waitFor(
-    `!document.querySelector('[data-testid="unified-toolbar"] [data-testid="bookmarks-count"]')`,
+    `[...document.querySelectorAll('[data-testid="bookmarks-empty"]')].some((e) => e.checkVisibility({ visibilityProperty: true }))`,
     'removing TXT bookmark',
   );
-  await page.clickButton('Bookmarks');
+  await page.hideSidebar();
 
   // Drag and drop a file onto the workspace and verify it opens and renders automatically.
   await page.evaluate(`(() => {
@@ -176,11 +175,12 @@ export async function txtFlow(page) {
   // Independent highlights & notes in TXT viewer: highlight dropped file text without creating a MindMap card, delete, and undo.
   await page.selectText(SEGMENT, 'Dropped E2E');
   await page.clickButton('Highlight selection');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="annotations-count"]')?.textContent === '1'`,
+    `[...document.querySelectorAll('[data-testid="annotation-item"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 1`,
     'TXT independent highlight count',
   );
-  await page.clickButton('Annotations');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
     `${visibleTxtViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 1`,
     'TXT annotation item in list',
@@ -199,5 +199,5 @@ export async function txtFlow(page) {
     `${visibleTxtViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 1`,
     'undoing TXT highlight deletion',
   );
-  await page.clickButton('Annotations');
+  await page.hideSidebar();
 }

@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearchBar';
+import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend, type MemoryFile } from '@/lib/backend/memoryBackend';
 import {
@@ -291,7 +291,7 @@ describe('TxtViewer', () => {
         }),
       );
       await waitFor(() => expect(store.getState().jumpRequest).toBeNull());
-      expect(await screen.findByRole('status')).toHaveTextContent(/past the end/);
+      expect(await screen.findByText(/past the end/)).toHaveAttribute('role', 'status');
     });
 
     it('keeps the selected rows rendered while scrolled away', async () => {
@@ -428,7 +428,7 @@ describe('TxtViewer', () => {
     it('tells the reader the file has malformed bytes', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);
-      expect(await screen.findByRole('status')).toHaveTextContent(/not valid UTF-8/);
+      expect(await screen.findByText(/not valid UTF-8/)).toHaveAttribute('role', 'status');
     });
 
     it('searches lossy TXT files while retaining source-byte highlight mapping', async () => {
@@ -456,11 +456,16 @@ describe('TxtViewer', () => {
     fireEvent.keyDown(window, { key: 'f', ctrlKey: true });
     const searchInput = await screen.findByTestId('search-input');
     expect(searchInput).toHaveFocus();
-    expect(screen.getByTestId('search-status')).toHaveTextContent('Enter a search term');
+    expect(searchInput).toHaveAttribute('role', 'searchbox');
+    expect(searchInput).toHaveAttribute('placeholder', 'Search');
+    expect(screen.getByTestId('search-status').textContent).toBe('');
+    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
 
     // Search for a phrase that exists both near the top and in an unrendered row at the end.
     fireEvent.change(searchInput, { target: { value: 'final target sentence' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+    // Results list in the sidebar, which opened on its Search tab.
+    expect(screen.getByTestId('navigator-sidebar')).toHaveAttribute('data-navigator-tab', 'search');
     expect(screen.getByTestId('search-result-location')).toHaveTextContent(/Line \d+/);
     expect(screen.getByTestId('search-result-snippet')).toHaveTextContent('final target sentence');
 
@@ -477,14 +482,34 @@ describe('TxtViewer', () => {
     // Case sensitivity and no-match behavior.
     fireEvent.change(searchInput, { target: { value: 'QUICK BROWN FOX' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
-    fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Search options' }));
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Match case/ }));
     await waitFor(() =>
       expect(screen.getByTestId('search-status')).toHaveTextContent('No matches'),
     );
 
-    // Empty query resets search state.
+    // Empty query resets search state and puts the sidebar back as it was.
     fireEvent.change(searchInput, { target: { value: '   ' } });
-    expect(screen.getByTestId('search-status')).toHaveTextContent('Enter a search term');
+    expect(screen.getByTestId('search-status').textContent).toBe('');
+    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
+
+    // Esc clears the query and gives focus back to the text.
+    fireEvent.change(searchInput, { target: { value: 'quick' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of'));
+    fireEvent.keyDown(searchInput, { key: 'Escape' });
+    expect(searchInput).toHaveValue('');
+    expect(scroller()).toHaveFocus();
+  });
+
+  it('uses the selection for Find with Cmd/Ctrl+E', async () => {
+    const bytes = documentFixture('sample.txt');
+    const { store, documentId } = await setup(bytes);
+    render(<Harness store={store} documentId={documentId} />);
+    await selectText('quick brown fox');
+    fireEvent.keyDown(window, { key: 'e', code: 'KeyE', ctrlKey: true });
+    const searchInput = await screen.findByTestId('search-input');
+    expect(searchInput).toHaveValue('quick brown fox');
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of'));
   });
 
   it('adds, lists, jumps to, persists, removes, and handles stale bookmarks without creating cards or annotations', async () => {
@@ -510,10 +535,11 @@ describe('TxtViewer', () => {
     expect(store.getState().bookmarks).toHaveLength(1);
     fireEvent.keyDown(searchInput, { key: 'Escape' });
 
-    // Scroll back to top, open bookmarks list, and jump to the saved bookmark.
+    // Scroll back to top, show Bookmarks in the sidebar (⌥⌘5), and jump to the saved bookmark.
     scrollTo(0);
     expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    fireEvent.keyDown(window, { key: '5', code: 'Digit5', altKey: true, ctrlKey: true });
+    expect(screen.getByTestId('navigator-tab-bookmarks')).toHaveAttribute('aria-selected', 'true');
     await screen.findByTestId('bookmark-item');
     expect(screen.getByTestId('bookmark-label')).toHaveTextContent(/Line 21/);
     const jumpButton = screen.getByTestId('bookmark-jump-button');
@@ -541,7 +567,7 @@ describe('TxtViewer', () => {
     expect(await screen.findByTestId('bookmark-stale')).toHaveTextContent('Stale');
     const jumpButtons = screen.getAllByTestId('bookmark-jump-button');
     fireEvent.click(jumpButtons[1] as HTMLElement);
-    expect(await screen.findByRole('status')).toHaveTextContent(/past the end of this file/);
+    expect(await screen.findByText(/past the end of this file/)).toHaveAttribute('role', 'status');
 
     // Persist across reopen and remove bookmarks.
     first.unmount();
@@ -550,11 +576,23 @@ describe('TxtViewer', () => {
     await reopened.getState().openDocument();
     render(<Harness store={reopened} documentId={documentId} />);
     await segmentWith('SynapseRead sample text');
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    // The sidebar remembers the Bookmarks tab for TXT documents.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
+    expect(screen.getByTestId('navigator-tab-bookmarks')).toHaveAttribute('aria-selected', 'true');
     expect(await screen.findAllByTestId('bookmark-item')).toHaveLength(2);
 
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
     fireEvent.click(removeButtons[0] as HTMLElement);
+    await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
+
+    // ⌘Z puts it back; ⌫ on a focused row removes it again.
+    fireEvent.keyDown(window, { key: 'z', code: 'KeyZ', ctrlKey: true });
+    await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(2));
+    const rows = await screen.findAllByTestId('bookmark-jump-button');
+    (rows[0] as HTMLElement).focus();
+    fireEvent.keyDown(rows[0] as HTMLElement, { key: 'ArrowDown' });
+    expect(rows[1]).toHaveFocus();
+    fireEvent.keyDown(rows[1] as HTMLElement, { key: 'Backspace' });
     await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
   });
 
@@ -577,8 +615,15 @@ describe('TxtViewer', () => {
     const painted = await segmentWith('quick brown fox');
     expect(painted).toHaveAttribute('data-annotation-id', annotationId);
 
-    // Open annotations panel and edit note & color.
-    fireEvent.click(screen.getByTestId('annotations-toggle-button'));
+    // Show Highlights & Notes (⌥⌘4): the row has its color, note, and date.
+    fireEvent.keyDown(window, { key: '4', code: 'Digit4', altKey: true, ctrlKey: true });
+    expect(await screen.findByTestId('annotation-note-preview')).toHaveTextContent(
+      'TXT note on line 2',
+    );
+    expect(screen.getByTestId('annotation-date').textContent).not.toBe('');
+
+    // Edit note & color.
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
     const editNoteInput = await screen.findByTestId('annotation-note-input');
     fireEvent.change(editNoteInput, { target: { value: 'Updated TXT note' } });
     fireEvent.blur(editNoteInput);
@@ -591,6 +636,15 @@ describe('TxtViewer', () => {
     fireEvent.click(await screen.findByTestId('undo-delete-annotation-button'));
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
     expect(store.getState().annotations[0]?.note).toBe('Updated TXT note');
+
+    // ⌫ on the focused row deletes; ⌘Z restores.
+    const row = await screen.findByTestId('annotation-jump-button');
+    row.focus();
+    fireEvent.keyDown(row, { key: 'Backspace' });
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(0));
+    expect(await screen.findByTestId('annotations-empty')).toHaveTextContent(/highlight it/);
+    fireEvent.keyDown(window, { key: 'z', code: 'KeyZ', ctrlKey: true });
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
   });
 
   it('shows a read failure instead of an empty page', async () => {

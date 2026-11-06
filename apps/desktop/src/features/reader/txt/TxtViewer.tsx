@@ -11,32 +11,28 @@ import {
   type UIEvent,
 } from 'react';
 
+import { PanelLeft } from 'lucide-react';
+
 import {
-  AnnotationsListToggleButton,
-  AnnotationsPanel,
   SelectionAnnotationControls,
   SelectionNoteComposer,
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
+import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import {
-  BookmarksListToggleButton,
-  BookmarksPanel,
-  BookmarkToggleButton,
-  useBookmarksController,
-} from '@/features/reader/BookmarksPanel';
-import {
-  DocumentSearchBar,
-  DocumentSearchToggleButton,
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  ToolbarSearchField,
   useDocumentSearch,
-} from '@/features/reader/DocumentSearchBar';
+} from '@/features/reader/DocumentSearch';
+import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
+import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
 import {
   HistoryButtons,
   ReaderPopoverLayer,
   ReaderToolbar,
-  ToolbarOverflowMenu,
+  ToolbarButton,
   ToolbarSeparator,
   ToolbarTitle,
 } from '@/features/reader/ReaderToolbar';
@@ -483,6 +479,10 @@ export function TxtViewer({
     [],
   );
 
+  // Plain text has no outline or pages: the sidebar holds bookmarks and notes.
+  const navigator = useNavigator('txt', ['notes', 'bookmarks']);
+  const showSidebar = navigator.open && !chromeHidden;
+
   const search = useDocumentSearch<TxtSearchMatch>({
     isActive,
     runSearch: (query, caseSensitive) => model.search(query, { caseSensitive }),
@@ -660,8 +660,6 @@ export function TxtViewer({
     setWasChromeHidden(chromeHidden);
     if (chromeHidden) {
       preferencesPanel.close();
-      bookmarksController.closePanel();
-      annotationsController.closePanel();
     }
   }
 
@@ -673,10 +671,12 @@ export function TxtViewer({
 
   useReaderCommands({
     isActive,
+    chromeHidden,
     search,
+    navigator,
     bookmarks: bookmarksController,
     annotations: annotationsController,
-    hasSelection: activeSelection !== null,
+    selectionText: activeSelection?.text ?? null,
     markup,
     reflowable: {
       preferences: effectivePreferences,
@@ -766,12 +766,23 @@ export function TxtViewer({
       <ReaderToolbar
         isActive={isActive}
         leading={
-          <HistoryButtons
-            canGoBack={history.canGoBack}
-            canGoForward={history.canGoForward}
-            onBack={handleReturnBack}
-            onForward={handleForward}
-          />
+          <>
+            <ToolbarButton
+              icon={PanelLeft}
+              label="Sidebar"
+              command="view.toggleSidebar"
+              pressed={showSidebar}
+              testId="sidebar-toggle"
+              disabled={chromeHidden}
+              onClick={navigator.toggle}
+            />
+            <HistoryButtons
+              canGoBack={history.canGoBack}
+              canGoForward={history.canGoForward}
+              onBack={handleReturnBack}
+              onForward={handleForward}
+            />
+          </>
         }
         center={
           <ToolbarTitle
@@ -801,102 +812,89 @@ export function TxtViewer({
               bookmarked={bookmarksController.isCurrentBookmarked}
               onToggle={bookmarksController.toggleCurrentBookmark}
             />
-            <BookmarksListToggleButton
-              open={bookmarksController.open}
-              count={bookmarksController.bookmarks.length}
-              collapse="md"
-              onToggle={bookmarksController.togglePanel}
+            <ToolbarSearchField
+              search={search}
+              onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
             />
-            <AnnotationsListToggleButton
-              open={annotationsController.open}
-              count={annotationsController.annotations.length}
-              collapse="md"
-              onToggle={annotationsController.togglePanel}
-            />
-            <ToolbarOverflowMenu
-              items={[
-                {
-                  label: 'Bookmarks',
-                  collapse: 'md',
-                  pressed: bookmarksController.open,
-                  onSelect: bookmarksController.togglePanel,
-                },
-                {
-                  label: 'Annotations',
-                  collapse: 'md',
-                  pressed: annotationsController.open,
-                  onSelect: annotationsController.togglePanel,
-                },
-              ]}
-            />
-            <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
           </>
         }
       />
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        <ReaderPopoverLayer>
-          {preferencesPanel.open && (
-            <ReadingPreferencesBar
-              preferences={effectivePreferences}
-              onChange={updatePreferences}
-            />
-          )}
-          <DocumentSearchBar search={search} />
-          <BookmarksPanel controller={bookmarksController} />
-          <SelectionNoteComposer
-            hasSelection={activeSelection !== null}
-            controller={annotationsController}
+      <div className="relative flex min-h-0 flex-1">
+        {showSidebar && (
+          <ReaderNavigator
+            navigator={navigator}
+            bookmarks={bookmarksController}
+            annotations={annotationsController}
+            search={search}
+            groupSearchResults={false}
+            annotationPlacement={(annotation) => ({
+              order: asTxtAnchor(annotation.anchor)?.startByteOffset ?? Number.MAX_SAFE_INTEGER,
+            })}
           />
-          <AnnotationsPanel controller={annotationsController} />
-          {(load.hadReplacements || missedJump) && (
-            <p role="status" className="bg-muted px-4 py-1.5 text-xs text-foreground">
-              {missedJump
-                ? 'That excerpt is past the end of this file, which may have changed since it was saved.'
-                : 'This file has bytes that are not valid UTF-8. They are shown as �.'}
-            </p>
-          )}
-        </ReaderPopoverLayer>
-        <div
-          ref={scrollRef}
-          onScroll={onScroll}
-          data-testid="txt-scroll"
-          className="min-h-0 flex-1 overflow-auto"
-        >
-          <div
-            role="document"
-            aria-label={document.title}
-            className={cn(
-              'relative mx-auto w-full',
-              READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
+        )}
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          <ReaderPopoverLayer>
+            {preferencesPanel.open && (
+              <ReadingPreferencesBar
+                preferences={effectivePreferences}
+                onChange={updatePreferences}
+              />
             )}
-            style={{
-              height: virtualizer.getTotalSize(),
-              fontFamily: FONT_FAMILY_CSS[effectivePreferences.fontFamily],
-              fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
-              lineHeight:
-                effectivePreferences.lineSpacing === 1.75
-                  ? 1.625
-                  : effectivePreferences.lineSpacing,
-            }}
+            <SelectionNoteComposer
+              hasSelection={activeSelection !== null}
+              controller={annotationsController}
+            />
+            {(load.hadReplacements || missedJump) && (
+              <p role="status" className="bg-muted px-4 py-1.5 text-xs text-foreground">
+                {missedJump
+                  ? 'That excerpt is past the end of this file, which may have changed since it was saved.'
+                  : 'This file has bytes that are not valid UTF-8. They are shown as �.'}
+              </p>
+            )}
+          </ReaderPopoverLayer>
+          <div
+            ref={scrollRef}
+            onScroll={onScroll}
+            tabIndex={-1}
+            data-testid="txt-scroll"
+            className="min-h-0 flex-1 overflow-auto outline-none"
           >
-            {virtualizer.getVirtualItems().map((item) => (
-              <div
-                key={item.key}
-                data-index={item.index}
-                ref={virtualizer.measureElement}
-                className="absolute top-0 left-0 min-h-[1lh] w-full px-6 break-words whitespace-pre-wrap"
-                style={{ transform: `translateY(${item.start}px)` }}
-              >
-                <TxtRow
-                  segments={segmentRow(
-                    model.rowStart(item.index),
-                    model.rowText(item.index),
-                    ranges,
-                  )}
-                  pulsingAnnotationId={pulsingAnnotationId}
-                />
-              </div>
-            ))}
+            <div
+              role="document"
+              aria-label={document.title}
+              className={cn(
+                'relative mx-auto w-full',
+                READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
+              )}
+              style={{
+                height: virtualizer.getTotalSize(),
+                fontFamily: FONT_FAMILY_CSS[effectivePreferences.fontFamily],
+                fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
+                lineHeight:
+                  effectivePreferences.lineSpacing === 1.75
+                    ? 1.625
+                    : effectivePreferences.lineSpacing,
+              }}
+            >
+              {virtualizer.getVirtualItems().map((item) => (
+                <div
+                  key={item.key}
+                  data-index={item.index}
+                  ref={virtualizer.measureElement}
+                  className="absolute top-0 left-0 min-h-[1lh] w-full px-6 break-words whitespace-pre-wrap"
+                  style={{ transform: `translateY(${item.start}px)` }}
+                >
+                  <TxtRow
+                    segments={segmentRow(
+                      model.rowStart(item.index),
+                      model.rowText(item.index),
+                      ranges,
+                    )}
+                    pulsingAnnotationId={pulsingAnnotationId}
+                  />
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>

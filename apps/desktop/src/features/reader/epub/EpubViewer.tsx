@@ -4,33 +4,27 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmented-control';
 import { dispatchCommandKeydown } from '@/features/commands/registry';
 import {
-  AnnotationsListToggleButton,
-  AnnotationsPanel,
+  type AnnotationPlacement,
   SelectionAnnotationControls,
   SelectionNoteComposer,
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
+import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import {
-  BookmarksListToggleButton,
-  BookmarksPanel,
-  BookmarkToggleButton,
-  useBookmarksController,
-} from '@/features/reader/BookmarksPanel';
-import {
-  DocumentSearchBar,
-  DocumentSearchToggleButton,
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  ToolbarSearchField,
   useDocumentSearch,
-} from '@/features/reader/DocumentSearchBar';
-import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
+} from '@/features/reader/DocumentSearch';
+import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
+import { indexOutline, type OutlineNode } from '@/features/reader/navigator/OutlineTree';
+import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
 import {
   HistoryButtons,
   ReaderPopoverLayer,
   ReaderToolbar,
   ToolbarButton,
-  ToolbarOverflowMenu,
   ToolbarSeparator,
   ToolbarTitle,
 } from '@/features/reader/ReaderToolbar';
@@ -87,23 +81,51 @@ function toOutlineNodes(items: readonly EpubTocItem[]): OutlineNode<string>[] {
   }));
 }
 
-function findOutlineLabel(items: readonly EpubTocItem[], href: string): string | null {
-  const cleanHref = (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+const cleanChapterPath = (href: string) => (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+
+/** Whether two hrefs name the same chapter file, ignoring fragments and relative prefixes. */
+function sameChapter(a: string, b: string): boolean {
+  const left = cleanChapterPath(a);
+  const right = cleanChapterPath(b);
+  return (
+    left !== '' &&
+    right !== '' &&
+    (left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`))
+  );
+}
+
+function findOutlineItem(items: readonly EpubTocItem[], href: string): EpubTocItem | null {
   for (const item of items) {
-    const cleanTarget = (item.href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
-    if (
-      cleanHref &&
-      cleanTarget &&
-      (cleanHref === cleanTarget ||
-        cleanHref.endsWith(`/${cleanTarget}`) ||
-        cleanTarget.endsWith(`/${cleanHref}`))
-    ) {
-      return item.label;
-    }
-    const nested = findOutlineLabel(item.children, href);
+    if (sameChapter(item.href, href)) return item;
+    const nested = findOutlineItem(item.children, href);
     if (nested) return nested;
   }
   return null;
+}
+
+function findOutlineLabel(items: readonly EpubTocItem[], href: string): string | null {
+  return findOutlineItem(items, href)?.label ?? null;
+}
+
+/**
+ * The TOC entry for the chapter being read: one that names the chapter file
+ * itself, else the first that points into it.
+ */
+function currentTocId(items: readonly EpubTocItem[], href: string | null): string | null {
+  if (!href) return null;
+  let inFile: string | null = null;
+  const walk = (nodes: readonly EpubTocItem[]): string | null => {
+    for (const item of nodes) {
+      if (sameChapter(item.href, href)) {
+        if (!item.href.includes('#')) return item.id;
+        inFile ??= item.id;
+      }
+      const nested = walk(item.children);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return walk(items) ?? inFile;
 }
 
 /** EPUB reader: epub.js renders each chapter in an iframe, addressed by CFI. */
@@ -142,7 +164,7 @@ export function EpubViewer({
   const effectivePreferences = preferences ?? localPreferences;
   const readingMode = effectivePreferences.epubReadingMode;
   const preferencesPanel = useReadingPreferencesPanel();
-  const [tocOpen, setTocOpen] = useState(false);
+  const navigator = useNavigator('epub', ['contents', 'notes', 'bookmarks']);
 
   const updatePreferences = (patch: Partial<ReadingPreferences>) => {
     setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
@@ -361,6 +383,7 @@ export function EpubViewer({
       query: string,
       caseSensitive: boolean,
       signal: AbortSignal,
+      onProgress: (matchesSoFar: readonly EpubSearchMatch[]) => void,
     ): Promise<readonly EpubSearchMatch[]> => {
       if (!handle?.searchChapter) return [];
       const count = handle.chapterCount ?? 0;
@@ -369,7 +392,10 @@ export function EpubViewer({
         if (signal.aborted) return [];
         const chapterMatches = await handle.searchChapter(chapterIndex, query, { caseSensitive });
         if (signal.aborted) return [];
-        matches.push(...chapterMatches);
+        if (chapterMatches.length > 0) {
+          matches.push(...chapterMatches);
+          onProgress([...matches]);
+        }
       }
       return matches;
     },
@@ -656,15 +682,15 @@ export function EpubViewer({
 
   const outlineItems = useMemo(() => toOutlineNodes(handle?.toc ?? []), [handle]);
 
-  const isTocTargetActive = (target: string): boolean => {
-    if (!currentHref || target.includes('#')) return false;
-    const cleanTarget = target.replace(/^(\.\/|\/)+/, '');
-    const cleanHref = currentHref.replace(/^(\.\/|\/)+/, '');
-    return (
-      cleanHref === cleanTarget ||
-      cleanHref.endsWith(`/${cleanTarget}`) ||
-      cleanTarget.endsWith(`/${cleanHref}`)
-    );
+  const tocIndex = useMemo(() => indexOutline(outlineItems), [outlineItems]);
+  const annotationPlacement = (annotation: Annotation): AnnotationPlacement => {
+    const anchor = asEpubAnchor(annotation.anchor);
+    const item = anchor ? findOutlineItem(handle?.toc ?? [], anchor.chapterHref) : null;
+    return {
+      group: item?.label ?? anchor?.chapterHref ?? 'Unknown chapter',
+      // Book order where the TOC knows the chapter; others after, as created.
+      order: item ? (tocIndex.get(item.id)?.order ?? 0) : Number.MAX_SAFE_INTEGER,
+    };
   };
 
   const handleTocSelect = (target: string) => {
@@ -701,8 +727,6 @@ export function EpubViewer({
     setWasChromeHidden(chromeHidden);
     if (chromeHidden) {
       preferencesPanel.close();
-      bookmarksController.closePanel();
-      annotationsController.closePanel();
     }
   }
 
@@ -710,10 +734,12 @@ export function EpubViewer({
   useReaderCommands({
     isActive,
     ready,
+    chromeHidden,
     search,
+    navigator,
     bookmarks: bookmarksController,
     annotations: annotationsController,
-    hasSelection: activeSelection !== null,
+    selectionText: activeSelection?.text ?? null,
     markup,
     reflowable: {
       preferences: effectivePreferences,
@@ -721,15 +747,6 @@ export function EpubViewer({
       panel: preferencesPanel,
     },
     extra: {
-      'view.toggleSidebar': {
-        run: () => setTocOpen((open) => !open),
-        enabled: ready && !chromeHidden,
-        title: tocOpen ? 'Hide Sidebar' : 'Show Sidebar',
-      },
-      'view.sidebarContents': {
-        run: () => setTocOpen((open) => !open),
-        enabled: ready && !chromeHidden,
-      },
       'view.layoutSingle': {
         run: () => updatePreferences({ epubReadingMode: 'paged' }),
         enabled: ready,
@@ -757,7 +774,7 @@ export function EpubViewer({
     );
   }
 
-  const showToc = tocOpen && !chromeHidden;
+  const showSidebar = navigator.open && !chromeHidden;
   const progress = (
     <>
       {readingMode !== 'scroll' && pageInfo && (
@@ -788,11 +805,12 @@ export function EpubViewer({
           <>
             <ToolbarButton
               icon={PanelLeft}
-              label="Table of contents"
-              command="view.sidebarContents"
-              pressed={showToc}
+              label="Sidebar"
+              command="view.toggleSidebar"
+              pressed={showSidebar}
+              testId="sidebar-toggle"
               disabled={!handle || chromeHidden}
-              onClick={() => setTocOpen((open) => !open)}
+              onClick={navigator.toggle}
             />
             <SegmentedControl
               label="Reading mode"
@@ -849,101 +867,78 @@ export function EpubViewer({
               disabled={!handle}
               onToggle={bookmarksController.toggleCurrentBookmark}
             />
-            <BookmarksListToggleButton
-              open={bookmarksController.open}
-              count={bookmarksController.bookmarks.length}
+            <ToolbarSearchField
+              search={search}
               disabled={!handle}
-              collapse="md"
-              onToggle={bookmarksController.togglePanel}
-            />
-            <AnnotationsListToggleButton
-              open={annotationsController.open}
-              count={annotationsController.annotations.length}
-              disabled={!handle}
-              collapse="md"
-              onToggle={annotationsController.togglePanel}
-            />
-            <ToolbarOverflowMenu
-              items={[
-                {
-                  label: 'Bookmarks',
-                  collapse: 'md',
-                  pressed: bookmarksController.open,
-                  disabled: !handle,
-                  onSelect: bookmarksController.togglePanel,
-                },
-                {
-                  label: 'Annotations',
-                  collapse: 'md',
-                  pressed: annotationsController.open,
-                  disabled: !handle,
-                  onSelect: annotationsController.togglePanel,
-                },
-              ]}
-            />
-            <DocumentSearchToggleButton
-              open={search.open}
-              disabled={!handle}
-              onToggle={search.toggleSearch}
+              onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
             />
           </>
         }
       />
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
-        <ReaderPopoverLayer>
-          {preferencesPanel.open && (
-            <ReadingPreferencesBar
-              preferences={effectivePreferences}
-              disabled={!handle}
-              onChange={updatePreferences}
-            />
-          )}
-          <DocumentSearchBar search={search} />
-          <BookmarksPanel controller={bookmarksController} />
-          <SelectionNoteComposer
-            hasSelection={activeSelection !== null}
-            controller={annotationsController}
-          />
-          <AnnotationsPanel controller={annotationsController} />
-          {missedJump && (
-            <p role="status" className="bg-muted px-4 py-1.5 text-xs">
-              That excerpt could not be found in this book. The file may have changed.
-            </p>
-          )}
-        </ReaderPopoverLayer>
-        {showToc && (
-          <OutlineSidebar
-            items={outlineItems}
-            isActive={isTocTargetActive}
-            emptyMessage="No table of contents in this book."
-            onSelect={handleTocSelect}
+        {showSidebar && (
+          <ReaderNavigator
+            navigator={navigator}
+            bookmarks={bookmarksController}
+            annotations={annotationsController}
+            search={search}
+            groupSearchResults
+            contents={{
+              items: outlineItems,
+              currentId: currentTocId(handle?.toc ?? [], currentHref),
+              emptyMessage: 'No table of contents in this book.',
+              onSelect: handleTocSelect,
+            }}
+            annotationPlacement={annotationPlacement}
           />
         )}
-        <div
-          className={cn(
-            'relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden px-2 pt-1.5 pb-3',
-            // In focus mode the whole reading area takes the page's theme color.
-            chromeHidden ? THEME_SURFACE_CLASSES[effectivePreferences.theme] : 'bg-muted/30',
-          )}
-        >
-          <div
-            ref={hostRef}
-            data-testid="epub-host"
-            className={cn(
-              'relative h-full w-full overflow-hidden rounded-sm',
-              !chromeHidden && 'shadow-sm ring-1 ring-black/5',
-              THEME_SURFACE_CLASSES[effectivePreferences.theme],
-              readingMode === 'spread'
-                ? 'max-w-none'
-                : READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
+        {/* Notices float over the page column only, never over the sidebar. */}
+        <div className="relative flex min-h-0 min-w-0 flex-1">
+          <ReaderPopoverLayer>
+            {preferencesPanel.open && (
+              <ReadingPreferencesBar
+                preferences={effectivePreferences}
+                disabled={!handle}
+                onChange={updatePreferences}
+              />
             )}
-          />
-          {readingMode === 'spread' && (
-            <div
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-y-3 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
+            <SelectionNoteComposer
+              hasSelection={activeSelection !== null}
+              controller={annotationsController}
             />
-          )}
+            {missedJump && (
+              <p role="status" className="bg-muted px-4 py-1.5 text-xs">
+                That excerpt could not be found in this book. The file may have changed.
+              </p>
+            )}
+          </ReaderPopoverLayer>
+          <div
+            className={cn(
+              'relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden px-2 pt-1.5 pb-3',
+              // In focus mode the whole reading area takes the page's theme color.
+              chromeHidden ? THEME_SURFACE_CLASSES[effectivePreferences.theme] : 'bg-muted/30',
+            )}
+          >
+            <div
+              ref={hostRef}
+              tabIndex={-1}
+              data-testid="epub-host"
+              className={cn(
+                'relative h-full w-full overflow-hidden rounded-sm',
+                !chromeHidden && 'shadow-sm ring-1 ring-black/5',
+                THEME_SURFACE_CLASSES[effectivePreferences.theme],
+                readingMode === 'spread'
+                  ? 'max-w-none'
+                  : READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
+              )}
+            />
+            {readingMode === 'spread' && (
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-3 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
+              />
+            )}
+          </div>
         </div>
       </div>
     </div>

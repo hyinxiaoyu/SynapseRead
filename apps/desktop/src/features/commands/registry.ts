@@ -142,9 +142,9 @@ export function isEditableShortcutTarget(target: EventTarget | null): boolean {
   return (element as Element).closest('[contenteditable="true"], [role="textbox"]') !== null;
 }
 
-/** Widgets that use bare arrow keys themselves. */
+/** Widgets that use bare arrow keys themselves; `data-arrow-keys` marks the rest (sidebar lists). */
 const ARROW_KEY_WIDGETS =
-  '[role="slider"], [role="separator"], [role="tablist"], [role="radiogroup"], [role="menu"], .react-flow';
+  '[role="slider"], [role="separator"], [role="tablist"], [role="radiogroup"], [role="menu"], [role="tree"], [data-arrow-keys], .react-flow';
 
 function isSearchField(target: EventTarget | null): boolean {
   const element = target as { dataset?: DOMStringMap } | null;

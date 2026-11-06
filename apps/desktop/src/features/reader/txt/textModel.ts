@@ -2,7 +2,7 @@ import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
   findSubstringMatches,
-} from '@/features/reader/DocumentSearchBar';
+} from '@/features/reader/DocumentSearch';
 import type { SourceSpan, TextChunk, TxtAnchor } from '@/types/domain';
 
 export interface TxtSearchMatch extends DocumentSearchResultItem {

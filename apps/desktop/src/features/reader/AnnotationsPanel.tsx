@@ -1,20 +1,16 @@
-import {
-  Highlighter,
-  Link2,
-  MessageSquare,
-  NotebookPen,
-  StickyNote,
-  Trash2,
-  Undo2,
-} from 'lucide-react';
-import { useState } from 'react';
+import { Highlighter, Link2, MessageSquare, Pencil, StickyNote, Undo2 } from 'lucide-react';
+import { Fragment, type KeyboardEvent as ReactKeyboardEvent, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { commandDefinition, formatShortcut } from '@/features/commands/commands';
 import {
-  collapseClass,
-  type ToolbarCollapse,
-  ToolbarButton,
-} from '@/features/reader/ReaderToolbar';
+  formatShortDate,
+  NavigatorEmptyState,
+  RowDeleteButton,
+  rowClassName,
+} from '@/features/reader/navigator/parts';
+import { isDeleteKey, useRovingList } from '@/features/reader/navigator/useRovingList';
+import { collapseClass, ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
 import type { Annotation, AnnotationPatch, ReaderSelection } from '@/types/domain';
 
@@ -47,7 +43,6 @@ export function formatAnnotationLocation(annotation: Annotation): string {
 }
 
 export interface AnnotationsController {
-  open: boolean;
   annotations: readonly Annotation[];
   activeColor: string;
   draftNoteOpen: boolean;
@@ -57,8 +52,6 @@ export interface AnnotationsController {
   setDraftNote: (value: string) => void;
   toggleDraftNote: () => void;
   closeDraftNote: () => void;
-  togglePanel: () => void;
-  closePanel: () => void;
   createHighlight: () => void;
   submitNoteSelection: () => void;
   selectAnnotation: (annotation: Annotation) => void;
@@ -93,7 +86,6 @@ export function useAnnotationsController({
   isStaleAnnotation,
   onSelectAnnotation,
 }: UseAnnotationsOptions): AnnotationsController {
-  const [open, setOpen] = useState(false);
   const [activeColor, setActiveColor] = useState<string>(ANNOTATION_COLORS[0]?.value ?? '#fde047');
   const [draftNoteOpen, setDraftNoteOpen] = useState(false);
   const [draftNote, setDraftNote] = useState('');
@@ -179,7 +171,6 @@ export function useAnnotationsController({
   };
 
   return {
-    open,
     annotations: effectiveAnnotations,
     activeColor,
     draftNoteOpen,
@@ -189,8 +180,6 @@ export function useAnnotationsController({
     setDraftNote,
     toggleDraftNote: () => setDraftNoteOpen((current) => !current),
     closeDraftNote: () => setDraftNoteOpen(false),
-    togglePanel: () => setOpen((current) => !current),
-    closePanel: () => setOpen(false),
     createHighlight,
     submitNoteSelection,
     selectAnnotation: onSelectAnnotation,
@@ -199,35 +188,6 @@ export function useAnnotationsController({
     undoDelete,
     isAnnotationStale: (annotation) => (isStaleAnnotation ? isStaleAnnotation(annotation) : false),
   };
-}
-
-export function AnnotationsListToggleButton({
-  open,
-  count,
-  disabled = false,
-  collapse,
-  onToggle,
-}: {
-  open: boolean;
-  count: number;
-  disabled?: boolean;
-  collapse?: ToolbarCollapse;
-  onToggle: () => void;
-}) {
-  return (
-    <ToolbarButton
-      icon={NotebookPen}
-      label="Annotations"
-      command="view.sidebarAnnotations"
-      pressed={open}
-      testId="annotations-toggle-button"
-      badge={count}
-      badgeTestId="annotations-count"
-      disabled={disabled}
-      {...(collapse ? { collapse } : {})}
-      onClick={onToggle}
-    />
-  );
 }
 
 /**
@@ -349,10 +309,26 @@ export function SelectionNoteComposer({
   );
 }
 
-function AnnotationListItem({
+function shortcutOf(id: 'edit.highlight' | 'edit.undoDelete'): string {
+  const { shortcut } = commandDefinition(id);
+  return shortcut ? formatShortcut(shortcut) : '';
+}
+
+/** Where an annotation sits, for grouping and ordering the list. */
+export interface AnnotationPlacement {
+  /** The chapter or section heading; omitted for formats without chapters. */
+  group?: string;
+  /** Document order; lower comes first. */
+  order: number;
+}
+
+function AnnotationRow({
   annotation,
   linkedToCard,
   stale,
+  tabIndex,
+  onFocus,
+  onKeyDown,
   onSelect,
   onUpdate,
   onDelete,
@@ -360,10 +336,14 @@ function AnnotationListItem({
   annotation: Annotation;
   linkedToCard: boolean;
   stale: boolean;
+  tabIndex: number;
+  onFocus: () => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   onSelect: () => void;
   onUpdate: (patch: AnnotationPatch) => void;
-  onDelete: () => void;
+  onDelete: (from: HTMLElement) => void;
 }) {
+  const [editing, setEditing] = useState(false);
   const [noteDraft, setNoteDraft] = useState(annotation.note ?? '');
   const [prevPropNote, setPrevPropNote] = useState(annotation.note ?? '');
   if ((annotation.note ?? '') !== prevPropNote) {
@@ -380,26 +360,54 @@ function AnnotationListItem({
   };
 
   const locationLabel = formatAnnotationLocation(annotation);
+  const date = formatShortDate(annotation.createdAt);
 
   return (
-    <li data-testid="annotation-item" className="flex flex-col gap-1.5 px-3 py-2">
-      <div className="flex items-start justify-between gap-2">
+    <li data-testid="annotation-item" className="group/row flex flex-col">
+      <div className="flex items-start gap-0.5">
         <button
           type="button"
+          data-roving-row=""
           data-testid="annotation-jump-button"
+          tabIndex={tabIndex}
+          aria-keyshortcuts="Backspace"
+          onFocus={onFocus}
+          onKeyDown={onKeyDown}
           onClick={onSelect}
-          className="flex min-w-0 flex-1 flex-col gap-0.5 rounded px-1.5 py-0.5 text-left text-xs transition-colors outline-none hover:bg-accent/60 focus-visible:ring-2 focus-visible:ring-ring"
+          className={rowClassName(false)}
         >
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span className="flex items-start gap-2">
             <span
-              className="inline-block size-2.5 shrink-0 rounded-full border border-black/20"
+              aria-hidden="true"
+              data-testid="annotation-color-chip"
+              className="mt-1 inline-block size-2.5 shrink-0 rounded-full border border-black/20"
               style={{ backgroundColor: annotation.color }}
             />
+            <span data-testid="annotation-excerpt" className="line-clamp-3 min-w-0 break-words">
+              {annotation.excerptText ??
+                (annotation.excerptImagePath ? 'Captured image excerpt' : 'Note')}
+            </span>
+          </span>
+          {annotation.note && (
+            <span
+              data-testid="annotation-note-preview"
+              className="ml-4.5 line-clamp-2 border-l-2 pl-2 text-xs break-words text-muted-foreground italic"
+            >
+              {annotation.note}
+            </span>
+          )}
+          <span className="ml-4.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground">
             <span data-testid="annotation-location">{locationLabel}</span>
+            {date && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span data-testid="annotation-date">{date}</span>
+              </>
+            )}
             {linkedToCard && (
               <span
                 data-testid="annotation-card-badge"
-                className="inline-flex items-center gap-0.5 rounded bg-secondary px-1.5 py-0.2 text-[10px] font-medium text-secondary-foreground"
+                className="inline-flex items-center gap-0.5 rounded bg-secondary px-1.5 text-[10px] font-medium text-secondary-foreground"
               >
                 <Link2 className="size-2.5" />
                 In MindMap
@@ -408,19 +416,38 @@ function AnnotationListItem({
             {stale && (
               <span
                 data-testid="annotation-stale"
-                className="rounded bg-destructive/15 px-1.5 py-0.2 text-[10px] font-medium text-destructive"
+                className="rounded bg-destructive/15 px-1.5 text-[10px] font-medium text-destructive"
               >
                 Stale
               </span>
             )}
-          </div>
-          <p data-testid="annotation-excerpt" className="line-clamp-2 text-xs text-foreground">
-            {annotation.excerptText ??
-              (annotation.excerptImagePath ? 'Captured image excerpt' : 'Note')}
-          </p>
+          </span>
         </button>
-
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center pt-1">
+          <button
+            type="button"
+            tabIndex={-1}
+            aria-label={`Edit note and color at ${locationLabel}`}
+            aria-expanded={editing}
+            title="Edit note and color"
+            data-testid="annotation-edit-button"
+            onClick={() => setEditing((current) => !current)}
+            className={cn(
+              'flex size-6 items-center justify-center rounded text-muted-foreground transition-opacity outline-none group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-background hover:text-foreground motion-reduce:transition-none',
+              editing ? 'opacity-100' : 'opacity-0',
+            )}
+          >
+            <Pencil className="size-3.5" />
+          </button>
+          <RowDeleteButton
+            label={`Delete annotation at ${locationLabel}`}
+            testId="annotation-delete-button"
+            onDelete={onDelete}
+          />
+        </div>
+      </div>
+      {editing && (
+        <div className="mb-1 ml-6 flex items-center gap-1.5 pr-1">
           <div role="group" aria-label="Change highlight color" className="flex items-center gap-1">
             {ANNOTATION_COLORS.map(({ label, value }) => {
               const active = annotation.color === value;
@@ -433,107 +460,164 @@ function AnnotationListItem({
                   data-testid={`annotation-item-color-${label.toLowerCase()}`}
                   onClick={() => onUpdate({ note: null, color: value })}
                   className={cn(
-                    'size-3 rounded-full border border-black/25 outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                    active && 'scale-115 ring-1 ring-foreground',
+                    'size-3.5 rounded-full border border-black/25 outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                    active && 'ring-1 ring-foreground',
                   )}
                   style={{ backgroundColor: value }}
                 />
               );
             })}
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 shrink-0"
-            aria-label={`Delete annotation at ${locationLabel}`}
-            data-testid="annotation-delete-button"
-            onClick={onDelete}
-          >
-            <Trash2 className="size-3.5" />
-          </Button>
+          <input
+            type="text"
+            aria-label={`Note for annotation at ${locationLabel}`}
+            data-testid="annotation-note-input"
+            placeholder="Add a note…"
+            value={noteDraft}
+            autoFocus
+            onChange={(event) => setNoteDraft(event.target.value)}
+            onBlur={commitNote}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                commitNote();
+                setEditing(false);
+              } else if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                setNoteDraft(annotation.note ?? '');
+                setEditing(false);
+              }
+            }}
+            className="h-6 min-w-0 flex-1 rounded border bg-background px-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
         </div>
-      </div>
-
-      <div className="flex items-center gap-1.5 pl-1.5">
-        <input
-          type="text"
-          aria-label={`Note for annotation at ${locationLabel}`}
-          data-testid="annotation-note-input"
-          placeholder="Add a note…"
-          value={noteDraft}
-          onChange={(event) => setNoteDraft(event.target.value)}
-          onBlur={commitNote}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              commitNote();
-            }
-          }}
-          className="h-6 min-w-0 flex-1 rounded border bg-background px-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
-      </div>
+      )}
     </li>
   );
 }
 
-export function AnnotationsPanel({
+/**
+ * The Navigator's Highlights & Notes tab: grouped by chapter, each row with its
+ * color, excerpt, note, and date.
+ */
+export function AnnotationsList({
   controller,
+  filter,
   linkedAnnotationIds,
+  placementOf,
+  onDeleted,
 }: {
   controller: AnnotationsController;
+  filter: string;
   linkedAnnotationIds?: ReadonlySet<string>;
+  placementOf?: (annotation: Annotation) => AnnotationPlacement;
+  /** Told after a row is deleted, so ⌘Z knows what to restore. */
+  onDeleted?: () => void;
 }) {
-  if (!controller.open) return null;
+  const needle = filter.trim().toLowerCase();
+  const placed = controller.annotations
+    .filter(
+      (annotation) =>
+        !needle ||
+        (annotation.excerptText ?? '').toLowerCase().includes(needle) ||
+        (annotation.note ?? '').toLowerCase().includes(needle),
+    )
+    .map((annotation, index) => ({
+      annotation,
+      placement: placementOf?.(annotation) ?? { order: index },
+    }))
+    .sort((a, b) => a.placement.order - b.placement.order);
+  const roving = useRovingList(placed.length);
+
+  const header = (
+    <div className="flex h-7 shrink-0 items-center justify-between gap-2 border-b px-3 text-[11px] text-muted-foreground">
+      <span>
+        {controller.annotations.length}{' '}
+        {controller.annotations.length === 1 ? 'highlight' : 'highlights'}
+      </span>
+      {controller.canUndoDelete && (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-5 px-1.5 text-[11px]"
+          aria-label="Undo annotation deletion"
+          title={`Undo annotation deletion (${shortcutOf('edit.undoDelete')})`}
+          data-testid="undo-delete-annotation-button"
+          onClick={controller.undoDelete}
+        >
+          <Undo2 className="size-3" />
+          Undo
+        </Button>
+      )}
+    </div>
+  );
+
+  let body;
+  if (controller.annotations.length === 0) {
+    body = (
+      <NavigatorEmptyState testId="annotations-empty" title="No highlights or notes yet">
+        Select text, then press {shortcutOf('edit.highlight')} to highlight it or choose Add Note.
+      </NavigatorEmptyState>
+    );
+  } else if (placed.length === 0) {
+    body = <NavigatorEmptyState title="No matching highlights" />;
+  } else {
+    body = (
+      <ol
+        {...roving.listProps}
+        aria-label="Highlights and notes"
+        data-testid="annotations-list"
+        data-arrow-keys=""
+        className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1"
+      >
+        {placed.map(({ annotation, placement }, index) => {
+          const groupStart =
+            placement.group !== undefined && placed[index - 1]?.placement.group !== placement.group;
+          const remove = (from: HTMLElement) => {
+            roving.refocusAfterRemoval(from, index);
+            controller.deleteAnnotation(annotation.id);
+            onDeleted?.();
+          };
+          return (
+            <Fragment key={annotation.id}>
+              {groupStart && (
+                <li
+                  role="presentation"
+                  data-testid="annotation-group"
+                  className="sticky top-0 z-10 truncate bg-background/95 px-2 pt-2 pb-1 text-[11px] font-semibold text-muted-foreground backdrop-blur-sm"
+                >
+                  {placement.group}
+                </li>
+              )}
+              <AnnotationRow
+                annotation={annotation}
+                linkedToCard={linkedAnnotationIds?.has(annotation.id) ?? false}
+                stale={controller.isAnnotationStale(annotation)}
+                tabIndex={roving.tabIndexFor(index)}
+                onFocus={() => roving.onRowFocus(index)}
+                onKeyDown={(event) => {
+                  if (roving.onRowKeyDown(event, index)) return;
+                  if (isDeleteKey(event)) {
+                    event.preventDefault();
+                    remove(event.currentTarget);
+                  }
+                }}
+                onSelect={() => controller.selectAnnotation(annotation)}
+                onUpdate={(patch) => controller.updateAnnotation(annotation.id, patch)}
+                onDelete={remove}
+              />
+            </Fragment>
+          );
+        })}
+      </ol>
+    );
+  }
 
   return (
-    <div
-      role="region"
-      aria-label="Annotations"
-      data-testid="annotations-panel"
-      data-reader-popover=""
-      className="shrink-0 border-b bg-background text-xs text-foreground"
-    >
-      <div className="flex items-center justify-between border-b px-3 py-1">
-        <span className="font-medium text-muted-foreground">
-          Document highlights & notes ({controller.annotations.length})
-        </span>
-        {controller.canUndoDelete && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-label="Undo annotation deletion"
-            data-testid="undo-delete-annotation-button"
-            onClick={controller.undoDelete}
-          >
-            <Undo2 className="size-3.5" />
-            Undo delete
-          </Button>
-        )}
-      </div>
-      {controller.annotations.length === 0 ? (
-        <p data-testid="annotations-empty" className="px-3 py-2 text-xs text-muted-foreground">
-          No highlights or notes in this document.
-        </p>
-      ) : (
-        <ol
-          aria-label="Annotation list"
-          data-testid="annotations-list"
-          className="max-h-48 divide-y overflow-y-auto bg-muted/20"
-        >
-          {controller.annotations.map((annotation) => (
-            <AnnotationListItem
-              key={annotation.id}
-              annotation={annotation}
-              linkedToCard={linkedAnnotationIds?.has(annotation.id) ?? false}
-              stale={controller.isAnnotationStale(annotation)}
-              onSelect={() => controller.selectAnnotation(annotation)}
-              onUpdate={(patch) => controller.updateAnnotation(annotation.id, patch)}
-              onDelete={() => controller.deleteAnnotation(annotation.id)}
-            />
-          ))}
-        </ol>
-      )}
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="annotations-panel">
+      {header}
+      {body}
     </div>
   );
 }
