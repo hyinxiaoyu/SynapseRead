@@ -9,7 +9,15 @@ import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
 import type { DocumentSource, NormalizedRect } from '@/types/domain';
 
-import { canvasRegion, normalizeBoxes, type PdfRotation } from './pdfGeometry';
+import {
+  canvasRegion,
+  getBoundedLru,
+  MAX_CACHED_ANNOTATION_PAGES,
+  MAX_CACHED_TEXT_PAGES,
+  normalizeBoxes,
+  type PdfRotation,
+  setBoundedLru,
+} from './pdfGeometry';
 
 // The legacy build because the modern one needs newer WebKit than we target: see
 // `docs/adr/0004-pdfjs-worker-csp.md`, which also explains everything else here.
@@ -172,6 +180,8 @@ function cancellableOnPage(
   };
 }
 
+const PDF_RANGE_CHUNK_BYTES = 64 * 1024;
+
 export async function openPdfDocument(source: DocumentSource): Promise<PdfDocumentHandle> {
   const worker = new PDFWorker();
   await worker.promise;
@@ -183,6 +193,7 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
     // pdf.js takes ownership of the buffer it is given, but a source may be reused.
     ...(source.kind === 'url' ? { url: source.url } : { data: source.bytes.slice() }),
     worker,
+    rangeChunkSize: PDF_RANGE_CHUNK_BYTES,
     cMapUrl: assetUrl('cmaps'),
     cMapPacked: true,
     standardFontDataUrl: assetUrl('standard_fonts'),
@@ -192,6 +203,7 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
   const pdf = await task.promise;
   const pageTextCache = new Map<number, Promise<PdfPageText>>();
   const pageAnnotationsCache = new Map<number, Promise<PdfPageAnnotations>>();
+  const pageSizeCache = new Map<number, Promise<PageSize>>();
 
   const SUPPORTED_EMBEDDED_SUBTYPES = new Set<PdfSupportedEmbeddedSubtype>([
     'Highlight',
@@ -229,7 +241,7 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
     },
 
     getPageText(pageIndex) {
-      const cached = pageTextCache.get(pageIndex);
+      const cached = getBoundedLru(pageTextCache, pageIndex);
       if (cached) return cached;
       const promise = (async (): Promise<PdfPageText> => {
         const page = await pdf.getPage(pageIndex + 1);
@@ -268,12 +280,12 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
         }
         return { pageIndex, runs };
       })();
-      pageTextCache.set(pageIndex, promise);
+      setBoundedLru(pageTextCache, pageIndex, promise, MAX_CACHED_TEXT_PAGES);
       return promise;
     },
 
     getPageAnnotations(pageIndex) {
-      const cached = pageAnnotationsCache.get(pageIndex);
+      const cached = getBoundedLru(pageAnnotationsCache, pageIndex);
       if (cached) return cached;
       const promise = (async (): Promise<PdfPageAnnotations> => {
         const page = await pdf.getPage(pageIndex + 1);
@@ -405,13 +417,19 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
           unsupportedSubtypes: [...unsupportedSet].sort(),
         };
       })();
-      pageAnnotationsCache.set(pageIndex, promise);
+      setBoundedLru(pageAnnotationsCache, pageIndex, promise, MAX_CACHED_ANNOTATION_PAGES);
       return promise;
     },
 
-    async pageSize(pageIndex) {
-      const { width, height } = (await pdf.getPage(pageIndex + 1)).getViewport({ scale: 1 });
-      return { width, height };
+    pageSize(pageIndex) {
+      const cached = pageSizeCache.get(pageIndex);
+      if (cached) return cached;
+      const promise = pdf.getPage(pageIndex + 1).then((page) => {
+        const { width, height } = page.getViewport({ scale: 1 });
+        return { width, height };
+      });
+      pageSizeCache.set(pageIndex, promise);
+      return promise;
     },
 
     renderPage(pageIndex, canvas, scale, rotation = 0) {
@@ -452,6 +470,7 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
     destroy() {
       pageTextCache.clear();
       pageAnnotationsCache.clear();
+      pageSizeCache.clear();
       void task.destroy();
       worker.destroy();
     },
@@ -477,5 +496,8 @@ export function cropCanvasToPng(canvas: HTMLCanvasElement, rect: NormalizedRect)
       crop.width,
       crop.height,
     );
-  return crop.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+  const png = crop.toDataURL('image/png').replace(/^data:image\/png;base64,/, '');
+  crop.width = 0;
+  crop.height = 0;
+  return png;
 }

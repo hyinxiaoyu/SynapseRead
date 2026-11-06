@@ -248,6 +248,28 @@ fn read_text_stream_reads_only_registered_documents() {
 }
 
 #[test]
+fn cancel_text_stream_halts_closed_tab_stream_over_ipc() {
+    let h = Harness::new();
+    let large_text = "line of text\n".repeat(20_000);
+    let document = h.register("large.txt", &large_text);
+
+    // Pre-cancelling a closed tab's streamId prevents `read_text_stream` from reading chunks.
+    let cancelled = h.ok("cancel_text_stream", json!({ "streamId": "tab-closed-1" }));
+    assert_eq!(cancelled, false);
+
+    let delivered = h.ok(
+        "read_text_stream",
+        json!({
+            "documentId": document["id"],
+            "encoding": null,
+            "streamId": "tab-closed-1",
+            "onChunk": "__CHANNEL__:1"
+        }),
+    );
+    assert_eq!(delivered, 0);
+}
+
+#[test]
 fn the_webview_cannot_register_a_path() {
     let h = Harness::new();
     let secret = h.dir.path().join("secret.txt");

@@ -83,6 +83,7 @@ function useTextStream(content: DocumentContentReader, documentId: string, encod
 
   useEffect(() => {
     const model = new TxtTextModel();
+    const controller = new AbortController();
     let cancelled = false;
     let lastPublish = -Infinity;
     const publish = (error: string | null) =>
@@ -95,20 +96,26 @@ function useTextStream(content: DocumentContentReader, documentId: string, encod
       });
 
     content
-      .readTextStream(documentId, encoding, (chunk) => {
-        if (cancelled) return;
-        model.append(chunk);
-        const now = performance.now();
-        if (chunk.isLast || now - lastPublish >= PUBLISH_INTERVAL_MS) {
-          lastPublish = now;
-          publish(null);
-        }
-      })
+      .readTextStream(
+        documentId,
+        encoding,
+        (chunk) => {
+          if (cancelled || controller.signal.aborted) return;
+          model.append(chunk);
+          const now = performance.now();
+          if (chunk.isLast || now - lastPublish >= PUBLISH_INTERVAL_MS) {
+            lastPublish = now;
+            publish(null);
+          }
+        },
+        controller.signal,
+      )
       .catch((error: unknown) => {
-        if (!cancelled) publish(describeError(error));
+        if (!cancelled && !controller.signal.aborted) publish(describeError(error));
       });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [content, documentId, encoding]);
 

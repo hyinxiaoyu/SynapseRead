@@ -300,6 +300,7 @@ export interface DocumentContentReader {
     documentId: string,
     encoding: string | null,
     onChunk: (chunk: TextChunk) => void,
+    signal?: AbortSignal,
   ): Promise<number>;
 }
 

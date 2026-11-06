@@ -42,6 +42,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::verify_document_source,
         commands::db::relink_document,
         commands::fs_reader::read_text_stream,
+        commands::fs_reader::cancel_text_stream,
     ])
 }
 

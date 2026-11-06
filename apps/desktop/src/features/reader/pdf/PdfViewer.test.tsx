@@ -14,6 +14,7 @@ import {
 import type { PdfAnchor } from '@/types/domain';
 
 import type { PdfOutlineItem, PdfPageAnnotations, PdfPageText } from './pdfEngine';
+import { getBoundedLru, MAX_CACHED_TEXT_PAGES, setBoundedLru } from './pdfGeometry';
 import { PdfViewer } from './PdfViewer';
 
 // jsdom cannot run pdf.js or draw a canvas: this replaces only the engine seam, and
@@ -994,5 +995,40 @@ describe('PdfViewer', () => {
     fireEvent.click(screen.getByTestId('pdf-mode-continuous'));
     expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'continuous');
     expect(pageInput).toHaveValue('3');
+  });
+
+  it('releases unmounted page and thumbnail canvas bitmaps and bounds per-document LRU caches', async () => {
+    const cache = new Map<number, string>();
+    for (let i = 0; i < MAX_CACHED_TEXT_PAGES + 8; i += 1) {
+      setBoundedLru(cache, i, `page-${i}`, MAX_CACHED_TEXT_PAGES);
+    }
+    expect(cache.size).toBe(MAX_CACHED_TEXT_PAGES);
+    expect(cache.has(0)).toBe(false);
+    expect(cache.has(7)).toBe(false);
+    expect(getBoundedLru(cache, 8)).toBe('page-8');
+    setBoundedLru(cache, 999, 'page-999', MAX_CACHED_TEXT_PAGES);
+    expect(cache.has(8)).toBe(true);
+    expect(cache.has(9)).toBe(false);
+
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    const page0 = await pageElement(0);
+    const page0Canvas = page0.querySelector('canvas') as HTMLCanvasElement;
+    expect(page0Canvas.width).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByTestId('pdf-thumbnails-toggle'));
+    const thumb0 = await screen.findByTestId('pdf-thumbnail-0');
+    const thumb0Canvas = thumb0.querySelector('canvas') as HTMLCanvasElement;
+    expect(thumb0Canvas.width).toBeGreaterThan(0);
+
+    // Closing thumbnails sidebar unmounts thumbnail canvases and zeroes their backing store.
+    fireEvent.click(screen.getByTestId('pdf-thumbnails-toggle'));
+    expect(thumb0Canvas.width).toBe(0);
+    expect(thumb0Canvas.height).toBe(0);
+
+    // Unmounting the viewer zeroes page canvas backing stores and clears text layers.
+    view.unmount();
+    expect(page0Canvas.width).toBe(0);
+    expect(page0Canvas.height).toBe(0);
   });
 });

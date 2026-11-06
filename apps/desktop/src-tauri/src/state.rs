@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use synapse_core::CoreResult;
 use synapse_core::db::Database;
-use synapse_core::fs_reader::DecoderRegistry;
+use synapse_core::fs_reader::{DecoderRegistry, StreamCancellationRegistry};
 
 use crate::error::IpcError;
 
@@ -11,6 +11,8 @@ pub struct AppState {
     database: Mutex<Database>,
     /// Shared with blocking stream tasks, which outlive the command borrowing state.
     pub decoders: Arc<DecoderRegistry>,
+    /// Shared registry for cancelling closed-tab TXT streams immediately.
+    pub streams: Arc<StreamCancellationRegistry>,
 }
 
 impl AppState {
@@ -18,6 +20,7 @@ impl AppState {
         Ok(Self {
             database: Mutex::new(Database::open(database_path)?),
             decoders: Arc::new(DecoderRegistry::default()),
+            streams: Arc::new(StreamCancellationRegistry::default()),
         })
     }
 

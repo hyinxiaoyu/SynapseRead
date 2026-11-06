@@ -301,6 +301,16 @@ function PdfThumbnailItem({
     return runCancellable(() => engine.renderPage(pageIndex, canvas, scale, rotation));
   }, [engine, pageIndex, scale, rotation]);
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    return () => {
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+    };
+  }, []);
+
   return (
     <button
       type="button"
@@ -434,6 +444,18 @@ function PdfPage({
     if (!layer) return;
     return runCancellable(() => engine.renderTextLayer(pageIndex, layer, scale, rotation));
   }, [engine, pageIndex, scale, rotation]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const layer = textLayerRef.current;
+    return () => {
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+      layer?.replaceChildren();
+    };
+  }, []);
 
   useEffect(() => {
     if (!engine.getPageAnnotations) return;

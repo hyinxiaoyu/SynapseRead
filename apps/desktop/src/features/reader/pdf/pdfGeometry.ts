@@ -124,3 +124,26 @@ export function unrotateNormalizedRect(
   const inverse = ((360 - rotation) % 360) as PdfRotation;
   return rotateNormalizedRect(rect, inverse);
 }
+
+export const MAX_CACHED_TEXT_PAGES = 32;
+export const MAX_CACHED_ANNOTATION_PAGES = 32;
+
+export function getBoundedLru<K, V>(map: Map<K, V>, key: K): V | undefined {
+  const existing = map.get(key);
+  if (existing === undefined) return undefined;
+  map.delete(key);
+  map.set(key, existing);
+  return existing;
+}
+
+export function setBoundedLru<K, V>(map: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  if (map.has(key)) {
+    map.delete(key);
+  } else if (map.size >= maxEntries) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey !== undefined) {
+      map.delete(oldestKey);
+    }
+  }
+  map.set(key, value);
+}

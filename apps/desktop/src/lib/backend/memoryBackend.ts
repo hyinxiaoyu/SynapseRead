@@ -689,12 +689,15 @@ export function createMemoryBackend({
       bytes: await readFile(document.filePath),
     }),
 
-    async readTextStream(documentId, encoding, onChunk) {
+    async readTextStream(documentId, encoding, onChunk, signal) {
       const document = require(documents, documentId, 'document');
       if (encoding !== null && !/^\s*utf-?8\s*$/i.test(encoding)) {
         throw fail('unsupported_encoding', `unsupported text encoding: ${encoding}`);
       }
-      return streamUtf8Lossy(await readFile(document.filePath), chunkBytes, onChunk);
+      if (signal?.aborted) return 0;
+      const bytes = await readFile(document.filePath);
+      if (signal?.aborted) return 0;
+      return streamUtf8Lossy(bytes, chunkBytes, onChunk, signal);
     },
   };
 }

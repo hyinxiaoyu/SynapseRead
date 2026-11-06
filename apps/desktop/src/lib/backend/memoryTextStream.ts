@@ -51,7 +51,9 @@ export function streamUtf8Lossy(
   source: Uint8Array,
   chunkBytes: number,
   onChunk: (chunk: TextChunk) => void,
+  signal?: AbortSignal,
 ): number {
+  if (signal?.aborted) return 0;
   const size = Math.max(chunkBytes, 4);
   const hasBom = BOM.every((byte, index) => source[index] === byte);
   const decoder = new TextDecoder('utf-8', { ignoreBOM: true });
@@ -63,6 +65,7 @@ export function streamUtf8Lossy(
   let bomPending = hasBom;
 
   for (;;) {
+    if (signal?.aborted) return seq;
     read = Math.min(read + size, source.length);
     const isLast = read >= source.length;
     const available = source.subarray(offset, read);
@@ -111,6 +114,7 @@ export function streamUtf8Lossy(
     }
 
     if (offset > start || isLast) {
+      if (signal?.aborted) return seq;
       onChunk({
         seq,
         encoding: 'utf-8',
@@ -125,6 +129,6 @@ export function streamUtf8Lossy(
       seq += 1;
     }
     line += text.split('\n').length - 1;
-    if (isLast) return seq;
+    if (isLast || signal?.aborted) return seq;
   }
 }

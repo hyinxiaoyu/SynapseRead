@@ -11,9 +11,12 @@
 //! Adding a character set means registering an implementation in
 //! [`DecoderRegistry`]; [`stream_text`] and the Tauri command stay unchanged.
 
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -23,6 +26,111 @@ use crate::{CoreError, CoreResult};
 pub const UTF8_LABEL: &str = "utf-8";
 pub const DEFAULT_CHUNK_BYTES: usize = 64 * 1024;
 const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+const MAX_PRE_CANCELLED_STREAMS: usize = 64;
+
+#[derive(Debug, Default)]
+struct StreamRegistryInner {
+    active: HashMap<String, Arc<AtomicBool>>,
+    pre_cancelled: VecDeque<String>,
+}
+
+/// Tracks active text streams by id so the frontend can cancel an in-flight
+/// stream when a tab closes or switches encodings.
+#[derive(Debug, Default, Clone)]
+pub struct StreamCancellationRegistry {
+    inner: Arc<Mutex<StreamRegistryInner>>,
+}
+
+/// Guard for an active stream registration; removes the stream entry on drop.
+#[derive(Debug)]
+pub struct StreamTicket {
+    flag: Arc<AtomicBool>,
+    cleanup: Option<(Arc<Mutex<StreamRegistryInner>>, String)>,
+}
+
+impl StreamTicket {
+    pub fn flag(&self) -> &AtomicBool {
+        &self.flag
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for StreamTicket {
+    fn drop(&mut self) {
+        if let Some((inner, stream_id)) = self.cleanup.take()
+            && let Ok(mut guard) = inner.lock()
+        {
+            guard.active.remove(&stream_id);
+        }
+    }
+}
+
+impl StreamCancellationRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registers a stream id and returns a ticket whose cancellation flag is
+    /// flipped if [`Self::cancel`] is called before or during streaming.
+    pub fn register(&self, stream_id: Option<&str>) -> StreamTicket {
+        let flag = Arc::new(AtomicBool::new(false));
+        let Some(raw_id) = stream_id.map(str::trim).filter(|id| !id.is_empty()) else {
+            return StreamTicket {
+                flag,
+                cleanup: None,
+            };
+        };
+        let id = raw_id.to_owned();
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some(pos) = guard.pre_cancelled.iter().position(|item| item == &id) {
+                guard.pre_cancelled.remove(pos);
+                flag.store(true, Ordering::Release);
+            }
+            guard.active.insert(id.clone(), Arc::clone(&flag));
+        }
+        StreamTicket {
+            flag,
+            cleanup: Some((Arc::clone(&self.inner), id)),
+        }
+    }
+
+    /// Signals cancellation for `stream_id`. If the stream has not registered
+    /// yet, remembers the id briefly so a racing start still aborts immediately.
+    pub fn cancel(&self, stream_id: &str) -> bool {
+        let id = stream_id.trim();
+        if id.is_empty() {
+            return false;
+        }
+        let Ok(mut guard) = self.inner.lock() else {
+            return false;
+        };
+        if let Some(flag) = guard.active.get(id) {
+            flag.store(true, Ordering::Release);
+            return true;
+        }
+        if !guard.pre_cancelled.iter().any(|existing| existing == id) {
+            if guard.pre_cancelled.len() >= MAX_PRE_CANCELLED_STREAMS {
+                guard.pre_cancelled.pop_front();
+            }
+            guard.pre_cancelled.push_back(id.to_owned());
+        }
+        false
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|guard| guard.active.len())
+            .unwrap_or(0)
+    }
+}
 
 /// A place where decoded text is not byte-identical to the source file. Text
 /// outside every span is, so a span list fully maps text positions to source
@@ -226,16 +334,44 @@ pub struct TextChunk {
 /// `sink` returning [`CoreError::StreamCancelled`] stops reading and is reported
 /// as a normal end of stream. Returns the number of chunks delivered.
 pub fn stream_text<R, F>(
+    reader: R,
+    requested_encoding: Option<&str>,
+    registry: &DecoderRegistry,
+    chunk_bytes: usize,
+    sink: F,
+) -> CoreResult<u64>
+where
+    R: Read,
+    F: FnMut(TextChunk) -> CoreResult<()>,
+{
+    let never_cancelled = AtomicBool::new(false);
+    stream_text_with_cancel(
+        reader,
+        requested_encoding,
+        registry,
+        chunk_bytes,
+        &never_cancelled,
+        sink,
+    )
+}
+
+/// Decodes `reader` into UTF-8 chunks while observing `cancelled` before every
+/// read and delivery step so closing a reader tab halts disk I/O immediately.
+pub fn stream_text_with_cancel<R, F>(
     mut reader: R,
     requested_encoding: Option<&str>,
     registry: &DecoderRegistry,
     chunk_bytes: usize,
+    cancelled: &AtomicBool,
     mut sink: F,
 ) -> CoreResult<u64>
 where
     R: Read,
     F: FnMut(TextChunk) -> CoreResult<()>,
 {
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(0);
+    }
     let chunk_bytes = chunk_bytes.max(4);
     let mut buffer = vec![0_u8; chunk_bytes];
     let mut filled = read_full(&mut reader, &mut buffer)?;
@@ -249,6 +385,9 @@ where
     let mut at_start = true;
 
     loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Ok(seq);
+        }
         // The chunk is the last one only once a further read comes back empty,
         // so read ahead rather than guessing from a short read.
         let mut next = vec![0_u8; chunk_bytes];
@@ -300,6 +439,9 @@ where
         // A chunk of only held-back bytes carries nothing; the empty last chunk
         // is still sent so consumers always see `is_last`.
         if chunk.end_byte_offset > chunk.start_byte_offset || is_last {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(seq);
+            }
             match sink(chunk) {
                 Ok(()) => seq += 1,
                 Err(CoreError::StreamCancelled) => return Ok(seq),
@@ -307,7 +449,7 @@ where
             }
         }
 
-        if is_last {
+        if is_last || cancelled.load(Ordering::Acquire) {
             return Ok(seq);
         }
         buffer = next;
@@ -325,12 +467,31 @@ pub fn stream_text_file<F>(
 where
     F: FnMut(TextChunk) -> CoreResult<()>,
 {
+    let never_cancelled = AtomicBool::new(false);
+    stream_text_file_with_cancel(path, requested_encoding, registry, &never_cancelled, sink)
+}
+
+/// Opens `path` and streams it through [`stream_text_with_cancel`].
+pub fn stream_text_file_with_cancel<F>(
+    path: &Path,
+    requested_encoding: Option<&str>,
+    registry: &DecoderRegistry,
+    cancelled: &AtomicBool,
+    sink: F,
+) -> CoreResult<u64>
+where
+    F: FnMut(TextChunk) -> CoreResult<()>,
+{
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(0);
+    }
     let file = File::open(path)?;
-    stream_text(
+    stream_text_with_cancel(
         file,
         requested_encoding,
         registry,
         DEFAULT_CHUNK_BYTES,
+        cancelled,
         sink,
     )
 }
@@ -784,5 +945,52 @@ mod tests {
             |_| Ok(()),
         );
         assert!(matches!(result, Err(CoreError::Io(_))));
+    }
+
+    #[test]
+    fn stream_cancellation_registry_cancels_active_and_precancelled_streams() {
+        let registry = StreamCancellationRegistry::new();
+        let decoder_registry = DecoderRegistry::default();
+        let source = "0123456789abcdef".repeat(16);
+
+        let ticket = registry.register(Some("stream-active"));
+        assert_eq!(registry.active_count(), 1);
+        assert!(!ticket.is_cancelled());
+
+        let delivered = stream_text_with_cancel(
+            source.as_bytes(),
+            None,
+            &decoder_registry,
+            16,
+            ticket.flag(),
+            |chunk| {
+                if chunk.seq == 2 {
+                    assert!(registry.cancel("stream-active"));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(delivered, 3);
+        assert!(ticket.is_cancelled());
+        drop(ticket);
+        assert_eq!(registry.active_count(), 0);
+
+        // Pre-cancelling before registration aborts the stream before any chunk is emitted.
+        assert!(!registry.cancel("stream-early"));
+        let early_ticket = registry.register(Some("stream-early"));
+        assert!(early_ticket.is_cancelled());
+        let early_delivered = stream_text_with_cancel(
+            source.as_bytes(),
+            None,
+            &decoder_registry,
+            16,
+            early_ticket.flag(),
+            |_| panic!("pre-cancelled stream must not emit chunks"),
+        )
+        .unwrap();
+        assert_eq!(early_delivered, 0);
+        drop(early_ticket);
+        assert_eq!(registry.active_count(), 0);
     }
 }

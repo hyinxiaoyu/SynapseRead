@@ -107,10 +107,28 @@ export function createTauriBackend(): StudyBackend {
       url: convertFileSrc(document.filePath),
     }),
 
-    readTextStream(documentId, encoding, onChunk) {
+    readTextStream(documentId, encoding, onChunk, signal) {
+      const streamId = crypto.randomUUID();
+      if (signal?.aborted) {
+        void invoke<boolean>('cancel_text_stream', { streamId });
+        return Promise.resolve(0);
+      }
+      const onAbort = () => {
+        void invoke<boolean>('cancel_text_stream', { streamId });
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
       const channel = new Channel<TextChunk>();
-      channel.onmessage = onChunk;
-      return invoke<number>('read_text_stream', { documentId, encoding, onChunk: channel });
+      channel.onmessage = (chunk) => {
+        if (!signal?.aborted) onChunk(chunk);
+      };
+      return invoke<number>('read_text_stream', {
+        documentId,
+        encoding,
+        streamId,
+        onChunk: channel,
+      }).finally(() => {
+        signal?.removeEventListener('abort', onAbort);
+      });
     },
   };
 }

@@ -255,8 +255,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       backendKind: backend.kind,
       content: {
         loadDocumentSource: (document) => backend.loadDocumentSource(document),
-        readTextStream: (documentId, encoding, onChunk) =>
-          backend.readTextStream(documentId, encoding, onChunk),
+        readTextStream: (documentId, encoding, onChunk, signal) =>
+          backend.readTextStream(documentId, encoding, onChunk, signal),
       },
       documents: [],
       documentSourceStatuses: {},

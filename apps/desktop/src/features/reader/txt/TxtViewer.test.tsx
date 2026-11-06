@@ -600,4 +600,48 @@ describe('TxtViewer', () => {
     render(<Harness store={store} documentId={documentId} />);
     expect(await screen.findByRole('alert')).toHaveTextContent('file is gone');
   });
+
+  it('cancels in-flight backend text streams when the reader tab unmounts and bounds DOM rows for large files', async () => {
+    const largeLines = Array.from(
+      { length: 2400 },
+      (_, index) => `Line ${index + 1}: large text fixture payload for bounded virtualization`,
+    ).join('\n');
+    const largeBytes = new TextEncoder().encode(largeLines);
+    const { store, documentId, backend } = await setup(largeBytes, 4096);
+
+    let receivedSignal: AbortSignal | undefined;
+    const originalRead = backend.readTextStream.bind(backend);
+    backend.readTextStream = vi.fn((docId, encoding, onChunk, signal) => {
+      receivedSignal = signal;
+      return originalRead(docId, encoding, onChunk, signal);
+    });
+
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await segmentWith('Line 1: large text fixture payload');
+
+    // Only the visible window + overscan rows are mounted in the DOM, never all 2,400 lines.
+    const renderedRows = document.querySelectorAll('[data-testid="txt-scroll"] [data-index]');
+    expect(renderedRows.length).toBeGreaterThan(0);
+    expect(renderedRows.length).toBeLessThan(80);
+    expect(receivedSignal?.aborted).toBe(false);
+
+    // Unmounting (closing the tab) immediately aborts the backend stream signal.
+    view.unmount();
+    expect(receivedSignal?.aborted).toBe(true);
+
+    // A stream invoked with an already-aborted signal delivers 0 chunks.
+    const abortedController = new AbortController();
+    abortedController.abort();
+    let chunksDeliveredAfterAbort = 0;
+    const count = await originalRead(
+      documentId,
+      'utf-8',
+      () => {
+        chunksDeliveredAfterAbort += 1;
+      },
+      abortedController.signal,
+    );
+    expect(count).toBe(0);
+    expect(chunksDeliveredAfterAbort).toBe(0);
+  });
 });
