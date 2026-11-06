@@ -1,7 +1,8 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearchBar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend, type MemoryFile } from '@/lib/backend/memoryBackend';
 import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
@@ -407,6 +408,61 @@ describe('TxtViewer', () => {
       render(<Harness store={store} documentId={documentId} />);
       expect(await screen.findByRole('status')).toHaveTextContent(/not valid UTF-8/);
     });
+
+    it('searches lossy TXT files while retaining source-byte highlight mapping', async () => {
+      const { store, documentId } = await setup(bytes, 7);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('middle target');
+
+      fireEvent.keyDown(window, { key: 'f', metaKey: true });
+      const searchInput = await screen.findByTestId('search-input');
+      fireEvent.change(searchInput, { target: { value: '汉字 target two' } });
+
+      await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+      const highlighted = await segmentWith('汉字 target two');
+      expect(highlighted).toHaveAttribute('data-annotation-id', SEARCH_HIGHLIGHT_ID);
+    });
+  });
+
+  it('opens search with Cmd/Ctrl+F, searches unrendered rows, highlights matches, and supports return', async () => {
+    const bytes = documentFixture('sample.txt');
+    const { store, documentId } = await setup(bytes);
+    render(<Harness store={store} documentId={documentId} />);
+    await segmentWith('SynapseRead sample text');
+    expect(screen.queryByText(/final target sentence/)).not.toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'f', ctrlKey: true });
+    const searchInput = await screen.findByTestId('search-input');
+    expect(searchInput).toHaveFocus();
+    expect(screen.getByTestId('search-status')).toHaveTextContent('Enter a search term');
+
+    // Search for a phrase that exists both near the top and in an unrendered row at the end.
+    fireEvent.change(searchInput, { target: { value: 'final target sentence' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+    expect(screen.getByTestId('search-result-location')).toHaveTextContent(/Line \d+/);
+    expect(screen.getByTestId('search-result-snippet')).toHaveTextContent('final target sentence');
+
+    // The virtualizer scrolled to the unrendered row and painted the search highlight.
+    const highlighted = await segmentWith('final target sentence');
+    expect(highlighted).toHaveAttribute('data-annotation-id', SEARCH_HIGHLIGHT_ID);
+    expect(highlighted).toHaveClass('anchor-pulse');
+    expect(scroller().scrollTop).toBeGreaterThan(0);
+
+    // Return to previous location restores the top scroll position.
+    fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+    expect(scroller().scrollTop).toBe(0);
+
+    // Case sensitivity and no-match behavior.
+    fireEvent.change(searchInput, { target: { value: 'QUICK BROWN FOX' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
+    await waitFor(() =>
+      expect(screen.getByTestId('search-status')).toHaveTextContent('No matches'),
+    );
+
+    // Empty query resets search state.
+    fireEvent.change(searchInput, { target: { value: '   ' } });
+    expect(screen.getByTestId('search-status')).toHaveTextContent('Enter a search term');
   });
 
   it('shows a read failure instead of an empty page', async () => {

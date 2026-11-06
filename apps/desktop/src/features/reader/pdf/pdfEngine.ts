@@ -9,7 +9,7 @@ import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
 import type { DocumentSource, NormalizedRect } from '@/types/domain';
 
-import { canvasRegion } from './pdfGeometry';
+import { canvasRegion, normalizeBoxes } from './pdfGeometry';
 
 // The legacy build because the modern one needs newer WebKit than we target: see
 // `docs/adr/0004-pdfjs-worker-csp.md`, which also explains everything else here.
@@ -29,6 +29,17 @@ export interface PdfOutlineItem {
   children: readonly PdfOutlineItem[];
 }
 
+export interface PdfTextRun {
+  text: string;
+  rect: NormalizedRect;
+  hasEOL?: boolean;
+}
+
+export interface PdfPageText {
+  pageIndex: number;
+  runs: readonly PdfTextRun[];
+}
+
 export interface Cancellable {
   promise: Promise<unknown>;
   cancel(): void;
@@ -41,6 +52,8 @@ export interface PdfDocumentHandle {
   readonly usesRealWorker: boolean;
   /** Embedded PDF outline tree, or an empty array when the document has none. */
   getOutline?(): Promise<readonly PdfOutlineItem[]>;
+  /** Extracted text runs and normalized rects for a page, whether rendered or not. */
+  getPageText?(pageIndex: number): Promise<PdfPageText>;
   /** Size in CSS pixels at scale 1, including the page's user unit. */
   pageSize(pageIndex: number): Promise<PageSize>;
   renderPage(pageIndex: number, canvas: HTMLCanvasElement, scale: number): Cancellable;
@@ -140,6 +153,7 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
     iccUrl: assetUrl('iccs'),
   });
   const pdf = await task.promise;
+  const pageTextCache = new Map<number, Promise<PdfPageText>>();
 
   return {
     pageCount: pdf.numPages,
@@ -148,6 +162,50 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
     async getOutline() {
       const raw = (await pdf.getOutline()) as readonly RawOutlineNode[] | null;
       return raw ? mapPdfOutline(pdf, raw) : [];
+    },
+
+    getPageText(pageIndex) {
+      const cached = pageTextCache.get(pageIndex);
+      if (cached) return cached;
+      const promise = (async (): Promise<PdfPageText> => {
+        const page = await pdf.getPage(pageIndex + 1);
+        const viewport = page.getViewport({ scale: 1 });
+        const content = await page.getTextContent();
+        const pageBox = { left: 0, top: 0, width: viewport.width, height: viewport.height };
+        const runs: PdfTextRun[] = [];
+        for (const raw of content.items) {
+          if (!('str' in raw) || typeof raw.str !== 'string' || raw.str.length === 0) continue;
+          const transform = Array.isArray(raw.transform)
+            ? (raw.transform as number[])
+            : [1, 0, 0, 1, 0, 0];
+          const tx = transform[4] ?? 0;
+          const ty = transform[5] ?? 0;
+          const fontHeight = Math.abs(
+            raw.height || Math.hypot(transform[2] ?? 0, transform[3] ?? 0) || 12,
+          );
+          const itemWidth = Math.abs(raw.width || fontHeight * raw.str.length * 0.5);
+          const [vx1 = 0, vy1 = 0] = viewport.convertToViewportPoint(tx, ty - fontHeight * 0.2);
+          const [vx2 = 0, vy2 = 0] = viewport.convertToViewportPoint(
+            tx + itemWidth,
+            ty + fontHeight * 0.85,
+          );
+          const left = Math.min(vx1, vx2);
+          const top = Math.min(vy1, vy2);
+          const width = Math.max(Math.abs(vx2 - vx1), 1);
+          const height = Math.max(Math.abs(vy2 - vy1), 2);
+          const [rect] = normalizeBoxes([{ left, top, width, height }], pageBox);
+          if (rect) {
+            runs.push({
+              text: raw.str,
+              rect,
+              ...(raw.hasEOL ? { hasEOL: true } : {}),
+            });
+          }
+        }
+        return { pageIndex, runs };
+      })();
+      pageTextCache.set(pageIndex, promise);
+      return promise;
     },
 
     async pageSize(pageIndex) {
@@ -185,6 +243,7 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
     },
 
     destroy() {
+      pageTextCache.clear();
       void task.destroy();
       worker.destroy();
     },

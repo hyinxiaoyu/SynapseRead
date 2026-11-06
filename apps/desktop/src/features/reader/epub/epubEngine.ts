@@ -1,6 +1,11 @@
 import ePub, { type Contents, type Location, type NavItem } from 'epubjs';
 
 import {
+  buildSearchSnippet,
+  type DocumentSearchResultItem,
+  findSubstringMatches,
+} from '@/features/reader/DocumentSearchBar';
+import {
   DEFAULT_READING_PREFERENCES,
   type DocumentSource,
   type EpubReadingMode,
@@ -18,6 +23,12 @@ export interface EpubTocItem {
   label: string;
   href: string;
   children: readonly EpubTocItem[];
+}
+
+export interface EpubSearchMatch extends DocumentSearchResultItem {
+  cfiRange: string;
+  chapterHref: string;
+  chapterIndex: number;
 }
 
 export interface EpubSelection {
@@ -40,6 +51,13 @@ export interface EpubLocation {
 export interface EpubHandle {
   readonly toc: readonly EpubTocItem[];
   readonly isFixedLayout: boolean;
+  readonly chapterCount?: number;
+  /** Searches one spine chapter (rendered or not) and returns CFI-anchored matches. */
+  searchChapter?(
+    chapterIndex: number,
+    query: string,
+    options?: { caseSensitive?: boolean },
+  ): Promise<readonly EpubSearchMatch[]>;
   /** Shows a CFI or chapter, or the first chapter with no target. Rejects if it cannot. */
   display(target?: string): Promise<void>;
   next(): Promise<void>;
@@ -240,6 +258,25 @@ function mapToc(items: readonly NavItem[], prefix = 'toc'): EpubTocItem[] {
   });
 }
 
+function findTocLabel(items: readonly EpubTocItem[], href: string): string | null {
+  const cleanHref = (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+  for (const item of items) {
+    const cleanTarget = (item.href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+    if (
+      cleanHref &&
+      cleanTarget &&
+      (cleanHref === cleanTarget ||
+        cleanHref.endsWith(`/${cleanTarget}`) ||
+        cleanTarget.endsWith(`/${cleanHref}`))
+    ) {
+      return item.label;
+    }
+    const nested = findTocLabel(item.children, href);
+    if (nested) return nested;
+  }
+  return null;
+}
+
 const toBuffer = async (source: DocumentSource): Promise<ArrayBuffer> => {
   if (source.kind === 'url') return (await fetch(source.url)).arrayBuffer();
   // A copy, because the archive reader may hold on to it after this tab closes.
@@ -354,6 +391,84 @@ export async function openEpubDocument(
   return {
     toc,
     isFixedLayout,
+    chapterCount: spineItems.length,
+    async searchChapter(chapterIndex, query, options) {
+      if (query.trim() === '') return [];
+      const section = book.spine.get(chapterIndex) as unknown as {
+        href: string;
+        document?: Document;
+        contents?: Element;
+        load(request: unknown): Promise<Element>;
+        unload(): void;
+        cfiFromRange(range: Range): string;
+      } | null;
+      if (!section) return [];
+      const wasLoaded = Boolean(section.document && section.contents);
+      if (!wasLoaded) {
+        await section.load(book.load.bind(book));
+      }
+      try {
+        const chapterDoc = section.document;
+        const root = chapterDoc?.body ?? chapterDoc?.documentElement;
+        if (!chapterDoc || !root) return [];
+
+        const walker = chapterDoc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        let fullText = '';
+        const nodes: { node: Text; start: number; end: number }[] = [];
+        for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+          const textNode = current as Text;
+          const parentTag = textNode.parentElement?.tagName.toLowerCase();
+          if (
+            parentTag === 'style' ||
+            parentTag === 'script' ||
+            parentTag === 'noscript' ||
+            parentTag === 'title' ||
+            textNode.parentElement?.closest('head, style, script, noscript')
+          ) {
+            continue;
+          }
+          const value = textNode.data;
+          if (!value) continue;
+          const start = fullText.length;
+          fullText += value;
+          const end = fullText.length;
+          nodes.push({ node: textNode, start, end });
+        }
+
+        const caseSensitive = options?.caseSensitive ?? false;
+        const rawMatches = findSubstringMatches(fullText, query, caseSensitive);
+        const locationLabel = findTocLabel(toc, section.href) ?? `Ch. ${chapterIndex + 1}`;
+        const matches: EpubSearchMatch[] = [];
+
+        for (let index = 0; index < rawMatches.length; index += 1) {
+          const match = rawMatches[index];
+          if (!match) continue;
+          const startEntry = nodes.find((entry) => entry.end > match.start);
+          const endEntry = nodes.findLast((entry) => entry.start < match.end);
+          if (!startEntry || !endEntry) continue;
+          const startOffset = Math.max(0, match.start - startEntry.start);
+          const endOffset = Math.min(endEntry.node.data.length, match.end - endEntry.start);
+          const range = chapterDoc.createRange();
+          range.setStart(startEntry.node, startOffset);
+          range.setEnd(endEntry.node, endOffset);
+          const cfiRange = section.cfiFromRange(range);
+          const snippet = buildSearchSnippet(fullText, match.start, match.end);
+          matches.push({
+            id: `epub-${chapterIndex}-${index}`,
+            cfiRange,
+            chapterHref: section.href,
+            chapterIndex,
+            locationLabel,
+            ...snippet,
+          });
+        }
+        return matches;
+      } finally {
+        if (!wasLoaded) {
+          section.unload();
+        }
+      }
+    },
     async display(target) {
       const resolved = resolveTarget(target);
       if (resolved?.startsWith('epubcfi(')) currentCfi = resolved;

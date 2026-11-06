@@ -236,4 +236,24 @@ export async function epubFlow(page) {
   await page.clickButton('Light');
   await page.waitFor(`${visibleViewer}.dataset.readingTheme === 'light'`, 'restore light theme');
   await page.clickButton('Reading appearance');
+
+  // In-document search across unrendered EPUB chapters, CFI highlight, and return.
+  await page.clickButton('Find in document');
+  await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');
+  await page.waitFor(
+    `${visibleViewer}?.querySelector('[data-testid="search-status"]')?.textContent === '1 of 1'`,
+    'EPUB search match in unrendered Chapter One',
+  );
+  await page.waitFor(
+    `${visibleViewer}?.querySelector('[data-testid="search-result-location"]')?.textContent === 'One'`,
+    'EPUB search result location for Chapter 1',
+  );
+  await page.waitFor(chapterIs('Chapter One'), 'EPUB search jump to Chapter One');
+  await page.waitFor(
+    `${visibleHost}?.querySelector('g[data-annotation-id="__search_active__"] rect')`,
+    'EPUB active search highlight',
+  );
+  await page.clickButton('Return to previous location');
+  await page.waitFor(chapterIs('Chapter Two'), 'returning from EPUB search jump to Chapter Two');
+  await page.clickButton('Close search');
 }

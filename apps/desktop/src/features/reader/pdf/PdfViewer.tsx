@@ -13,6 +13,16 @@ import {
 } from 'react';
 
 import { Button } from '@/components/ui/button';
+import {
+  buildSearchSnippet,
+  DocumentSearchBar,
+  type DocumentSearchResultItem,
+  DocumentSearchToggleButton,
+  findSubstringMatches,
+  SEARCH_HIGHLIGHT_COLOR,
+  SEARCH_HIGHLIGHT_ID,
+  useDocumentSearch,
+} from '@/features/reader/DocumentSearchBar';
 import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { cn, describeError } from '@/lib/utils';
@@ -30,6 +40,7 @@ import {
   type PageSize,
   type PdfDocumentHandle,
   type PdfOutlineItem,
+  type PdfPageText,
 } from './pdfEngine';
 import { mergeLineRects, normalizeBoxes } from './pdfGeometry';
 
@@ -139,6 +150,69 @@ function toPdfOutlineNodes(items: readonly PdfOutlineItem[]): OutlineNode<number
 interface PdfReturnLocation {
   pageIndex: number;
   fraction: number;
+}
+
+export interface PdfSearchMatch extends DocumentSearchResultItem {
+  pageIndex: number;
+  rects: readonly NormalizedRect[];
+}
+
+function searchPdfPage(
+  pageText: PdfPageText,
+  query: string,
+  caseSensitive: boolean,
+): PdfSearchMatch[] {
+  let fullText = '';
+  const spans: { start: number; end: number; rect: NormalizedRect }[] = [];
+  let prevHadEOL = false;
+
+  for (const run of pageText.runs) {
+    if (
+      fullText.length > 0 &&
+      prevHadEOL &&
+      !fullText.endsWith(' ') &&
+      !fullText.endsWith('\n') &&
+      !run.text.startsWith(' ')
+    ) {
+      fullText += '\n';
+    }
+    const start = fullText.length;
+    fullText += run.text;
+    const end = fullText.length;
+    spans.push({ start, end, rect: run.rect });
+    prevHadEOL = Boolean(run.hasEOL);
+  }
+
+  const rawMatches = findSubstringMatches(fullText, query, caseSensitive);
+  return rawMatches.map(({ start, end }, matchIndex) => {
+    const rawRects: NormalizedRect[] = [];
+    for (const span of spans) {
+      if (span.end <= start || span.start >= end) continue;
+      const overlapStart = Math.max(start, span.start) - span.start;
+      const overlapEnd = Math.min(end, span.end) - span.start;
+      const spanLen = Math.max(span.end - span.start, 1);
+      const x = Math.min(1, Math.max(0, span.rect.x + span.rect.width * (overlapStart / spanLen)));
+      const width = Math.min(
+        1 - x,
+        Math.max(0.004, span.rect.width * ((overlapEnd - overlapStart) / spanLen)),
+      );
+      rawRects.push({
+        x,
+        y: span.rect.y,
+        width,
+        height: span.rect.height,
+      });
+    }
+    const rects = mergeLineRects(rawRects);
+    const snippet = buildSearchSnippet(fullText, start, end);
+    return {
+      id: `pdf-${pageText.pageIndex}-${matchIndex}`,
+      pageIndex: pageText.pageIndex,
+      rects: rects.length > 0 ? rects : [{ x: 0.1, y: 0.1, width: 0.2, height: 0.02 }],
+      locationLabel: `Page ${pageText.pageIndex + 1}`,
+      ...snippet,
+    };
+  });
 }
 
 function runCancellable(start: () => Cancellable): () => void {
@@ -514,7 +588,24 @@ function PdfPages({
   );
 
   const lastScrollTop = useRef(0);
+  const programmaticScrollRef = useRef<{ pageIndex: number; scrollTop: number } | null>(null);
+  const scrollToPageOffset = useCallback(
+    (pageIndex: number, offset: number) => {
+      setCurrentPageIndex(pageIndex);
+      virtualizer.scrollToOffset(offset);
+      const actualScrollTop = scrollRef.current?.scrollTop ?? offset;
+      lastScrollTop.current = actualScrollTop;
+      programmaticScrollRef.current = { pageIndex, scrollTop: actualScrollTop };
+    },
+    [virtualizer],
+  );
   const currentReturnLocation = useCallback((): PdfReturnLocation => {
+    if (
+      programmaticScrollRef.current &&
+      Math.abs(lastScrollTop.current - programmaticScrollRef.current.scrollTop) <= 2
+    ) {
+      return { pageIndex: programmaticScrollRef.current.pageIndex, fraction: 0 };
+    }
     const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
     if (!item) return { pageIndex: currentPageIndex, fraction: 0 };
     const height = pageHeight(item.index);
@@ -588,18 +679,16 @@ function PdfPages({
       if (previous.pageIndex !== targetPageIndex || previous.fraction > 0.05) {
         setReturnStack((stack) => [...stack, previous]);
       }
-      setCurrentPageIndex(targetPageIndex);
-      virtualizer.scrollToOffset(offsetWithin(targetPageIndex, 0));
+      scrollToPageOffset(targetPageIndex, offsetWithin(targetPageIndex, 0));
     },
-    [engine.pageCount, currentReturnLocation, offsetWithin, virtualizer],
+    [engine.pageCount, currentReturnLocation, offsetWithin, scrollToPageOffset],
   );
 
   const handleReturnBack = () => {
     const target = returnStack.at(-1);
     if (!target) return;
     setReturnStack((stack) => stack.slice(0, -1));
-    setCurrentPageIndex(target.pageIndex);
-    virtualizer.scrollToOffset(offsetWithin(target.pageIndex, target.fraction));
+    scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
   };
 
   const submitPageInput = () => {
@@ -637,10 +726,21 @@ function PdfPages({
   }, [reportCursor]);
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
-    lastScrollTop.current = event.currentTarget.scrollTop;
-    const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
-    if (item && item.index !== currentPageIndex) {
-      setCurrentPageIndex(item.index);
+    const nextScrollTop = event.currentTarget.scrollTop;
+    lastScrollTop.current = nextScrollTop;
+    if (
+      programmaticScrollRef.current &&
+      Math.abs(nextScrollTop - programmaticScrollRef.current.scrollTop) <= 2
+    ) {
+      if (programmaticScrollRef.current.pageIndex !== currentPageIndex) {
+        setCurrentPageIndex(programmaticScrollRef.current.pageIndex);
+      }
+    } else {
+      programmaticScrollRef.current = null;
+      const item = virtualizer.getVirtualItemForOffset(nextScrollTop);
+      if (item && item.index !== currentPageIndex) {
+        setCurrentPageIndex(item.index);
+      }
     }
     if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
     pendingCursor.current = window.setTimeout(() => {
@@ -716,7 +816,81 @@ function PdfPages({
   const jumpNonce = jumpRequest?.nonce ?? null;
   const jumpExists = jumpAnchor !== null && jumpAnchor.pageIndex < engine.pageCount;
   const jumpReady = jumpExists && sizes.length > jumpAnchor.pageIndex && width > 0;
-  const pulsingAnnotationId = jumpReady ? (jumpRequest?.annotationId ?? null) : null;
+  const [searchPulsing, setSearchPulsing] = useState(false);
+  const searchPulseTimerRef = useRef<number | null>(null);
+
+  const navigateToSearchMatch = useCallback(
+    (match: PdfSearchMatch) => {
+      const previous = currentReturnLocation();
+      const targetFraction = match.rects[0]?.y ?? 0;
+      if (
+        previous.pageIndex !== match.pageIndex ||
+        Math.abs(previous.fraction - targetFraction) > 0.02
+      ) {
+        setReturnStack((stack) => {
+          const top = stack.at(-1);
+          if (
+            top &&
+            top.pageIndex === previous.pageIndex &&
+            Math.abs(top.fraction - previous.fraction) <= 0.02
+          ) {
+            return stack;
+          }
+          return [...stack, previous];
+        });
+      }
+      const pageStart = offsetWithin(match.pageIndex, 0);
+      const top = offsetWithin(match.pageIndex, targetFraction);
+      const currentViewportHeight = scrollRef.current?.clientHeight ?? 0;
+      scrollToPageOffset(match.pageIndex, Math.max(top - currentViewportHeight / 3, pageStart));
+      if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
+      setSearchPulsing(true);
+      searchPulseTimerRef.current = window.setTimeout(() => {
+        searchPulseTimerRef.current = null;
+        setSearchPulsing(false);
+      }, PULSE_MS);
+    },
+    [currentReturnLocation, offsetWithin, scrollToPageOffset],
+  );
+
+  useEffect(
+    () => () => {
+      if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
+    },
+    [],
+  );
+
+  const runPdfSearch = useCallback(
+    async (
+      query: string,
+      caseSensitive: boolean,
+      signal: AbortSignal,
+    ): Promise<readonly PdfSearchMatch[]> => {
+      if (!engine.getPageText) return [];
+      const matches: PdfSearchMatch[] = [];
+      for (let pageIndex = 0; pageIndex < engine.pageCount; pageIndex += 1) {
+        if (signal.aborted) return [];
+        const pageText = await engine.getPageText(pageIndex);
+        if (signal.aborted) return [];
+        matches.push(...searchPdfPage(pageText, query, caseSensitive));
+      }
+      return matches;
+    },
+    [engine],
+  );
+
+  const search = useDocumentSearch<PdfSearchMatch>({
+    isActive,
+    runSearch: runPdfSearch,
+    onNavigateToMatch: navigateToSearchMatch,
+  });
+
+  const activeSearchMatch = search.activeMatch;
+  const pulsingAnnotationId = jumpReady
+    ? (jumpRequest?.annotationId ?? null)
+    : searchPulsing && activeSearchMatch
+      ? SEARCH_HIGHLIGHT_ID
+      : null;
 
   const viewportHeight = scrollRef.current?.clientHeight;
   const lastHandledJumpNonce = useRef<number | null>(null);
@@ -762,8 +936,22 @@ function PdfPages({
       const anchor = asPdfAnchor(highlight.anchor);
       if (anchor) pages.set(anchor.pageIndex, [...(pages.get(anchor.pageIndex) ?? []), highlight]);
     }
+    if (activeSearchMatch) {
+      pages.set(activeSearchMatch.pageIndex, [
+        ...(pages.get(activeSearchMatch.pageIndex) ?? []),
+        {
+          annotationId: SEARCH_HIGHLIGHT_ID,
+          anchor: {
+            format: 'pdf',
+            pageIndex: activeSearchMatch.pageIndex,
+            rects: [...activeSearchMatch.rects],
+          },
+          color: SEARCH_HIGHLIGHT_COLOR,
+        },
+      ]);
+    }
     return pages;
-  }, [highlights]);
+  }, [highlights, activeSearchMatch]);
 
   const virtualItems = virtualizer.getVirtualItems();
   const maxPageWidth = virtualItems.reduce(
@@ -807,6 +995,7 @@ function PdfPages({
               Back
             </Button>
           )}
+          <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
         </div>
         <form
           className="flex items-center gap-1"
@@ -910,6 +1099,7 @@ function PdfPages({
           Capture area
         </Button>
       </div>
+      <DocumentSearchBar search={search} />
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt is on a page this file does not have. The file may have changed.

@@ -7,9 +7,16 @@ import {
   RotateCcw,
   ScrollText,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import {
+  DocumentSearchBar,
+  DocumentSearchToggleButton,
+  SEARCH_HIGHLIGHT_COLOR,
+  SEARCH_HIGHLIGHT_ID,
+  useDocumentSearch,
+} from '@/features/reader/DocumentSearchBar';
 import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import {
@@ -31,6 +38,7 @@ import {
   type EpubHandle,
   type EpubLocation,
   type EpubReadingMode,
+  type EpubSearchMatch,
   type EpubTocItem,
   openEpubDocument,
 } from './epubEngine';
@@ -240,6 +248,97 @@ export function EpubViewer({
   // ---- Highlights ----------------------------------------------------------
 
   const painted = useRef(new Map<string, string>());
+  const searchPulseCleanupRef = useRef<(() => void) | null>(null);
+
+  const navigateToSearchMatch = useCallback(
+    (match: EpubSearchMatch) => {
+      if (!handle) return;
+      searchPulseCleanupRef.current?.();
+      searchPulseCleanupRef.current = null;
+
+      let cancelled = false;
+      let endPulse: number | undefined;
+      let pollForMarks: number | undefined;
+      searchPulseCleanupRef.current = () => {
+        cancelled = true;
+        window.clearTimeout(endPulse);
+        window.clearTimeout(pollForMarks);
+        handle.setPulse(SEARCH_HIGHLIGHT_ID, false);
+      };
+
+      const existingSearchCfi = painted.current.get(SEARCH_HIGHLIGHT_ID);
+      if (existingSearchCfi && existingSearchCfi !== match.cfiRange) {
+        handle.removeHighlight(existingSearchCfi);
+        painted.current.delete(SEARCH_HIGHLIGHT_ID);
+      }
+      if (!painted.current.has(SEARCH_HIGHLIGHT_ID)) {
+        handle.highlight(SEARCH_HIGHLIGHT_ID, match.cfiRange, SEARCH_HIGHLIGHT_COLOR);
+        painted.current.set(SEARCH_HIGHLIGHT_ID, match.cfiRange);
+      }
+
+      const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+      void handle
+        .display(match.cfiRange)
+        .then(() => {
+          if (cancelled) return;
+          if (previous && previous !== match.cfiRange) {
+            setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+          }
+          const waitedSince = performance.now();
+          const startPulse = () => {
+            if (cancelled) return;
+            const hasMarks = handle.setPulse(SEARCH_HIGHLIGHT_ID, true);
+            if (!hasMarks && performance.now() - waitedSince < MARK_WAIT_MS) {
+              pollForMarks = window.setTimeout(startPulse, MARK_POLL_MS);
+              return;
+            }
+            endPulse = window.setTimeout(() => {
+              handle.setPulse(SEARCH_HIGHLIGHT_ID, false);
+            }, PULSE_MS);
+          };
+          startPulse();
+        })
+        .catch(() => undefined);
+    },
+    [handle],
+  );
+
+  useEffect(
+    () => () => {
+      searchPulseCleanupRef.current?.();
+    },
+    [],
+  );
+
+  const runEpubSearch = useCallback(
+    async (
+      query: string,
+      caseSensitive: boolean,
+      signal: AbortSignal,
+    ): Promise<readonly EpubSearchMatch[]> => {
+      if (!handle?.searchChapter) return [];
+      const count = handle.chapterCount ?? 0;
+      const matches: EpubSearchMatch[] = [];
+      for (let chapterIndex = 0; chapterIndex < count; chapterIndex += 1) {
+        if (signal.aborted) return [];
+        const chapterMatches = await handle.searchChapter(chapterIndex, query, { caseSensitive });
+        if (signal.aborted) return [];
+        matches.push(...chapterMatches);
+      }
+      return matches;
+    },
+    [handle],
+  );
+
+  const search = useDocumentSearch<EpubSearchMatch>({
+    isActive,
+    runSearch: runEpubSearch,
+    onNavigateToMatch: navigateToSearchMatch,
+    searchRevision: Boolean(handle),
+  });
+
+  const activeSearchMatch = search.activeMatch;
+
   useEffect(() => {
     if (!handle) return;
     const wanted = new Map<string, { cfiRange: string; color: string }>();
@@ -255,9 +354,16 @@ export function EpubViewer({
         color: FALLBACK_HIGHLIGHT,
       });
     }
+    if (activeSearchMatch) {
+      wanted.set(SEARCH_HIGHLIGHT_ID, {
+        cfiRange: activeSearchMatch.cfiRange,
+        color: SEARCH_HIGHLIGHT_COLOR,
+      });
+    }
 
     for (const [annotationId, cfiRange] of painted.current) {
-      if (!wanted.has(annotationId)) {
+      const next = wanted.get(annotationId);
+      if (!next || next.cfiRange !== cfiRange) {
         handle.removeHighlight(cfiRange);
         painted.current.delete(annotationId);
       }
@@ -268,7 +374,7 @@ export function EpubViewer({
         painted.current.set(annotationId, cfiRange);
       }
     }
-  }, [handle, highlights, jumpRequest]);
+  }, [handle, highlights, jumpRequest, activeSearchMatch]);
 
   // ---- Jumping -------------------------------------------------------------
 
@@ -338,6 +444,7 @@ export function EpubViewer({
   useLayoutEffect(() => {
     if (!handle || !isActive) return;
     const onKeyDown = (event: KeyboardEvent) => {
+      if (search.handleKeyDown(event)) return;
       if (shouldIgnoreKeyEvent(event)) return;
       if (event.key === 'ArrowRight') {
         event.preventDefault();
@@ -353,7 +460,7 @@ export function EpubViewer({
       window.removeEventListener('keydown', onKeyDown);
       handle.onKeyDown(() => undefined);
     };
-  }, [handle, isActive]);
+  }, [handle, isActive, search]);
 
   useEffect(() => {
     // The store drops the selection on a tab switch; keep the frame in step.
@@ -478,6 +585,11 @@ export function EpubViewer({
             disabled={!handle}
             onToggle={preferencesPanel.toggle}
           />
+          <DocumentSearchToggleButton
+            open={search.open}
+            disabled={!handle}
+            onToggle={search.toggleSearch}
+          />
         </div>
         <div className="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
           {readingMode !== 'scroll' && pageInfo && (
@@ -514,6 +626,7 @@ export function EpubViewer({
           onChange={updatePreferences}
         />
       )}
+      <DocumentSearchBar search={search} />
       {missedJump && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
           That excerpt could not be found in this book. The file may have changed.

@@ -184,6 +184,21 @@ export class Page {
     await this.click(point);
   }
 
+  async setInputValue(selector, value) {
+    await this.waitFor(
+      `(() => {
+        const input = [...document.querySelectorAll(${JSON.stringify(selector)})].find(
+          (element) => element.checkVisibility({ visibilityProperty: true }));
+        if (!input) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(input, ${JSON.stringify(value)});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`,
+      `visible input ${selector}`,
+    );
+  }
+
   /**
    * Clicks Open until `isTarget` holds. The fake picker cycles through its library, so
    * this waits for each open to finish first: on a slow machine, clicking again too soon

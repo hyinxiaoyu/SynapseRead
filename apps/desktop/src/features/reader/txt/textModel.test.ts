@@ -170,6 +170,45 @@ describe('TxtTextModel', () => {
     const chunks = collect('hello world', 5);
     expect(() => model.append(chunks[1] as TextChunk)).toThrow(/gap/);
   });
+
+  it('searches across chunks with case-sensitivity options and retains source-byte mapping', () => {
+    // BOM (3 bytes) + "第一行 Fox\n" + invalid byte 0xff (1 byte -> U+FFFD) + " fox € target"
+    const prefix = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const part1 = new TextEncoder().encode('第一行 Fox\n');
+    const bad = new Uint8Array([0xff]);
+    const part2 = new TextEncoder().encode(' fox € target');
+    const source = new Uint8Array(prefix.length + part1.length + bad.length + part2.length);
+    source.set(prefix, 0);
+    source.set(part1, prefix.length);
+    source.set(bad, prefix.length + part1.length);
+    source.set(part2, prefix.length + part1.length + bad.length);
+
+    const model = modelOf(source, 7);
+    expect(model.search('   ')).toEqual([]);
+    expect(model.search('nonexistent')).toEqual([]);
+
+    const insensitive = model.search('fox');
+    expect(insensitive).toHaveLength(2);
+    expect(insensitive[0]?.matchText).toBe('Fox');
+    expect(insensitive[0]?.locationLabel).toBe('Line 1');
+    expect(insensitive[1]?.matchText).toBe('fox');
+    expect(insensitive[1]?.locationLabel).toBe('Line 2');
+
+    // Every match's TxtAnchor must slice the exact source bytes in `source`.
+    for (const match of insensitive) {
+      const slice = source.slice(match.anchor.startByteOffset, match.anchor.endByteOffset);
+      expect(new TextDecoder().decode(slice)).toBe(match.matchText);
+      expect(model.rangeFor(match.anchor)).toEqual({
+        startUnit: match.startUnit,
+        endUnit: match.endUnit,
+      });
+    }
+
+    const sensitive = model.search('fox', { caseSensitive: true });
+    expect(sensitive).toHaveLength(1);
+    expect(sensitive[0]?.matchText).toBe('fox');
+    expect(sensitive[0]?.lineNumber).toBe(2);
+  });
 });
 
 function collect(source: string, chunkBytes: number): TextChunk[] {

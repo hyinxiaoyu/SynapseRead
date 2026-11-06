@@ -248,4 +248,30 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.zoomMode === 'fit-width'`,
     'Fit width zoom mode',
   );
+
+  // In-document search across unrendered PDF pages, match highlight, and return.
+  await page.clickButton('Find in document');
+  await page.setInputValue('[data-testid="search-input"]', '汉字');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
+    'PDF search match on unrendered page 5',
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="search-result-location"]')?.textContent === 'Page 5'`,
+    'PDF search result location for page 5',
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '5'`,
+    'PDF search jump to page 5',
+  );
+  await page.waitFor(
+    `document.querySelector('[data-page-index="4"] [data-annotation-id="__search_active__"]')`,
+    'PDF active search highlight on page 5',
+  );
+  await page.clickButton('Return to previous location');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] input[aria-label="Page number"]')?.value === '1'`,
+    'returning from PDF search jump to page 1',
+  );
+  await page.clickButton('Close search');
 }

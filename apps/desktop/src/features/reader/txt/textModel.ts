@@ -1,4 +1,17 @@
+import {
+  buildSearchSnippet,
+  type DocumentSearchResultItem,
+  findSubstringMatches,
+} from '@/features/reader/DocumentSearchBar';
 import type { SourceSpan, TextChunk, TxtAnchor } from '@/types/domain';
+
+export interface TxtSearchMatch extends DocumentSearchResultItem {
+  anchor: TxtAnchor;
+  startUnit: number;
+  endUnit: number;
+  rowIndex: number;
+  lineNumber: number;
+}
 
 /**
  * Longest row, in UTF-16 units. A file with one enormous line would otherwise
@@ -239,6 +252,33 @@ export class TxtTextModel {
       if (end > start) return this.anchor(start, end);
     }
     return null;
+  }
+
+  /**
+   * Searches all loaded text (including unrendered rows) and maps every match
+   * to source-file byte offsets (`TxtAnchor`).
+   */
+  search(query: string, options?: { caseSensitive?: boolean }): TxtSearchMatch[] {
+    if (query.trim() === '' || this.units === 0) return [];
+    const caseSensitive = options?.caseSensitive ?? false;
+    const fullText = this.slice(0, this.units);
+    const rawMatches = findSubstringMatches(fullText, query, caseSensitive);
+    return rawMatches.map(({ start, end }, index) => {
+      const anchor = this.anchor(start, end);
+      const rowIndex = this.rowAtUnit(start);
+      const lineNumber = anchor.lineIndex + 1;
+      const snippet = buildSearchSnippet(fullText, start, end);
+      return {
+        id: `txt-${anchor.startByteOffset}-${anchor.endByteOffset}-${index}`,
+        anchor,
+        startUnit: start,
+        endUnit: end,
+        rowIndex,
+        lineNumber,
+        locationLabel: `Line ${lineNumber}`,
+        ...snippet,
+      };
+    });
   }
 }
 

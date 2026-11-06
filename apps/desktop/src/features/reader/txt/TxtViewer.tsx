@@ -13,6 +13,13 @@ import {
 } from 'react';
 
 import { Button } from '@/components/ui/button';
+import {
+  DocumentSearchBar,
+  DocumentSearchToggleButton,
+  SEARCH_HIGHLIGHT_COLOR,
+  SEARCH_HIGHLIGHT_ID,
+  useDocumentSearch,
+} from '@/features/reader/DocumentSearchBar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import {
   FONT_FAMILY_CSS,
@@ -33,7 +40,7 @@ import {
 } from '@/types/domain';
 
 import { UNIT_ATTRIBUTE, unitAtBoundary } from './selectionMapping';
-import { TxtTextModel } from './textModel';
+import { type TxtSearchMatch, TxtTextModel } from './textModel';
 
 export const ROW_ESTIMATE_PX = 26;
 const OVERSCAN_ROWS = 12;
@@ -391,8 +398,54 @@ export function TxtViewer({
   const jumpNonce = jumpRequest?.nonce ?? null;
   const jumpResolved = jumpRange !== null;
   const jumpRow = jumpRange ? model.rowAtUnit(jumpRange.startUnit) : null;
-  const pulsingAnnotationId = jumpResolved ? (jumpRequest?.annotationId ?? null) : null;
   const lastHandledJumpNonce = useRef<number | null>(null);
+  const [searchPulsing, setSearchPulsing] = useState(false);
+  const searchPulseTimerRef = useRef<number | null>(null);
+
+  const navigateToSearchMatch = useCallback(
+    (match: TxtSearchMatch) => {
+      const range = model.rangeFor(match.anchor);
+      if (!range) return;
+      const previousTop = lastScrollTop.current;
+      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      virtualizer.scrollToIndex(model.rowAtUnit(range.startUnit), { align: 'center' });
+      if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
+      setSearchPulsing(true);
+      searchPulseTimerRef.current = window.setTimeout(() => {
+        searchPulseTimerRef.current = null;
+        setSearchPulsing(false);
+      }, PULSE_MS);
+    },
+    [model, virtualizer],
+  );
+
+  useEffect(
+    () => () => {
+      if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
+    },
+    [],
+  );
+
+  const search = useDocumentSearch<TxtSearchMatch>({
+    isActive,
+    runSearch: (query, caseSensitive) => model.search(query, { caseSensitive }),
+    onNavigateToMatch: navigateToSearchMatch,
+    searchRevision: `${rowCount}:${complete}`,
+  });
+
+  const activeSearchMatch = search.activeMatch;
+  const activeSearchRange = useMemo(
+    () => (activeSearchMatch ? model.rangeFor(activeSearchMatch.anchor) : null),
+    // `rowCount` and `complete` stand in for the mutable model's loaded length.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [model, rowCount, complete, activeSearchMatch],
+  );
+
+  const pulsingAnnotationId = jumpResolved
+    ? (jumpRequest?.annotationId ?? null)
+    : searchPulsing && activeSearchRange
+      ? SEARCH_HIGHLIGHT_ID
+      : null;
 
   useLayoutEffect(() => {
     if (jumpRow === null || jumpNonce === null) return;
@@ -443,6 +496,13 @@ export function TxtViewer({
         ...jumpRange,
       });
     }
+    if (activeSearchRange) {
+      painted.push({
+        annotationId: SEARCH_HIGHLIGHT_ID,
+        color: SEARCH_HIGHLIGHT_COLOR,
+        ...activeSearchRange,
+      });
+    }
     return painted;
     // `rowCount` and `complete` stand in for the mutable model's loaded length.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -454,6 +514,8 @@ export function TxtViewer({
     jumpRequest,
     jumpRange?.startUnit,
     jumpRange?.endUnit,
+    activeSearchRange?.startUnit,
+    activeSearchRange?.endUnit,
   ]);
 
   if (load.error) {
@@ -491,11 +553,13 @@ export function TxtViewer({
             open={preferencesPanel.open}
             onToggle={preferencesPanel.toggle}
           />
+          <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
         </div>
       </div>
       {preferencesPanel.open && (
         <ReadingPreferencesBar preferences={effectivePreferences} onChange={updatePreferences} />
       )}
+      <DocumentSearchBar search={search} />
       {(load.hadReplacements || missedJump) && (
         <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs text-foreground">
           {missedJump

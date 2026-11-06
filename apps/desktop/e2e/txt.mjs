@@ -86,6 +86,29 @@ export async function txtFlow(page) {
     'reopening at the last position',
   );
 
+  // In-document search across virtualized TXT rows, active match highlight, and return.
+  const visibleTxtViewer = `[...document.querySelectorAll('[data-testid="txt-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  await page.clickButton('Find in document');
+  await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');
+  await page.waitFor(
+    `${visibleTxtViewer}?.querySelector('[data-testid="search-status"]')?.textContent === '1 of 1'`,
+    'TXT search match count',
+  );
+  await page.waitFor(
+    `${visibleTxtViewer}?.querySelector('[data-testid="search-result-location"]')?.textContent === 'Line 6'`,
+    'TXT search match location',
+  );
+  await page.waitFor(
+    `[...${visibleTxtViewer}.querySelectorAll('[data-annotation-id="__search_active__"]')].some((e) => e.textContent === 'quick brown fox')`,
+    'TXT active search highlight',
+  );
+  await page.clickButton('Return to previous location');
+  await page.waitFor(
+    `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
+    'returning from TXT search jump to previous scroll offset',
+  );
+  await page.clickButton('Close search');
+
   // Drag and drop a file onto the workspace and verify it opens and renders automatically.
   await page.evaluate(`(() => {
     const dt = new DataTransfer();
@@ -104,7 +127,6 @@ export async function txtFlow(page) {
   );
 
   // Reading appearance controls in TXT viewer.
-  const visibleTxtViewer = `[...document.querySelectorAll('[data-testid="txt-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
   await page.clickButton('Reading appearance');
   await page.waitFor(
     `${visibleTxtViewer}.querySelector('[data-testid="reading-preferences-bar"]')`,

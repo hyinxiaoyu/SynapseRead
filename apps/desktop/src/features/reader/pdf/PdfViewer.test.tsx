@@ -2,12 +2,13 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearchBar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
 import type { PdfAnchor } from '@/types/domain';
 
-import type { PdfOutlineItem } from './pdfEngine';
+import type { PdfOutlineItem, PdfPageText } from './pdfEngine';
 import { PdfViewer } from './PdfViewer';
 
 // jsdom cannot run pdf.js or draw a canvas: this replaces only the engine seam, and
@@ -17,6 +18,7 @@ const engineState = vi.hoisted(() => ({
   opened: 0,
   destroyed: 0,
   outline: [] as PdfOutlineItem[],
+  pageTextGate: null as (() => Promise<void>) | null,
 }));
 
 const PNG = 'iVBORw0KGgoAAAA';
@@ -32,6 +34,28 @@ vi.mock('./pdfEngine', () => ({
         return engineState.usesRealWorker;
       },
       getOutline: async () => engineState.outline,
+      getPageText: async (pageIndex: number): Promise<PdfPageText> => {
+        if (engineState.pageTextGate) {
+          await engineState.pageTextGate();
+        }
+        return {
+          pageIndex,
+          runs: [
+            {
+              text: `First line of page ${pageIndex}`,
+              rect: { x: 0.1, y: 0.2, width: 0.5, height: 0.03 },
+              hasEOL: true,
+            },
+            {
+              text:
+                pageIndex === 4
+                  ? `Second line of page ${pageIndex} with 汉字 and Fox`
+                  : `Second line of page ${pageIndex}`,
+              rect: { x: 0.1, y: 0.4, width: 0.6, height: 0.03 },
+            },
+          ],
+        };
+      },
       pageSize: async (index: number) =>
         index === 3 ? { width: 306, height: 400 } : { width: 612, height: 800 },
       renderPage: done,
@@ -61,7 +85,15 @@ const PAGE_PX = 800;
 
 type Store = ReturnType<typeof createStudySyncStore>;
 
-function Harness({ store, documentId }: { store: Store; documentId: string }) {
+function Harness({
+  store,
+  documentId,
+  isActive = true,
+}: {
+  store: Store;
+  documentId: string;
+  isActive?: boolean;
+}) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
   const highlights = useMemo(
@@ -72,7 +104,7 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
   return (
     <PdfViewer
       document={{ ...document, format: 'pdf' }}
-      isActive
+      isActive={isActive}
       content={state.content}
       highlights={highlights}
       jumpRequest={state.jumpRequest?.documentId === documentId ? state.jumpRequest : null}
@@ -132,6 +164,7 @@ describe('PdfViewer', () => {
     engineState.usesRealWorker = true;
     engineState.opened = 0;
     engineState.destroyed = 0;
+    engineState.pageTextGate = null;
     engineState.outline = [
       {
         id: 'outline-0',
@@ -617,5 +650,84 @@ describe('PdfViewer', () => {
     fireEvent.keyDown(pageInput, { key: '+', metaKey: true });
     expect(viewer).toHaveAttribute('data-zoom-mode', 'fit-width');
     expect(zoomLevel).toHaveTextContent('100%');
+  });
+
+  it('searches across rendered and unrendered PDF pages, highlights matches, and supports return', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    // Page 4 is far off-screen and not rendered in the virtualizer.
+    expect(document.querySelector('[data-page-index="4"]')).toBeNull();
+
+    fireEvent.keyDown(window, { key: 'f', metaKey: true });
+    const searchInput = await screen.findByTestId('search-input');
+
+    // Search for "First line of page", which matches all 5 pages.
+    fireEvent.change(searchInput, { target: { value: 'First line of page' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 5'));
+    const resultItems = screen.getAllByTestId('search-result-item');
+    expect(resultItems).toHaveLength(5);
+    expect(resultItems[4]).toHaveTextContent('Page 5');
+
+    // Direct jump to the 5th match (unrendered page index 4).
+    fireEvent.click(resultItems[4] as HTMLElement);
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('5 of 5'));
+    expect(screen.getByLabelText('Page number')).toHaveValue('5');
+    const page4 = await pageElement(4);
+    const painted = page4.querySelector<HTMLElement>(
+      `[data-annotation-id="${SEARCH_HIGHLIGHT_ID}"]`,
+    );
+    expect(painted).not.toBeNull();
+    expect(painted).toHaveClass('anchor-pulse');
+
+    // Return to previous location returns to page 1.
+    fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+    expect(screen.getByLabelText('Page number')).toHaveValue('1');
+
+    // Case-sensitive search for "fox" vs "Fox" on page 5.
+    fireEvent.change(searchInput, { target: { value: 'fox' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
+    await waitFor(() =>
+      expect(screen.getByTestId('search-status')).toHaveTextContent('No matches'),
+    );
+  });
+
+  it('cancels an in-flight PDF search on explicit cancel or tab deactivation', async () => {
+    const { store, documentId } = await setup();
+    let releaseGate: (() => void) | undefined;
+    engineState.pageTextGate = () =>
+      new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Find in document' }));
+    const searchInput = await screen.findByTestId('search-input');
+    fireEvent.change(searchInput, { target: { value: 'Second line' } });
+
+    await waitFor(() =>
+      expect(screen.getByTestId('search-status')).toHaveTextContent('Searching…'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel search' }));
+    expect(screen.getByTestId('search-status')).toHaveTextContent('Search cancelled');
+    releaseGate?.();
+
+    // Start another slow search and switch away from the tab (`isActive = false`).
+    engineState.pageTextGate = () =>
+      new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+    fireEvent.change(searchInput, { target: { value: 'First line' } });
+    await waitFor(() =>
+      expect(screen.getByTestId('search-status')).toHaveTextContent('Searching…'),
+    );
+    view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+    await waitFor(() =>
+      expect(screen.getByTestId('search-status')).toHaveTextContent('Search cancelled'),
+    );
+    releaseGate?.();
   });
 });

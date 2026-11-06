@@ -2,11 +2,22 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useMemo } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  buildSearchSnippet,
+  findSubstringMatches,
+  SEARCH_HIGHLIGHT_ID,
+} from '@/features/reader/DocumentSearchBar';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import { createStudySyncStore, selectHighlights } from '@/stores/useStudySyncStore';
 
-import type { EpubLocation, EpubReadingMode, EpubSelection, EpubTocItem } from './epubEngine';
+import type {
+  EpubLocation,
+  EpubReadingMode,
+  EpubSearchMatch,
+  EpubSelection,
+  EpubTocItem,
+} from './epubEngine';
 import { EpubViewer } from './EpubViewer';
 
 // jsdom has no layout for epub.js to render into: this replaces only the engine seam,
@@ -14,6 +25,20 @@ import { EpubViewer } from './EpubViewer';
 const engine = vi.hoisted(() => ({
   toc: [] as EpubTocItem[],
   isFixedLayout: false,
+  chapters: [
+    {
+      href: 'OEBPS/chapter1.xhtml',
+      label: 'One',
+      text: 'The quick brown fox jumps over the lazy dog.',
+      cfi: 'epubcfi(/6/2!/4/6,/1:4,/1:19)',
+    },
+    {
+      href: 'OEBPS/chapter2.xhtml',
+      label: 'Two',
+      text: 'Second chapter contains final target sentence and Fox.',
+      cfi: 'epubcfi(/6/4!/4/4,/1:0,/1:10)',
+    },
+  ],
   displayed: [] as (string | undefined)[],
   highlighted: new Map<string, string>(),
   removed: [] as string[],
@@ -37,6 +62,26 @@ vi.mock('./epubEngine', () => ({
     },
     get isFixedLayout() {
       return engine.isFixedLayout;
+    },
+    get chapterCount() {
+      return engine.chapters.length;
+    },
+    async searchChapter(
+      chapterIndex: number,
+      query: string,
+      options?: { caseSensitive?: boolean },
+    ): Promise<readonly EpubSearchMatch[]> {
+      const chapter = engine.chapters[chapterIndex];
+      if (!chapter) return [];
+      const matches = findSubstringMatches(chapter.text, query, options?.caseSensitive ?? false);
+      return matches.map((match, index) => ({
+        id: `epub-${chapterIndex}-${index}`,
+        cfiRange: chapter.cfi,
+        chapterHref: chapter.href,
+        chapterIndex,
+        locationLabel: chapter.label,
+        ...buildSearchSnippet(chapter.text, match.start, match.end),
+      }));
     },
     async display(target?: string) {
       if (target && target === engine.failCfi) throw new Error('no such location');
@@ -478,6 +523,55 @@ describe('EpubViewer', () => {
     expect(screen.getByTestId('reader-toc')).toHaveTextContent(
       'No table of contents in this book.',
     );
+  });
+
+  it('opens search via iframe Cmd/Ctrl+F, searches across chapters, highlights CFI matches, and supports return', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 1,
+        totalPages: 2,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 25,
+      }),
+    );
+
+    // Trigger Cmd+F from inside the EPUB iframe via `emitKeyDown`.
+    act(() =>
+      engine.emitKeyDown(
+        new KeyboardEvent('keydown', { key: 'f', metaKey: true, cancelable: true }),
+      ),
+    );
+    const searchInput = await screen.findByTestId('search-input');
+
+    // Search for "fox", matching both Chapter One ("fox") and unrendered Chapter Two ("Fox").
+    fireEvent.change(searchInput, { target: { value: 'fox' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 2'));
+    expect(engine.highlighted.get(SEARCH_HIGHLIGHT_ID)).toBe(CFI);
+
+    // Jump to the next match in Chapter Two.
+    fireEvent.click(screen.getByRole('button', { name: 'Next match' }));
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('2 of 2'));
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe(FAR_CFI));
+    expect(engine.highlighted.get(SEARCH_HIGHLIGHT_ID)).toBe(FAR_CFI);
+    expect(engine.pulsing.has(SEARCH_HIGHLIGHT_ID)).toBe(true);
+
+    // Return to previous location returns to Chapter One (`CFI`).
+    const backButton = await screen.findByRole('button', { name: 'Return to previous location' });
+    fireEvent.click(backButton);
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe(CFI));
+
+    // Case-sensitive search narrows to only Chapter Two's "Fox".
+    fireEvent.change(searchInput, { target: { value: 'Fox' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+    expect(screen.getByTestId('search-result-location')).toHaveTextContent('Two');
   });
 
   it('shows why a book could not open', async () => {
