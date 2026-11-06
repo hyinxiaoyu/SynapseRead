@@ -530,4 +530,92 @@ describe('PdfViewer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
     expect(screen.getByTestId('reader-toc')).toHaveTextContent('No outline in this document.');
   });
+
+  it('supports fit-width, fit-page, actual-size, and explicit zoom while preserving the reading target across mixed page sizes', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+
+    const viewer = screen.getByTestId('pdf-viewer');
+    const zoomLevel = screen.getByTestId('pdf-zoom-level');
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'fit-width');
+    expect(zoomLevel).toHaveTextContent('100%');
+
+    // Scroll to 25% into page 2 (0-based index 2).
+    const page2StartAtFitWidth = 2 * (PAGE_PX + GAP_PX);
+    await scrollTo(page2StartAtFitWidth + PAGE_PX * 0.25);
+
+    // Switch to Fit page: available height is VIEWPORT_PX - 2 * GAP_PX = 576, so scale is 576 / 800 = 0.72 (72%).
+    fireEvent.click(screen.getByRole('button', { name: 'Fit page' }));
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'fit-page');
+    expect(zoomLevel).toHaveTextContent('72%');
+    const fitPageHeight = PAGE_PX * (576 / 800);
+    const expectedFitPageTop = 2 * (fitPageHeight + GAP_PX) + fitPageHeight * 0.25;
+    expect((await scroller()).scrollTop).toBeCloseTo(expectedFitPageTop, 0);
+
+    // Zoom in from 72% snaps to 75%, then 100%, then 125%, preserving page 2 at 25%.
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'custom');
+    expect(zoomLevel).toHaveTextContent('75%');
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(zoomLevel).toHaveTextContent('100%');
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    expect(zoomLevel).toHaveTextContent('125%');
+    const custom125Height = PAGE_PX * 1.25;
+    expect((await scroller()).scrollTop).toBeCloseTo(
+      2 * (custom125Height + GAP_PX) + custom125Height * 0.25,
+      0,
+    );
+
+    // Navigate to page 4 (0-based index 3, which is 306x400) and compare Fit width vs Actual size.
+    const pageInput = screen.getByLabelText('Page number');
+    fireEvent.change(pageInput, { target: { value: '4' } });
+    fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Fit width' }));
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'fit-width');
+    // Page 3 is 306px wide in a 612px content width -> 200% scale.
+    expect(zoomLevel).toHaveTextContent('200%');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actual size' }));
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'actual-size');
+    expect(zoomLevel).toHaveTextContent('100%');
+    const page3El = await pageElement(3);
+    expect(page3El.parentElement?.style.width).toBe('306px');
+    expect(page3El.parentElement?.style.height).toBe('400px');
+  });
+
+  it('handles keyboard zoom shortcuts and ignores them inside text inputs', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+
+    const viewer = screen.getByTestId('pdf-viewer');
+    const zoomLevel = screen.getByTestId('pdf-zoom-level');
+
+    fireEvent.keyDown(window, { key: '+', metaKey: true });
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'custom');
+    expect(zoomLevel).toHaveTextContent('125%');
+
+    fireEvent.keyDown(window, { key: '-', ctrlKey: true });
+    expect(zoomLevel).toHaveTextContent('100%');
+
+    fireEvent.keyDown(window, { key: '8', metaKey: true });
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'fit-page');
+    expect(zoomLevel).toHaveTextContent('72%');
+
+    fireEvent.keyDown(window, { key: '0', metaKey: true });
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'actual-size');
+    expect(zoomLevel).toHaveTextContent('100%');
+
+    fireEvent.keyDown(window, { key: '9', metaKey: true });
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'fit-width');
+    expect(zoomLevel).toHaveTextContent('100%');
+
+    // Shortcuts fired inside the page number input must not trigger zoom changes.
+    const pageInput = screen.getByLabelText('Page number');
+    fireEvent.keyDown(pageInput, { key: '+', metaKey: true });
+    expect(viewer).toHaveAttribute('data-zoom-mode', 'fit-width');
+    expect(zoomLevel).toHaveTextContent('100%');
+  });
 });

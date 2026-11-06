@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { Crop, ListTree, RotateCcw } from 'lucide-react';
+import { Crop, ListTree, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
 import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
@@ -43,26 +43,37 @@ const MIN_CAPTURE_PX = 4;
 const CURSOR_RECT_HEIGHT = 0.001;
 /** Only until the first page's size has loaded. */
 const DEFAULT_PAGE_SIZE: PageSize = { width: 612, height: 792 };
+const MIN_ZOOM_SCALE = 0.25;
+const MAX_ZOOM_SCALE = 4;
+const ZOOM_STEP = 0.25;
+
+export type PdfZoomMode = 'fit-width' | 'fit-page' | 'actual-size' | 'custom';
 
 const asPdfAnchor = (anchor: { format: string } | null | undefined): PdfAnchor | null =>
   anchor?.format === 'pdf' ? (anchor as PdfAnchor) : null;
 
-/** Follows an element's width, settling first so a dragged pane does not re-render pages. */
-function useSettledWidth(ref: React.RefObject<HTMLElement | null>): number {
-  const [width, setWidth] = useState(0);
+/** Follows an element's dimensions, settling first so a dragged pane does not re-render pages. */
+function useSettledSize(ref: React.RefObject<HTMLElement | null>): {
+  width: number;
+  height: number;
+} {
+  const [size, setSize] = useState({ width: 0, height: 0 });
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
     let timer: number | undefined;
-    let current = element.clientWidth;
-    setWidth(current);
+    let currentWidth = element.clientWidth;
+    let currentHeight = element.clientHeight;
+    setSize({ width: currentWidth, height: currentHeight });
     const observer = new ResizeObserver(() => {
-      const next = element.clientWidth;
-      if (next === current) return;
+      const nextWidth = element.clientWidth;
+      const nextHeight = element.clientHeight;
+      if (nextWidth === currentWidth && nextHeight === currentHeight) return;
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
-        current = element.clientWidth;
-        setWidth(current);
+        currentWidth = element.clientWidth;
+        currentHeight = element.clientHeight;
+        setSize({ width: currentWidth, height: currentHeight });
       }, 150);
     });
     observer.observe(element);
@@ -71,7 +82,7 @@ function useSettledWidth(ref: React.RefObject<HTMLElement | null>): number {
       observer.disconnect();
     };
   }, [ref]);
-  return width;
+  return size;
 }
 
 /** Loads every page's size in order. Known sizes make scroll offsets exact. */
@@ -324,20 +335,40 @@ function PdfPages({
 }: { engine: PdfDocumentHandle } & Omit<DocumentViewerProps<'pdf'>, 'content'>) {
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
-  const width = useSettledWidth(scrollRef);
+  const { width, height } = useSettledSize(scrollRef);
   const sizes = usePageSizes(engine);
   const [tocOpen, setTocOpen] = useState(false);
   const outline = usePdfOutline(engine, tocOpen);
   const outlineNodes = useMemo(() => toPdfOutlineNodes(outline), [outline]);
+  const [zoomMode, setZoomMode] = useState<PdfZoomMode>('fit-width');
+  const [customScale, setCustomScale] = useState(1);
   const contentWidth = Math.max(width - SIDE_PADDING_PX * 2, 1);
+  const availableHeight = Math.max(height - PAGE_GAP_PX * 2, 1);
 
   const sizeOf = useCallback(
     (index: number) => sizes[index] ?? sizes[0] ?? DEFAULT_PAGE_SIZE,
     [sizes],
   );
   const scaleOf = useCallback(
-    (index: number) => contentWidth / sizeOf(index).width,
-    [contentWidth, sizeOf],
+    (index: number) => {
+      const size = sizeOf(index);
+      switch (zoomMode) {
+        case 'fit-width':
+          return contentWidth / size.width;
+        case 'fit-page':
+          return Math.min(contentWidth / size.width, availableHeight / size.height);
+        case 'actual-size':
+          return 1;
+        case 'custom':
+          return customScale;
+      }
+    },
+    [availableHeight, contentWidth, customScale, sizeOf, zoomMode],
+  );
+  const pageWidth = useCallback(
+    (index: number) =>
+      zoomMode === 'fit-width' ? contentWidth : sizeOf(index).width * scaleOf(index),
+    [contentWidth, sizeOf, scaleOf, zoomMode],
   );
   const pageHeight = useCallback(
     (index: number) => sizeOf(index).height * scaleOf(index),
@@ -349,6 +380,7 @@ function PdfPages({
   const [capture, setCapture] = useState<(CaptureBox & { highlightCount: number }) | null>(null);
   const [missedJump, setMissedJump] = useState(false);
   const [returnStack, setReturnStack] = useState<PdfReturnLocation[]>([]);
+  const pendingZoomTarget = useRef<PdfReturnLocation | null>(null);
 
   // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
   const virtualizer = useVirtualizer({
@@ -369,12 +401,6 @@ function PdfPages({
       return [...pages].sort((a, b) => a - b);
     },
   });
-
-  // Page heights are computed rather than measured, so a change must be pushed in
-  // before anything below reads an offset.
-  useLayoutEffect(() => {
-    virtualizer.measure();
-  }, [virtualizer, sizes, contentWidth]);
 
   // ---- Selection -----------------------------------------------------------
 
@@ -487,6 +513,59 @@ function PdfPages({
     [virtualizer, pageHeight],
   );
 
+  const lastScrollTop = useRef(0);
+  const currentReturnLocation = useCallback((): PdfReturnLocation => {
+    const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
+    if (!item) return { pageIndex: currentPageIndex, fraction: 0 };
+    const height = pageHeight(item.index);
+    const fraction =
+      height > 0 ? Math.min(Math.max((lastScrollTop.current - item.start) / height, 0), 0.99) : 0;
+    return { pageIndex: item.index, fraction };
+  }, [virtualizer, pageHeight, currentPageIndex]);
+
+  const currentScale = scaleOf(currentPageIndex);
+  const zoomPercent = Math.round(currentScale * 100);
+
+  const applyZoom = useCallback(
+    (nextMode: PdfZoomMode, nextScale?: number) => {
+      pendingZoomTarget.current = currentReturnLocation();
+      setZoomMode(nextMode);
+      if (nextScale !== undefined) {
+        const clamped = Math.min(
+          MAX_ZOOM_SCALE,
+          Math.max(MIN_ZOOM_SCALE, Math.round(nextScale * 100) / 100),
+        );
+        setCustomScale(clamped);
+      }
+    },
+    [currentReturnLocation],
+  );
+
+  const stepZoom = useCallback(
+    (direction: 1 | -1) => {
+      const next =
+        direction > 0
+          ? Math.floor(currentScale / ZOOM_STEP + 1e-4) * ZOOM_STEP + ZOOM_STEP
+          : Math.ceil(currentScale / ZOOM_STEP - 1e-4) * ZOOM_STEP - ZOOM_STEP;
+      applyZoom('custom', next);
+    },
+    [applyZoom, currentScale],
+  );
+
+  // Page heights are computed rather than measured, so a change must be pushed in
+  // before anything below reads an offset.
+  useLayoutEffect(() => {
+    virtualizer.measure();
+    const target = pendingZoomTarget.current;
+    if (target) {
+      pendingZoomTarget.current = null;
+      const nextTop = offsetWithin(target.pageIndex, target.fraction);
+      lastScrollTop.current = nextTop;
+      setCurrentPageIndex(target.pageIndex);
+      virtualizer.scrollToOffset(nextTop);
+    }
+  }, [virtualizer, sizes, contentWidth, availableHeight, zoomMode, customScale, offsetWithin]);
+
   useLayoutEffect(() => {
     if (restored.current || !initialCursor || width === 0) return;
     const pageIndex = initialCursor.pageIndex;
@@ -501,16 +580,6 @@ function PdfPages({
   }, [engine, initialCursor, offsetWithin, sizes, virtualizer, width]);
 
   // ---- Reporting the reading position --------------------------------------
-
-  const lastScrollTop = useRef(0);
-  const currentReturnLocation = useCallback((): PdfReturnLocation => {
-    const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
-    if (!item) return { pageIndex: currentPageIndex, fraction: 0 };
-    const height = pageHeight(item.index);
-    const fraction =
-      height > 0 ? Math.min(Math.max((lastScrollTop.current - item.start) / height, 0), 0.99) : 0;
-    return { pageIndex: item.index, fraction };
-  }, [virtualizer, pageHeight, currentPageIndex]);
 
   const navigateToPage = useCallback(
     (targetPageIndex: number) => {
@@ -592,13 +661,7 @@ function PdfPages({
   useEffect(() => {
     if (!isActive) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.altKey ||
-        event.shiftKey
-      ) {
+      if (event.defaultPrevented || event.altKey) {
         return;
       }
       const target = event.target instanceof HTMLElement ? event.target : null;
@@ -615,6 +678,26 @@ function PdfPages({
           return;
         }
       }
+      if (event.metaKey || event.ctrlKey) {
+        if (event.key === '=' || event.key === '+') {
+          event.preventDefault();
+          stepZoom(1);
+        } else if (event.key === '-' || event.key === '_') {
+          event.preventDefault();
+          stepZoom(-1);
+        } else if (event.key === '0' && !event.shiftKey) {
+          event.preventDefault();
+          applyZoom('actual-size');
+        } else if (event.key === '9' && !event.shiftKey) {
+          event.preventDefault();
+          applyZoom('fit-width');
+        } else if (event.key === '8' && !event.shiftKey) {
+          event.preventDefault();
+          applyZoom('fit-page');
+        }
+        return;
+      }
+      if (event.shiftKey) return;
       const currentPage = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
       if (event.key === 'ArrowRight' && currentPage + 1 < engine.pageCount) {
         event.preventDefault();
@@ -626,7 +709,7 @@ function PdfPages({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isActive, engine.pageCount, offsetWithin, virtualizer]);
+  }, [applyZoom, engine.pageCount, isActive, offsetWithin, stepZoom, virtualizer]);
   // ---- Jumping -------------------------------------------------------------
 
   const jumpAnchor = asPdfAnchor(jumpRequest?.anchor);
@@ -682,17 +765,29 @@ function PdfPages({
     return pages;
   }, [highlights]);
 
+  const virtualItems = virtualizer.getVirtualItems();
+  const maxPageWidth = virtualItems.reduce(
+    (max, item) => Math.max(max, pageWidth(item.index)),
+    pageWidth(currentPageIndex),
+  );
+  const innerMinWidth =
+    width > 0 && maxPageWidth > contentWidth + 1
+      ? `${Math.ceil(maxPageWidth + SIDE_PADDING_PX * 2)}px`
+      : '100%';
+
   return (
     <div
-      className="flex h-full flex-col"
+      className="flex h-full min-w-0 flex-col overflow-hidden"
       data-testid="pdf-viewer"
       data-pdf-worker={engine.usesRealWorker ? 'worker' : 'main-thread'}
+      data-zoom-mode={zoomMode}
     >
-      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b px-3 text-xs text-muted-foreground">
-        <div className="flex items-center gap-1.5">
+      <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b px-2 py-1 text-xs text-muted-foreground">
+        <div className="flex items-center gap-1">
           <Button
             variant={tocOpen ? 'secondary' : 'ghost'}
             size="sm"
+            className="h-6 px-2 text-xs"
             aria-label="Table of contents"
             aria-pressed={tocOpen}
             onClick={() => setTocOpen((open) => !open)}
@@ -704,6 +799,7 @@ function PdfPages({
             <Button
               variant="ghost"
               size="sm"
+              className="h-6 px-2 text-xs"
               aria-label="Return to previous location"
               onClick={handleReturnBack}
             >
@@ -713,7 +809,7 @@ function PdfPages({
           )}
         </div>
         <form
-          className="flex items-center gap-1.5"
+          className="flex items-center gap-1"
           onSubmit={(event) => {
             event.preventDefault();
             submitPageInput();
@@ -740,7 +836,7 @@ function PdfPages({
               }
             }}
             className={cn(
-              'h-6 w-12 rounded border bg-background px-1.5 text-center text-xs text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              'h-6 w-10 rounded border bg-background px-1 text-center text-xs text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
               pageInputInvalid && 'border-destructive text-destructive',
             )}
           />
@@ -748,9 +844,65 @@ function PdfPages({
             of {engine.pageCount}
           </span>
         </form>
+        <div role="group" aria-label="Zoom controls" className="flex items-center gap-0.5">
+          <Button
+            variant={zoomMode === 'fit-width' ? 'secondary' : 'ghost'}
+            size="sm"
+            className="h-6 px-2 text-xs"
+            aria-pressed={zoomMode === 'fit-width'}
+            onClick={() => applyZoom('fit-width')}
+          >
+            Fit width
+          </Button>
+          <Button
+            variant={zoomMode === 'fit-page' ? 'secondary' : 'ghost'}
+            size="sm"
+            className="h-6 px-2 text-xs"
+            aria-pressed={zoomMode === 'fit-page'}
+            onClick={() => applyZoom('fit-page')}
+          >
+            Fit page
+          </Button>
+          <Button
+            variant={zoomMode === 'actual-size' ? 'secondary' : 'ghost'}
+            size="sm"
+            className="h-6 px-2 text-xs"
+            aria-pressed={zoomMode === 'actual-size'}
+            onClick={() => applyZoom('actual-size')}
+          >
+            Actual size
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6"
+            aria-label="Zoom out"
+            disabled={currentScale <= MIN_ZOOM_SCALE + 1e-4}
+            onClick={() => stepZoom(-1)}
+          >
+            <ZoomOut />
+          </Button>
+          <span
+            data-testid="pdf-zoom-level"
+            className="min-w-10 text-center text-xs text-foreground tabular-nums"
+          >
+            {zoomPercent}%
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6"
+            aria-label="Zoom in"
+            disabled={currentScale >= MAX_ZOOM_SCALE - 1e-4}
+            onClick={() => stepZoom(1)}
+          >
+            <ZoomIn />
+          </Button>
+        </div>
         <Button
           variant={captureMode ? 'secondary' : 'ghost'}
           size="sm"
+          className="h-6 px-2 text-xs"
           aria-pressed={captureMode}
           onClick={toggleCaptureMode}
         >
@@ -783,34 +935,44 @@ function PdfPages({
           data-testid="pdf-scroll"
           className="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-scroll bg-muted"
         >
-          <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+          <div
+            className="relative"
+            style={{
+              width: innerMinWidth,
+              height: virtualizer.getTotalSize(),
+            }}
+          >
             {width > 0 &&
-              virtualizer.getVirtualItems().map((item) => (
-                <div
-                  key={item.key}
-                  className="absolute"
-                  style={{
-                    top: 0,
-                    left: SIDE_PADDING_PX,
-                    width: contentWidth,
-                    height: pageHeight(item.index),
-                    transform: `translateY(${item.start}px)`,
-                  }}
-                >
-                  <PdfPage
-                    engine={engine}
-                    pageIndex={item.index}
-                    scale={scaleOf(item.index)}
-                    highlights={byPage.get(item.index) ?? EMPTY_HIGHLIGHTS}
-                    pulsingAnnotationId={pulsingAnnotationId}
-                    captureMode={captureMode}
-                    captureBox={
-                      visibleCapture?.pageIndex === item.index ? visibleCapture.rect : null
-                    }
-                    onCapture={(canvas, rect) => onCapture(item.index, canvas, rect)}
-                  />
-                </div>
-              ))}
+              virtualItems.map((item) => {
+                const itemWidth = pageWidth(item.index);
+                const itemLeft = Math.max(SIDE_PADDING_PX, (width - itemWidth) / 2);
+                return (
+                  <div
+                    key={item.key}
+                    className="absolute"
+                    style={{
+                      top: 0,
+                      left: itemLeft,
+                      width: itemWidth,
+                      height: pageHeight(item.index),
+                      transform: `translateY(${item.start}px)`,
+                    }}
+                  >
+                    <PdfPage
+                      engine={engine}
+                      pageIndex={item.index}
+                      scale={scaleOf(item.index)}
+                      highlights={byPage.get(item.index) ?? EMPTY_HIGHLIGHTS}
+                      pulsingAnnotationId={pulsingAnnotationId}
+                      captureMode={captureMode}
+                      captureBox={
+                        visibleCapture?.pageIndex === item.index ? visibleCapture.rect : null
+                      }
+                      onCapture={(canvas, rect) => onCapture(item.index, canvas, rect)}
+                    />
+                  </div>
+                );
+              })}
           </div>
         </div>
       </div>

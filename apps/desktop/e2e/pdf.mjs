@@ -201,4 +201,51 @@ export async function pdfFlow(page) {
     `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
     'returning from PDF outline jump to previous scroll offset',
   );
+
+  // Zoom modes, explicit zoom, and highlight alignment on page 1.
+  await scrollToPage(page, 0);
+  await page.clickButton('Actual size');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.zoomMode === 'actual-size' && document.querySelector('[data-testid="pdf-zoom-level"]')?.textContent === '100%'`,
+    'Actual size zoom mode (100%)',
+  );
+  await page.evaluate(
+    `document.querySelector('[data-testid="pdf-viewer"] button[aria-label="Zoom in"]')?.click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.zoomMode === 'custom' && document.querySelector('[data-testid="pdf-zoom-level"]')?.textContent === '125%'`,
+    'explicit Zoom in (125%)',
+  );
+  await page.waitFor(
+    `[...document.querySelectorAll(${JSON.stringify(TEXT)})].some((e) => e.textContent.includes('quick brown fox'))`,
+    'text layer at 125% zoom',
+  );
+  const zoomedExpected = await page.textRect(TEXT, selected);
+  const zoomedPainted = await page.waitFor(
+    `(() => {
+      const element = document.querySelector('[data-page-index="0"] [data-annotation-id]');
+      if (!element) return null;
+      const r = element.getBoundingClientRect();
+      return { left: r.left, right: r.right, y: r.top + r.height / 2 };
+    })()`,
+    'the highlight at 125% zoom',
+  );
+  assert(
+    Math.abs(zoomedPainted.left - zoomedExpected.start.x) < 4,
+    'highlight stays aligned at 125% zoom (left)',
+  );
+  assert(
+    Math.abs(zoomedPainted.right - zoomedExpected.end.x) < 4,
+    'highlight stays aligned at 125% zoom (right)',
+  );
+  await page.clickButton('Fit page');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.zoomMode === 'fit-page'`,
+    'Fit page zoom mode',
+  );
+  await page.clickButton('Fit width');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.zoomMode === 'fit-width'`,
+    'Fit width zoom mode',
+  );
 }
