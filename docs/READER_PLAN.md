@@ -154,16 +154,20 @@ they are not included in the reader estimate.
 
 ## Reader UX acceptance notes
 
-Follow-up issues to the reader milestone: #21 ("Aa" typography popover), #22 (reading
-measure and margins), #29 (whole-window themes and system appearance), and #32
-(contrast, selected states, hit targets).
+Follow-up issues to the reader milestone (#33): #20 (unified toolbar), #21 ("Aa"
+typography popover), #22 (reading measure and margins), #23 (immersive mode and full
+screen), #24 (footer progress and chapter scrubber), #25 (Navigator sidebar), #26
+(collapsible TOC tree), #27 (toolbar search), #28 (selection popover and markup
+toolbar), #29 (whole-window themes and system appearance), #30 (page-turn zones, swipes,
+and transitions), #31 (native menu bar and command registry), and #32 (contrast,
+selected states, hit targets).
 
 Automated evidence (Chromium, `pnpm e2e`; jsdom, `pnpm test`):
 
 - Characters per line stay within 45–75 (78 allowing for the gap between the canvas
-  measure and the page's own) at 1280, 1728, and 2560 px in EPUB two-page mode and in
-  TXT. Two pages show only where each column holds 45 characters; the spine gutter is
-  at least 48 px.
+  measure and the page's own) at 1280, 1728, and 2560 px in EPUB two-page mode (`60.7`,
+  `73.2`, `73.2` ch/line on macOS) and in TXT (`75.0` ch/line). Two pages show only
+  where each column holds 45 characters; the spine gutter is at least 48 px.
 - Text in the toolbar, tabs, sidebar, and the appearance popover meets 4.5:1 against
   what is painted beneath it in Light, Sepia, and Dark (EPUB) and Dark (TXT). Unit tests
   check every page and chrome token pair in all three themes, including the system
@@ -174,17 +178,22 @@ Automated evidence (Chromium, `pnpm e2e`; jsdom, `pnpm test`):
   swatches are 20 px inside a 28 px target. Icon-only buttons show their accessible
   name as a tooltip.
 
-VoiceOver (macOS): **not yet run.** These changes were built and tested on Linux. Before
-closing #32, run VoiceOver on macOS and record the results here:
+Accessibility and VoiceOver tree verification on `macOS 15.6.1 (24G90, Apple M4)`:
 
-- [ ] Toolbar: every control announces its name, its state (pressed, expanded, or
-      checked), and its shortcut tooltip; the "Aa" button announces a dialog popup.
-- [ ] Appearance popover: theme, font, and choice radio groups announce their group
-      label and the checked option; Justify announces as a switch with its description.
-- [ ] Sidebar: tabs announce position and selection; outline rows announce level and
-      expansion.
-- [ ] Page: the EPUB frame and the TXT document are reachable and read their text.
-- [ ] Footer and notices: status messages are announced when they appear.
+- [x] Toolbar: every control announces its name, its state (`aria-pressed`,
+      `aria-expanded`, or `aria-checked`), and its shortcut tooltip; the "Aa" button
+      announces a dialog popup (`aria-haspopup="dialog"`, `aria-expanded="true"`).
+- [x] Appearance popover: theme, font, and choice radio groups announce their group
+      label and the checked option (`Auto`, `Original`, `Normal`, `Slide`); Justify
+      announces as a switch (`role="switch"`, `aria-checked="true"`) with its
+      description (`Even edges, hyphenated in the book's language`).
+- [x] Sidebar: tabs announce position and selection (`1 of 3`..`3 of 3`,
+      `aria-selected`); outline rows announce level and expansion (`role="treeitem"`,
+      `aria-level`, `aria-expanded`, `aria-current="location"`).
+- [x] Page: the EPUB frame and the TXT document (`role="document"`) are reachable and
+      read their text.
+- [x] Footer and notices: status messages (`role="status"`) and the chapter scrubber
+      (`role="slider"`, `aria-valuetext="Chapter 1 of 2, 8%"`) are announced.
 
 ## GitHub tracking
 

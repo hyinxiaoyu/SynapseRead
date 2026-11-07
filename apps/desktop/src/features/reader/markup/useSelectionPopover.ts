@@ -123,6 +123,14 @@ export function useSelectionPopover({
     if (selection !== null) setAnnotationTarget(null);
     if (selection === null || annotationTarget === null) setNoteOpen(false);
   }
+  // Creating a highlight or an excerpt consumes the selection's popover even when
+  // triggered from the toolbar button or a keyboard shortcut.
+  const [annotationCount, setAnnotationCount] = useState(annotations.annotations.length);
+  if (annotationCount !== annotations.annotations.length) {
+    const grew = annotations.annotations.length > annotationCount;
+    setAnnotationCount(annotations.annotations.length);
+    if (grew && selection !== null) setDismissed(selection);
+  }
   const [wasActive, setWasActive] = useState(isActive);
   if (wasActive !== isActive) {
     setWasActive(isActive);

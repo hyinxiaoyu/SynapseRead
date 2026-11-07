@@ -246,8 +246,11 @@ export function EpubViewer({
     observer.observe(area);
     return () => observer.disconnect();
   }, []);
+  const [currentHref, setCurrentHref] = useState<string | null>(null);
+  const [currentCfi, setCurrentCfi] = useState<string | null>(null);
+  const [chapterFontFamily, setChapterFontFamily] = useState<string | null>(null);
   const charWidth = measureCharWidth(
-    fontStack(effectivePreferences.fontFamily) ?? DEFAULT_SERIF_STACK,
+    fontStack(effectivePreferences.fontFamily) ?? (chapterFontFamily || DEFAULT_SERIF_STACK),
     (rootFontSizePx() * EPUB_BASE_FONT_REM * effectivePreferences.fontSize) / 100,
   );
   const layout = computeReadingLayout({
@@ -267,8 +270,6 @@ export function EpubViewer({
     setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
     onPreferencesChange?.(patch);
   };
-  const [currentHref, setCurrentHref] = useState<string | null>(null);
-  const [currentCfi, setCurrentCfi] = useState<string | null>(null);
   const [staleBookmarkIds, setStaleBookmarkIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pageInfo, setPageInfo] = useState<{ page: number; totalPages: number } | null>(null);
   const [bookProgress, setBookProgress] = useState<{
@@ -365,6 +366,12 @@ export function EpubViewer({
           currentLocationRef.current = location;
           setCurrentHref(location.href);
           setCurrentCfi(location.cfi);
+          const body = host.querySelector('iframe')?.contentDocument?.body;
+          setChapterFontFamily(
+            body
+              ? (body.ownerDocument.defaultView?.getComputedStyle(body).fontFamily ?? null)
+              : null,
+          );
           if (location.page !== undefined && location.totalPages !== undefined) {
             setPageInfo({ page: location.page, totalPages: location.totalPages });
           }
@@ -611,6 +618,13 @@ export function EpubViewer({
     setActiveSelection(null);
     onSelectionChange(null);
   }, [handle, onSelectionChange]);
+
+  const prevHighlightCount = useRef(highlights.length);
+  useEffect(() => {
+    const grew = highlights.length > prevHighlightCount.current;
+    prevHighlightCount.current = highlights.length;
+    if (grew && activeSelection) clearSelectionAfterAnnotate();
+  }, [highlights.length, activeSelection, clearSelectionAfterAnnotate]);
 
   const annotationsController = useAnnotationsController({
     documentId,

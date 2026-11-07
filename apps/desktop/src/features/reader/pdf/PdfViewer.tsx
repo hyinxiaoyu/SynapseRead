@@ -1014,7 +1014,11 @@ function PdfPages({
       onSelectionChange(nextSelection);
     };
     view.addEventListener('selectionchange', onChange);
-    return () => view.removeEventListener('selectionchange', onChange);
+    view.addEventListener('mouseup', onChange);
+    return () => {
+      view.removeEventListener('selectionchange', onChange);
+      view.removeEventListener('mouseup', onChange);
+    };
   }, [isActive, documentId, onSelectionChange, capture, rotation]);
 
   const onCapture = useCallback(
@@ -1424,6 +1428,13 @@ function PdfPages({
     setCapture(null);
     onSelectionChange(null);
   }, [onSelectionChange]);
+
+  const prevHighlightCount = useRef(highlights.length);
+  useEffect(() => {
+    const grew = highlights.length > prevHighlightCount.current;
+    prevHighlightCount.current = highlights.length;
+    if (grew && activeSelection) clearSelectionAfterAnnotate();
+  }, [highlights.length, activeSelection, clearSelectionAfterAnnotate]);
 
   const annotationsController = useAnnotationsController({
     documentId,
