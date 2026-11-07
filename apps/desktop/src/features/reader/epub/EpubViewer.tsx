@@ -257,6 +257,7 @@ export function EpubViewer({
     availableWidth,
     charWidth,
     margins: effectivePreferences.margins,
+    pageWidth: effectivePreferences.pageWidth,
     spread: readingMode === 'spread',
   });
   // Read when the book opens, so the first render already has the right pages.

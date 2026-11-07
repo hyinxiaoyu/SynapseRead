@@ -272,5 +272,35 @@ export async function txtFlow(page) {
     );
     console.log(`     txt: ${width} px, ${perLine.toFixed(1)} characters per line`);
   }
+  const documentWidth = `${visibleTxtViewer}.querySelector('[role="document"]').getBoundingClientRect().width`;
+  const standardWidth = await page.evaluate(documentWidth);
+  await page.clickButton('Reading appearance');
+  await page.clickButton('Wide');
+  await page.waitFor(
+    `${documentWidth} > ${standardWidth} + 100`,
+    'TXT Wide expands the text column',
+  );
+  await page.clickButton('Full width');
+  await page.waitFor(
+    `${documentWidth} >= ${visibleScroller}.clientWidth - 1`,
+    'TXT Full width fills the reader pane',
+  );
+  await page.press('Escape');
+  // Reuse the same saved preference after switching documents.
+  const textTabIndex = await page.evaluate(
+    `${tabs()}.findIndex((tab) => tab.getAttribute('aria-selected') === 'true')`,
+  );
+  await page.clickButton('Open');
+  await page.waitFor(`!${visibleScroller}`, 'switching away from TXT');
+  await page.evaluate(`${tabs()}[${textTabIndex}].click()`);
+  await page.waitFor(
+    `${documentWidth} >= ${visibleScroller}.clientWidth - 1`,
+    'TXT width survives document switches',
+  );
+  await page.setViewport(480);
+  await page.waitFor(
+    `${documentWidth} <= 480 && ${visibleScroller}.scrollWidth <= ${visibleScroller}.clientWidth`,
+    'TXT Full width fits a narrow pane',
+  );
   await page.cdp.send('Emulation.clearDeviceMetricsOverride');
 }

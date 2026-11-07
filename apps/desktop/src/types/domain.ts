@@ -272,6 +272,8 @@ export type ReadingFontFamily =
   | 'mono';
 /** Page padding; the text column is capped by the reading measure instead. */
 export type ReadingMargins = 'narrow' | 'normal' | 'wide';
+/** Text-column width, independent of page padding. */
+export type ReadingPageWidth = 'standard' | 'wide' | 'full';
 export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
 /** How a paged reader animates a page turn; reduced motion always turns instantly. */
 export type PageTransition = 'none' | 'slide' | 'fade';
@@ -284,6 +286,7 @@ export interface ReadingPreferences {
   /** Line height multiplier (`1.2..=2.4`). */
   lineSpacing: number;
   margins: ReadingMargins;
+  pageWidth: ReadingPageWidth;
   /** Justified text, hyphenated in the document's language. */
   justify: boolean;
   /** Dims images in the Dark theme. */
@@ -299,6 +302,7 @@ export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
   fontSize: 100,
   lineSpacing: 1.75,
   margins: 'normal',
+  pageWidth: 'standard',
   justify: true,
   dimImages: false,
   epubReadingMode: 'spread',

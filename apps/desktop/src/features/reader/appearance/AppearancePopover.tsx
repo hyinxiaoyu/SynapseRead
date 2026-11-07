@@ -20,6 +20,7 @@ import { cn } from '@/lib/utils';
 import type {
   PageTransition,
   ReadingMargins,
+  ReadingPageWidth,
   ReadingPreferences,
   ReadingTheme,
 } from '@/types/domain';
@@ -51,6 +52,12 @@ const MARGINS: readonly { value: ReadingMargins; label: string }[] = [
   { value: 'narrow', label: 'Narrow' },
   { value: 'normal', label: 'Normal' },
   { value: 'wide', label: 'Wide' },
+];
+
+const PAGE_WIDTHS: readonly { value: ReadingPageWidth; label: string }[] = [
+  { value: 'standard', label: 'Standard' },
+  { value: 'wide', label: 'Wide' },
+  { value: 'full', label: 'Full width' },
 ];
 
 const PAGE_TRANSITIONS: readonly { value: PageTransition; label: string }[] = [
@@ -333,6 +340,13 @@ function AppearancePanel({
         </div>
       </div>
 
+      <TextChoices
+        label="Page width"
+        options={PAGE_WIDTHS}
+        checkedIndex={PAGE_WIDTHS.findIndex((width) => width.value === preferences.pageWidth)}
+        onSelect={(pageWidth) => onChange({ pageWidth })}
+      />
+
       <div>
         <SectionLabel id={ids.font}>Font</SectionLabel>
         <div
@@ -479,6 +493,24 @@ export function AppearanceMenu({
       window.removeEventListener('blur', onBlur);
     };
   }, [open, onClose]);
+
+  // Toolbar compression can place Aa near either edge of the viewport.
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const root = rootRef.current;
+    if (!open || !panel || !root) return;
+    const keepInViewport = () => {
+      const right = root.getBoundingClientRect().right;
+      const shift = Math.max(
+        8 - right + panel.offsetWidth,
+        Math.min(0, window.innerWidth - 8 - right),
+      );
+      panel.style.translate = `${shift}px`;
+    };
+    keepInViewport();
+    window.addEventListener('resize', keepInViewport);
+    return () => window.removeEventListener('resize', keepInViewport);
+  }, [open]);
 
   // Opening moves focus into the popover; closing returns it to the button, unless
   // the click that closed it put focus somewhere else on purpose.

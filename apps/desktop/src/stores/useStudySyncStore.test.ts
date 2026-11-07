@@ -464,6 +464,7 @@ describe('useStudySyncStore', () => {
         fontFamily: 'sf-pro',
         fontSize: 120,
         margins: 'wide',
+        pageWidth: 'full',
         justify: false,
         dimImages: true,
         epubReadingMode: 'paged',
@@ -474,6 +475,7 @@ describe('useStudySyncStore', () => {
         fontFamily: 'sf-pro',
         fontSize: 120,
         margins: 'wide',
+        pageWidth: 'full',
         justify: false,
         dimImages: true,
         epubReadingMode: 'paged',
@@ -487,11 +489,16 @@ describe('useStudySyncStore', () => {
         fontFamily: 'sf-pro',
         fontSize: 120,
         margins: 'wide',
+        pageWidth: 'full',
         justify: false,
         dimImages: true,
         epubReadingMode: 'paged',
         pageTransition: 'fade',
       });
+
+      await state().updateReadingPreferences({ pageWidth: 'invalid' as 'full' });
+      expect(state().readingPreferences.pageWidth).toBe('full');
+      expect(state().error).toMatch(/pageWidth/);
 
       await state().updateReadingPreferences({ fontSize: 300 });
       expect(state().readingPreferences.fontSize).toBe(120);

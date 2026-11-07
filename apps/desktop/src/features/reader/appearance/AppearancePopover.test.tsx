@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { useState } from 'react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { DEFAULT_READING_PREFERENCES, type ReadingPreferences } from '@/types/domain';
 
@@ -53,6 +53,24 @@ describe('AppearanceMenu', () => {
     fireEvent.click(trigger());
     expect(popover()).not.toBeInTheDocument();
     expect(trigger()).toHaveFocus();
+  });
+
+  it('keeps the appearance choices within the viewport near either toolbar edge', () => {
+    const rect = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue({ right: 220 } as DOMRect);
+    const width = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(288);
+    try {
+      render(<Harness />);
+      fireEvent.click(trigger());
+      expect(popover()?.style.translate).toBe('76px');
+      rect.mockReturnValue({ right: window.innerWidth + 20 } as DOMRect);
+      fireEvent(window, new Event('resize'));
+      expect(popover()?.style.translate).toBe('-28px');
+    } finally {
+      rect.mockRestore();
+      width.mockRestore();
+    }
   });
 
   it('closes on Esc and returns focus to the button', () => {
@@ -125,6 +143,24 @@ describe('AppearanceMenu', () => {
     expect(screen.getByRole('radio', { name: 'Default' })).toHaveAttribute('aria-checked', 'true');
     expect(screen.queryByRole('radio', { name: 'Original' })).not.toBeInTheDocument();
   });
+
+  it.each(['txt', 'epub'] as const)(
+    'adjusts page width by keyboard in %s without changing margins',
+    (format) => {
+      render(<Harness format={format} />);
+      fireEvent.click(trigger());
+      const widths = within(screen.getByRole('radiogroup', { name: 'Page width' }));
+      const standard = widths.getByRole('radio', { name: 'Standard' });
+      expect(standard).toHaveAttribute('aria-checked', 'true');
+      fireEvent.keyDown(standard, { key: 'ArrowRight' });
+      expect(current().pageWidth).toBe('wide');
+      expect(widths.getByRole('radio', { name: 'Wide' })).toHaveFocus();
+      fireEvent.keyDown(widths.getByRole('radio', { name: 'Wide' }), { key: 'End' });
+      expect(current().pageWidth).toBe('full');
+      expect(current().margins).toBe('normal');
+      expect(widths.getByRole('radio', { name: 'Full width' })).toHaveFocus();
+    },
+  );
 
   it('steps the text size with small and large A buttons, within bounds', () => {
     render(<Harness initial={{ ...DEFAULT_READING_PREFERENCES, fontSize: 190 }} />);

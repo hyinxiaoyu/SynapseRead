@@ -293,6 +293,7 @@ export function TxtViewer({
   const page = singleColumnPage(
     measureCharWidth(fontFamily, (rootFontSizePx() * effectivePreferences.fontSize) / 100),
     effectivePreferences.margins,
+    effectivePreferences.pageWidth,
   );
 
   const updatePreferences = (patch: Partial<ReadingPreferences>) => {
@@ -423,6 +424,7 @@ export function TxtViewer({
     fontSize: effectivePreferences.fontSize,
     lineSpacing: effectivePreferences.lineSpacing,
     margins: effectivePreferences.margins,
+    pageWidth: effectivePreferences.pageWidth,
     justify: effectivePreferences.justify,
   });
 
@@ -433,6 +435,7 @@ export function TxtViewer({
       prev.fontSize !== effectivePreferences.fontSize ||
       prev.lineSpacing !== effectivePreferences.lineSpacing ||
       prev.margins !== effectivePreferences.margins ||
+      prev.pageWidth !== effectivePreferences.pageWidth ||
       prev.justify !== effectivePreferences.justify;
     if (!changed) return;
     layoutSnapshot.current = {
@@ -440,6 +443,7 @@ export function TxtViewer({
       fontSize: effectivePreferences.fontSize,
       lineSpacing: effectivePreferences.lineSpacing,
       margins: effectivePreferences.margins,
+      pageWidth: effectivePreferences.pageWidth,
       justify: effectivePreferences.justify,
     };
     const anchorRow = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
@@ -455,6 +459,7 @@ export function TxtViewer({
     effectivePreferences.fontSize,
     effectivePreferences.lineSpacing,
     effectivePreferences.margins,
+    effectivePreferences.pageWidth,
     effectivePreferences.justify,
     virtualizer,
   ]);
@@ -1006,7 +1011,7 @@ export function TxtViewer({
                 className="relative mx-auto w-full"
                 style={{
                   height: virtualizer.getTotalSize(),
-                  maxWidth: page.maxWidth,
+                  maxWidth: Number.isFinite(page.maxWidth) ? page.maxWidth : '100%',
                   fontFamily,
                   fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
                   lineHeight:
