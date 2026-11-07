@@ -1,8 +1,8 @@
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual';
-import { RotateCcw } from 'lucide-react';
 import {
   type CSSProperties,
   memo,
+  type MouseEvent as ReactMouseEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -12,39 +12,63 @@ import {
   type UIEvent,
 } from 'react';
 
-import { Button } from '@/components/ui/button';
+import { PanelLeft } from 'lucide-react';
+
+import { localHighlights, useAnnotationsController } from '@/features/reader/AnnotationsPanel';
+import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import {
-  AnnotationsListToggleButton,
-  AnnotationsPanel,
-  SelectionAnnotationControls,
-  SelectionNoteComposer,
-  useAnnotationsController,
-} from '@/features/reader/AnnotationsPanel';
-import {
-  BookmarksListToggleButton,
-  BookmarksPanel,
-  BookmarkToggleButton,
-  useBookmarksController,
-} from '@/features/reader/BookmarksPanel';
-import {
-  DocumentSearchBar,
-  DocumentSearchToggleButton,
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  ToolbarSearchField,
   useDocumentSearch,
-} from '@/features/reader/DocumentSearchBar';
+} from '@/features/reader/DocumentSearch';
+import {
+  annotationAtPoint,
+  focusInReaderPopover,
+  selectionViewportRect,
+} from '@/features/reader/markup/geometry';
+import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
+import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
+import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
+import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
+import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
 import {
-  FONT_FAMILY_CSS,
-  READING_WIDTH_CLASSES,
-  ReadingPreferencesBar,
-  ReadingPreferencesToggleButton,
-  THEME_SURFACE_CLASSES,
-  useReadingPreferencesPanel,
-} from '@/features/reader/ReadingPreferencesBar';
+  HistoryButtons,
+  ReaderPopoverLayer,
+  ReaderToolbar,
+  ToolbarButton,
+  ToolbarSeparator,
+  ToolbarTitle,
+} from '@/features/reader/ReaderToolbar';
+import { AppearanceMenu, useAppearancePanel } from '@/features/reader/appearance/AppearancePopover';
+import {
+  measureCharWidth,
+  rootFontSizePx,
+  singleColumnPage,
+} from '@/features/reader/appearance/measure';
+import {
+  DEFAULT_SERIF_STACK,
+  fontStack,
+  pageFooterStyle,
+  pageSurfaceStyle,
+} from '@/features/reader/appearance/themes';
+import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
+import {
+  animatePageTurn,
+  type TurnDirection,
+  usePageTurnGestures,
+  zoneCursor,
+} from '@/features/reader/paging/pageTurn';
+import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import { useBackChip } from '@/features/reader/progress/useBackChip';
+import { useJumpHistory } from '@/features/reader/useJumpHistory';
+import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
+  type AnnotationStyle,
   type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
@@ -59,6 +83,8 @@ import { UNIT_ATTRIBUTE, unitAtBoundary } from './selectionMapping';
 import { type TxtSearchMatch, TxtTextModel } from './textModel';
 
 export const ROW_ESTIMATE_PX = 26;
+/** Plain text has no chapters: Page Up and Page Down on the scrubber move a tenth. */
+const SCRUB_STEP = 0.1;
 const OVERSCAN_ROWS = 12;
 const CURSOR_DEBOUNCE_MS = 400;
 /** A long file should fill in steadily, not re-render for every 64 KiB chunk. */
@@ -125,6 +151,7 @@ function useTextStream(content: DocumentContentReader, documentId: string, encod
 interface PaintedRange {
   annotationId: string;
   color: string;
+  style: AnnotationStyle;
   startUnit: number;
   endUnit: number;
 }
@@ -178,16 +205,26 @@ const TxtRow = memo(function TxtRow({
             </span>
           );
         }
-        const style: CSSProperties & Record<'--anchor-pulse-color', string> = {
-          backgroundColor: range.color,
-          color: '#000',
-          '--anchor-pulse-color': range.color,
-        };
+        const style: CSSProperties & Record<'--anchor-pulse-color', string> =
+          range.style === 'underline'
+            ? {
+                textDecorationLine: 'underline',
+                textDecorationColor: range.color,
+                textDecorationThickness: '0.18em',
+                textUnderlineOffset: '0.2em',
+                '--anchor-pulse-color': range.color,
+              }
+            : {
+                backgroundColor: range.color,
+                color: '#000',
+                '--anchor-pulse-color': range.color,
+              };
         return (
           <span
             key={unit}
             {...unitAttribute}
             data-annotation-id={range.annotationId}
+            data-annotation-style={range.style}
             style={style}
             className={cn(pulsingAnnotationId === range.annotationId && 'anchor-pulse')}
           >
@@ -204,10 +241,10 @@ const asTxtAnchor = (anchor: { format: string } | null | undefined): TxtAnchor |
 
 function paint(model: TxtTextModel, highlights: readonly ReaderHighlight[]): PaintedRange[] {
   const ranges: PaintedRange[] = [];
-  for (const { annotationId, anchor, color } of highlights) {
+  for (const { annotationId, anchor, color, style = 'highlight' } of highlights) {
     const txtAnchor = asTxtAnchor(anchor);
     const range = txtAnchor && model.rangeFor(txtAnchor);
-    if (range) ranges.push({ annotationId, color, ...range });
+    if (range) ranges.push({ annotationId, color, style, ...range });
   }
   return ranges;
 }
@@ -225,6 +262,7 @@ export function TxtViewer({
   onSelectionChange,
   onJumpHandled,
   onCursorChange,
+  chromeHidden = false,
   preferences,
   onPreferencesChange,
   bookmarks,
@@ -236,17 +274,26 @@ export function TxtViewer({
   onDeleteAnnotation,
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
+  onExcerptSelection,
+  canExcerpt,
 }: DocumentViewerProps<'txt'>) {
   const load = useTextStream(content, document.id, document.encoding);
   const { model, rowCount, complete } = load;
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const readerAreaRef = useRef<HTMLDivElement>(null);
 
   const [localPreferences, setLocalPreferences] = useState<ReadingPreferences>(
     () => preferences ?? DEFAULT_READING_PREFERENCES,
   );
   const effectivePreferences = preferences ?? localPreferences;
-  const preferencesPanel = useReadingPreferencesPanel();
+  const preferencesPanel = useAppearancePanel();
+  const theme = useResolvedReadingTheme(effectivePreferences.theme);
+  const fontFamily = fontStack(effectivePreferences.fontFamily) ?? DEFAULT_SERIF_STACK;
+  const page = singleColumnPage(
+    measureCharWidth(fontFamily, (rootFontSizePx() * effectivePreferences.fontSize) / 100),
+    effectivePreferences.margins,
+  );
 
   const updatePreferences = (patch: Partial<ReadingPreferences>) => {
     setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
@@ -258,8 +305,12 @@ export function TxtViewer({
   const [pinnedRows, setPinnedRows] = useState<readonly number[]>([]);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [missedJump, setMissedJump] = useState(false);
-  const [returnStack, setReturnStack] = useState<number[]>([]);
+  const history = useJumpHistory<number>();
+  const pushHistory = history.push;
+  const backChip = useBackChip(history.canGoBack);
+  const markup = useMarkupToolbar();
   const [currentRow, setCurrentRow] = useState(0);
+  const pageRef = useRef<HTMLDivElement>(null);
   const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
   const annotationPulseTimerRef = useRef<number | null>(null);
 
@@ -311,6 +362,8 @@ export function TxtViewer({
         !root.contains(range.startContainer) ||
         !root.contains(range.endContainer)
       ) {
+        // Typing a note for the selection moves the document's selection into the field.
+        if (focusInReaderPopover(view)) return;
         clear();
         return;
       }
@@ -334,7 +387,11 @@ export function TxtViewer({
       onSelectionChange(nextSelection);
     };
     view.addEventListener('selectionchange', onChange);
-    return () => view.removeEventListener('selectionchange', onChange);
+    view.addEventListener('mouseup', onChange);
+    return () => {
+      view.removeEventListener('selectionchange', onChange);
+      view.removeEventListener('mouseup', onChange);
+    };
   }, [isActive, model, documentId, onSelectionChange]);
 
   // ---- Reopen at the last reading position ---------------------------------
@@ -365,7 +422,8 @@ export function TxtViewer({
     fontFamily: effectivePreferences.fontFamily,
     fontSize: effectivePreferences.fontSize,
     lineSpacing: effectivePreferences.lineSpacing,
-    readingWidth: effectivePreferences.readingWidth,
+    margins: effectivePreferences.margins,
+    justify: effectivePreferences.justify,
   });
 
   useLayoutEffect(() => {
@@ -374,13 +432,15 @@ export function TxtViewer({
       prev.fontFamily !== effectivePreferences.fontFamily ||
       prev.fontSize !== effectivePreferences.fontSize ||
       prev.lineSpacing !== effectivePreferences.lineSpacing ||
-      prev.readingWidth !== effectivePreferences.readingWidth;
+      prev.margins !== effectivePreferences.margins ||
+      prev.justify !== effectivePreferences.justify;
     if (!changed) return;
     layoutSnapshot.current = {
       fontFamily: effectivePreferences.fontFamily,
       fontSize: effectivePreferences.fontSize,
       lineSpacing: effectivePreferences.lineSpacing,
-      readingWidth: effectivePreferences.readingWidth,
+      margins: effectivePreferences.margins,
+      justify: effectivePreferences.justify,
     };
     const anchorRow = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
     const frame = window.requestAnimationFrame(() => {
@@ -394,7 +454,8 @@ export function TxtViewer({
     effectivePreferences.fontFamily,
     effectivePreferences.fontSize,
     effectivePreferences.lineSpacing,
-    effectivePreferences.readingWidth,
+    effectivePreferences.margins,
+    effectivePreferences.justify,
     virtualizer,
   ]);
   const reportCursor = useCallback(() => {
@@ -449,7 +510,7 @@ export function TxtViewer({
       const range = model.rangeFor(match.anchor);
       if (!range) return;
       const previousTop = lastScrollTop.current;
-      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
       virtualizer.scrollToIndex(targetRow, { align: 'center' });
@@ -460,7 +521,7 @@ export function TxtViewer({
         setSearchPulsing(false);
       }, PULSE_MS);
     },
-    [model, virtualizer],
+    [pushHistory, model, virtualizer],
   );
 
   useEffect(
@@ -471,6 +532,10 @@ export function TxtViewer({
     },
     [],
   );
+
+  // Plain text has no outline or pages: the sidebar holds bookmarks and notes.
+  const navigator = useNavigator('txt', ['notes', 'bookmarks']);
+  const showSidebar = navigator.open && !chromeHidden;
 
   const search = useDocumentSearch<TxtSearchMatch>({
     isActive,
@@ -521,17 +586,16 @@ export function TxtViewer({
       }
       setMissedJump(false);
       const previousTop = lastScrollTop.current;
-      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
       virtualizer.scrollToIndex(targetRow, { align: 'start' });
     },
-    [model, complete, virtualizer],
+    [pushHistory, model, complete, virtualizer],
   );
 
   const bookmarksController = useBookmarksController<'txt'>({
     documentId,
-    isActive,
     bookmarks,
     onAddBookmark,
     onRemoveBookmark,
@@ -551,7 +615,7 @@ export function TxtViewer({
       }
       setMissedJump(false);
       const previousTop = lastScrollTop.current;
-      setReturnStack((stack) => (stack.at(-1) === previousTop ? stack : [...stack, previousTop]));
+      pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
       virtualizer.scrollToIndex(targetRow, { align: 'center' });
@@ -563,7 +627,7 @@ export function TxtViewer({
         setAnnotationPulsingId(null);
       }, PULSE_MS);
     },
-    [model, complete, virtualizer],
+    [pushHistory, model, complete, virtualizer],
   );
 
   const clearSelectionAfterAnnotate = useCallback(() => {
@@ -573,6 +637,13 @@ export function TxtViewer({
     setActiveSelection(null);
     onSelectionChange(null);
   }, [onSelectionChange]);
+
+  const prevHighlightCount = useRef(highlights.length);
+  useEffect(() => {
+    const grew = highlights.length > prevHighlightCount.current;
+    prevHighlightCount.current = highlights.length;
+    if (grew && activeSelection) clearSelectionAfterAnnotate();
+  }, [highlights.length, activeSelection, clearSelectionAfterAnnotate]);
 
   const annotationsController = useAnnotationsController({
     documentId,
@@ -596,16 +667,26 @@ export function TxtViewer({
     onSelectAnnotation: handleSelectAnnotation,
   });
 
+  const getSelectionRect = useCallback(() => selectionViewportRect(scrollRef.current), []);
+  const popover = useSelectionPopover({
+    isActive,
+    selection: activeSelection,
+    annotations: annotationsController,
+    surfaceRef: scrollRef,
+    getSelectionRect,
+  });
+  const openClickedHighlight = (event: ReactMouseEvent<HTMLElement>) => {
+    const page = pageRef.current;
+    if (!page || event.button !== 0 || event.detail > 1) return;
+    const selection = page.ownerDocument.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    const hit = annotationAtPoint(event, page);
+    if (hit) popover.openForAnnotation(hit.annotationId, hit.rect);
+  };
+
   const effectiveHighlights = useMemo(() => {
     if (annotations !== undefined) return highlights;
-    return [
-      ...highlights,
-      ...annotationsController.annotations.map(({ id, anchor, color }) => ({
-        annotationId: id,
-        anchor,
-        color,
-      })),
-    ];
+    return [...highlights, ...localHighlights(annotationsController.annotations)];
   }, [annotations, annotationsController.annotations, highlights]);
 
   const activeSearchMatch = search.activeMatch;
@@ -629,17 +710,127 @@ export function TxtViewer({
     if (lastHandledJumpNonce.current !== jumpNonce) {
       lastHandledJumpNonce.current = jumpNonce;
       const previousTop = lastScrollTop.current;
-      setReturnStack((stack) => [...stack, previousTop]);
+      pushHistory(previousTop);
     }
     virtualizer.scrollToIndex(jumpRow, { align: 'center' });
-  }, [jumpNonce, jumpRow, virtualizer]);
+  }, [pushHistory, jumpNonce, jumpRow, virtualizer]);
 
   const handleReturnBack = () => {
-    const targetTop = returnStack.at(-1);
-    if (targetTop === undefined) return;
-    setReturnStack((stack) => stack.slice(0, -1));
-    scrollRef.current?.scrollTo({ top: targetTop });
+    backChip.dismiss();
+    const targetTop = history.goBack(scrollRef.current?.scrollTop ?? lastScrollTop.current);
+    if (targetTop !== undefined) scrollRef.current?.scrollTo({ top: targetTop });
   };
+
+  const handleForward = () => {
+    backChip.dismiss();
+    const targetTop = history.goForward(scrollRef.current?.scrollTop ?? lastScrollTop.current);
+    if (targetTop !== undefined) scrollRef.current?.scrollTo({ top: targetTop });
+  };
+
+  // Entering focus mode puts the panels away; leaving it does not reopen them.
+  const [wasChromeHidden, setWasChromeHidden] = useState(chromeHidden);
+  if (wasChromeHidden !== chromeHidden) {
+    setWasChromeHidden(chromeHidden);
+    if (chromeHidden) {
+      preferencesPanel.close();
+    }
+  }
+
+  const pageBy = (direction: 1 | -1) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    scroller.scrollBy({ top: direction * scroller.clientHeight * 0.9 });
+  };
+
+  const turnPage = (direction: TurnDirection) => {
+    backChip.dismiss();
+    pageBy(direction);
+    animatePageTurn(pageRef.current, direction, effectivePreferences.pageTransition);
+  };
+
+  const scrollToEdge = (edge: 'start' | 'end') => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    backChip.dismiss();
+    scroller.scrollTo({ top: edge === 'start' ? 0 : scroller.scrollHeight });
+  };
+
+  // ---- Progress: by source byte, so it does not depend on row heights ----------
+
+  // `rowCount` and `complete` stand in for the mutable model's loaded length.
+  const loadedBytes = useMemo(
+    () => model.loadedBytes,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [model, rowCount, complete],
+  );
+  const currentByte = model.cursorAnchorForRow(currentRow)?.startByteOffset ?? 0;
+  const fraction = loadedBytes > 0 ? Math.min(currentByte / loadedBytes, 1) : 0;
+  const percent = Math.round(fraction * 100);
+  const rowAtFraction = (at: number) => {
+    const byte = Math.floor(Math.min(Math.max(at, 0), 1) * loadedBytes);
+    return model.rowAtUnit(model.unitAtSourceOffset(byte, 'down') ?? 0);
+  };
+  const showRow = (row: number) => {
+    setCurrentRow(row);
+    virtualizer.scrollToIndex(row, { align: 'start' });
+  };
+  const scrubber: ScrubberModel | null =
+    loadedBytes > 0
+      ? {
+          value: fraction,
+          valueText: `Line ${currentRow + 1} of ${rowCount}, ${percent}%`,
+          ticks: [],
+          describe: (at) => `Line ${rowAtFraction(at) + 1} · ${Math.round(at * 100)}%`,
+          onCommit: (at) => {
+            const origin = currentRow + 1;
+            pushHistory(lastScrollTop.current);
+            showRow(rowAtFraction(at));
+            backChip.offer(`Back to line ${origin}`);
+          },
+          onStepPage: turnPage,
+          onStepChapter: (direction) => {
+            backChip.dismiss();
+            showRow(rowAtFraction(fraction + direction * SCRUB_STEP));
+          },
+        }
+      : null;
+
+  const gestures = usePageTurnGestures({
+    enabled: isActive,
+    areaRef: scrollRef,
+    pageRef,
+    onTurn: turnPage,
+    canSwipe: () => {
+      const scroller = scrollRef.current;
+      return !scroller || scroller.scrollWidth <= scroller.clientWidth + 1;
+    },
+  });
+
+  useReaderCommands({
+    isActive,
+    chromeHidden,
+    search,
+    navigator,
+    bookmarks: bookmarksController,
+    annotations: annotationsController,
+    selectionText: activeSelection?.text ?? null,
+    markup,
+    popover,
+    reflowable: {
+      preferences: effectivePreferences,
+      onChange: updatePreferences,
+      panel: preferencesPanel,
+    },
+    extra: {
+      'go.previousPage': { run: () => turnPage(-1) },
+      'go.nextPage': { run: () => turnPage(1) },
+      // A text file is one chapter: Home and End go to its start and end.
+      'go.chapterStart': { run: () => scrollToEdge('start'), title: 'Start of Document' },
+      'go.chapterEnd': { run: () => scrollToEdge('end'), title: 'End of Document' },
+      'go.back': { run: handleReturnBack, enabled: history.canGoBack },
+      'go.forward': { run: handleForward, enabled: history.canGoForward },
+    },
+  });
 
   useEffect(() => {
     if (jumpNonce === null) return;
@@ -670,6 +861,7 @@ export function TxtViewer({
       painted.push({
         annotationId: jumpRequest.annotationId,
         color: '#fde047',
+        style: 'highlight',
         ...jumpRange,
       });
     }
@@ -677,6 +869,7 @@ export function TxtViewer({
       painted.push({
         annotationId: SEARCH_HIGHLIGHT_ID,
         color: SEARCH_HIGHLIGHT_COLOR,
+        style: 'highlight',
         ...activeSearchRange,
       });
     }
@@ -705,104 +898,161 @@ export function TxtViewer({
 
   return (
     <div
-      className={cn(
-        'relative flex h-full flex-col',
-        THEME_SURFACE_CLASSES[effectivePreferences.theme],
-      )}
+      className="relative flex h-full flex-col bg-background text-foreground"
       data-testid="txt-viewer"
       data-reading-theme={effectivePreferences.theme}
-      data-reading-width={effectivePreferences.readingWidth}
+      data-resolved-theme={theme}
+      data-reading-margins={effectivePreferences.margins}
     >
-      <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-background px-3 py-1 text-foreground">
-        <div className="flex flex-wrap items-center gap-1">
-          {returnStack.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              aria-label="Return to previous location"
-              onClick={handleReturnBack}
-            >
-              <RotateCcw />
-              Back
-            </Button>
-          )}
-          <ReadingPreferencesToggleButton
-            open={preferencesPanel.open}
-            onToggle={preferencesPanel.toggle}
-          />
-          <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
-          <BookmarkToggleButton
-            bookmarked={bookmarksController.isCurrentBookmarked}
-            onToggle={bookmarksController.toggleCurrentBookmark}
-          />
-          <BookmarksListToggleButton
-            open={bookmarksController.open}
-            count={bookmarksController.bookmarks.length}
-            onToggle={bookmarksController.togglePanel}
-          />
-          <AnnotationsListToggleButton
-            open={annotationsController.open}
-            count={annotationsController.annotations.length}
-            onToggle={annotationsController.togglePanel}
-          />
-          <SelectionAnnotationControls
-            hasSelection={activeSelection !== null}
-            controller={annotationsController}
-          />
-        </div>
-      </div>
-      {preferencesPanel.open && (
-        <ReadingPreferencesBar preferences={effectivePreferences} onChange={updatePreferences} />
-      )}
-      <DocumentSearchBar search={search} />
-      <BookmarksPanel controller={bookmarksController} />
-      <SelectionNoteComposer
-        hasSelection={activeSelection !== null}
-        controller={annotationsController}
+      <ReaderToolbar
+        isActive={isActive}
+        leading={
+          <>
+            <ToolbarButton
+              icon={PanelLeft}
+              label="Sidebar"
+              command="view.toggleSidebar"
+              pressed={showSidebar}
+              testId="sidebar-toggle"
+              disabled={chromeHidden}
+              onClick={navigator.toggle}
+            />
+            <HistoryButtons
+              canGoBack={history.canGoBack}
+              canGoForward={history.canGoForward}
+              onBack={handleReturnBack}
+              onForward={handleForward}
+            />
+          </>
+        }
+        center={<ToolbarTitle title={document.title} />}
+        trailing={
+          <>
+            <AppearanceMenu
+              open={preferencesPanel.open}
+              onToggle={preferencesPanel.toggle}
+              onClose={preferencesPanel.close}
+              preferences={effectivePreferences}
+              onChange={updatePreferences}
+              format="txt"
+            />
+            <MarkupToggleButton
+              visible={markup.visible}
+              highlightMode={annotationsController.highlightMode}
+              onToggle={markup.toggle}
+            />
+            <ToolbarSeparator />
+            <BookmarkToggleButton
+              bookmarked={bookmarksController.isCurrentBookmarked}
+              onToggle={bookmarksController.toggleCurrentBookmark}
+            />
+            <ToolbarSearchField
+              search={search}
+              onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+            />
+          </>
+        }
       />
-      <AnnotationsPanel controller={annotationsController} />
-      {(load.hadReplacements || missedJump) && (
-        <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs text-foreground">
-          {missedJump
-            ? 'That excerpt is past the end of this file, which may have changed since it was saved.'
-            : 'This file has bytes that are not valid UTF-8. They are shown as �.'}
-        </p>
-      )}
-      <div
-        ref={scrollRef}
-        onScroll={onScroll}
-        data-testid="txt-scroll"
-        className="min-h-0 flex-1 overflow-auto"
-      >
-        <div
-          role="document"
-          aria-label={document.title}
-          className={cn(
-            'relative mx-auto w-full',
-            READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
-          )}
-          style={{
-            height: virtualizer.getTotalSize(),
-            fontFamily: FONT_FAMILY_CSS[effectivePreferences.fontFamily],
-            fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
-            lineHeight:
-              effectivePreferences.lineSpacing === 1.75 ? 1.625 : effectivePreferences.lineSpacing,
-          }}
-        >
-          {virtualizer.getVirtualItems().map((item) => (
+      <div className="relative flex min-h-0 flex-1">
+        {showSidebar && (
+          <ReaderNavigator
+            navigator={navigator}
+            bookmarks={bookmarksController}
+            annotations={annotationsController}
+            search={search}
+            groupSearchResults={false}
+            annotationPlacement={(annotation) => ({
+              order: asTxtAnchor(annotation.anchor)?.startByteOffset ?? Number.MAX_SAFE_INTEGER,
+            })}
+          />
+        )}
+        <div ref={readerAreaRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {markup.visible && <MarkupBar controller={annotationsController} onClose={markup.hide} />}
+          <SelectionPopover
+            popover={popover}
+            annotations={annotationsController}
+            selection={activeSelection}
+            boundsRef={readerAreaRef}
+            onExcerpt={onExcerptSelection}
+            canExcerpt={canExcerpt}
+            onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+          />
+          <ReaderPopoverLayer>
+            {(load.hadReplacements || missedJump) && (
+              <p role="status" className="bg-muted px-4 py-1.5 text-xs text-foreground">
+                {missedJump
+                  ? 'That excerpt is past the end of this file, which may have changed since it was saved.'
+                  : 'This file has bytes that are not valid UTF-8. They are shown as �.'}
+              </p>
+            )}
+          </ReaderPopoverLayer>
+          <div className="group/page relative flex min-h-0 flex-1 flex-col">
             <div
-              key={item.key}
-              data-index={item.index}
-              ref={virtualizer.measureElement}
-              className="absolute top-0 left-0 min-h-[1lh] w-full px-6 break-words whitespace-pre-wrap"
-              style={{ transform: `translateY(${item.start}px)` }}
+              ref={scrollRef}
+              onScroll={onScroll}
+              tabIndex={-1}
+              data-testid="txt-scroll"
+              data-turn-zone={gestures.zone ?? undefined}
+              className="min-h-0 flex-1 overflow-auto outline-none"
+              style={{ ...pageSurfaceStyle(theme), cursor: zoneCursor(gestures.zone) || undefined }}
             >
-              <TxtRow
-                segments={segmentRow(model.rowStart(item.index), model.rowText(item.index), ranges)}
-                pulsingAnnotationId={pulsingAnnotationId}
-              />
+              <div
+                ref={pageRef}
+                role="document"
+                onClick={openClickedHighlight}
+                aria-label={document.title}
+                // Hyphenation needs a language; a text file declares none.
+                lang={window.navigator.language || undefined}
+                className="relative mx-auto w-full"
+                style={{
+                  height: virtualizer.getTotalSize(),
+                  maxWidth: page.maxWidth,
+                  fontFamily,
+                  fontSize: `${(effectivePreferences.fontSize / 100).toFixed(2)}rem`,
+                  lineHeight:
+                    effectivePreferences.lineSpacing === 1.75
+                      ? 1.625
+                      : effectivePreferences.lineSpacing,
+                }}
+              >
+                {virtualizer.getVirtualItems().map((item) => (
+                  <div
+                    key={item.key}
+                    data-index={item.index}
+                    ref={virtualizer.measureElement}
+                    className="absolute top-0 left-0 min-h-[1lh] w-full break-words whitespace-pre-wrap"
+                    style={{
+                      transform: `translateY(${item.start}px)`,
+                      paddingInline: page.sidePadding,
+                      ...(effectivePreferences.justify
+                        ? { textAlign: 'justify', hyphens: 'auto' }
+                        : { textAlign: 'start', hyphens: 'manual' }),
+                    }}
+                  >
+                    <TxtRow
+                      segments={segmentRow(
+                        model.rowStart(item.index),
+                        model.rowText(item.index),
+                        ranges,
+                      )}
+                      pulsingAnnotationId={pulsingAnnotationId}
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
-          ))}
+            <PageTurnChevrons onPrevious={() => turnPage(-1)} onNext={() => turnPage(1)} />
+          </div>
+          <ReaderFooter
+            readouts={{
+              position: `Line ${currentRow + 1} of ${rowCount}${complete ? '' : '…'}`,
+              percent: `${percent}%${complete ? '' : '…'}`,
+            }}
+            scrubber={scrubber}
+            backLabel={backChip.label}
+            onBack={handleReturnBack}
+            style={pageFooterStyle(theme)}
+          />
         </div>
       </div>
     </div>

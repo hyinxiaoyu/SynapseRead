@@ -7,6 +7,7 @@ import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-in
 import {
   type AnchorLocation,
   type Annotation,
+  type AnnotationStyle,
   type Bookmark,
   bookmarkLocationKey,
   DEFAULT_READING_PREFERENCES,
@@ -68,6 +69,13 @@ const FORMAT_BY_EXTENSION: Record<string, DocumentFormat> = {
 };
 
 const fail = (code: string, message: string): IpcError => ({ code, message });
+
+const ANNOTATION_STYLES: readonly string[] = ['highlight', 'underline'] satisfies AnnotationStyle[];
+
+/** Core rejects an unknown style while deserializing the request. */
+function checkAnnotationStyle(style: string): void {
+  if (!ANNOTATION_STYLES.includes(style)) throw fail('json', `unknown annotation style: ${style}`);
+}
 const now = () => new Date().toISOString();
 
 /**
@@ -90,7 +98,11 @@ export function createMemoryBackend({
   const captures = new Map<string, string>();
   const bookmarks = new Map<string, Bookmark>();
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
-  let workspaceSession: WorkspaceSession = { openDocumentIds: [], activeDocumentId: null };
+  let workspaceSession: WorkspaceSession = {
+    openDocumentIds: [],
+    activeDocumentId: null,
+    immersive: false,
+  };
   let picks = 0;
   let clockSeq = 0;
   const monotonicNow = () => {
@@ -233,6 +245,7 @@ export function createMemoryBackend({
 
   return {
     kind: 'memory',
+    chromeStyle: 'standard',
 
     async pickDocument() {
       const path = paths[picks % paths.length];
@@ -381,7 +394,7 @@ export function createMemoryBackend({
         openDocumentIds.includes(workspaceSession.activeDocumentId)
           ? workspaceSession.activeDocumentId
           : (openDocumentIds.at(-1) ?? null);
-      return { openDocumentIds, activeDocumentId };
+      return { openDocumentIds, activeDocumentId, immersive: workspaceSession.immersive };
     },
 
     async saveWorkspaceSession(session) {
@@ -395,7 +408,7 @@ export function createMemoryBackend({
         session.activeDocumentId && openDocumentIds.includes(session.activeDocumentId)
           ? session.activeDocumentId
           : (openDocumentIds.at(-1) ?? null);
-      workspaceSession = { openDocumentIds, activeDocumentId };
+      workspaceSession = { openDocumentIds, activeDocumentId, immersive: session.immersive };
       return { ...workspaceSession };
     },
 
@@ -455,6 +468,7 @@ export function createMemoryBackend({
         excerptImagePath: input.excerptImagePng === null ? null : `captures/${annotationId}.png`,
         note: null,
         color: input.color,
+        style: 'highlight',
         createdAt: now(),
       };
       const card: NoteCard = {
@@ -506,6 +520,7 @@ export function createMemoryBackend({
       if (!input.color.trim()) {
         throw fail('invalid_anchor', 'an annotation needs a highlight color');
       }
+      checkAnnotationStyle(input.style);
       const trimmedNote = input.note?.trim() || null;
       if (!input.excerptText?.trim() && input.excerptImagePng === null && trimmedNote === null) {
         throw fail(
@@ -528,6 +543,7 @@ export function createMemoryBackend({
         excerptImagePath: input.excerptImagePng === null ? null : `captures/${annotationId}.png`,
         note: trimmedNote,
         color: input.color.trim(),
+        style: input.style,
         createdAt: now(),
       };
       annotations.set(annotation.id, annotation);
@@ -539,10 +555,12 @@ export function createMemoryBackend({
       if (patch.color !== null && !patch.color.trim()) {
         throw fail('invalid_anchor', 'an annotation needs a highlight color');
       }
+      if (patch.style != null) checkAnnotationStyle(patch.style);
       const updated: Annotation = {
         ...existing,
         note: patch.note !== null ? patch.note.trim() || null : (existing.note ?? null),
         color: patch.color !== null ? patch.color.trim() : existing.color,
+        style: patch.style ?? existing.style,
       };
       annotations.set(annotationId, updated);
       return updated;
@@ -629,6 +647,9 @@ export function createMemoryBackend({
       ) {
         throw fail('invalid_preferences', 'lineSpacing must be between 1.2 and 2.4');
       }
+      if (!['none', 'slide', 'fade'].includes(preferences.pageTransition)) {
+        throw fail('invalid_preferences', 'pageTransition must be none, slide, or fade');
+      }
       readingPreferences = { ...preferences };
       return { ...readingPreferences };
     },
@@ -682,6 +703,28 @@ export function createMemoryBackend({
     async deleteBookmark(bookmarkId) {
       require(bookmarks, bookmarkId, 'bookmark');
       bookmarks.delete(bookmarkId);
+    },
+
+    // A browser has no native menu; the keyboard and toolbar reach every command.
+    onMenuCommand: () => () => undefined,
+    setMenuItemStates: async () => undefined,
+    // The page's Fullscreen API stands in for the window's in the browser preview.
+    isFullscreen: async () => globalThis.document?.fullscreenElement != null,
+    async setFullscreen(fullscreen) {
+      const page = globalThis.document;
+      if (!page) return;
+      if (fullscreen && !page.fullscreenElement) {
+        await page.documentElement.requestFullscreen?.();
+      } else if (!fullscreen && page.fullscreenElement) {
+        await page.exitFullscreen?.();
+      }
+    },
+    onFullscreenChange(listener) {
+      const page = globalThis.document;
+      if (!page) return () => undefined;
+      const onChange = () => listener(page.fullscreenElement != null);
+      page.addEventListener('fullscreenchange', onChange);
+      return () => page.removeEventListener('fullscreenchange', onChange);
     },
 
     loadDocumentSource: async (document) => ({

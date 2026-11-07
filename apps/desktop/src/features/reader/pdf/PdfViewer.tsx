@@ -1,18 +1,21 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
-  BookOpen,
   Columns2,
   Crop,
+  Expand,
   FileText,
-  LayoutGrid,
-  ListTree,
+  MoveHorizontal,
+  PanelLeft,
   RotateCcw,
   RotateCw,
+  ScrollText,
+  Scan,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import {
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
@@ -23,35 +26,59 @@ import {
   type UIEvent,
 } from 'react';
 
-import { Button } from '@/components/ui/button';
+import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmented-control';
 import {
-  AnnotationsListToggleButton,
-  AnnotationsPanel,
-  SelectionAnnotationControls,
-  SelectionNoteComposer,
+  type AnnotationPlacement,
+  localHighlights,
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
 import {
-  BookmarksListToggleButton,
-  BookmarksPanel,
-  BookmarkToggleButton,
-  useBookmarksController,
-} from '@/features/reader/BookmarksPanel';
+  annotationAtPoint,
+  focusInReaderPopover,
+  selectionViewportRect,
+} from '@/features/reader/markup/geometry';
+import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
+import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
+import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
+import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import {
   buildSearchSnippet,
-  DocumentSearchBar,
   type DocumentSearchResultItem,
-  DocumentSearchToggleButton,
   findSubstringMatches,
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  ToolbarSearchField,
   useDocumentSearch,
-} from '@/features/reader/DocumentSearchBar';
-import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
+} from '@/features/reader/DocumentSearch';
+import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
+import { NavigatorEmptyState } from '@/features/reader/navigator/parts';
+import type { OutlineNode } from '@/features/reader/navigator/OutlineTree';
+import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
+import {
+  HistoryButtons,
+  ReaderPopoverLayer,
+  ReaderToolbar,
+  ToolbarButton,
+  ToolbarOverflowMenu,
+  ToolbarSeparator,
+} from '@/features/reader/ReaderToolbar';
+import {
+  animatePageTurn,
+  type TurnDirection,
+  usePageTurnGestures,
+  zoneCursor,
+} from '@/features/reader/paging/pageTurn';
+import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import { useBackChip } from '@/features/reader/progress/useBackChip';
+import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
+import { useJumpHistory } from '@/features/reader/useJumpHistory';
+import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
 import type {
   Annotation,
+  AnnotationStyle,
   Bookmark,
   DocumentViewerProps,
   NormalizedRect,
@@ -184,8 +211,54 @@ function toPdfOutlineNodes(items: readonly PdfOutlineItem[]): OutlineNode<number
     label: item.title,
     target: item.pageIndex,
     children: toPdfOutlineNodes(item.children),
+    ...(item.pageIndex !== null ? { hint: String(item.pageIndex + 1) } : {}),
   }));
 }
+
+/**
+ * The outline entry for `pageIndex`: the one starting closest before it, the
+ * deepest of several on the same page.
+ */
+function currentOutlineId(items: readonly OutlineNode<number>[], pageIndex: number): string | null {
+  let bestId: string | null = null;
+  let bestPage = -1;
+  const walk = (nodes: readonly OutlineNode<number>[]) => {
+    for (const node of nodes) {
+      if (node.target !== null && node.target <= pageIndex && node.target >= bestPage) {
+        bestId = node.id;
+        bestPage = node.target;
+      }
+      walk(node.children);
+    }
+  };
+  walk(items);
+  return bestId;
+}
+
+/** The top-level outline section containing `pageIndex`, for grouping highlights. */
+function chapterOfPage(items: readonly OutlineNode<number>[], pageIndex: number): string | null {
+  let best: OutlineNode<number> | null = null;
+  for (const node of items) {
+    if (node.target !== null && node.target <= pageIndex && node.target >= (best?.target ?? -1)) {
+      best = node;
+    }
+  }
+  return best?.label ?? null;
+}
+
+const DISPLAY_MODES: readonly SegmentedOption<PdfDisplayMode>[] = [
+  { value: 'single', label: 'Single page', icon: FileText, testId: 'pdf-mode-single' },
+  { value: 'two-page', label: 'Two pages', icon: Columns2, testId: 'pdf-mode-two-page' },
+  {
+    value: 'continuous',
+    label: 'Continuous scroll',
+    icon: ScrollText,
+    testId: 'pdf-mode-continuous',
+  },
+];
+
+const isSamePdfLocation = (a: PdfReturnLocation, b: PdfReturnLocation) =>
+  a.pageIndex === b.pageIndex && Math.abs(a.fraction - b.fraction) <= 0.02;
 
 interface PdfReturnLocation {
   pageIndex: number;
@@ -334,48 +407,55 @@ function PdfThumbnailItem({
   );
 }
 
-function PdfThumbnailsSidebar({
+function PdfThumbnailsList({
   engine,
   sizes,
   rotation,
   currentPageIndex,
+  filter,
   onSelectPage,
 }: {
   engine: PdfDocumentHandle;
   sizes: readonly PageSize[];
   rotation: PdfRotation;
   currentPageIndex: number;
+  /** Page numbers containing this text, as Preview's sidebar filter does. */
+  filter: string;
   onSelectPage: (pageIndex: number) => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
+  const needle = filter.trim();
+  const pages = useMemo(() => {
+    const all = Array.from({ length: engine.pageCount }, (_, index) => index);
+    return needle ? all.filter((index) => String(index + 1).includes(needle)) : all;
+  }, [engine.pageCount, needle]);
   // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
   const virtualizer = useVirtualizer({
-    count: engine.pageCount,
+    count: pages.length,
     getScrollElement: () => listRef.current,
     estimateSize: () => THUMBNAIL_ROW_HEIGHT_PX,
     overscan: 2,
   });
 
+  const currentRow = pages.indexOf(currentPageIndex);
   useEffect(() => {
-    virtualizer.scrollToIndex(currentPageIndex, { align: 'auto' });
-  }, [currentPageIndex, virtualizer]);
+    if (currentRow >= 0) virtualizer.scrollToIndex(currentRow, { align: 'auto' });
+  }, [currentRow, virtualizer]);
+
+  if (pages.length === 0) return <NavigatorEmptyState title="No matching pages" />;
 
   return (
-    <aside
+    <div
+      ref={listRef}
       data-testid="pdf-thumbnails-sidebar"
       aria-label="Page thumbnails"
-      className="flex h-full w-36 shrink-0 flex-col border-r bg-background"
+      role="group"
+      className="min-h-0 flex-1 overflow-y-auto p-1.5"
     >
-      <div className="border-b px-2.5 py-1.5 text-xs font-medium text-muted-foreground">
-        Thumbnails
-      </div>
-      <div
-        ref={listRef}
-        data-testid="pdf-thumbnails-scroll"
-        className="min-h-0 flex-1 overflow-y-auto p-1.5"
-      >
-        <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
-          {virtualizer.getVirtualItems().map((item) => (
+      <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualizer.getVirtualItems().map((item) => {
+          const pageIndex = pages[item.index] ?? 0;
+          return (
             <div
               key={item.key}
               className="absolute top-0 left-0 w-full px-0.5"
@@ -386,17 +466,17 @@ function PdfThumbnailsSidebar({
             >
               <PdfThumbnailItem
                 engine={engine}
-                pageIndex={item.index}
-                pageSize={sizes[item.index] ?? sizes[0] ?? DEFAULT_PAGE_SIZE}
+                pageIndex={pageIndex}
+                pageSize={sizes[pageIndex] ?? sizes[0] ?? DEFAULT_PAGE_SIZE}
                 rotation={rotation}
-                isActive={item.index === currentPageIndex}
+                isActive={pageIndex === currentPageIndex}
                 onSelect={onSelectPage}
               />
             </div>
-          ))}
-        </div>
+          );
+        })}
       </div>
-    </aside>
+    </div>
   );
 }
 
@@ -552,13 +632,14 @@ function PdfPage({
         }),
       )}
 
-      {highlights.map(({ annotationId, anchor, color }) =>
+      {highlights.map(({ annotationId, anchor, color, style = 'highlight' }) =>
         asPdfAnchor(anchor)?.rects.map((rawRect, index) => {
           const rect = rotateNormalizedRect(rawRect, rotation);
           return (
             <div
               key={`${annotationId}-${index}`}
               data-annotation-id={annotationId}
+              data-annotation-style={style}
               className={cn(
                 'pointer-events-none absolute mix-blend-multiply',
                 pulsingAnnotationId === annotationId && 'anchor-pulse',
@@ -569,9 +650,11 @@ function PdfPage({
                   top: `${rect.y * 100}%`,
                   width: `${rect.width * 100}%`,
                   height: `${rect.height * 100}%`,
-                  backgroundColor: color,
+                  ...(style === 'underline'
+                    ? { borderBottom: `2px solid ${color}` }
+                    : { backgroundColor: color }),
                   '--anchor-pulse-color': color,
-                } as CSSProperties
+                } as CSSProperties & Record<'--anchor-pulse-color', string>
               }
             />
           );
@@ -689,11 +772,13 @@ function PdfPages({
   engine,
   document,
   isActive,
+  chromeHidden = false,
   highlights,
   jumpRequest,
   onSelectionChange,
   onJumpHandled,
   onCursorChange,
+  preferences,
   bookmarks,
   onAddBookmark,
   onRemoveBookmark,
@@ -703,14 +788,17 @@ function PdfPages({
   onDeleteAnnotation,
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
+  onExcerptSelection,
+  canExcerpt,
 }: { engine: PdfDocumentHandle } & Omit<DocumentViewerProps<'pdf'>, 'content'>) {
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const readerAreaRef = useRef<HTMLDivElement>(null);
   const { width, height } = useSettledSize(scrollRef);
   const sizes = usePageSizes(engine);
-  const [tocOpen, setTocOpen] = useState(false);
-  const [thumbnailsOpen, setThumbnailsOpen] = useState(false);
-  const outline = usePdfOutline(engine, tocOpen);
+  const navigator = useNavigator('pdf', ['thumbnails', 'contents', 'notes', 'bookmarks']);
+  // Chapters group highlights, name the toolbar subtitle, and tick the scrubber.
+  const outline = usePdfOutline(engine, true);
   const outlineNodes = useMemo(() => toPdfOutlineNodes(outline), [outline]);
   const [zoomMode, setZoomMode] = useState<PdfZoomMode>('fit-width');
   const [customScale, setCustomScale] = useState(1);
@@ -760,7 +848,12 @@ function PdfPages({
   const [captureMode, setCaptureMode] = useState(false);
   const [capture, setCapture] = useState<(CaptureBox & { highlightCount: number }) | null>(null);
   const [missedJump, setMissedJump] = useState(false);
-  const [returnStack, setReturnStack] = useState<PdfReturnLocation[]>([]);
+  const history = useJumpHistory<PdfReturnLocation>(isSamePdfLocation);
+  const pushHistory = history.push;
+  const backChip = useBackChip(history.canGoBack);
+  const markup = useMarkupToolbar();
+  const pageContentRef = useRef<HTMLDivElement>(null);
+  const pageInputRef = useRef<HTMLInputElement>(null);
   const pendingZoomTarget = useRef<PdfReturnLocation | null>(null);
 
   // ---- Reopen at the last reading position ---------------------------------
@@ -881,7 +974,8 @@ function PdfPages({
       const range = current && current.rangeCount > 0 ? current.getRangeAt(0) : null;
       if (!range || range.collapsed || !root.contains(range.commonAncestorContainer)) {
         // A capture is a selection too, and a click on its surface must not drop it.
-        if (!capture) clear();
+        // Typing a note for the selection moves the document's selection into the field.
+        if (!capture && !focusInReaderPopover(view)) clear();
         return;
       }
       const pageElements = Array.from(root.querySelectorAll<HTMLElement>('[data-page-index]'));
@@ -920,7 +1014,11 @@ function PdfPages({
       onSelectionChange(nextSelection);
     };
     view.addEventListener('selectionchange', onChange);
-    return () => view.removeEventListener('selectionchange', onChange);
+    view.addEventListener('mouseup', onChange);
+    return () => {
+      view.removeEventListener('selectionchange', onChange);
+      view.removeEventListener('mouseup', onChange);
+    };
   }, [isActive, documentId, onSelectionChange, capture, rotation]);
 
   const onCapture = useCallback(
@@ -967,6 +1065,13 @@ function PdfPages({
 
   const lastScrollTop = useRef(0);
   const programmaticScrollRef = useRef<{ pageIndex: number; scrollTop: number } | null>(null);
+  /**
+   * Where the reader is, as a page and fraction, kept current by every scroll.
+   * When the pane's width changes (a sidebar opens, the window resizes) and fit
+   * width rescales the pages, the view returns here rather than to a pixel
+   * offset that now belongs to another part of the document.
+   */
+  const layoutAnchor = useRef<PdfReturnLocation | null>(null);
   const scrollToPageOffset = useCallback(
     (pageIndex: number, offset: number) => {
       setCurrentPageIndex(pageIndex);
@@ -974,15 +1079,21 @@ function PdfPages({
       const actualScrollTop = scrollRef.current?.scrollTop ?? offset;
       lastScrollTop.current = actualScrollTop;
       programmaticScrollRef.current = { pageIndex, scrollTop: actualScrollTop };
+      const height = pageHeight(pageIndex);
+      const fraction = height > 0 ? (offset - offsetWithin(pageIndex, 0)) / height : 0;
+      layoutAnchor.current = { pageIndex, fraction: Math.min(Math.max(fraction, 0), 0.99) };
     },
-    [virtualizer],
+    [offsetWithin, pageHeight, virtualizer],
   );
   const currentReturnLocation = useCallback((): PdfReturnLocation => {
     if (
       programmaticScrollRef.current &&
       Math.abs(lastScrollTop.current - programmaticScrollRef.current.scrollTop) <= 2
     ) {
-      return { pageIndex: programmaticScrollRef.current.pageIndex, fraction: 0 };
+      // Where the viewer was sent, exactly; geometry may still be settling.
+      const anchor = layoutAnchor.current;
+      const { pageIndex } = programmaticScrollRef.current;
+      return anchor?.pageIndex === pageIndex ? anchor : { pageIndex, fraction: 0 };
     }
     if (displayMode === 'single') {
       const height = pageHeight(currentPageIndex);
@@ -1039,10 +1150,14 @@ function PdfPages({
     [currentReturnLocation, displayMode],
   );
 
-  const rotateClockwise = useCallback(() => {
-    pendingZoomTarget.current = currentReturnLocation();
-    setRotation((prev) => ((prev + 90) % 360) as PdfRotation);
-  }, [currentReturnLocation]);
+  const rotateBy = useCallback(
+    (degrees: 90 | -90) => {
+      pendingZoomTarget.current = currentReturnLocation();
+      setRotation((prev) => ((prev + degrees + 360) % 360) as PdfRotation);
+    },
+    [currentReturnLocation],
+  );
+  const rotateClockwise = useCallback(() => rotateBy(90), [rotateBy]);
 
   const handlePageAnnotationsLoaded = useCallback(
     (_pageIndex: number, loaded: PdfPageAnnotations) => {
@@ -1058,9 +1173,13 @@ function PdfPages({
 
   // Page heights are computed rather than measured, so a change must be pushed in
   // before anything below reads an offset.
+  const anchoredWidth = useRef(contentWidth);
   useLayoutEffect(() => {
     virtualizer.measure();
-    const target = pendingZoomTarget.current;
+    const widthChanged = anchoredWidth.current !== contentWidth;
+    anchoredWidth.current = contentWidth;
+    const target =
+      pendingZoomTarget.current ?? (widthChanged && restored.current ? layoutAnchor.current : null);
     if (target) {
       pendingZoomTarget.current = null;
       const nextTop = offsetWithin(target.pageIndex, target.fraction);
@@ -1105,11 +1224,11 @@ function PdfPages({
         previous.pageIndex !== targetPageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.05
       ) {
-        setReturnStack((stack) => [...stack, previous]);
+        pushHistory(previous);
       }
       scrollToPageOffset(targetPageIndex, offsetWithin(targetPageIndex, targetFraction));
     },
-    [engine.pageCount, currentReturnLocation, offsetWithin, scrollToPageOffset],
+    [pushHistory, engine.pageCount, currentReturnLocation, offsetWithin, scrollToPageOffset],
   );
 
   const navigateToInternalLink = useCallback(
@@ -1120,10 +1239,17 @@ function PdfPages({
   );
 
   const handleReturnBack = () => {
-    const target = returnStack.at(-1);
-    if (!target) return;
-    setReturnStack((stack) => stack.slice(0, -1));
-    scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
+    backChip.dismiss();
+    const target = history.goBack(currentReturnLocation());
+    if (target)
+      scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
+  };
+
+  const handleForward = () => {
+    backChip.dismiss();
+    const target = history.goForward(currentReturnLocation());
+    if (target)
+      scrollToPageOffset(target.pageIndex, offsetWithin(target.pageIndex, target.fraction));
   };
 
   const navigateToBookmark = useCallback(
@@ -1140,16 +1266,15 @@ function PdfPages({
         previous.pageIndex !== pdfAnchor.pageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.02
       ) {
-        setReturnStack((stack) => [...stack, previous]);
+        pushHistory(previous);
       }
       scrollToPageOffset(pdfAnchor.pageIndex, offsetWithin(pdfAnchor.pageIndex, targetFraction));
     },
-    [currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
+    [pushHistory, currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
   );
 
   const bookmarksController = useBookmarksController<'pdf'>({
     documentId,
-    isActive,
     bookmarks,
     onAddBookmark,
     onRemoveBookmark,
@@ -1212,6 +1337,11 @@ function PdfPages({
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     const nextScrollTop = event.currentTarget.scrollTop;
     lastScrollTop.current = nextScrollTop;
+    const isProgrammatic =
+      programmaticScrollRef.current !== null &&
+      Math.abs(nextScrollTop - programmaticScrollRef.current.scrollTop) <= 2;
+    // A programmatic scroll already recorded its exact target.
+    if (!isProgrammatic) layoutAnchor.current = currentReturnLocation();
     if (
       programmaticScrollRef.current &&
       Math.abs(nextScrollTop - programmaticScrollRef.current.scrollTop) <= 2
@@ -1248,74 +1378,6 @@ function PdfPages({
     [],
   );
 
-  useEffect(() => {
-    if (!isActive) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.altKey) {
-        return;
-      }
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      if (target) {
-        const tag = target.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
-          return;
-        }
-        if (
-          target.closest(
-            '[contenteditable="true"], [role="textbox"], [role="slider"], [role="separator"], [role="tablist"], .react-flow',
-          )
-        ) {
-          return;
-        }
-      }
-      if (event.metaKey || event.ctrlKey) {
-        if (event.key === '=' || event.key === '+') {
-          event.preventDefault();
-          stepZoom(1);
-        } else if (event.key === '-' || event.key === '_') {
-          event.preventDefault();
-          stepZoom(-1);
-        } else if (event.key === '0' && !event.shiftKey) {
-          event.preventDefault();
-          applyZoom('actual-size');
-        } else if (event.key === '9' && !event.shiftKey) {
-          event.preventDefault();
-          applyZoom('fit-width');
-        } else if (event.key === '8' && !event.shiftKey) {
-          event.preventDefault();
-          applyZoom('fit-page');
-        }
-        return;
-      }
-      if (event.shiftKey) return;
-      const currentPage =
-        displayMode === 'single'
-          ? currentPageIndex
-          : (pagesInRow(
-              virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0,
-            )[0] ?? currentPageIndex);
-      if (event.key === 'ArrowRight' && currentPage + 1 < engine.pageCount) {
-        event.preventDefault();
-        scrollToPageOffset(currentPage + 1, offsetWithin(currentPage + 1, 0));
-      } else if (event.key === 'ArrowLeft' && currentPage > 0) {
-        event.preventDefault();
-        scrollToPageOffset(currentPage - 1, offsetWithin(currentPage - 1, 0));
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [
-    applyZoom,
-    currentPageIndex,
-    displayMode,
-    engine.pageCount,
-    isActive,
-    offsetWithin,
-    pagesInRow,
-    scrollToPageOffset,
-    stepZoom,
-    virtualizer,
-  ]);
   // ---- Jumping -------------------------------------------------------------
 
   const jumpAnchor = asPdfAnchor(jumpRequest?.anchor);
@@ -1341,7 +1403,7 @@ function PdfPages({
         previous.pageIndex !== pdfAnchor.pageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.02
       ) {
-        setReturnStack((stack) => [...stack, previous]);
+        pushHistory(previous);
       }
       const pageStart = offsetWithin(pdfAnchor.pageIndex, 0);
       const top = offsetWithin(pdfAnchor.pageIndex, targetFraction);
@@ -1355,7 +1417,7 @@ function PdfPages({
         setAnnotationPulsingId(null);
       }, PULSE_MS);
     },
-    [currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
+    [pushHistory, currentReturnLocation, engine.pageCount, offsetWithin, scrollToPageOffset],
   );
 
   const clearSelectionAfterAnnotate = useCallback(() => {
@@ -1366,6 +1428,13 @@ function PdfPages({
     setCapture(null);
     onSelectionChange(null);
   }, [onSelectionChange]);
+
+  const prevHighlightCount = useRef(highlights.length);
+  useEffect(() => {
+    const grew = highlights.length > prevHighlightCount.current;
+    prevHighlightCount.current = highlights.length;
+    if (grew && activeSelection) clearSelectionAfterAnnotate();
+  }, [highlights.length, activeSelection, clearSelectionAfterAnnotate]);
 
   const annotationsController = useAnnotationsController({
     documentId,
@@ -1402,17 +1471,7 @@ function PdfPages({
         previous.pageIndex !== match.pageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.02
       ) {
-        setReturnStack((stack) => {
-          const top = stack.at(-1);
-          if (
-            top &&
-            top.pageIndex === previous.pageIndex &&
-            Math.abs(top.fraction - previous.fraction) <= 0.02
-          ) {
-            return stack;
-          }
-          return [...stack, previous];
-        });
+        pushHistory(previous);
       }
       const pageStart = offsetWithin(match.pageIndex, 0);
       const top = offsetWithin(match.pageIndex, targetFraction);
@@ -1425,7 +1484,7 @@ function PdfPages({
         setSearchPulsing(false);
       }, PULSE_MS);
     },
-    [currentReturnLocation, offsetWithin, scrollToPageOffset],
+    [pushHistory, currentReturnLocation, offsetWithin, scrollToPageOffset],
   );
 
   useEffect(
@@ -1442,6 +1501,7 @@ function PdfPages({
       query: string,
       caseSensitive: boolean,
       signal: AbortSignal,
+      onProgress: (matchesSoFar: readonly PdfSearchMatch[]) => void,
     ): Promise<readonly PdfSearchMatch[]> => {
       if (!engine.getPageText) return [];
       const matches: PdfSearchMatch[] = [];
@@ -1449,7 +1509,11 @@ function PdfPages({
         if (signal.aborted) return [];
         const pageText = await engine.getPageText(pageIndex);
         if (signal.aborted) return [];
-        matches.push(...searchPdfPage(pageText, query, caseSensitive));
+        const pageMatches = searchPdfPage(pageText, query, caseSensitive);
+        if (pageMatches.length > 0) {
+          matches.push(...pageMatches);
+          onProgress([...matches]);
+        }
       }
       return matches;
     },
@@ -1465,15 +1529,28 @@ function PdfPages({
   const activeSearchMatch = search.activeMatch;
   const effectiveHighlights = useMemo(() => {
     if (annotations !== undefined) return highlights;
-    const localHighlights: ReaderHighlight[] = annotationsController.annotations.map(
-      ({ id, anchor, color }) => ({
-        annotationId: id,
-        anchor,
-        color,
-      }),
-    );
-    return [...highlights, ...localHighlights];
+    return [...highlights, ...localHighlights(annotationsController.annotations)];
   }, [annotations, annotationsController.annotations, highlights]);
+
+  // Captures are excerpted from the toolbar; the popover is for selected text.
+  const getSelectionRect = useCallback(() => selectionViewportRect(scrollRef.current), []);
+  const popover = useSelectionPopover({
+    isActive,
+    selection: activeSelection,
+    annotations: annotationsController,
+    surfaceRef: scrollRef,
+    getSelectionRect,
+  });
+  const openClickedHighlight = (event: ReactMouseEvent<HTMLElement>) => {
+    if (captureMode || event.button !== 0 || event.detail > 1) return;
+    const selection = event.currentTarget.ownerDocument.getSelection();
+    if (selection && !selection.isCollapsed) return;
+    // Highlights let clicks through to the text layer, so find the one under the point.
+    const pageElement = (event.target as Element).closest('[data-page-index]');
+    if (!pageElement) return;
+    const hit = annotationAtPoint(event, pageElement);
+    if (hit) popover.openForAnnotation(hit.annotationId, hit.rect);
+  };
 
   const pulsingAnnotationId = jumpReady
     ? (jumpRequest?.annotationId ?? null)
@@ -1495,7 +1572,7 @@ function PdfPages({
         previous.pageIndex !== jumpAnchor.pageIndex ||
         Math.abs(previous.fraction - targetFraction) > 0.02
       ) {
-        setReturnStack((stack) => [...stack, previous]);
+        pushHistory(previous);
       }
     }
     setCurrentPageIndex(jumpAnchor.pageIndex);
@@ -1519,6 +1596,176 @@ function PdfPages({
     return () => window.clearTimeout(timer);
   }, [jumpNonce, jumpExists, jumpReady, onJumpHandled]);
 
+  // ---- Commands -----------------------------------------------------------
+
+  const stepPage = (direction: 1 | -1) => {
+    const currentPage =
+      displayMode === 'single'
+        ? currentPageIndex
+        : (pagesInRow(virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0)[0] ??
+          currentPageIndex);
+    // Two pages turn a whole spread.
+    const target = currentPage + direction * (displayMode === 'two-page' ? 2 : 1);
+    if (target < 0 || target >= engine.pageCount) return false;
+    scrollToPageOffset(target, offsetWithin(target, 0));
+    return true;
+  };
+
+  const paged = displayMode !== 'continuous';
+  const turnPage = (direction: TurnDirection) => {
+    backChip.dismiss();
+    if (stepPage(direction) && paged) {
+      animatePageTurn(pageContentRef.current, direction, preferences?.pageTransition ?? 'slide');
+    }
+  };
+
+  /** Where each top-level outline chapter starts, in page order. */
+  const chapterStarts = useMemo(
+    () =>
+      [...new Set(outlineNodes.flatMap((node) => (node.target === null ? [] : [node.target])))]
+        .filter((page) => page >= 0 && page < engine.pageCount)
+        .sort((a, b) => a - b),
+    [outlineNodes, engine.pageCount],
+  );
+  const chapterTitle = chapterOfPage(outlineNodes, currentPageIndex);
+  const chapterStartOf = (page: number) => chapterStarts.findLast((start) => start <= page) ?? 0;
+  const nextChapterStart = (page: number) => chapterStarts.find((start) => start > page);
+
+  const showPage = (page: number) => {
+    backChip.dismiss();
+    const target = Math.min(Math.max(page, 0), engine.pageCount - 1);
+    scrollToPageOffset(target, offsetWithin(target, 0));
+  };
+
+  /** A big jump (contents, thumbnails, scrubber), with a chip that leads back. */
+  const jumpToPage = (page: number) => {
+    const target = Math.min(Math.max(page, 0), engine.pageCount - 1);
+    const origin = currentPageIndex + 1;
+    navigateToPage(target);
+    if (target !== currentPageIndex) backChip.offer(`Back to page ${origin}`);
+  };
+
+  const lastPage = Math.max(engine.pageCount - 1, 0);
+  const pagePercent = Math.round(((currentPageIndex + 1) / Math.max(engine.pageCount, 1)) * 100);
+  const describePage = (page: number) => {
+    const chapter = chapterOfPage(outlineNodes, page);
+    return chapter ? `${chapter} · p. ${page + 1}` : `Page ${page + 1}`;
+  };
+  const pageAt = (fraction: number) => Math.round(Math.min(Math.max(fraction, 0), 1) * lastPage);
+  const scrubber: ScrubberModel | null =
+    engine.pageCount > 1
+      ? {
+          value: currentPageIndex / lastPage,
+          valueText: `Page ${currentPageIndex + 1} of ${engine.pageCount}${
+            chapterTitle ? `, ${chapterTitle}` : ''
+          }, ${pagePercent}%`,
+          ticks: chapterStarts
+            .filter((start) => start > 0)
+            .map((start) => ({
+              position: start / lastPage,
+              label: chapterOfPage(outlineNodes, start) ?? `Page ${start + 1}`,
+            })),
+          describe: (fraction) => describePage(pageAt(fraction)),
+          onCommit: (fraction) => jumpToPage(pageAt(fraction)),
+          onStepPage: turnPage,
+          onStepChapter: (direction) =>
+            showPage(
+              direction > 0
+                ? (nextChapterStart(currentPageIndex) ?? lastPage)
+                : chapterStartOf(currentPageIndex - 1),
+            ),
+        }
+      : null;
+
+  const pagesLeft =
+    (chapterStarts.length > 0
+      ? (nextChapterStart(currentPageIndex) ?? engine.pageCount)
+      : engine.pageCount) -
+    currentPageIndex -
+    1;
+  const readouts: FooterReadouts = {
+    remaining:
+      pagesLeft <= 0
+        ? chapterStarts.length > 0
+          ? 'Last page in chapter'
+          : 'Last page'
+        : `${pagesLeft} ${pagesLeft === 1 ? 'page' : 'pages'} left${
+            chapterStarts.length > 0 ? ' in chapter' : ''
+          }`,
+    position: `Page ${currentPageIndex + 1} of ${engine.pageCount}`,
+    percent: `${pagePercent}%`,
+  };
+
+  const gestures = usePageTurnGestures({
+    enabled: isActive && paged && !captureMode,
+    areaRef: scrollRef,
+    onTurn: turnPage,
+    // A page zoomed wider than the pane scrolls sideways instead.
+    canSwipe: () => {
+      const scroller = scrollRef.current;
+      return !scroller || scroller.scrollWidth <= scroller.clientWidth + 1;
+    },
+  });
+
+  const goToPage = () => {
+    const input = pageInputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  };
+
+  // Entering focus mode puts the panels away; leaving it does not reopen them.
+  const [wasChromeHidden, setWasChromeHidden] = useState(chromeHidden);
+  if (wasChromeHidden !== chromeHidden) {
+    setWasChromeHidden(chromeHidden);
+  }
+
+  const showSidebar = navigator.open && !chromeHidden;
+  const canZoomIn = currentScale < MAX_ZOOM_SCALE - 1e-4;
+  const canZoomOut = currentScale > MIN_ZOOM_SCALE + 1e-4;
+
+  useReaderCommands({
+    isActive,
+    chromeHidden,
+    search,
+    navigator,
+    bookmarks: bookmarksController,
+    annotations: annotationsController,
+    selectionText: activeSelection?.text ?? null,
+    markup,
+    popover,
+    extra: {
+      'view.layoutSingle': { run: () => applyDisplayMode('single') },
+      'view.layoutTwoPage': { run: () => applyDisplayMode('two-page') },
+      'view.layoutScroll': { run: () => applyDisplayMode('continuous') },
+      'view.zoomIn': { run: () => stepZoom(1), enabled: canZoomIn },
+      'view.zoomOut': { run: () => stepZoom(-1), enabled: canZoomOut },
+      'view.actualSize': { run: () => applyZoom('actual-size') },
+      'view.zoomToFit': { run: () => applyZoom('fit-page') },
+      'view.zoomToWidth': { run: () => applyZoom('fit-width') },
+      'view.rotateLeft': { run: () => rotateBy(-90) },
+      'view.rotateRight': { run: () => rotateBy(90) },
+      // Continuous scroll keeps Space and Page Up/Down as the browser scrolls them.
+      'go.previousPage': { run: () => turnPage(-1), nativeAliases: !paged },
+      'go.nextPage': { run: () => turnPage(1), nativeAliases: !paged },
+      'go.previousChapter': {
+        run: () => showPage(chapterStartOf(currentPageIndex - 1)),
+        enabled: chapterStarts.length > 0 && currentPageIndex > (chapterStarts[0] ?? 0),
+      },
+      'go.nextChapter': {
+        run: () => showPage(nextChapterStart(currentPageIndex) ?? lastPage),
+        enabled: nextChapterStart(currentPageIndex) !== undefined,
+      },
+      'go.chapterStart': { run: () => showPage(chapterStartOf(currentPageIndex)) },
+      'go.chapterEnd': {
+        run: () => showPage((nextChapterStart(currentPageIndex) ?? engine.pageCount) - 1),
+      },
+      'go.page': { run: goToPage },
+      'go.back': { run: handleReturnBack, enabled: history.canGoBack },
+      'go.forward': { run: handleForward, enabled: history.canGoForward },
+    },
+  });
+
   // ---- Rendering -----------------------------------------------------------
 
   const byPage = useMemo(() => {
@@ -1528,6 +1775,7 @@ function PdfPages({
       annotationId: string,
       rects: NormalizedRect[],
       color: string,
+      style: AnnotationStyle = 'highlight',
     ) => {
       pages.set(pageIndex, [
         ...(pages.get(pageIndex) ?? []),
@@ -1535,18 +1783,20 @@ function PdfPages({
           annotationId,
           anchor: { format: 'pdf', pageIndex, rects },
           color,
+          style,
         },
       ]);
     };
     for (const highlight of effectiveHighlights) {
       const anchor = asPdfAnchor(highlight.anchor);
       if (!anchor) continue;
+      const { annotationId, color, style } = highlight;
       if (anchor.pageSpans && anchor.pageSpans.length > 0) {
         for (const span of anchor.pageSpans) {
-          addPageHighlight(span.pageIndex, highlight.annotationId, span.rects, highlight.color);
+          addPageHighlight(span.pageIndex, annotationId, span.rects, color, style);
         }
       } else {
-        addPageHighlight(anchor.pageIndex, highlight.annotationId, anchor.rects, highlight.color);
+        addPageHighlight(anchor.pageIndex, annotationId, anchor.rects, color, style);
       }
     }
     if (activeSearchMatch) {
@@ -1578,325 +1828,352 @@ function PdfPages({
       data-zoom-mode={zoomMode}
       data-display-mode={displayMode}
       data-rotation={rotation}
+      data-chrome-hidden={chromeHidden || undefined}
     >
-      <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b px-2 py-1 text-xs text-muted-foreground">
-        <div className="flex flex-wrap items-center gap-1">
-          <Button
-            variant={tocOpen ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-label="Table of contents"
-            aria-pressed={tocOpen}
-            onClick={() => setTocOpen((open) => !open)}
-          >
-            <ListTree />
-            Contents
-          </Button>
-          <Button
-            variant={thumbnailsOpen ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-thumbnails-toggle"
-            aria-label="Page thumbnails"
-            aria-pressed={thumbnailsOpen}
-            onClick={() => setThumbnailsOpen((open) => !open)}
-          >
-            <LayoutGrid />
-            Thumbnails
-          </Button>
-          {returnStack.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-xs"
-              aria-label="Return to previous location"
-              onClick={handleReturnBack}
+      <ReaderToolbar
+        isActive={isActive}
+        leading={
+          <>
+            <ToolbarButton
+              icon={PanelLeft}
+              label="Sidebar"
+              command="view.toggleSidebar"
+              pressed={showSidebar}
+              testId="sidebar-toggle"
+              disabled={chromeHidden}
+              onClick={navigator.toggle}
+            />
+            <SegmentedControl
+              label="Display mode"
+              options={DISPLAY_MODES}
+              value={displayMode}
+              onChange={applyDisplayMode}
+            />
+            <HistoryButtons
+              canGoBack={history.canGoBack}
+              canGoForward={history.canGoForward}
+              onBack={handleReturnBack}
+              onForward={handleForward}
+            />
+          </>
+        }
+        center={
+          <div className="flex min-w-0 flex-col items-center leading-tight">
+            <span
+              data-testid="reader-toolbar-title"
+              className="max-w-full truncate text-xs font-semibold"
             >
-              <RotateCcw />
-              Back
-            </Button>
-          )}
-          <DocumentSearchToggleButton open={search.open} onToggle={search.toggleSearch} />
-          <BookmarkToggleButton
-            bookmarked={bookmarksController.isCurrentBookmarked}
-            onToggle={bookmarksController.toggleCurrentBookmark}
-          />
-          <BookmarksListToggleButton
-            open={bookmarksController.open}
-            count={bookmarksController.bookmarks.length}
-            onToggle={bookmarksController.togglePanel}
-          />
-          <AnnotationsListToggleButton
-            open={annotationsController.open}
-            count={annotationsController.annotations.length}
-            onToggle={annotationsController.togglePanel}
-          />
-          <SelectionAnnotationControls
-            hasSelection={activeSelection !== null}
-            controller={annotationsController}
-          />
-        </div>
-        <form
-          className="flex items-center gap-1"
-          onSubmit={(event) => {
-            event.preventDefault();
-            submitPageInput();
-          }}
-        >
-          <label htmlFor={`pdf-page-input-${documentId}`} className="text-xs text-muted-foreground">
-            Page
-          </label>
-          <input
-            id={`pdf-page-input-${documentId}`}
-            type="text"
-            inputMode="numeric"
-            aria-label="Page number"
-            aria-invalid={pageInputInvalid}
-            value={pageInput}
-            onChange={(event) => {
-              setPageInput(event.target.value);
-              if (pageInputInvalid) setPageInputInvalid(false);
-            }}
-            onBlur={() => {
-              if (pageInputInvalid) {
-                setPageInput(String(currentPageIndex + 1));
-                setPageInputInvalid(false);
-              }
-            }}
-            className={cn(
-              'h-6 w-10 rounded border bg-background px-1 text-center text-xs text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
-              pageInputInvalid && 'border-destructive text-destructive',
-            )}
-          />
-          <span data-testid="pdf-page-count" className="text-xs text-muted-foreground tabular-nums">
-            of {engine.pageCount}
-          </span>
-        </form>
-        <div role="group" aria-label="Display mode" className="flex flex-wrap items-center gap-0.5">
-          <Button
-            variant={displayMode === 'continuous' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-mode-continuous"
-            aria-label="Continuous scroll"
-            aria-pressed={displayMode === 'continuous'}
-            onClick={() => applyDisplayMode('continuous')}
-          >
-            <BookOpen />
-            Continuous
-          </Button>
-          <Button
-            variant={displayMode === 'single' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-mode-single"
-            aria-label="Single page"
-            aria-pressed={displayMode === 'single'}
-            onClick={() => applyDisplayMode('single')}
-          >
-            <FileText />
-            Single page
-          </Button>
-          <Button
-            variant={displayMode === 'two-page' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-mode-two-page"
-            aria-label="Two pages"
-            aria-pressed={displayMode === 'two-page'}
-            onClick={() => applyDisplayMode('two-page')}
-          >
-            <Columns2 />
-            Two pages
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            data-testid="pdf-rotate-button"
-            aria-label="Rotate clockwise"
-            onClick={rotateClockwise}
-          >
-            <RotateCw />
-            Rotate
-          </Button>
-        </div>
-        <div
-          role="group"
-          aria-label="Zoom controls"
-          className="flex flex-wrap items-center gap-0.5"
-        >
-          <Button
-            variant={zoomMode === 'fit-width' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-pressed={zoomMode === 'fit-width'}
-            onClick={() => applyZoom('fit-width')}
-          >
-            Fit width
-          </Button>
-          <Button
-            variant={zoomMode === 'fit-page' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-pressed={zoomMode === 'fit-page'}
-            onClick={() => applyZoom('fit-page')}
-          >
-            Fit page
-          </Button>
-          <Button
-            variant={zoomMode === 'actual-size' ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-pressed={zoomMode === 'actual-size'}
-            onClick={() => applyZoom('actual-size')}
-          >
-            Actual size
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6"
-            aria-label="Zoom out"
-            disabled={currentScale <= MIN_ZOOM_SCALE + 1e-4}
-            onClick={() => stepZoom(-1)}
-          >
-            <ZoomOut />
-          </Button>
-          <span
-            data-testid="pdf-zoom-level"
-            className="min-w-10 text-center text-xs text-foreground tabular-nums"
-          >
-            {zoomPercent}%
-          </span>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6"
-            aria-label="Zoom in"
-            disabled={currentScale >= MAX_ZOOM_SCALE - 1e-4}
-            onClick={() => stepZoom(1)}
-          >
-            <ZoomIn />
-          </Button>
-        </div>
-        <Button
-          variant={captureMode ? 'secondary' : 'ghost'}
-          size="sm"
-          className="h-6 px-2 text-xs"
-          aria-pressed={captureMode}
-          onClick={toggleCaptureMode}
-        >
-          <Crop />
-          Capture area
-        </Button>
-      </div>
-      <DocumentSearchBar search={search} />
-      <BookmarksPanel controller={bookmarksController} />
-      <SelectionNoteComposer
-        hasSelection={activeSelection !== null}
-        controller={annotationsController}
+              {document.title}
+            </span>
+            <form
+              className="flex max-w-full min-w-0 items-center gap-1 text-[11px] text-muted-foreground"
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitPageInput();
+              }}
+            >
+              {chapterTitle && (
+                <span
+                  data-testid="reader-toolbar-subtitle"
+                  title={chapterTitle}
+                  className="max-w-48 min-w-0 truncate"
+                >
+                  {chapterTitle} ·
+                </span>
+              )}
+              <label htmlFor={`pdf-page-input-${documentId}`}>Page</label>
+              <input
+                ref={pageInputRef}
+                id={`pdf-page-input-${documentId}`}
+                type="text"
+                inputMode="numeric"
+                aria-label="Page number"
+                aria-invalid={pageInputInvalid}
+                value={pageInput}
+                onChange={(event) => {
+                  setPageInput(event.target.value);
+                  if (pageInputInvalid) setPageInputInvalid(false);
+                }}
+                onBlur={() => {
+                  if (pageInputInvalid) {
+                    setPageInput(String(currentPageIndex + 1));
+                    setPageInputInvalid(false);
+                  }
+                }}
+                className={cn(
+                  'h-4.5 w-9 rounded border bg-background px-1 text-center text-[11px] text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  pageInputInvalid && 'border-destructive text-destructive',
+                )}
+              />
+              <span data-testid="pdf-page-count" className="tabular-nums">
+                of {engine.pageCount}
+              </span>
+            </form>
+          </div>
+        }
+        trailing={
+          <>
+            <div role="group" aria-label="Zoom controls" className="flex items-center gap-0.5">
+              <ToolbarButton
+                icon={MoveHorizontal}
+                label="Fit width"
+                command="view.zoomToWidth"
+                pressed={zoomMode === 'fit-width'}
+                collapse="xl"
+                onClick={() => applyZoom('fit-width')}
+              />
+              <ToolbarButton
+                icon={Expand}
+                label="Fit page"
+                command="view.zoomToFit"
+                pressed={zoomMode === 'fit-page'}
+                collapse="xl"
+                onClick={() => applyZoom('fit-page')}
+              />
+              <ToolbarButton
+                icon={Scan}
+                label="Actual size"
+                command="view.actualSize"
+                pressed={zoomMode === 'actual-size'}
+                collapse="xl"
+                onClick={() => applyZoom('actual-size')}
+              />
+              <ToolbarButton
+                icon={ZoomOut}
+                label="Zoom out"
+                command="view.zoomOut"
+                disabled={!canZoomOut}
+                onClick={() => stepZoom(-1)}
+              />
+              <span
+                data-testid="pdf-zoom-level"
+                className="min-w-9 text-center text-xs text-foreground tabular-nums"
+              >
+                {zoomPercent}%
+              </span>
+              <ToolbarButton
+                icon={ZoomIn}
+                label="Zoom in"
+                command="view.zoomIn"
+                disabled={!canZoomIn}
+                onClick={() => stepZoom(1)}
+              />
+            </div>
+            <ToolbarButton
+              icon={RotateCcw}
+              label="Rotate counterclockwise"
+              command="view.rotateLeft"
+              collapse="lg"
+              onClick={() => rotateBy(-90)}
+            />
+            <ToolbarButton
+              icon={RotateCw}
+              label="Rotate clockwise"
+              command="view.rotateRight"
+              testId="pdf-rotate-button"
+              collapse="lg"
+              onClick={rotateClockwise}
+            />
+            <ToolbarSeparator />
+            <ToolbarButton
+              icon={Crop}
+              label="Capture area"
+              pressed={captureMode}
+              onClick={toggleCaptureMode}
+            />
+            <MarkupToggleButton
+              visible={markup.visible}
+              highlightMode={annotationsController.highlightMode}
+              onToggle={markup.toggle}
+            />
+            <ToolbarSeparator />
+            <BookmarkToggleButton
+              bookmarked={bookmarksController.isCurrentBookmarked}
+              onToggle={bookmarksController.toggleCurrentBookmark}
+            />
+            <ToolbarOverflowMenu
+              items={[
+                {
+                  label: 'Fit width',
+                  collapse: 'xl',
+                  pressed: zoomMode === 'fit-width',
+                  onSelect: () => applyZoom('fit-width'),
+                },
+                {
+                  label: 'Fit page',
+                  collapse: 'xl',
+                  pressed: zoomMode === 'fit-page',
+                  onSelect: () => applyZoom('fit-page'),
+                },
+                {
+                  label: 'Actual size',
+                  collapse: 'xl',
+                  pressed: zoomMode === 'actual-size',
+                  onSelect: () => applyZoom('actual-size'),
+                },
+                { label: 'Rotate counterclockwise', collapse: 'lg', onSelect: () => rotateBy(-90) },
+                { label: 'Rotate clockwise', collapse: 'lg', onSelect: rotateClockwise },
+              ]}
+            />
+            <ToolbarSearchField
+              search={search}
+              onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+            />
+          </>
+        }
       />
-      <AnnotationsPanel controller={annotationsController} />
-      {unsupportedSubtypes.length > 0 && (
-        <p
-          role="status"
-          data-testid="pdf-unsupported-annotations-notice"
-          className="shrink-0 border-b bg-muted/60 px-4 py-1 text-xs text-muted-foreground"
-        >
-          Unsupported PDF annotation types not shown: {unsupportedSubtypes.join(', ')}. Source PDF
-          is never modified.
-        </p>
-      )}
-      {missedJump && (
-        <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
-          That excerpt is on a page this file does not have. The file may have changed.
-        </p>
-      )}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        {tocOpen && (
-          <OutlineSidebar
-            items={outlineNodes}
-            isActive={(targetPage) => targetPage === currentPageIndex}
-            emptyMessage="No outline in this document."
-            onSelect={(pageIndex) => navigateToPage(pageIndex)}
-          />
-        )}
-        {thumbnailsOpen && (
-          <PdfThumbnailsSidebar
-            engine={engine}
-            sizes={sizes}
-            rotation={rotation}
-            currentPageIndex={currentPageIndex}
-            onSelectPage={(pageIndex) => navigateToPage(pageIndex)}
-          />
-        )}
-        {/*
-          The scrollbar is always present. If it appeared once page sizes loaded, the pane
-          would narrow, every page would re-render at a new scale, and that destroys any
-          selection already made.
-        */}
-        <div
-          ref={scrollRef}
-          onScroll={onScroll}
-          data-testid="pdf-scroll"
-          className="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-scroll bg-muted"
-        >
-          <div
-            className="relative"
-            style={{
-              width: innerMinWidth,
-              height: virtualizer.getTotalSize(),
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {showSidebar && (
+          <ReaderNavigator
+            navigator={navigator}
+            bookmarks={bookmarksController}
+            annotations={annotationsController}
+            search={search}
+            groupSearchResults
+            contents={{
+              items: outlineNodes,
+              currentId: currentOutlineId(outlineNodes, currentPageIndex),
+              emptyMessage: 'No outline in this document.',
+              onSelect: (pageIndex: number) => jumpToPage(pageIndex),
             }}
-          >
-            {width > 0 &&
-              virtualItems.map((item) => {
-                const pages = pagesInRow(item.index);
-                const itemWidth = rowWidth(item.index);
-                const itemHeight = rowHeight(item.index);
-                const itemLeft = Math.max(SIDE_PADDING_PX, (width - itemWidth) / 2);
-                return (
-                  <div
-                    key={`${displayMode}-${item.key}`}
-                    className="absolute flex items-start"
-                    style={{
-                      top: 0,
-                      left: itemLeft,
-                      width: itemWidth,
-                      height: itemHeight,
-                      gap: PAGE_GAP_PX,
-                      transform: `translateY(${item.start}px)`,
-                    }}
-                  >
-                    {pages.map((pageIndex) => (
+            renderThumbnails={(filter) => (
+              <PdfThumbnailsList
+                engine={engine}
+                sizes={sizes}
+                rotation={rotation}
+                currentPageIndex={currentPageIndex}
+                filter={filter}
+                onSelectPage={(pageIndex) => jumpToPage(pageIndex)}
+              />
+            )}
+            annotationPlacement={(annotation): AnnotationPlacement => {
+              const anchor = asPdfAnchor(annotation.anchor);
+              if (!anchor) return { order: Number.MAX_SAFE_INTEGER };
+              return {
+                group:
+                  chapterOfPage(outlineNodes, anchor.pageIndex) ?? `Page ${anchor.pageIndex + 1}`,
+                order: anchor.pageIndex + (anchor.rects[0]?.y ?? 0),
+              };
+            }}
+          />
+        )}
+        {/* Notices float over the page column only, never over the sidebar. */}
+        <div ref={readerAreaRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {markup.visible && <MarkupBar controller={annotationsController} onClose={markup.hide} />}
+          <SelectionPopover
+            popover={popover}
+            annotations={annotationsController}
+            selection={activeSelection?.text ? activeSelection : null}
+            boundsRef={readerAreaRef}
+            onExcerpt={onExcerptSelection}
+            canExcerpt={canExcerpt}
+            onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+          />
+          <ReaderPopoverLayer>
+            {unsupportedSubtypes.length > 0 && !chromeHidden && (
+              <p
+                role="status"
+                data-testid="pdf-unsupported-annotations-notice"
+                className="bg-muted px-4 py-1 text-xs text-muted-foreground"
+              >
+                Unsupported PDF annotation types not shown: {unsupportedSubtypes.join(', ')}. Source
+                PDF is never modified.
+              </p>
+            )}
+            {missedJump && (
+              <p role="status" className="bg-muted px-4 py-1.5 text-xs">
+                That excerpt is on a page this file does not have. The file may have changed.
+              </p>
+            )}
+          </ReaderPopoverLayer>
+          {/*
+            The scrollbar is always present. If it appeared once page sizes loaded, the pane
+            would narrow, every page would re-render at a new scale, and that destroys any
+            selection already made.
+          */}
+          <div className="group/page relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <div
+              ref={scrollRef}
+              onScroll={onScroll}
+              onClick={openClickedHighlight}
+              tabIndex={-1}
+              data-testid="pdf-scroll"
+              data-turn-zone={gestures.zone ?? undefined}
+              className="min-h-0 min-w-0 flex-1 overflow-x-auto overflow-y-scroll bg-muted outline-none"
+              style={{ cursor: zoneCursor(gestures.zone) || undefined }}
+            >
+              <div
+                ref={pageContentRef}
+                className="relative"
+                style={{
+                  width: innerMinWidth,
+                  height: virtualizer.getTotalSize(),
+                }}
+              >
+                {width > 0 &&
+                  virtualItems.map((item) => {
+                    const pages = pagesInRow(item.index);
+                    const itemWidth = rowWidth(item.index);
+                    const itemHeight = rowHeight(item.index);
+                    const itemLeft = Math.max(SIDE_PADDING_PX, (width - itemWidth) / 2);
+                    return (
                       <div
-                        key={pageIndex}
+                        key={`${displayMode}-${item.key}`}
+                        className="absolute flex items-start"
                         style={{
-                          width: pageWidth(pageIndex),
-                          height: pageHeight(pageIndex),
+                          top: 0,
+                          left: itemLeft,
+                          width: itemWidth,
+                          height: itemHeight,
+                          gap: PAGE_GAP_PX,
+                          transform: `translateY(${item.start}px)`,
                         }}
                       >
-                        <PdfPage
-                          engine={engine}
-                          pageIndex={pageIndex}
-                          scale={scaleOf(pageIndex)}
-                          rotation={rotation}
-                          highlights={byPage.get(pageIndex) ?? EMPTY_HIGHLIGHTS}
-                          pulsingAnnotationId={pulsingAnnotationId}
-                          captureMode={captureMode}
-                          captureBox={
-                            visibleCapture?.pageIndex === pageIndex ? visibleCapture.rect : null
-                          }
-                          onCapture={(canvas, rect) => onCapture(pageIndex, canvas, rect)}
-                          onNavigateLink={navigateToInternalLink}
-                          onPageAnnotationsLoaded={handlePageAnnotationsLoaded}
-                        />
+                        {pages.map((pageIndex) => (
+                          <div
+                            key={pageIndex}
+                            style={{
+                              width: pageWidth(pageIndex),
+                              height: pageHeight(pageIndex),
+                            }}
+                          >
+                            <PdfPage
+                              engine={engine}
+                              pageIndex={pageIndex}
+                              scale={scaleOf(pageIndex)}
+                              rotation={rotation}
+                              highlights={byPage.get(pageIndex) ?? EMPTY_HIGHLIGHTS}
+                              pulsingAnnotationId={pulsingAnnotationId}
+                              captureMode={captureMode}
+                              captureBox={
+                                visibleCapture?.pageIndex === pageIndex ? visibleCapture.rect : null
+                              }
+                              onCapture={(canvas, rect) => onCapture(pageIndex, canvas, rect)}
+                              onNavigateLink={navigateToInternalLink}
+                              onPageAnnotationsLoaded={handlePageAnnotationsLoaded}
+                            />
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                );
-              })}
+                    );
+                  })}
+              </div>
+            </div>
+            {paged && (
+              <PageTurnChevrons
+                disabled={captureMode}
+                onPrevious={() => turnPage(-1)}
+                onNext={() => turnPage(1)}
+              />
+            )}
           </div>
+          <ReaderFooter
+            readouts={readouts}
+            scrubber={scrubber}
+            backLabel={backChip.label}
+            onBack={handleReturnBack}
+            className="border-t bg-background text-muted-foreground"
+          />
         </div>
       </div>
     </div>

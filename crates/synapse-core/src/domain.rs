@@ -259,6 +259,10 @@ pub struct RelinkDocumentResult {
 pub struct WorkspaceSession {
     pub open_document_ids: Vec<String>,
     pub active_document_id: Option<String>,
+    /// Immersive reading: chrome collapsed and the toolbar auto-hiding. Optional on
+    /// the wire so a frontend that predates it still round-trips.
+    #[serde(default)]
+    pub immersive: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -278,6 +282,33 @@ pub struct StudyNotebook {
     pub created_at: String,
 }
 
+/// How an annotation is drawn over its text. Excerpts are always highlights.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnnotationStyle {
+    #[default]
+    Highlight,
+    Underline,
+}
+
+impl AnnotationStyle {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Highlight => "highlight",
+            Self::Underline => "underline",
+        }
+    }
+
+    /// Rows only hold what the column's CHECK allows; anything else reads as a
+    /// highlight rather than failing the whole notebook load.
+    pub fn from_column(value: &str) -> Self {
+        match value {
+            "underline" => Self::Underline,
+            _ => Self::Highlight,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Annotation {
@@ -290,6 +321,8 @@ pub struct Annotation {
     #[serde(default)]
     pub note: Option<String>,
     pub color: String,
+    #[serde(default)]
+    pub style: AnnotationStyle,
     pub created_at: String,
 }
 
@@ -304,6 +337,9 @@ pub struct CreateAnnotationInput {
     pub excerpt_image_png: Option<String>,
     pub note: Option<String>,
     pub color: String,
+    /// Optional on the wire so older callers keep creating highlights.
+    #[serde(default)]
+    pub style: AnnotationStyle,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -311,6 +347,9 @@ pub struct CreateAnnotationInput {
 pub struct AnnotationPatch {
     pub note: Option<String>,
     pub color: Option<String>,
+    /// `None` keeps the current style.
+    #[serde(default)]
+    pub style: Option<AnnotationStyle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -422,29 +461,41 @@ pub struct CreateBookmarkInput {
     pub label: Option<String>,
 }
 
+/// The page palette. `Auto` follows the system's light or dark appearance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReadingTheme {
+    Auto,
     Light,
     Sepia,
     Dark,
 }
 
+/// A reading face. `Original` keeps the publisher's fonts (EPUB) or the default
+/// serif (TXT); the frontend maps every other face to a stack with fallbacks for
+/// platforms that lack it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum ReadingFontFamily {
-    Serif,
-    Sans,
+    Original,
+    Charter,
+    Iowan,
+    Palatino,
+    Athelas,
+    NewYork,
+    Seravek,
+    SfPro,
     Mono,
 }
 
+/// Page padding around the text column. The column itself is capped by the
+/// reading measure, not by this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ReadingWidth {
+pub enum ReadingMargins {
     Narrow,
-    Medium,
+    Normal,
     Wide,
-    Full,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -453,6 +504,16 @@ pub enum EpubReadingMode {
     Spread,
     Paged,
     Scroll,
+}
+
+/// How a paged reader animates a page turn. Reduced motion always turns instantly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PageTransition {
+    None,
+    #[default]
+    Slide,
+    Fade,
 }
 
 /// User-configurable appearance and layout preferences for EPUB and TXT readers.
@@ -465,19 +526,30 @@ pub struct ReadingPreferences {
     pub font_size: u32,
     /// Line height multiplier (`1.2..=2.4`).
     pub line_spacing: f64,
-    pub reading_width: ReadingWidth,
+    pub margins: ReadingMargins,
+    /// Justified text, hyphenated in the document's language.
+    pub justify: bool,
+    /// Dims images in the Dark theme.
+    pub dim_images: bool,
     pub epub_reading_mode: EpubReadingMode,
+    /// Also used by PDF single and two-page modes. Rows saved before it existed
+    /// take the default, so it needs no migration.
+    #[serde(default)]
+    pub page_transition: PageTransition,
 }
 
 impl Default for ReadingPreferences {
     fn default() -> Self {
         Self {
-            theme: ReadingTheme::Light,
-            font_family: ReadingFontFamily::Serif,
+            theme: ReadingTheme::Auto,
+            font_family: ReadingFontFamily::Original,
             font_size: 100,
             line_spacing: 1.75,
-            reading_width: ReadingWidth::Medium,
+            margins: ReadingMargins::Normal,
+            justify: true,
+            dim_images: false,
             epub_reading_mode: EpubReadingMode::Spread,
+            page_transition: PageTransition::Slide,
         }
     }
 }

@@ -1,8 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearchBar';
+import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend, type MemoryFile } from '@/lib/backend/memoryBackend';
 import {
@@ -60,6 +60,8 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
       onDeleteAnnotation={(id) => void state.removeAnnotation(id)}
       canUndoAnnotationDelete={state.deletedAnnotationHistory.length > 0}
       onUndoAnnotationDelete={() => void state.undoRemoveAnnotation()}
+      onExcerptSelection={() => void state.excerptSelection()}
+      canExcerpt={!state.isExcerpting}
     />
   );
 }
@@ -136,6 +138,73 @@ describe('TxtViewer', () => {
   describe('with the plain fixture', () => {
     const bytes = documentFixture('sample.txt');
     const decoded = new TextDecoder().decode(bytes);
+
+    it('shows line and byte progress in the footer, and scrubs with a Back chip', async () => {
+      const { store, documentId } = await setup(bytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('SynapseRead sample text');
+
+      const readout = await screen.findByTestId('reader-footer-readout');
+      await waitFor(() => expect(readout).toHaveTextContent(/^Line 1 of \d+$/));
+      fireEvent.click(readout);
+      expect(readout).toHaveTextContent('0%');
+
+      const slider = screen.getByRole('slider', { name: 'Reading position' });
+      expect(slider).toHaveAttribute(
+        'aria-valuetext',
+        expect.stringMatching(/^Line 1 of \d+, 0%$/),
+      );
+      vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 100, 20));
+      fireEvent.pointerDown(slider, { clientX: 99, button: 0, pointerId: 1 });
+      fireEvent.pointerUp(slider, { clientX: 99, button: 0, pointerId: 1 });
+      await waitFor(() => expect(scroller().scrollTop).toBeGreaterThan(0));
+      const chip = await screen.findByTestId('reader-back-chip');
+      expect(chip).toHaveTextContent('Back to line 1');
+      fireEvent.click(chip);
+      expect(scroller().scrollTop).toBe(0);
+      expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
+    });
+
+    it('pages with edge clicks, Space, and Page Down, and goes to the ends with Home and End', async () => {
+      const scrollBy = vi.fn();
+      Element.prototype.scrollBy = scrollBy as unknown as Element['scrollBy'];
+      const { store, documentId } = await setup(bytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('SynapseRead sample text');
+      vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, VIEWPORT_PX),
+      );
+
+      fireEvent.click(scroller(), { clientX: 790, clientY: 100, button: 0, detail: 1 });
+      expect(scrollBy).toHaveBeenLastCalledWith({ top: VIEWPORT_PX * 0.9 });
+      fireEvent.click(scroller(), { clientX: 10, clientY: 100, button: 0, detail: 1 });
+      expect(scrollBy).toHaveBeenLastCalledWith({ top: -VIEWPORT_PX * 0.9 });
+      // The middle of the page never turns it.
+      fireEvent.click(scroller(), { clientX: 400, clientY: 100, button: 0, detail: 1 });
+      expect(scrollBy).toHaveBeenCalledTimes(2);
+
+      fireEvent.keyDown(scroller(), { key: ' ', code: 'Space' });
+      fireEvent.keyDown(scroller(), { key: 'PageDown', code: 'PageDown' });
+      fireEvent.keyDown(scroller(), { key: ' ', code: 'Space', shiftKey: true });
+      expect(scrollBy.mock.calls.map(([options]) => (options as ScrollToOptions).top)).toEqual([
+        VIEWPORT_PX * 0.9,
+        -VIEWPORT_PX * 0.9,
+        VIEWPORT_PX * 0.9,
+        VIEWPORT_PX * 0.9,
+        -VIEWPORT_PX * 0.9,
+      ]);
+      // Space on a focused button presses the button instead.
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Next Page' }), {
+        key: ' ',
+        code: 'Space',
+      });
+      expect(scrollBy).toHaveBeenCalledTimes(5);
+
+      fireEvent.keyDown(scroller(), { key: 'End', code: 'End' });
+      expect(scroller().scrollTop).toBe(ROW_PX * 10_000);
+      fireEvent.keyDown(scroller(), { key: 'Home', code: 'Home' });
+      expect(scroller().scrollTop).toBe(0);
+    });
 
     it('virtualizes: renders only rows near the viewport', async () => {
       const { store, documentId } = await setup(bytes);
@@ -291,7 +360,7 @@ describe('TxtViewer', () => {
         }),
       );
       await waitFor(() => expect(store.getState().jumpRequest).toBeNull());
-      expect(await screen.findByRole('status')).toHaveTextContent(/past the end/);
+      expect(await screen.findByText(/past the end/)).toHaveAttribute('role', 'status');
     });
 
     it('keeps the selected rows rendered while scrolled away', async () => {
@@ -315,29 +384,39 @@ describe('TxtViewer', () => {
       await act(async () => {
         screen.getByRole('button', { name: 'Reading appearance' }).click();
       });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Dark' }).click();
-      });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Mono' }).click();
-      });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Increase font size' }).click();
-      });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Relaxed' }).click();
-      });
-      await act(async () => {
-        screen.getByRole('button', { name: 'Narrow' }).click();
-      });
+      // TXT has no publisher fonts, so Original reads as the default face.
+      expect(screen.getByRole('radio', { name: 'Default' })).toHaveAttribute(
+        'aria-checked',
+        'true',
+      );
+      for (const [role, name] of [
+        ['radio', 'Dark'],
+        ['radio', 'Monospace'],
+        ['button', 'Increase font size'],
+        ['button', 'Customize'],
+        ['radio', 'Relaxed'],
+        ['radio', 'Narrow'],
+        ['switch', 'Justify'],
+      ] as const) {
+        await act(async () => {
+          screen.getByRole(role, { name }).click();
+        });
+      }
+      // Image dimming only applies to formats with images.
+      expect(screen.queryByRole('switch', { name: /Dim images/ })).not.toBeInTheDocument();
 
       const viewer = screen.getByTestId('txt-viewer');
       expect(viewer).toHaveAttribute('data-reading-theme', 'dark');
-      expect(viewer).toHaveAttribute('data-reading-width', 'narrow');
+      expect(viewer).toHaveAttribute('data-reading-margins', 'narrow');
       expect(scroller().scrollTop).toBe(40 * ROW_PX);
+      expect(scroller().style.backgroundColor).toBe('rgb(24, 24, 27)');
       const docEl = screen.getByRole('document');
       expect(docEl.style.fontSize).toBe('1.1rem');
       expect(docEl.style.lineHeight).toBe('2.1');
+      // Capped at 75ch (fallback 0.5em of 17.6 px) plus 32 px a side at narrow margins.
+      expect(docEl.style.maxWidth).toBe(`${75 * 8.8 + 64}px`);
+      const row = docEl.querySelector<HTMLElement>('[data-index]');
+      expect(row?.style.textAlign).toBe('start');
       first.unmount();
 
       const reopened = createStudySyncStore(backend);
@@ -346,7 +425,7 @@ describe('TxtViewer', () => {
       render(<Harness store={reopened} documentId={documentId} />);
       await waitFor(() => expect(scroller().scrollTop).toBe(40 * ROW_PX));
       expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-theme', 'dark');
-      expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-width', 'narrow');
+      expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-margins', 'narrow');
     });
   });
 
@@ -428,7 +507,7 @@ describe('TxtViewer', () => {
     it('tells the reader the file has malformed bytes', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);
-      expect(await screen.findByRole('status')).toHaveTextContent(/not valid UTF-8/);
+      expect(await screen.findByText(/not valid UTF-8/)).toHaveAttribute('role', 'status');
     });
 
     it('searches lossy TXT files while retaining source-byte highlight mapping', async () => {
@@ -456,11 +535,16 @@ describe('TxtViewer', () => {
     fireEvent.keyDown(window, { key: 'f', ctrlKey: true });
     const searchInput = await screen.findByTestId('search-input');
     expect(searchInput).toHaveFocus();
-    expect(screen.getByTestId('search-status')).toHaveTextContent('Enter a search term');
+    expect(searchInput).toHaveAttribute('role', 'searchbox');
+    expect(searchInput).toHaveAttribute('placeholder', 'Search');
+    expect(screen.getByTestId('search-status').textContent).toBe('');
+    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
 
     // Search for a phrase that exists both near the top and in an unrendered row at the end.
     fireEvent.change(searchInput, { target: { value: 'final target sentence' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+    // Results list in the sidebar, which opened on its Search tab.
+    expect(screen.getByTestId('navigator-sidebar')).toHaveAttribute('data-navigator-tab', 'search');
     expect(screen.getByTestId('search-result-location')).toHaveTextContent(/Line \d+/);
     expect(screen.getByTestId('search-result-snippet')).toHaveTextContent('final target sentence');
 
@@ -477,14 +561,34 @@ describe('TxtViewer', () => {
     // Case sensitivity and no-match behavior.
     fireEvent.change(searchInput, { target: { value: 'QUICK BROWN FOX' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
-    fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Search options' }));
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Match case/ }));
     await waitFor(() =>
       expect(screen.getByTestId('search-status')).toHaveTextContent('No matches'),
     );
 
-    // Empty query resets search state.
+    // Empty query resets search state and puts the sidebar back as it was.
     fireEvent.change(searchInput, { target: { value: '   ' } });
-    expect(screen.getByTestId('search-status')).toHaveTextContent('Enter a search term');
+    expect(screen.getByTestId('search-status').textContent).toBe('');
+    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
+
+    // Esc clears the query and gives focus back to the text.
+    fireEvent.change(searchInput, { target: { value: 'quick' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of'));
+    fireEvent.keyDown(searchInput, { key: 'Escape' });
+    expect(searchInput).toHaveValue('');
+    expect(scroller()).toHaveFocus();
+  });
+
+  it('uses the selection for Find with Cmd/Ctrl+E', async () => {
+    const bytes = documentFixture('sample.txt');
+    const { store, documentId } = await setup(bytes);
+    render(<Harness store={store} documentId={documentId} />);
+    await selectText('quick brown fox');
+    fireEvent.keyDown(window, { key: 'e', code: 'KeyE', ctrlKey: true });
+    const searchInput = await screen.findByTestId('search-input');
+    expect(searchInput).toHaveValue('quick brown fox');
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of'));
   });
 
   it('adds, lists, jumps to, persists, removes, and handles stale bookmarks without creating cards or annotations', async () => {
@@ -510,10 +614,11 @@ describe('TxtViewer', () => {
     expect(store.getState().bookmarks).toHaveLength(1);
     fireEvent.keyDown(searchInput, { key: 'Escape' });
 
-    // Scroll back to top, open bookmarks list, and jump to the saved bookmark.
+    // Scroll back to top, show Bookmarks in the sidebar (⌥⌘5), and jump to the saved bookmark.
     scrollTo(0);
     expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    fireEvent.keyDown(window, { key: '5', code: 'Digit5', altKey: true, ctrlKey: true });
+    expect(screen.getByTestId('navigator-tab-bookmarks')).toHaveAttribute('aria-selected', 'true');
     await screen.findByTestId('bookmark-item');
     expect(screen.getByTestId('bookmark-label')).toHaveTextContent(/Line 21/);
     const jumpButton = screen.getByTestId('bookmark-jump-button');
@@ -541,7 +646,7 @@ describe('TxtViewer', () => {
     expect(await screen.findByTestId('bookmark-stale')).toHaveTextContent('Stale');
     const jumpButtons = screen.getAllByTestId('bookmark-jump-button');
     fireEvent.click(jumpButtons[1] as HTMLElement);
-    expect(await screen.findByRole('status')).toHaveTextContent(/past the end of this file/);
+    expect(await screen.findByText(/past the end of this file/)).toHaveAttribute('role', 'status');
 
     // Persist across reopen and remove bookmarks.
     first.unmount();
@@ -550,11 +655,23 @@ describe('TxtViewer', () => {
     await reopened.getState().openDocument();
     render(<Harness store={reopened} documentId={documentId} />);
     await segmentWith('SynapseRead sample text');
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    // The sidebar remembers the Bookmarks tab for TXT documents.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
+    expect(screen.getByTestId('navigator-tab-bookmarks')).toHaveAttribute('aria-selected', 'true');
     expect(await screen.findAllByTestId('bookmark-item')).toHaveLength(2);
 
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
     fireEvent.click(removeButtons[0] as HTMLElement);
+    await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
+
+    // ⌘Z puts it back; ⌫ on a focused row removes it again.
+    fireEvent.keyDown(window, { key: 'z', code: 'KeyZ', ctrlKey: true });
+    await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(2));
+    const rows = await screen.findAllByTestId('bookmark-jump-button');
+    (rows[0] as HTMLElement).focus();
+    fireEvent.keyDown(rows[0] as HTMLElement, { key: 'ArrowDown' });
+    expect(rows[1]).toHaveFocus();
+    fireEvent.keyDown(rows[1] as HTMLElement, { key: 'Backspace' });
     await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
   });
 
@@ -563,22 +680,39 @@ describe('TxtViewer', () => {
     const { store, documentId } = await setup(bytes);
     render(<Harness store={store} documentId={documentId} />);
 
+    // The markup bar (⇧⌘A) picks the color new marks use.
+    expect(screen.queryByTestId('markup-bar')).toBeNull();
+    fireEvent.keyDown(window, { key: 'a', code: 'KeyA', shiftKey: true, ctrlKey: true });
+    fireEvent.click(
+      within(await screen.findByTestId('markup-bar')).getByRole('button', {
+        name: 'Pink highlight',
+      }),
+    );
+
     await selectText('quick brown fox');
-    fireEvent.click(screen.getByTestId('annotation-color-pink'));
-    fireEvent.click(screen.getByTestId('add-note-selection-button'));
-    const composerInput = await screen.findByTestId('selection-note-input');
+    const popover = await screen.findByTestId('selection-popover');
+    fireEvent.click(within(popover).getByRole('button', { name: 'Add Note' }));
+    const composerInput = await screen.findByTestId('popover-note-input');
     fireEvent.change(composerInput, { target: { value: 'TXT note on line 2' } });
-    fireEvent.click(screen.getByTestId('save-selection-note-button'));
+    fireEvent.click(screen.getByTestId('popover-note-save'));
 
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]?.color).toBe('#f9a8d4');
     expect(store.getState().cards).toEqual([]);
     expect(store.getState().nodes).toEqual([]);
     const annotationId = store.getState().annotations[0]?.id as string;
     const painted = await segmentWith('quick brown fox');
     expect(painted).toHaveAttribute('data-annotation-id', annotationId);
 
-    // Open annotations panel and edit note & color.
-    fireEvent.click(screen.getByTestId('annotations-toggle-button'));
+    // Show Highlights & Notes (⌥⌘4): the row has its color, note, and date.
+    fireEvent.keyDown(window, { key: '4', code: 'Digit4', altKey: true, ctrlKey: true });
+    expect(await screen.findByTestId('annotation-note-preview')).toHaveTextContent(
+      'TXT note on line 2',
+    );
+    expect(screen.getByTestId('annotation-date').textContent).not.toBe('');
+
+    // Edit note & color.
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
     const editNoteInput = await screen.findByTestId('annotation-note-input');
     fireEvent.change(editNoteInput, { target: { value: 'Updated TXT note' } });
     fireEvent.blur(editNoteInput);
@@ -591,6 +725,135 @@ describe('TxtViewer', () => {
     fireEvent.click(await screen.findByTestId('undo-delete-annotation-button'));
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
     expect(store.getState().annotations[0]?.note).toBe('Updated TXT note');
+
+    // ⌫ on the focused row deletes; ⌘Z restores.
+    const row = await screen.findByTestId('annotation-jump-button');
+    row.focus();
+    fireEvent.keyDown(row, { key: 'Backspace' });
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(0));
+    expect(await screen.findByTestId('annotations-empty')).toHaveTextContent(/highlight it/);
+    fireEvent.keyDown(window, { key: 'z', code: 'KeyZ', ctrlKey: true });
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+  });
+
+  it('offers a selection popover with named swatches, the keyboard, edit mode, and excerpting', async () => {
+    const { store, documentId } = await setup(documentFixture('sample.txt'));
+    render(<Harness store={store} documentId={documentId} />);
+
+    // Nothing to act on yet: no popover, and no disabled Highlight or Add Note buttons.
+    await segmentWith('quick brown fox');
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+    expect(screen.queryByRole('button', { name: /highlight selection/i })).toBeNull();
+
+    await selectText('quick brown fox');
+    const popover = await screen.findByTestId('selection-popover');
+    expect(popover).toHaveAttribute('data-popover-mode', 'create');
+    const swatches = within(popover).getAllByRole('button', { name: / highlight$/ });
+    expect(swatches.map((swatch) => swatch.getAttribute('aria-label'))).toEqual([
+      'Yellow highlight',
+      'Green highlight',
+      'Blue highlight',
+      'Pink highlight',
+      'Purple highlight',
+    ]);
+    // The last color is marked by a check, not by its hue alone.
+    expect(swatches[0]).toHaveAttribute('aria-pressed', 'true');
+    expect(swatches[0]?.querySelector('svg')).not.toBeNull();
+    for (const name of ['Underline', 'Add Note', 'Excerpt to MindMap', 'Copy']) {
+      expect(within(popover).getByRole('button', { name })).toBeInTheDocument();
+    }
+
+    // ⇧F10 moves focus into the popover; arrows move along it; Esc puts it away.
+    fireEvent.keyDown(window, { key: 'F10', code: 'F10', shiftKey: true });
+    expect(swatches[0]).toHaveFocus();
+    fireEvent.keyDown(swatches[0] as HTMLElement, { key: 'ArrowRight' });
+    expect(swatches[1]).toHaveFocus();
+    fireEvent.keyDown(swatches[1] as HTMLElement, { key: 'Escape' });
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+    // The context-menu key brings it back.
+    fireEvent.keyDown(window, { key: 'ContextMenu', code: 'ContextMenu' });
+    expect(await screen.findByTestId('selection-popover')).toBeInTheDocument();
+
+    // Underline uses the last color.
+    fireEvent.click(screen.getByRole('button', { name: 'Underline' }));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    const underlined = store.getState().annotations[0];
+    expect(underlined?.style).toBe('underline');
+    expect(underlined?.color).toBe('#fde047');
+    const painted = await segmentWith('quick brown fox');
+    expect(painted).toHaveAttribute('data-annotation-style', 'underline');
+    expect(painted.style.textDecorationLine).toBe('underline');
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+
+    // Clicking it opens the same popover in edit mode: color, note, delete.
+    fireEvent.click(painted);
+    const editor = await screen.findByTestId('selection-popover');
+    expect(editor).toHaveAttribute('data-popover-mode', 'edit');
+    expect(within(editor).getByRole('button', { name: 'Underline' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(editor).queryByRole('button', { name: 'Excerpt to MindMap' })).toBeNull();
+    fireEvent.click(within(editor).getByRole('button', { name: 'Green highlight' }));
+    await waitFor(() => expect(store.getState().annotations[0]?.color).toBe('#86efac'));
+    expect(store.getState().annotations[0]?.style).toBe('underline');
+    fireEvent.click(within(editor).getByRole('button', { name: 'Underline' }));
+    await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('highlight'));
+    fireEvent.click(within(editor).getByRole('button', { name: 'Add Note' }));
+    fireEvent.change(await screen.findByTestId('popover-note-input'), {
+      target: { value: 'Edited in place' },
+    });
+    fireEvent.click(screen.getByTestId('popover-note-save'));
+    await waitFor(() => expect(store.getState().annotations[0]?.note).toBe('Edited in place'));
+    fireEvent.click(within(editor).getByRole('button', { name: 'Delete Highlight' }));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(0));
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+
+    // ⇧⌘H highlights with the last color (green, from the edit above).
+    await selectText('quick brown fox');
+    fireEvent.keyDown(window, { key: 'h', code: 'KeyH', shiftKey: true, ctrlKey: true });
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]?.color).toBe('#86efac');
+    expect(store.getState().annotations[0]?.style).toBe('highlight');
+
+    // Excerpt to MindMap from the popover.
+    await selectText('quick brown fox');
+    fireEvent.click(
+      within(await screen.findByTestId('selection-popover')).getByRole('button', {
+        name: 'Excerpt to MindMap',
+      }),
+    );
+    await waitFor(() => expect(store.getState().cards).toHaveLength(1));
+  });
+
+  it('highlights every pointer selection while highlight mode is on', async () => {
+    const { store, documentId } = await setup(documentFixture('sample.txt'));
+    render(<Harness store={store} documentId={documentId} />);
+    await segmentWith('quick brown fox');
+
+    // ⌃⌘H arms it and shows the markup bar, where it reads as on.
+    fireEvent.keyDown(window, { key: 'h', code: 'KeyH', altKey: true, ctrlKey: true });
+    const toggle = within(await screen.findByTestId('markup-bar')).getByRole('switch', {
+      name: 'Highlight Mode',
+    });
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Underline' }));
+
+    fireEvent.pointerDown(scroller(), { button: 0 });
+    await selectText('quick brown fox');
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+    fireEvent.pointerUp(window, { button: 0 });
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    expect(store.getState().annotations[0]?.style).toBe('underline');
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+
+    // Off again, a selection gets the popover instead.
+    fireEvent.click(toggle);
+    fireEvent.pointerDown(scroller(), { button: 0 });
+    await selectText('quick brown fox');
+    fireEvent.pointerUp(window, { button: 0 });
+    expect(await screen.findByTestId('selection-popover')).toBeInTheDocument();
+    expect(store.getState().annotations).toHaveLength(1);
   });
 
   it('shows a read failure instead of an empty page', async () => {

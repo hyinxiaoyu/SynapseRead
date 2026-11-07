@@ -111,6 +111,7 @@ describe('useStudySyncStore', () => {
           annotationId: state().annotations[0]?.id,
           anchor: pdfAnchor,
           color: state().annotations[0]?.color,
+          style: 'highlight',
         },
       ]);
       expect(selectHighlights(state().annotations, otherId)).toEqual([]);
@@ -460,24 +461,36 @@ describe('useStudySyncStore', () => {
     it('persists reading preferences and rolls back on validation failure', async () => {
       await state().updateReadingPreferences({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 120,
+        margins: 'wide',
+        justify: false,
+        dimImages: true,
         epubReadingMode: 'paged',
+        pageTransition: 'fade',
       });
       expect(state().readingPreferences).toMatchObject({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 120,
+        margins: 'wide',
+        justify: false,
+        dimImages: true,
         epubReadingMode: 'paged',
+        pageTransition: 'fade',
       });
 
       const reopened = createStudySyncStore(backend);
       await reopened.getState().initialize();
       expect(reopened.getState().readingPreferences).toMatchObject({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 120,
+        margins: 'wide',
+        justify: false,
+        dimImages: true,
         epubReadingMode: 'paged',
+        pageTransition: 'fade',
       });
 
       await state().updateReadingPreferences({ fontSize: 300 });
@@ -658,6 +671,7 @@ describe('useStudySyncStore', () => {
       await backend.saveWorkspaceSession({
         openDocumentIds: [firstId, 'deleted-doc-id', secondId],
         activeDocumentId: firstId,
+        immersive: false,
       });
 
       const restarted = createStudySyncStore(backend);
@@ -669,6 +683,25 @@ describe('useStudySyncStore', () => {
         theme: 'dark',
         fontSize: 130,
       });
+    });
+
+    it('persists immersive reading with the session and restores it on restart', async () => {
+      const firstId = await openDocument();
+      expect(state().immersive).toBe(false);
+      state().setImmersive(true);
+      await vi.waitFor(async () =>
+        expect((await backend.getWorkspaceSession()).immersive).toBe(true),
+      );
+
+      const restarted = createStudySyncStore(backend);
+      await restarted.getState().initialize();
+      expect(restarted.getState().immersive).toBe(true);
+      expect(restarted.getState().openDocumentIds).toEqual([firstId]);
+
+      restarted.getState().setImmersive(false);
+      await vi.waitFor(async () =>
+        expect((await backend.getWorkspaceSession()).immersive).toBe(false),
+      );
     });
 
     it('detects missing, moved, and changed sources across PDF, EPUB, and TXT, and relinks while preserving notes', async () => {

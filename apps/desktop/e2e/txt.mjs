@@ -1,5 +1,9 @@
 import { assert } from './harness.mjs';
 
+/** The text `measureCharWidth` samples; see `appearance/measure.ts`. */
+const MEASURE_SAMPLE =
+  'The quick brown fox jumps over the lazy dog, and then reads a chapter or two of a good book.';
+
 const SEGMENT = '[data-testid="txt-scroll"] [data-unit]';
 const scrollTop = `document.querySelector('[data-testid="txt-scroll"]').scrollTop`;
 const visibleScroller = `[...document.querySelectorAll('[data-testid="txt-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
@@ -95,10 +99,9 @@ export async function txtFlow(page) {
 
   // In-document search across virtualized TXT rows, active match highlight, and return.
   const visibleTxtViewer = `[...document.querySelectorAll('[data-testid="txt-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
-  await page.clickButton('Find in document');
   await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');
   await page.waitFor(
-    `${visibleTxtViewer}?.querySelector('[data-testid="search-status"]')?.textContent === '1 of 1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
     'TXT search match count',
   );
   await page.waitFor(
@@ -114,17 +117,17 @@ export async function txtFlow(page) {
     `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
     'returning from TXT search jump to previous scroll offset',
   );
-  await page.clickButton('Close search');
+  await page.leaveSearch();
 
   // Independent bookmarks in TXT: bookmark at scrollTop 1500, scroll to top, jump back, and remove.
   await page.clickButton('Bookmark current location');
   await page.waitFor(
-    `${visibleTxtViewer}?.querySelector('[data-testid="bookmarks-count"]')?.textContent === '1'`,
-    'TXT bookmark badge count',
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="toggle-bookmark-button"]')?.getAttribute('aria-pressed') === 'true'`,
+    'TXT bookmark toggle pressed',
   );
   await page.evaluate(`${visibleScroller}.scrollTop = 0`);
   await page.waitFor(`${visibleScroller}.scrollTop === 0`, 'scrolling TXT to top');
-  await page.clickButton('Bookmarks');
+  await page.showSidebarTab('Bookmarks');
   await page.waitFor(
     `${visibleTxtViewer}?.querySelector('[data-testid="bookmark-jump-button"]')`,
     'TXT bookmark item in list',
@@ -140,10 +143,42 @@ export async function txtFlow(page) {
     `${visibleTxtViewer}.querySelector('[data-testid="bookmark-remove-button"]').click()`,
   );
   await page.waitFor(
-    `!${visibleTxtViewer}?.querySelector('[data-testid="bookmarks-count"]')`,
+    `[...document.querySelectorAll('[data-testid="bookmarks-empty"]')].some((e) => e.checkVisibility({ visibilityProperty: true }))`,
     'removing TXT bookmark',
   );
-  await page.clickButton('Bookmarks');
+  await page.hideSidebar();
+
+  // Page turns: a click beside the page's right edge, Space, and Page Up, each a
+  // screen. Progress sits in a footer under the page.
+  await page.evaluate(`${visibleScroller}.scrollTop = 0`);
+  await page.waitFor(`${visibleScroller}.scrollTop === 0`, 'scrolling TXT to the top');
+  await page.waitFor(
+    `/^Line \\d+ of \\d+$/.test(${visibleTxtViewer}.querySelector('[data-testid="reader-footer-readout"]')?.textContent ?? '')`,
+    'the TXT footer to show the line',
+  );
+  const screenful = await page.evaluate(`${visibleScroller}.clientHeight * 0.9`);
+  const rightEdge = await page.evaluate(`(() => {
+    const r = ${visibleScroller}.getBoundingClientRect();
+    return { x: r.right - 24, y: r.top + r.height / 2 };
+  })()`);
+  await page.click(rightEdge);
+  await page.waitFor(
+    `Math.abs(${visibleScroller}.scrollTop - ${screenful}) < 2`,
+    'a click in the right page edge to turn a page',
+  );
+  await page.evaluate(`${visibleScroller}.focus()`);
+  await page.press(' ', 'Space');
+  await page.waitFor(
+    `Math.abs(${visibleScroller}.scrollTop - ${2 * screenful}) < 2`,
+    'Space to turn a page',
+  );
+  await page.press('PageUp');
+  await page.waitFor(
+    `Math.abs(${visibleScroller}.scrollTop - ${screenful}) < 2`,
+    'Page Up to turn back',
+  );
+  await page.press('Home');
+  await page.waitFor(`${visibleScroller}.scrollTop === 0`, 'Home to go to the start');
 
   // Drag and drop a file onto the workspace and verify it opens and renders automatically.
   await page.evaluate(`(() => {
@@ -165,22 +200,32 @@ export async function txtFlow(page) {
   // Reading appearance controls in TXT viewer.
   await page.clickButton('Reading appearance');
   await page.waitFor(
-    `${visibleTxtViewer}.querySelector('[data-testid="reading-preferences-bar"]')`,
-    'TXT reading preferences bar',
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'TXT appearance popover',
   );
   await page.clickButton('Dark');
   await page.waitFor(`${visibleTxtViewer}.dataset.readingTheme === 'dark'`, 'TXT dark theme');
+  await page.assertContrast(
+    '[data-testid="unified-toolbar"], [aria-label="Document reader"]',
+    'TXT Dark chrome',
+  );
   await page.clickButton('Light');
   await page.waitFor(`${visibleTxtViewer}.dataset.readingTheme === 'light'`, 'TXT light theme');
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'Esc closes the TXT appearance popover',
+  );
 
   // Independent highlights & notes in TXT viewer: highlight dropped file text without creating a MindMap card, delete, and undo.
   await page.selectText(SEGMENT, 'Dropped E2E');
-  await page.clickButton('Highlight selection');
+  await page.clickButton('Yellow highlight');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
-    `${visibleTxtViewer}?.querySelector('[data-testid="annotations-count"]')?.textContent === '1'`,
+    `[...document.querySelectorAll('[data-testid="annotation-item"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 1`,
     'TXT independent highlight count',
   );
-  await page.clickButton('Annotations');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
     `${visibleTxtViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 1`,
     'TXT annotation item in list',
@@ -199,5 +244,33 @@ export async function txtFlow(page) {
     `${visibleTxtViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 1`,
     'undoing TXT highlight deletion',
   );
-  await page.clickButton('Annotations');
+  await page.hideSidebar();
+
+  // Last, because resizing reflows the text and moves every scroll offset above.
+  // TXT keeps the same reading measure as EPUB at every window width.
+  for (const width of [1280, 1728, 2560]) {
+    await page.setViewport(width);
+    const perLine = await page.waitFor(
+      `(() => {
+        const row = ${visibleTxtViewer}?.querySelector('[role="document"] [data-index]');
+        if (!row || row.closest('[role="document"]').getBoundingClientRect().width > ${width}) {
+          return null;
+        }
+        const style = getComputedStyle(row);
+        const column =
+          row.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+        const probe = document.createElement('span');
+        probe.textContent = ${JSON.stringify(MEASURE_SAMPLE)};
+        probe.style.cssText = 'position: absolute; visibility: hidden; white-space: nowrap';
+        row.appendChild(probe);
+        const advance = probe.getBoundingClientRect().width / probe.textContent.length;
+        probe.remove();
+        const perLine = column / advance;
+        return perLine >= 45 && perLine <= 78 ? perLine : null;
+      })()`,
+      `TXT 45–78 characters per line at ${width} px`,
+    );
+    console.log(`     txt: ${width} px, ${perLine.toFixed(1)} characters per line`);
+  }
+  await page.cdp.send('Emulation.clearDeviceMetricsOverride');
 }

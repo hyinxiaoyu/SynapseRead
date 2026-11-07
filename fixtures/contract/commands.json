@@ -1,0 +1,180 @@
+{
+  "$comment": "The single list of app commands. The native menu (src-tauri/src/menu.rs) and the frontend command registry (features/commands) both read it, so a menu item, its key equivalent, and the toolbar tooltip cannot drift apart. Shortcuts use Tauri accelerator syntax. `shortcutOther` replaces `shortcut` off macOS; `aliases` are extra keyboard-only bindings; `accelerator: false` keeps a key out of the menu so it does not swallow it in text fields; `allowInSearch` lets a command run while the search field has focus. Unmodified keys (arrows, Space, Page Up/Down, Home, End) never fire in a widget that uses them itself. `edit.undoDelete` is keyboard-only because the predefined Edit ▸ Undo owns ⌘Z in the menu bar; the registry never takes ⌘Z from a text field.",
+  "menus": [
+    {
+      "id": "file",
+      "title": "File",
+      "items": ["file.open", "separator", "file.closeTab"]
+    },
+    {
+      "id": "edit",
+      "title": "Edit",
+      "items": [
+        "edit.find",
+        "edit.findNext",
+        "edit.findPrevious",
+        "edit.useSelectionForFind",
+        "separator",
+        "edit.undoDelete",
+        "separator",
+        "edit.highlight",
+        "edit.addNote",
+        "edit.selectionActions",
+        "edit.highlightMode",
+        "edit.excerpt"
+      ]
+    },
+    {
+      "id": "view",
+      "title": "View",
+      "items": [
+        "view.toggleSidebar",
+        "view.hideSidebar",
+        "view.sidebarThumbnails",
+        "view.sidebarContents",
+        "view.sidebarAnnotations",
+        "view.sidebarBookmarks",
+        "view.sidebarSearch",
+        "separator",
+        "view.layoutSingle",
+        "view.layoutTwoPage",
+        "view.layoutScroll",
+        "separator",
+        "view.zoomIn",
+        "view.zoomOut",
+        "view.actualSize",
+        "view.zoomToFit",
+        "view.zoomToWidth",
+        "separator",
+        "view.rotateLeft",
+        "view.rotateRight",
+        "separator",
+        "view.appearance",
+        "view.markup",
+        "separator",
+        "view.immersive",
+        "view.fullScreen"
+      ]
+    },
+    {
+      "id": "go",
+      "title": "Go",
+      "items": [
+        "go.previousPage",
+        "go.nextPage",
+        "separator",
+        "go.previousChapter",
+        "go.nextChapter",
+        "go.chapterStart",
+        "go.chapterEnd",
+        "separator",
+        "go.page",
+        "separator",
+        "go.back",
+        "go.forward"
+      ]
+    },
+    {
+      "id": "bookmarks",
+      "title": "Bookmarks",
+      "items": ["bookmarks.toggle"]
+    },
+    {
+      "id": "window",
+      "title": "Window",
+      "items": ["window.mindMap", "window.inspector"]
+    },
+    {
+      "id": "help",
+      "title": "Help",
+      "items": ["help.shortcuts"]
+    }
+  ],
+  "commands": {
+    "file.open": { "title": "Open…", "shortcut": "CmdOrCtrl+O" },
+    "file.closeTab": { "title": "Close Tab", "shortcut": "CmdOrCtrl+W" },
+    "edit.find": { "title": "Find…", "shortcut": "CmdOrCtrl+F", "allowInSearch": true },
+    "edit.findNext": { "title": "Find Next", "shortcut": "CmdOrCtrl+G", "allowInSearch": true },
+    "edit.findPrevious": {
+      "title": "Find Previous",
+      "shortcut": "Shift+CmdOrCtrl+G",
+      "allowInSearch": true
+    },
+    "edit.useSelectionForFind": { "title": "Use Selection for Find", "shortcut": "CmdOrCtrl+E" },
+    "edit.undoDelete": { "title": "Undo Delete", "shortcut": "CmdOrCtrl+Z", "accelerator": false },
+    "edit.highlight": { "title": "Highlight Selection", "shortcut": "Shift+CmdOrCtrl+H" },
+    "edit.addNote": { "title": "Add Note to Selection" },
+    "edit.selectionActions": {
+      "title": "Show Selection Actions",
+      "shortcut": "Shift+F10",
+      "aliases": ["ContextMenu"],
+      "accelerator": false
+    },
+    "edit.highlightMode": {
+      "title": "Highlight Mode",
+      "shortcut": "Ctrl+Cmd+H",
+      "shortcutOther": "Ctrl+Alt+H"
+    },
+    "edit.excerpt": { "title": "Excerpt to MindMap", "shortcut": "Shift+CmdOrCtrl+E" },
+    "view.toggleSidebar": { "title": "Toggle Sidebar", "shortcut": "Alt+CmdOrCtrl+S" },
+    "view.hideSidebar": { "title": "Hide Sidebar", "shortcut": "Alt+CmdOrCtrl+1" },
+    "view.sidebarThumbnails": { "title": "Thumbnails", "shortcut": "Alt+CmdOrCtrl+2" },
+    "view.sidebarContents": { "title": "Table of Contents", "shortcut": "Alt+CmdOrCtrl+3" },
+    "view.sidebarAnnotations": { "title": "Highlights and Notes", "shortcut": "Alt+CmdOrCtrl+4" },
+    "view.sidebarBookmarks": { "title": "Bookmarks", "shortcut": "Alt+CmdOrCtrl+5" },
+    "view.sidebarSearch": { "title": "Search Results" },
+    "view.layoutSingle": { "title": "Single Page" },
+    "view.layoutTwoPage": { "title": "Two Pages" },
+    "view.layoutScroll": { "title": "Continuous Scroll" },
+    "view.zoomIn": {
+      "title": "Zoom In",
+      "shortcut": "CmdOrCtrl+=",
+      "aliases": ["CmdOrCtrl+Plus", "Shift+CmdOrCtrl+="]
+    },
+    "view.zoomOut": { "title": "Zoom Out", "shortcut": "CmdOrCtrl+-" },
+    "view.actualSize": { "title": "Actual Size", "shortcut": "CmdOrCtrl+0" },
+    "view.zoomToFit": { "title": "Zoom to Fit", "shortcut": "CmdOrCtrl+8" },
+    "view.zoomToWidth": { "title": "Zoom to Width", "shortcut": "CmdOrCtrl+9" },
+    "view.rotateLeft": { "title": "Rotate Left", "shortcut": "CmdOrCtrl+L" },
+    "view.rotateRight": { "title": "Rotate Right", "shortcut": "CmdOrCtrl+R" },
+    "view.appearance": { "title": "Appearance…" },
+    "view.markup": { "title": "Show Markup Toolbar", "shortcut": "Shift+CmdOrCtrl+A" },
+    "view.immersive": { "title": "Enter Focus Mode", "shortcut": "Shift+CmdOrCtrl+F" },
+    "view.fullScreen": {
+      "title": "Enter Full Screen",
+      "shortcut": "Ctrl+Cmd+F",
+      "shortcutOther": "F11"
+    },
+    "go.previousPage": {
+      "title": "Previous Page",
+      "shortcut": "ArrowLeft",
+      "aliases": ["Shift+Space", "PageUp"],
+      "accelerator": false
+    },
+    "go.nextPage": {
+      "title": "Next Page",
+      "shortcut": "ArrowRight",
+      "aliases": ["Space", "PageDown"],
+      "accelerator": false
+    },
+    "go.previousChapter": {
+      "title": "Previous Chapter",
+      "shortcut": "Alt+ArrowUp",
+      "accelerator": false
+    },
+    "go.nextChapter": {
+      "title": "Next Chapter",
+      "shortcut": "Alt+ArrowDown",
+      "accelerator": false
+    },
+    "go.chapterStart": { "title": "Start of Chapter", "shortcut": "Home", "accelerator": false },
+    "go.chapterEnd": { "title": "End of Chapter", "shortcut": "End", "accelerator": false },
+    "go.page": { "title": "Go to Page…", "shortcut": "Alt+CmdOrCtrl+G" },
+    "go.back": { "title": "Back", "shortcut": "CmdOrCtrl+[" },
+    "go.forward": { "title": "Forward", "shortcut": "CmdOrCtrl+]" },
+    "bookmarks.toggle": { "title": "Add Bookmark", "shortcut": "CmdOrCtrl+D" },
+    "window.mindMap": { "title": "Show MindMap", "shortcut": "Shift+CmdOrCtrl+M" },
+    "window.inspector": { "title": "Show Inspector" },
+    "help.shortcuts": { "title": "Keyboard Shortcuts", "shortcut": "CmdOrCtrl+/" }
+  }
+}

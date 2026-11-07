@@ -1,12 +1,13 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildSearchSnippet,
   findSubstringMatches,
   SEARCH_HIGHLIGHT_ID,
-} from '@/features/reader/DocumentSearchBar';
+} from '@/features/reader/DocumentSearch';
+import type { PageGestureSample, WheelSample } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import {
@@ -16,12 +17,13 @@ import {
   selectHighlights,
 } from '@/stores/useStudySyncStore';
 
-import type {
-  EpubLocation,
-  EpubReadingMode,
-  EpubSearchMatch,
-  EpubSelection,
-  EpubTocItem,
+import {
+  type EpubLocation,
+  type EpubReadingMode,
+  type EpubSearchMatch,
+  type EpubSelection,
+  type EpubTocItem,
+  openEpubDocument,
 } from './epubEngine';
 import { EpubViewer } from './EpubViewer';
 
@@ -46,6 +48,7 @@ const engine = vi.hoisted(() => ({
   ],
   displayed: [] as (string | undefined)[],
   highlighted: new Map<string, string>(),
+  highlightStyles: new Map<string, string>(),
   removed: [] as string[],
   pulsing: new Set<string>(),
   selectionCleared: 0,
@@ -54,10 +57,17 @@ const engine = vi.hoisted(() => ({
   emitSelection: (() => undefined) as (selection: unknown) => void,
   emitLocation: (() => undefined) as (location: unknown) => void,
   emitKeyDown: (() => undefined) as (event: KeyboardEvent) => void,
+  emitGesture: (() => undefined) as (sample: PageGestureSample) => void,
+  emitWheel: (() => false) as (wheel: WheelSample) => boolean,
+  emitMarkClick: (() => undefined) as (annotationId: string, rect: null) => void,
+  emitPointer: (() => undefined) as (down: boolean) => void,
+  cursor: '',
+  displayedFractions: [] as [number, number][],
   next: vi.fn(async () => undefined),
   previous: vi.fn(async () => undefined),
   setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
   setPreferences: vi.fn(),
+  setColumns: vi.fn<(columns: 1 | 2) => void>(),
 }));
 
 vi.mock('./epubEngine', () => ({
@@ -92,12 +102,22 @@ vi.mock('./epubEngine', () => ({
       if (target && target === engine.failCfi) throw new Error('no such location');
       engine.displayed.push(target);
     },
+    spineIndexOf: (href: string) =>
+      engine.chapters.findIndex((chapter) => chapter.href === href.split('#')[0]),
+    spineHref: (index: number) => engine.chapters[index]?.href,
+    async displayChapterFraction(index: number, fraction: number) {
+      engine.displayedFractions.push([index, fraction]);
+      engine.displayed.push(engine.chapters[index]?.href);
+    },
     next: engine.next,
     previous: engine.previous,
     setReadingMode: engine.setReadingMode,
     setPreferences: engine.setPreferences,
-    highlight: (annotationId: string, cfiRange: string) =>
-      void engine.highlighted.set(annotationId, cfiRange),
+    setColumns: engine.setColumns,
+    highlight(annotationId: string, cfiRange: string, _color: string, style = 'highlight') {
+      engine.highlighted.set(annotationId, cfiRange);
+      engine.highlightStyles.set(annotationId, style);
+    },
     removeHighlight: (cfiRange: string) => void engine.removed.push(cfiRange),
     setPulse(annotationId: string, pulsing: boolean) {
       if (pulsing) engine.pulsing.add(annotationId);
@@ -108,6 +128,13 @@ vi.mock('./epubEngine', () => ({
       engine.selectionCleared += 1;
     },
     resize: () => undefined,
+    selectionRect: () => null,
+    onMarkClick(listener: (annotationId: string, rect: null) => void) {
+      engine.emitMarkClick = listener;
+    },
+    onPointer(listener: (down: boolean) => void) {
+      engine.emitPointer = listener;
+    },
     onSelection(listener: (selection: EpubSelection | null) => void) {
       engine.emitSelection = listener as (selection: unknown) => void;
     },
@@ -116,6 +143,15 @@ vi.mock('./epubEngine', () => ({
     },
     onKeyDown(listener: (event: KeyboardEvent) => void) {
       engine.emitKeyDown = listener;
+    },
+    onGesture(listener: (sample: PageGestureSample) => void) {
+      engine.emitGesture = listener;
+    },
+    onWheel(listener: (wheel: WheelSample) => boolean) {
+      engine.emitWheel = listener;
+    },
+    setCursor(cursor: string) {
+      engine.cursor = cursor;
     },
     destroy() {
       engine.destroyed += 1;
@@ -193,10 +229,18 @@ const reopen = async (backend: ReturnType<typeof createMemoryBackend>) => {
 };
 
 const opened = () =>
-  waitFor(() => expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled());
+  waitFor(() => expect(screen.getByRole('button', { name: 'Next Page' })).toBeEnabled());
 
 const select = (cfiRange = CFI, text = 'quick brown fox') =>
   act(() => engine.emitSelection({ cfiRange, chapterHref: 'OEBPS/chapter1.xhtml', text }));
+
+/**
+ * At 1440 px, with the fallback character width (0.5em of 16.8 px = 8.4 px) and
+ * normal margins (16 px): two columns of 75ch = 630 px, each page 630 + 64 px.
+ */
+let pageAreaWidth = 1440;
+const TWO_PAGE_WIDTH = '1388px';
+const ONE_PAGE_WIDTH = '694px';
 
 describe('EpubViewer', () => {
   beforeEach(() => {
@@ -213,15 +257,31 @@ describe('EpubViewer', () => {
     ];
     engine.displayed = [];
     engine.highlighted = new Map();
+    engine.highlightStyles = new Map();
     engine.removed = [];
     engine.pulsing = new Set();
     engine.selectionCleared = 0;
     engine.destroyed = 0;
     engine.failCfi = null;
+    engine.displayedFractions = [];
+    engine.cursor = '';
+    window.localStorage.clear();
     engine.next.mockClear();
     engine.previous.mockClear();
     engine.setReadingMode.mockClear();
     engine.setPreferences.mockClear();
+    engine.setColumns.mockClear();
+    // jsdom has no layout: give the page area a width, so the measure has room to work.
+    pageAreaWidth = 1440;
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.dataset.testid === 'epub-page-area' ? pageAreaWidth : 0;
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('runs selection -> CFI anchor -> persist -> reopen', async () => {
@@ -314,7 +374,7 @@ describe('EpubViewer', () => {
       }),
     );
     await waitFor(() => expect(store.getState().jumpRequest).toBeNull());
-    expect(await screen.findByRole('status')).toHaveTextContent(/could not be found/);
+    expect(await screen.findByText(/could not be found/)).toHaveAttribute('role', 'status');
   });
 
   it('reopens at the last reading position, without overwriting it first', async () => {
@@ -389,8 +449,8 @@ describe('EpubViewer', () => {
     const { store, documentId } = await setup();
     const view = render(<Harness store={store} documentId={documentId} />);
     await opened();
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
     expect(engine.next).toHaveBeenCalledOnce();
     expect(engine.previous).toHaveBeenCalledOnce();
 
@@ -417,21 +477,41 @@ describe('EpubViewer', () => {
     const viewer = screen.getByTestId('epub-viewer');
     const host = screen.getByTestId('epub-host');
     expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
-    expect(host).toHaveClass('max-w-none');
-    expect(screen.getByRole('button', { name: 'Two pages' })).toHaveAttribute(
-      'aria-pressed',
+    expect(viewer).toHaveAttribute('data-columns', '2');
+    expect(host.style.width).toBe(TWO_PAGE_WIDTH);
+    expect(screen.getByTestId('epub-spine')).toBeInTheDocument();
+    expect(screen.getByRole('radiogroup', { name: 'Reading mode' })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Two pages' })).toHaveAttribute(
+      'aria-checked',
       'true',
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'paged');
-    expect(host).toHaveClass('max-w-6xl');
+    expect(viewer).toHaveAttribute('data-columns', '1');
+    expect(host.style.width).toBe(ONE_PAGE_WIDTH);
+    expect(screen.queryByTestId('epub-spine')).not.toBeInTheDocument();
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('paged');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Scroll' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
     expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
-    expect(host).toHaveClass('max-w-6xl');
+    expect(host.style.width).toBe(ONE_PAGE_WIDTH);
     expect(engine.setReadingMode).toHaveBeenLastCalledWith('scroll');
+
+    // The segmented control is one tab stop; arrow keys move and select, wrapping,
+    // and do not also turn the page.
+    const scroll = screen.getByRole('radio', { name: 'Scroll' });
+    expect(scroll).toHaveAttribute('tabindex', '0');
+    expect(screen.getByRole('radio', { name: 'Two pages' })).toHaveAttribute('tabindex', '-1');
+    scroll.focus();
+    fireEvent.keyDown(scroll, { key: 'ArrowLeft' });
+    expect(viewer).toHaveAttribute('data-reading-mode', 'paged');
+    expect(screen.getByRole('radio', { name: 'Single page' })).toHaveFocus();
+    expect(engine.previous).not.toHaveBeenCalled();
+    fireEvent.keyDown(screen.getByRole('radio', { name: 'Single page' }), { key: 'End' });
+    expect(viewer).toHaveAttribute('data-reading-mode', 'scroll');
+    fireEvent.keyDown(screen.getByRole('radio', { name: 'Scroll' }), { key: 'ArrowRight' });
+    expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
   });
 
   it('persists reading mode and appearance preferences across restart', async () => {
@@ -439,33 +519,43 @@ describe('EpubViewer', () => {
     const view = render(<Harness store={store} documentId={documentId} />);
     await opened();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
     fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Sepia' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Sans' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Sepia' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'San Francisco' }));
     fireEvent.click(screen.getByRole('button', { name: 'Increase font size' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Wide' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    const margins = screen.getByRole('radiogroup', { name: 'Margins' });
+    fireEvent.click(within(margins).getByRole('radio', { name: 'Wide' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Justify' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Dim images in Dark theme' }));
 
     await waitFor(() =>
       expect(store.getState().readingPreferences).toEqual({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 110,
         lineSpacing: 1.75,
-        readingWidth: 'wide',
+        margins: 'wide',
+        justify: false,
+        dimImages: true,
         epubReadingMode: 'paged',
+        pageTransition: 'slide',
       }),
     );
     expect(engine.setPreferences).toHaveBeenLastCalledWith(
       expect.objectContaining({
         theme: 'sepia',
-        fontFamily: 'sans',
+        fontFamily: 'sf-pro',
         fontSize: 110,
-        readingWidth: 'wide',
+        margins: 'wide',
+        justify: false,
       }),
     );
     expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-theme', 'sepia');
-    expect(screen.getByTestId('epub-host')).toHaveClass('max-w-7xl');
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-margins', 'wide');
+    // The page's color fills the margins around it.
+    expect(screen.getByTestId('epub-page-area').style.backgroundColor).toBe('rgb(244, 236, 216)');
     view.unmount();
 
     const reopened = await reopen(backend);
@@ -473,10 +563,71 @@ describe('EpubViewer', () => {
     await opened();
     expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-mode', 'paged');
     expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-theme', 'sepia');
-    expect(screen.getByTestId('epub-host')).toHaveClass('max-w-7xl');
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-margins', 'wide');
   });
 
-  it('distinguishes chapter-local pages from whole-book progress', async () => {
+  it('shows two pages only where each column holds the minimum measure', async () => {
+    // 900 px: two columns would be (868 / 2 - 64) = 370 px, under 45ch (378 px).
+    pageAreaWidth = 900;
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    const viewer = screen.getByTestId('epub-viewer');
+    expect(viewer).toHaveAttribute('data-reading-mode', 'spread');
+    expect(viewer).toHaveAttribute('data-columns', '1');
+    expect(screen.queryByTestId('epub-spine')).not.toBeInTheDocument();
+    expect(vi.mocked(openEpubDocument).mock.lastCall?.[4]).toBe(1);
+    view.unmount();
+
+    pageAreaWidth = 2560;
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-columns', '2');
+    // Capped at 75ch per column: the pages stay 1388 px and center in the window.
+    expect(screen.getByTestId('epub-host').style.width).toBe(TWO_PAGE_WIDTH);
+    expect(vi.mocked(openEpubDocument).mock.lastCall?.[4]).toBe(2);
+  });
+
+  it('settles the Auto theme against the system appearance', async () => {
+    const listeners = new Set<() => void>();
+    let dark = true;
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({
+        get matches() {
+          return dark;
+        },
+        addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+        removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+      })),
+    );
+    try {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      const viewer = screen.getByTestId('epub-viewer');
+      expect(viewer).toHaveAttribute('data-reading-theme', 'auto');
+      expect(viewer).toHaveAttribute('data-resolved-theme', 'dark');
+      expect(engine.setPreferences).toHaveBeenLastCalledWith(
+        expect.objectContaining({ theme: 'dark' }),
+      );
+
+      dark = false;
+      act(() => {
+        for (const listener of listeners) listener();
+      });
+      expect(viewer).toHaveAttribute('data-resolved-theme', 'light');
+      expect(engine.setPreferences).toHaveBeenLastCalledWith(
+        expect.objectContaining({ theme: 'light' }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('shows progress in a footer whose readout cycles, and the chapter in the toolbar', async () => {
     const { store, documentId } = await setup();
     render(<Harness store={store} documentId={documentId} />);
     await opened();
@@ -490,16 +641,150 @@ describe('EpubViewer', () => {
         chapterIndex: 0,
         totalChapters: 2,
         bookProgress: 25,
+        fraction: 0.125,
       }),
     );
 
-    expect(screen.getByTestId('epub-chapter-page')).toHaveTextContent('Chapter page 2 of 4');
-    expect(screen.getByTestId('epub-book-progress')).toHaveTextContent('Book 25% (Ch. 1/2)');
+    expect(screen.getByTestId('reader-toolbar-subtitle')).toHaveTextContent('One');
+    const readout = screen.getByTestId('reader-footer-readout');
+    expect(readout).toHaveTextContent('2 pages left in chapter');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('Page 2 of 4 in chapter');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('25% of book');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('2 pages left in chapter');
 
-    // Scroll mode hides chapter pages while keeping whole-book progress visible.
-    fireEvent.click(screen.getByRole('button', { name: 'Scroll' }));
-    expect(screen.queryByTestId('epub-chapter-page')).not.toBeInTheDocument();
-    expect(screen.getByTestId('epub-book-progress')).toHaveTextContent('Book 25% (Ch. 1/2)');
+    // Scroll mode has no pages: only whole-book progress remains, and it is remembered.
+    fireEvent.click(readout);
+    fireEvent.click(readout);
+    fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+    expect(screen.getByTestId('reader-footer-readout')).toHaveTextContent('25% of book');
+    expect(JSON.parse(window.localStorage.getItem('synapseread.footer.v1') ?? '{}')).toEqual({
+      readout: 'percent',
+    });
+  });
+
+  it('scrubs by chapter with ticks, a spoken position, keys, and a Back chip', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 3,
+        totalPages: 4,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 38,
+        fraction: 0.25,
+      }),
+    );
+
+    const slider = screen.getByRole('slider', { name: 'Reading position' });
+    expect(slider).toHaveAttribute('aria-valuenow', '25');
+    expect(slider).toHaveAttribute('aria-valuetext', 'Chapter 1 of 2, 38%');
+    // Chapter Two starts halfway through the spine.
+    const ticks = screen.getAllByTestId('progress-scrubber-tick');
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]).toHaveStyle({ left: '50%' });
+
+    vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 200, 20));
+    fireEvent.pointerMove(slider, { clientX: 150 });
+    expect(screen.getByTestId('progress-scrubber-tooltip')).toHaveTextContent('Two · 75%');
+    fireEvent.pointerDown(slider, { clientX: 150, button: 0, pointerId: 1 });
+    fireEvent.pointerUp(slider, { clientX: 150, button: 0, pointerId: 1 });
+    await waitFor(() => expect(engine.displayedFractions).toEqual([[1, 0.5]]));
+    const chip = await screen.findByTestId('reader-back-chip');
+    expect(chip).toHaveTextContent('Back to One, page 3');
+    fireEvent.click(chip);
+    expect(engine.displayed.at(-1)).toBe(CFI);
+    expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
+
+    // Arrow keys turn a page, Page Up and Page Down move a chapter.
+    fireEvent.keyDown(slider, { key: 'ArrowRight' });
+    expect(engine.next).toHaveBeenCalledOnce();
+    fireEvent.keyDown(slider, { key: 'PageDown' });
+    expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml');
+  });
+
+  it('turns pages from the page edges, swipes, and Space, never over text', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    vi.spyOn(screen.getByTestId('epub-host'), 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(100, 0, 1000, 800),
+    );
+
+    const click = (x: number, overContent = false, hasSelection = false) =>
+      act(() => {
+        engine.emitGesture({ kind: 'down', x, y: 300, hasSelection });
+        engine.emitGesture({ kind: 'click', x, y: 300, overContent, hasSelection });
+      });
+    click(1050);
+    expect(engine.next).toHaveBeenCalledOnce();
+    click(150);
+    expect(engine.previous).toHaveBeenCalledOnce();
+    // Text, a selection, and the middle of the page are the reader's.
+    click(1050, true);
+    click(1050, false, true);
+    click(600);
+    expect(engine.next).toHaveBeenCalledOnce();
+    expect(engine.previous).toHaveBeenCalledOnce();
+
+    act(() => engine.emitGesture({ kind: 'move', x: 1080, y: 300, overContent: false }));
+    expect(engine.cursor).toBe('e-resize');
+    act(() => engine.emitGesture({ kind: 'move', x: 1080, y: 300, overContent: true }));
+    expect(engine.cursor).toBe('');
+
+    // One swipe turns one page, however many events its momentum sends.
+    let used = false;
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        used = engine.emitWheel({ deltaX: 30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    expect(used).toBe(true);
+    expect(engine.next).toHaveBeenCalledTimes(2);
+    expect(engine.emitWheel({ deltaX: 0, deltaY: 40, ctrlKey: false })).toBe(false);
+
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' });
+    fireEvent.keyDown(window, { key: 'PageUp', code: 'PageUp' });
+    expect(engine.next).toHaveBeenCalledTimes(3);
+    expect(engine.previous).toHaveBeenCalledTimes(2);
+
+    // Scroll mode scrolls: no edge zones.
+    fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+    click(1050);
+    expect(engine.next).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole('button', { name: 'Next Page' })).not.toBeInTheDocument();
+  });
+
+  it('goes by chapter with Option-arrows and to chapter edges with Home and End', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 2,
+        totalPages: 4,
+        chapterIndex: 0,
+        totalChapters: 2,
+      }),
+    );
+    fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+    expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml');
+    fireEvent.keyDown(window, { key: 'End', code: 'End' });
+    fireEvent.keyDown(window, { key: 'Home', code: 'Home' });
+    await waitFor(() =>
+      expect(engine.displayedFractions).toEqual([
+        [0, 1],
+        [0, 0],
+      ]),
+    );
   });
 
   it('navigates nested TOC entries, handles empty TOCs, and returns to previous locations', async () => {
@@ -519,13 +804,18 @@ describe('EpubViewer', () => {
       }),
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    // The sidebar opens on Contents, with the current chapter's path expanded.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
     const toc = screen.getByTestId('reader-toc');
     expect(toc).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'One' })).toHaveAttribute('aria-current', 'location');
-    expect(screen.getByRole('button', { name: 'Section 1.1' })).toBeInTheDocument();
+    expect(screen.getByTestId('navigator-tab-contents')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByTestId('navigator-tab-thumbnails')).not.toBeInTheDocument();
+    const one = screen.getByRole('treeitem', { name: 'One' });
+    expect(one).toHaveAttribute('aria-current', 'location');
+    expect(one).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('treeitem', { name: 'Section 1.1' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Two' }));
+    fireEvent.click(screen.getByRole('treeitem', { name: 'Two' }));
     await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
 
     const backButton = await screen.findByRole('button', { name: 'Return to previous location' });
@@ -541,7 +831,7 @@ describe('EpubViewer', () => {
     engine.toc = [];
     render(<Harness store={store} documentId={documentId} />);
     await opened();
-    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    fireEvent.keyDown(window, { key: '3', code: 'Digit3', altKey: true, metaKey: true });
     expect(screen.getByTestId('reader-toc')).toHaveTextContent(
       'No table of contents in this book.',
     );
@@ -591,7 +881,8 @@ describe('EpubViewer', () => {
 
     // Case-sensitive search narrows to only Chapter Two's "Fox".
     fireEvent.change(searchInput, { target: { value: 'Fox' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Search options' }));
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Match case/ }));
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
     expect(screen.getByTestId('search-result-location')).toHaveTextContent('Two');
   });
@@ -639,8 +930,9 @@ describe('EpubViewer', () => {
     );
     expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
 
-    // Open the bookmarks panel and jump back to Chapter One's bookmark.
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    // Show Bookmarks in the sidebar and jump back to Chapter One's bookmark.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
+    fireEvent.click(screen.getByTestId('navigator-tab-bookmarks'));
     expect(await screen.findByTestId('bookmark-label')).toHaveTextContent('One · Page 1');
     fireEvent.click(screen.getByTestId('bookmark-jump-button'));
     await waitFor(() => expect(engine.displayed.at(-1)).toBe(CFI));
@@ -667,14 +959,18 @@ describe('EpubViewer', () => {
     const jumpButtons = screen.getAllByTestId('bookmark-jump-button');
     fireEvent.click(jumpButtons[1] as HTMLElement);
     expect(await screen.findByTestId('bookmark-stale')).toHaveTextContent('Stale');
-    expect(await screen.findByRole('status')).toHaveTextContent(/could not be found in this book/);
+    expect(await screen.findByText(/could not be found in this book/)).toHaveAttribute(
+      'role',
+      'status',
+    );
 
     // Persist across reopen and remove bookmarks.
     first.unmount();
     const reopened = await reopen(backend);
     render(<Harness store={reopened} documentId={documentId} />);
     await opened();
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    // The Bookmarks tab is remembered for EPUB documents.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
     expect(await screen.findAllByTestId('bookmark-item')).toHaveLength(2);
 
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
@@ -688,18 +984,43 @@ describe('EpubViewer', () => {
     await opened();
 
     select(CFI, 'quick brown fox');
-    fireEvent.click(screen.getByTestId('annotation-color-pink'));
-    fireEvent.click(screen.getByTestId('highlight-selection-button'));
+    // The selection popover offers the colors; choosing one highlights at once.
+    const popover = await screen.findByTestId('selection-popover');
+    expect(popover).toHaveAttribute('data-popover-mode', 'create');
+    fireEvent.click(screen.getByRole('button', { name: 'Pink highlight' }));
 
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
     expect(store.getState().cards).toEqual([]);
     expect(store.getState().nodes).toEqual([]);
     const annotationId = store.getState().annotations[0]?.id as string;
+    expect(store.getState().annotations[0]?.color).toBe('#f9a8d4');
     expect(engine.highlighted.get(annotationId)).toBe(CFI);
+    await waitFor(() => expect(screen.queryByTestId('selection-popover')).toBeNull());
 
-    fireEvent.click(screen.getByTestId('annotations-toggle-button'));
+    // Clicking the mark reopens the popover to restyle it as an underline.
+    act(() => engine.emitMarkClick(annotationId, null));
+    expect(await screen.findByTestId('selection-popover')).toHaveAttribute(
+      'data-popover-mode',
+      'edit',
+    );
+    expect(screen.getByRole('button', { name: 'Pink highlight' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Underline' }));
+    await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('underline'));
+    await waitFor(() => expect(engine.highlightStyles.get(annotationId)).toBe('underline'));
+    // A press in the page puts the popover away.
+    act(() => engine.emitPointer(true));
+    await waitFor(() => expect(screen.queryByTestId('selection-popover')).toBeNull());
+    act(() => engine.emitPointer(false));
+
+    fireEvent.keyDown(window, { key: '4', code: 'Digit4', altKey: true, metaKey: true });
     expect(await screen.findByTestId('annotation-item')).toHaveTextContent('quick brown fox');
+    // Grouped under the chapter's TOC title.
+    expect(screen.getByTestId('annotation-group')).toHaveTextContent('One');
 
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
     const noteInput = screen.getByTestId('annotation-note-input');
     fireEvent.change(noteInput, { target: { value: 'EPUB chapter note' } });
     fireEvent.blur(noteInput);

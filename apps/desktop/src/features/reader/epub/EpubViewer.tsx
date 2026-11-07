@@ -1,47 +1,66 @@
-import {
-  BookOpen,
-  ChevronLeft,
-  ChevronRight,
-  FileText,
-  ListTree,
-  RotateCcw,
-  ScrollText,
-} from 'lucide-react';
+import { BookOpen, FileText, PanelLeft, ScrollText } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
-import { Button } from '@/components/ui/button';
+import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmented-control';
+import { dispatchCommandKeydown } from '@/features/commands/registry';
 import {
-  AnnotationsListToggleButton,
-  AnnotationsPanel,
-  SelectionAnnotationControls,
-  SelectionNoteComposer,
+  type AnnotationPlacement,
+  localHighlights,
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
+import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import {
-  BookmarksListToggleButton,
-  BookmarksPanel,
-  BookmarkToggleButton,
-  useBookmarksController,
-} from '@/features/reader/BookmarksPanel';
-import {
-  DocumentSearchBar,
-  DocumentSearchToggleButton,
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  ToolbarSearchField,
   useDocumentSearch,
-} from '@/features/reader/DocumentSearchBar';
-import { type OutlineNode, OutlineSidebar } from '@/features/reader/OutlineSidebar';
+} from '@/features/reader/DocumentSearch';
+import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
+import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
+import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
+import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
+import { indexOutline, type OutlineNode } from '@/features/reader/navigator/OutlineTree';
+import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
+import { AppearanceMenu, useAppearancePanel } from '@/features/reader/appearance/AppearancePopover';
 import {
-  READING_WIDTH_CLASSES,
-  ReadingPreferencesBar,
-  ReadingPreferencesToggleButton,
-  THEME_SURFACE_CLASSES,
-  useReadingPreferencesPanel,
-} from '@/features/reader/ReadingPreferencesBar';
+  computeReadingLayout,
+  EPUB_BASE_FONT_REM,
+  measureCharWidth,
+  rootFontSizePx,
+} from '@/features/reader/appearance/measure';
+import {
+  DEFAULT_SERIF_STACK,
+  fontStack,
+  PAGE_PALETTES,
+  pageFooterStyle,
+  pageSurfaceStyle,
+} from '@/features/reader/appearance/themes';
+import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
+import {
+  HistoryButtons,
+  ReaderPopoverLayer,
+  ReaderToolbar,
+  ToolbarButton,
+  ToolbarSeparator,
+  ToolbarTitle,
+} from '@/features/reader/ReaderToolbar';
+import {
+  animatePageTurn,
+  type TurnDirection,
+  usePageTurnGestures,
+  zoneCursor,
+} from '@/features/reader/paging/pageTurn';
+import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import { useBackChip } from '@/features/reader/progress/useBackChip';
+import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
+import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
+import { useJumpHistory } from '@/features/reader/useJumpHistory';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
+  type AnnotationStyle,
   type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentViewerProps,
@@ -65,14 +84,10 @@ const FALLBACK_HIGHLIGHT = '#fde047';
 const MARK_WAIT_MS = 2000;
 const MARK_POLL_MS = 50;
 
-const READING_MODES: readonly {
-  mode: EpubReadingMode;
-  label: string;
-  icon: typeof BookOpen;
-}[] = [
-  { mode: 'spread', label: 'Two pages', icon: BookOpen },
-  { mode: 'paged', label: 'Single page', icon: FileText },
-  { mode: 'scroll', label: 'Scroll', icon: ScrollText },
+const READING_MODES: readonly SegmentedOption<EpubReadingMode>[] = [
+  { value: 'spread', label: 'Two pages', icon: BookOpen },
+  { value: 'paged', label: 'Single page', icon: FileText },
+  { value: 'scroll', label: 'Scroll', icon: ScrollText },
 ];
 
 const asEpubAnchor = (anchor: { format: string } | null | undefined): EpubAnchor | null =>
@@ -87,45 +102,97 @@ function toOutlineNodes(items: readonly EpubTocItem[]): OutlineNode<string>[] {
   }));
 }
 
-function findOutlineLabel(items: readonly EpubTocItem[], href: string): string | null {
-  const cleanHref = (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+const cleanChapterPath = (href: string) => (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
+
+/** Whether two hrefs name the same chapter file, ignoring fragments and relative prefixes. */
+function sameChapter(a: string, b: string): boolean {
+  const left = cleanChapterPath(a);
+  const right = cleanChapterPath(b);
+  return (
+    left !== '' &&
+    right !== '' &&
+    (left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`))
+  );
+}
+
+function findOutlineItem(items: readonly EpubTocItem[], href: string): EpubTocItem | null {
   for (const item of items) {
-    const cleanTarget = (item.href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
-    if (
-      cleanHref &&
-      cleanTarget &&
-      (cleanHref === cleanTarget ||
-        cleanHref.endsWith(`/${cleanTarget}`) ||
-        cleanTarget.endsWith(`/${cleanHref}`))
-    ) {
-      return item.label;
-    }
-    const nested = findOutlineLabel(item.children, href);
+    if (sameChapter(item.href, href)) return item;
+    const nested = findOutlineItem(item.children, href);
     if (nested) return nested;
   }
   return null;
 }
 
-function shouldIgnoreKeyEvent(event: KeyboardEvent): boolean {
-  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
-    return true;
-  }
-  const target = event.target instanceof HTMLElement ? event.target : null;
-  if (!target) return false;
-  const tag = target.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
-    return true;
-  }
-  return (
-    target.closest(
-      '[contenteditable="true"], [role="textbox"], [role="slider"], [role="separator"], [role="tablist"], .react-flow',
-    ) !== null
-  );
+function findOutlineLabel(items: readonly EpubTocItem[], href: string): string | null {
+  return findOutlineItem(items, href)?.label ?? null;
 }
+
+function flattenToc(items: readonly EpubTocItem[]): EpubTocItem[] {
+  return items.flatMap((item) => [item, ...flattenToc(item.children)]);
+}
+
+/** The title to show for each spine chapter: the last TOC entry at or before it. */
+function chapterTitlesBySpine(handle: EpubHandle | null): readonly (string | null)[] {
+  const count = handle?.chapterCount ?? 0;
+  if (!handle || count === 0) return [];
+  const titles: (string | null)[] = Array.from({ length: count }, () => null);
+  for (const item of flattenToc(handle.toc)) {
+    const index = handle.spineIndexOf(item.href);
+    if (index >= 0 && titles[index] === null) titles[index] = item.label;
+  }
+  for (let index = 1; index < count; index += 1) titles[index] ??= titles[index - 1] ?? null;
+  return titles;
+}
+
+/** A tick where each top-level chapter starts, or each spine file without a TOC. */
+function chapterTicks(handle: EpubHandle | null): ScrubberModel['ticks'] {
+  const count = handle?.chapterCount ?? 0;
+  if (!handle || count <= 1) return [];
+  const starts = new Map<number, string>();
+  for (const item of handle.toc) {
+    const index = handle.spineIndexOf(item.href);
+    if (index > 0 && !starts.has(index)) starts.set(index, item.label);
+  }
+  if (handle.toc.length === 0) {
+    for (let index = 1; index < count; index += 1) starts.set(index, `Chapter ${index + 1}`);
+  }
+  return [...starts].map(([index, label]) => ({ position: index / count, label }));
+}
+
+const pagesLeftText = (left: number) =>
+  left <= 0
+    ? 'Last page in chapter'
+    : left === 1
+      ? '1 page left in chapter'
+      : `${left} pages left in chapter`;
+
+/**
+ * The TOC entry for the chapter being read: one that names the chapter file
+ * itself, else the first that points into it.
+ */
+function currentTocId(items: readonly EpubTocItem[], href: string | null): string | null {
+  if (!href) return null;
+  let inFile: string | null = null;
+  const walk = (nodes: readonly EpubTocItem[]): string | null => {
+    for (const item of nodes) {
+      if (sameChapter(item.href, href)) {
+        if (!item.href.includes('#')) return item.id;
+        inFile ??= item.id;
+      }
+      const nested = walk(item.children);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return walk(items) ?? inFile;
+}
+
 /** EPUB reader: epub.js renders each chapter in an iframe, addressed by CFI. */
 export function EpubViewer({
   document,
   isActive,
+  chromeHidden = false,
   content,
   highlights,
   jumpRequest,
@@ -143,9 +210,12 @@ export function EpubViewer({
   onDeleteAnnotation,
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
+  onExcerptSelection,
+  canExcerpt,
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
+  const readerAreaRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [staleAnnotationIds, setStaleAnnotationIds] = useState<ReadonlySet<string>>(
@@ -156,23 +226,62 @@ export function EpubViewer({
   );
   const effectivePreferences = preferences ?? localPreferences;
   const readingMode = effectivePreferences.epubReadingMode;
-  const preferencesPanel = useReadingPreferencesPanel();
-  const [tocOpen, setTocOpen] = useState(false);
+  const preferencesPanel = useAppearancePanel();
+  const theme = useResolvedReadingTheme(effectivePreferences.theme);
+  // The engine paints the page; it gets the theme already settled against the system.
+  const enginePreferences = useMemo(
+    () => ({ ...effectivePreferences, theme }),
+    [effectivePreferences, theme],
+  );
+
+  // ---- Reading measure: column count and page width -------------------------
+
+  const areaRef = useRef<HTMLDivElement>(null);
+  const [availableWidth, setAvailableWidth] = useState(0);
+  useLayoutEffect(() => {
+    const area = areaRef.current;
+    if (!area) return;
+    setAvailableWidth(area.clientWidth);
+    const observer = new ResizeObserver(() => setAvailableWidth(area.clientWidth));
+    observer.observe(area);
+    return () => observer.disconnect();
+  }, []);
+  const [currentHref, setCurrentHref] = useState<string | null>(null);
+  const [currentCfi, setCurrentCfi] = useState<string | null>(null);
+  const [chapterFontFamily, setChapterFontFamily] = useState<string | null>(null);
+  const charWidth = measureCharWidth(
+    fontStack(effectivePreferences.fontFamily) ?? (chapterFontFamily || DEFAULT_SERIF_STACK),
+    (rootFontSizePx() * EPUB_BASE_FONT_REM * effectivePreferences.fontSize) / 100,
+  );
+  const layout = computeReadingLayout({
+    availableWidth,
+    charWidth,
+    margins: effectivePreferences.margins,
+    spread: readingMode === 'spread',
+  });
+  // Read when the book opens, so the first render already has the right pages.
+  const columnsRef = useRef(layout.columns);
+  useEffect(() => {
+    columnsRef.current = layout.columns;
+  });
+  const navigator = useNavigator('epub', ['contents', 'notes', 'bookmarks']);
 
   const updatePreferences = (patch: Partial<ReadingPreferences>) => {
     setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
     onPreferencesChange?.(patch);
   };
-  const [currentHref, setCurrentHref] = useState<string | null>(null);
-  const [currentCfi, setCurrentCfi] = useState<string | null>(null);
   const [staleBookmarkIds, setStaleBookmarkIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pageInfo, setPageInfo] = useState<{ page: number; totalPages: number } | null>(null);
   const [bookProgress, setBookProgress] = useState<{
     chapter: number;
     totalChapters: number;
     percent: number;
+    fraction: number;
   } | null>(null);
-  const [returnStack, setReturnStack] = useState<string[]>([]);
+  const history = useJumpHistory<string>();
+  const pushHistory = history.push;
+  const backChip = useBackChip(history.canGoBack);
+  const markup = useMarkupToolbar();
   const [error, setError] = useState<string | null>(null);
   const [missedJump, setMissedJump] = useState(false);
   // Taken once: the store feeds every cursor report back through this prop.
@@ -219,7 +328,8 @@ export function EpubViewer({
           source,
           host,
           effectivePreferences.epubReadingMode,
-          effectivePreferences,
+          enginePreferences,
+          columnsRef.current,
         );
         if (cancelled) {
           engine.destroy();
@@ -256,6 +366,12 @@ export function EpubViewer({
           currentLocationRef.current = location;
           setCurrentHref(location.href);
           setCurrentCfi(location.cfi);
+          const body = host.querySelector('iframe')?.contentDocument?.body;
+          setChapterFontFamily(
+            body
+              ? (body.ownerDocument.defaultView?.getComputedStyle(body).fontFamily ?? null)
+              : null,
+          );
           if (location.page !== undefined && location.totalPages !== undefined) {
             setPageInfo({ page: location.page, totalPages: location.totalPages });
           }
@@ -271,6 +387,7 @@ export function EpubViewer({
               chapter: location.chapterIndex + 1,
               totalChapters: location.totalChapters,
               percent,
+              fraction: location.fraction ?? location.chapterIndex / location.totalChapters,
             });
           }
           // Layout during opening reports positions the reader never chose.
@@ -303,7 +420,9 @@ export function EpubViewer({
 
   // ---- Highlights ----------------------------------------------------------
 
-  const painted = useRef(new Map<string, { cfiRange: string; color: string }>());
+  const painted = useRef(
+    new Map<string, { cfiRange: string; color: string; style: AnnotationStyle }>(),
+  );
   const searchPulseCleanupRef = useRef<(() => void) | null>(null);
 
   const navigateToSearchMatch = useCallback(
@@ -332,6 +451,7 @@ export function EpubViewer({
         painted.current.set(SEARCH_HIGHLIGHT_ID, {
           cfiRange: match.cfiRange,
           color: SEARCH_HIGHLIGHT_COLOR,
+          style: 'highlight',
         });
       }
 
@@ -341,7 +461,7 @@ export function EpubViewer({
         .then(() => {
           if (cancelled) return;
           if (previous && previous !== match.cfiRange) {
-            setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+            pushHistory(previous);
           }
           const waitedSince = performance.now();
           const startPulse = () => {
@@ -359,7 +479,7 @@ export function EpubViewer({
         })
         .catch(() => undefined);
     },
-    [handle],
+    [handle, pushHistory],
   );
 
   useEffect(
@@ -374,6 +494,7 @@ export function EpubViewer({
       query: string,
       caseSensitive: boolean,
       signal: AbortSignal,
+      onProgress: (matchesSoFar: readonly EpubSearchMatch[]) => void,
     ): Promise<readonly EpubSearchMatch[]> => {
       if (!handle?.searchChapter) return [];
       const count = handle.chapterCount ?? 0;
@@ -382,7 +503,10 @@ export function EpubViewer({
         if (signal.aborted) return [];
         const chapterMatches = await handle.searchChapter(chapterIndex, query, { caseSensitive });
         if (signal.aborted) return [];
-        matches.push(...chapterMatches);
+        if (chapterMatches.length > 0) {
+          matches.push(...chapterMatches);
+          onProgress([...matches]);
+        }
       }
       return matches;
     },
@@ -412,7 +536,7 @@ export function EpubViewer({
         .then(() => {
           setMissedJump(false);
           if (previous && previous !== epubAnchor.cfiRange) {
-            setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+            pushHistory(previous);
           }
         })
         .catch(() => {
@@ -420,12 +544,11 @@ export function EpubViewer({
           setMissedJump(true);
         });
     },
-    [handle],
+    [handle, pushHistory],
   );
 
   const bookmarksController = useBookmarksController<'epub'>({
     documentId,
-    isActive,
     bookmarks,
     onAddBookmark,
     onRemoveBookmark,
@@ -475,7 +598,7 @@ export function EpubViewer({
         .then(() => {
           setMissedJump(false);
           if (previous && previous !== epubAnchor.cfiRange) {
-            setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+            pushHistory(previous);
           }
           handle.setPulse(annotation.id, true);
           window.setTimeout(() => {
@@ -487,7 +610,7 @@ export function EpubViewer({
           setMissedJump(true);
         });
     },
-    [handle],
+    [handle, pushHistory],
   );
 
   const clearSelectionAfterAnnotate = useCallback(() => {
@@ -495,6 +618,13 @@ export function EpubViewer({
     setActiveSelection(null);
     onSelectionChange(null);
   }, [handle, onSelectionChange]);
+
+  const prevHighlightCount = useRef(highlights.length);
+  useEffect(() => {
+    const grew = highlights.length > prevHighlightCount.current;
+    prevHighlightCount.current = highlights.length;
+    if (grew && activeSelection) clearSelectionAfterAnnotate();
+  }, [highlights.length, activeSelection, clearSelectionAfterAnnotate]);
 
   const annotationsController = useAnnotationsController({
     documentId,
@@ -516,22 +646,33 @@ export function EpubViewer({
 
   const effectiveHighlights = useMemo(() => {
     if (annotations !== undefined) return highlights;
-    return [
-      ...highlights,
-      ...annotationsController.annotations.map(({ id, anchor, color }) => ({
-        annotationId: id,
-        anchor,
-        color,
-      })),
-    ];
+    return [...highlights, ...localHighlights(annotationsController.annotations)];
   }, [annotations, annotationsController.annotations, highlights]);
+
+  const getSelectionRect = useCallback(() => handle?.selectionRect() ?? null, [handle]);
+  const popover = useSelectionPopover({
+    isActive,
+    selection: activeSelection,
+    annotations: annotationsController,
+    surfaceRef: areaRef,
+    getSelectionRect,
+  });
+  const { openForAnnotation, reportPointer } = popover;
+  useEffect(() => {
+    if (!handle) return;
+    handle.onMarkClick((annotationId, rect) => {
+      if (!latest.current.isActive) return;
+      openForAnnotation(annotationId, rect);
+    });
+    handle.onPointer(reportPointer);
+  }, [handle, openForAnnotation, reportPointer]);
 
   useEffect(() => {
     if (!handle) return;
-    const wanted = new Map<string, { cfiRange: string; color: string }>();
-    for (const { annotationId, anchor, color } of effectiveHighlights) {
+    const wanted = new Map<string, { cfiRange: string; color: string; style: AnnotationStyle }>();
+    for (const { annotationId, anchor, color, style = 'highlight' } of effectiveHighlights) {
       const epubAnchor = asEpubAnchor(anchor);
-      if (epubAnchor) wanted.set(annotationId, { cfiRange: epubAnchor.cfiRange, color });
+      if (epubAnchor) wanted.set(annotationId, { cfiRange: epubAnchor.cfiRange, color, style });
     }
     // A jump can target an annotation from another notebook, with no highlight here.
     const jumpAnchor = asEpubAnchor(jumpRequest?.anchor);
@@ -539,26 +680,33 @@ export function EpubViewer({
       wanted.set(jumpRequest.annotationId, {
         cfiRange: jumpAnchor.cfiRange,
         color: FALLBACK_HIGHLIGHT,
+        style: 'highlight',
       });
     }
     if (activeSearchMatch) {
       wanted.set(SEARCH_HIGHLIGHT_ID, {
         cfiRange: activeSearchMatch.cfiRange,
         color: SEARCH_HIGHLIGHT_COLOR,
+        style: 'highlight',
       });
     }
 
     for (const [annotationId, existing] of painted.current) {
       const next = wanted.get(annotationId);
-      if (!next || next.cfiRange !== existing.cfiRange || next.color !== existing.color) {
-        handle.removeHighlight(existing.cfiRange);
+      if (
+        !next ||
+        next.cfiRange !== existing.cfiRange ||
+        next.color !== existing.color ||
+        next.style !== existing.style
+      ) {
+        handle.removeHighlight(existing.cfiRange, existing.style);
         painted.current.delete(annotationId);
       }
     }
-    for (const [annotationId, { cfiRange, color }] of wanted) {
+    for (const [annotationId, mark] of wanted) {
       if (!painted.current.has(annotationId)) {
-        handle.highlight(annotationId, cfiRange, color);
-        painted.current.set(annotationId, { cfiRange, color });
+        handle.highlight(annotationId, mark.cfiRange, mark.color, mark.style);
+        painted.current.set(annotationId, mark);
       }
     }
   }, [handle, effectiveHighlights, jumpRequest, activeSearchMatch]);
@@ -590,7 +738,7 @@ export function EpubViewer({
       }
       if (cancelled) return;
       if (previous && previous !== anchor.cfiRange) {
-        setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+        pushHistory(previous);
       }
       const waitedSince = performance.now();
       const startPulse = () => {
@@ -614,7 +762,7 @@ export function EpubViewer({
       window.clearTimeout(pollForMarks);
       handle.setPulse(annotationId, false);
     };
-  }, [handle, jumpRequest, onJumpHandled]);
+  }, [handle, jumpRequest, onJumpHandled, pushHistory]);
 
   // ---- Reading mode, keyboard navigation, and pane changes -----------------
 
@@ -625,30 +773,26 @@ export function EpubViewer({
 
   useEffect(() => {
     if (!handle) return;
-    handle.setPreferences(effectivePreferences);
-  }, [handle, effectivePreferences]);
+    handle.setPreferences(enginePreferences);
+  }, [handle, enginePreferences]);
+
+  useEffect(() => {
+    handle?.setColumns(layout.columns);
+  }, [handle, layout.columns]);
 
   useLayoutEffect(() => {
     if (!handle || !isActive) return;
-    const onKeyDown = (event: KeyboardEvent) => {
+    // Keys typed inside a chapter's iframe never reach the window, so the frame
+    // forwards them: Escape closes Find, and every shortcut reaches the registry.
+    const onFrameKeyDown = (event: KeyboardEvent) => {
       if (search.handleKeyDown(event)) return;
-      if (bookmarksController.handleKeyDown(event)) return;
-      if (shouldIgnoreKeyEvent(event)) return;
-      if (event.key === 'ArrowRight') {
-        event.preventDefault();
-        void handle.next();
-      } else if (event.key === 'ArrowLeft') {
-        event.preventDefault();
-        void handle.previous();
-      }
+      dispatchCommandKeydown(event);
     };
-    window.addEventListener('keydown', onKeyDown);
-    handle.onKeyDown(onKeyDown);
+    handle.onKeyDown(onFrameKeyDown);
     return () => {
-      window.removeEventListener('keydown', onKeyDown);
       handle.onKeyDown(() => undefined);
     };
-  }, [bookmarksController, handle, isActive, search]);
+  }, [handle, isActive, search]);
 
   useEffect(() => {
     // The store drops the selection on a tab switch; keep the frame in step.
@@ -674,40 +818,202 @@ export function EpubViewer({
       window.clearTimeout(timer);
       observer.disconnect();
     };
-  }, [handle, readingMode, effectivePreferences.readingWidth]);
+  }, [handle, readingMode]);
 
   const outlineItems = useMemo(() => toOutlineNodes(handle?.toc ?? []), [handle]);
 
-  const isTocTargetActive = (target: string): boolean => {
-    if (!currentHref || target.includes('#')) return false;
-    const cleanTarget = target.replace(/^(\.\/|\/)+/, '');
-    const cleanHref = currentHref.replace(/^(\.\/|\/)+/, '');
-    return (
-      cleanHref === cleanTarget ||
-      cleanHref.endsWith(`/${cleanTarget}`) ||
-      cleanTarget.endsWith(`/${cleanHref}`)
-    );
+  const tocIndex = useMemo(() => indexOutline(outlineItems), [outlineItems]);
+  const annotationPlacement = (annotation: Annotation): AnnotationPlacement => {
+    const anchor = asEpubAnchor(annotation.anchor);
+    const item = anchor ? findOutlineItem(handle?.toc ?? [], anchor.chapterHref) : null;
+    return {
+      group: item?.label ?? anchor?.chapterHref ?? 'Unknown chapter',
+      // Book order where the TOC knows the chapter; others after, as created.
+      order: item ? (tocIndex.get(item.id)?.order ?? 0) : Number.MAX_SAFE_INTEGER,
+    };
   };
 
-  const handleTocSelect = (target: string) => {
-    if (!handle) return;
+  const chapterTitles = useMemo(() => chapterTitlesBySpine(handle), [handle]);
+  const ticks = useMemo(() => chapterTicks(handle), [handle]);
+  const chapterCount = handle?.chapterCount ?? 0;
+  const currentChapterIndex = bookProgress ? bookProgress.chapter - 1 : 0;
+  const chapterTitle =
+    (currentHref ? findOutlineLabel(handle?.toc ?? [], currentHref) : null) ??
+    chapterTitles[currentChapterIndex] ??
+    (bookProgress ? `Chapter ${bookProgress.chapter}` : null);
+  const transition = effectivePreferences.pageTransition;
+  const paged = readingMode !== 'scroll';
+
+  /** Where the reader is, for "Back to …". */
+  const describeHere = () => {
+    const place = chapterTitle ?? 'previous location';
+    return paged && pageInfo ? `${place}, page ${pageInfo.page}` : place;
+  };
+
+  /** A big jump: remembered in history, with a chip that leads back. */
+  const jumpWithBackChip = (go: () => Promise<void>, target?: string) => {
     const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
-    void handle
-      .display(target)
+    const origin = describeHere();
+    void go()
       .then(() => {
         if (previous && previous !== target) {
-          setReturnStack((stack) => (stack.at(-1) === previous ? stack : [...stack, previous]));
+          pushHistory(previous);
+          backChip.offer(`Back to ${origin}`);
         }
       })
       .catch(() => undefined);
   };
 
-  const handleReturnBack = () => {
-    const target = returnStack.at(-1);
-    if (!handle || !target) return;
-    setReturnStack((stack) => stack.slice(0, -1));
-    void handle.display(target).catch(() => undefined);
+  const handleTocSelect = (target: string) => {
+    if (!handle) return;
+    jumpWithBackChip(() => handle.display(target), target);
   };
+
+  const turnPage = (direction: TurnDirection) => {
+    if (!handle) return;
+    backChip.dismiss();
+    void (direction > 0 ? handle.next() : handle.previous())
+      .then(() => {
+        if (paged) animatePageTurn(hostRef.current, direction, transition);
+      })
+      .catch(() => undefined);
+  };
+
+  const goToChapter = (index: number) => {
+    const href = handle?.spineHref(index);
+    if (!handle || href === undefined) return;
+    backChip.dismiss();
+    void handle.display(href).catch(() => undefined);
+  };
+
+  const goToChapterEdge = (edge: 'start' | 'end') => {
+    if (!handle || !bookProgress) return;
+    backChip.dismiss();
+    void handle
+      .displayChapterFraction(currentChapterIndex, edge === 'start' ? 0 : 1)
+      .catch(() => undefined);
+  };
+
+  const scrubber: ScrubberModel | null =
+    handle && chapterCount > 0 && bookProgress
+      ? {
+          value: Math.min(Math.max(bookProgress.fraction, 0), 1),
+          valueText: `Chapter ${bookProgress.chapter} of ${chapterCount}, ${bookProgress.percent}%`,
+          ticks,
+          describe: (fraction) => {
+            const index = Math.min(Math.floor(fraction * chapterCount), chapterCount - 1);
+            const title = chapterTitles[index] ?? `Chapter ${index + 1}`;
+            return `${title} · ${Math.round(fraction * 100)}%`;
+          },
+          onCommit: (fraction) => {
+            const scaled = Math.min(Math.max(fraction, 0), 1) * chapterCount;
+            const index = Math.min(Math.floor(scaled), chapterCount - 1);
+            jumpWithBackChip(() =>
+              handle.displayChapterFraction(index, Math.min(scaled - index, 1)),
+            );
+          },
+          onStepPage: turnPage,
+          onStepChapter: (direction) => goToChapter(currentChapterIndex + direction),
+        }
+      : null;
+
+  const readouts: FooterReadouts = {};
+  if (paged && pageInfo) {
+    readouts.remaining = pagesLeftText(pageInfo.totalPages - pageInfo.page);
+    readouts.position = `Page ${pageInfo.page} of ${pageInfo.totalPages} in chapter`;
+  }
+  if (bookProgress) readouts.percent = `${bookProgress.percent}% of book`;
+
+  // ---- Page-turn gestures: edge clicks and swipes, also from inside the frame ----
+
+  const gestures = usePageTurnGestures({
+    enabled: handle !== null && isActive && paged,
+    areaRef,
+    pageRef: hostRef,
+    onTurn: turnPage,
+  });
+  const { handleSample, handleWheel, zone } = gestures;
+  useEffect(() => {
+    if (!handle) return;
+    handle.onGesture(handleSample);
+    handle.onWheel(handleWheel);
+  }, [handle, handleSample, handleWheel]);
+  useEffect(() => {
+    handle?.setCursor(zoneCursor(zone));
+  }, [handle, zone]);
+
+  const currentHistoryLocation = (): string =>
+    currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? currentCfi ?? '';
+
+  const handleReturnBack = () => {
+    if (!handle) return;
+    backChip.dismiss();
+    const target = history.goBack(currentHistoryLocation());
+    if (target) void handle.display(target).catch(() => undefined);
+  };
+
+  const handleForward = () => {
+    if (!handle) return;
+    backChip.dismiss();
+    const target = history.goForward(currentHistoryLocation());
+    if (target) void handle.display(target).catch(() => undefined);
+  };
+
+  // Entering focus mode puts the panels away; leaving it does not reopen them.
+  const [wasChromeHidden, setWasChromeHidden] = useState(chromeHidden);
+  if (wasChromeHidden !== chromeHidden) {
+    setWasChromeHidden(chromeHidden);
+    if (chromeHidden) {
+      preferencesPanel.close();
+    }
+  }
+
+  const ready = handle !== null;
+  useReaderCommands({
+    isActive,
+    ready,
+    chromeHidden,
+    search,
+    navigator,
+    bookmarks: bookmarksController,
+    annotations: annotationsController,
+    selectionText: activeSelection?.text ?? null,
+    markup,
+    popover,
+    reflowable: {
+      preferences: effectivePreferences,
+      onChange: updatePreferences,
+      panel: preferencesPanel,
+    },
+    extra: {
+      'view.layoutSingle': {
+        run: () => updatePreferences({ epubReadingMode: 'paged' }),
+        enabled: ready,
+      },
+      'view.layoutTwoPage': {
+        run: () => updatePreferences({ epubReadingMode: 'spread' }),
+        enabled: ready,
+      },
+      'view.layoutScroll': {
+        run: () => updatePreferences({ epubReadingMode: 'scroll' }),
+        enabled: ready,
+      },
+      'go.previousPage': { run: () => turnPage(-1), enabled: ready },
+      'go.nextPage': { run: () => turnPage(1), enabled: ready },
+      'go.previousChapter': {
+        run: () => goToChapter(currentChapterIndex - 1),
+        enabled: ready && currentChapterIndex > 0,
+      },
+      'go.nextChapter': {
+        run: () => goToChapter(currentChapterIndex + 1),
+        enabled: ready && currentChapterIndex < chapterCount - 1,
+      },
+      'go.chapterStart': { run: () => goToChapterEdge('start'), enabled: ready },
+      'go.chapterEnd': { run: () => goToChapterEdge('end'), enabled: ready },
+      'go.back': { run: handleReturnBack, enabled: ready && history.canGoBack },
+      'go.forward': { run: handleForward, enabled: ready && history.canGoForward },
+    },
+  });
 
   if (error) {
     return (
@@ -717,174 +1023,161 @@ export function EpubViewer({
     );
   }
 
+  const showSidebar = navigator.open && !chromeHidden;
   return (
     <div
       className="flex h-full flex-col"
       data-testid="epub-viewer"
       data-reading-mode={readingMode}
       data-reading-theme={effectivePreferences.theme}
-      data-reading-width={effectivePreferences.readingWidth}
+      data-resolved-theme={theme}
+      data-reading-margins={effectivePreferences.margins}
+      data-columns={layout.columns}
+      data-chrome-hidden={chromeHidden || undefined}
     >
-      <div className="flex min-h-9 shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b bg-background px-2 py-1 text-foreground">
-        <div className="flex flex-wrap items-center gap-1">
-          <Button
-            variant={tocOpen ? 'secondary' : 'ghost'}
-            size="sm"
-            className="h-6 px-2 text-xs"
-            aria-label="Table of contents"
-            aria-pressed={tocOpen}
-            disabled={!handle}
-            onClick={() => setTocOpen((open) => !open)}
-          >
-            <ListTree />
-            Contents
-          </Button>
-          {returnStack.length > 0 && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-xs"
-              aria-label="Return to previous location"
+      <ReaderToolbar
+        isActive={isActive}
+        leading={
+          <>
+            <ToolbarButton
+              icon={PanelLeft}
+              label="Sidebar"
+              command="view.toggleSidebar"
+              pressed={showSidebar}
+              testId="sidebar-toggle"
+              disabled={!handle || chromeHidden}
+              onClick={navigator.toggle}
+            />
+            <SegmentedControl
+              label="Reading mode"
+              options={READING_MODES}
+              value={readingMode}
               disabled={!handle}
-              onClick={handleReturnBack}
-            >
-              <RotateCcw />
-              Back
-            </Button>
-          )}
-          <div role="group" aria-label="Reading mode" className="flex items-center gap-0.5">
-            {READING_MODES.map(({ mode, label, icon: Icon }) => {
-              const active = readingMode === mode;
-              return (
-                <Button
-                  key={mode}
-                  variant={active ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-6 px-2 text-xs"
-                  aria-pressed={active}
-                  disabled={!handle}
-                  onClick={() => updatePreferences({ epubReadingMode: mode })}
-                >
-                  <Icon />
-                  {label}
-                </Button>
-              );
-            })}
-          </div>
-          <ReadingPreferencesToggleButton
-            open={preferencesPanel.open}
-            disabled={!handle}
-            onToggle={preferencesPanel.toggle}
-          />
-          <DocumentSearchToggleButton
-            open={search.open}
-            disabled={!handle}
-            onToggle={search.toggleSearch}
-          />
-          <BookmarkToggleButton
-            bookmarked={bookmarksController.isCurrentBookmarked}
-            disabled={!handle}
-            onToggle={bookmarksController.toggleCurrentBookmark}
-          />
-          <BookmarksListToggleButton
-            open={bookmarksController.open}
-            count={bookmarksController.bookmarks.length}
-            disabled={!handle}
-            onToggle={bookmarksController.togglePanel}
-          />
-          <AnnotationsListToggleButton
-            open={annotationsController.open}
-            count={annotationsController.annotations.length}
-            disabled={!handle}
-            onToggle={annotationsController.togglePanel}
-          />
-          <SelectionAnnotationControls
-            hasSelection={activeSelection !== null}
-            controller={annotationsController}
-            disabled={!handle}
-          />
-        </div>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground tabular-nums">
-          {readingMode !== 'scroll' && pageInfo && (
-            <span data-testid="epub-chapter-page">
-              Chapter page {pageInfo.page} of {pageInfo.totalPages}
-            </span>
-          )}
-          {bookProgress && (
-            <span data-testid="epub-book-progress">
-              Book {bookProgress.percent}% (Ch. {bookProgress.chapter}/{bookProgress.totalChapters})
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            disabled={!handle}
-            onClick={() => void handle?.previous()}
-          >
-            <ChevronLeft />
-            Previous
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            disabled={!handle}
-            onClick={() => void handle?.next()}
-          >
-            Next
-            <ChevronRight />
-          </Button>
-        </div>
-      </div>
-      {preferencesPanel.open && (
-        <ReadingPreferencesBar
-          preferences={effectivePreferences}
-          disabled={!handle}
-          onChange={updatePreferences}
-        />
-      )}
-      <DocumentSearchBar search={search} />
-      <BookmarksPanel controller={bookmarksController} />
-      <SelectionNoteComposer
-        hasSelection={activeSelection !== null}
-        controller={annotationsController}
+              onChange={(mode) => updatePreferences({ epubReadingMode: mode })}
+            />
+            <HistoryButtons
+              canGoBack={history.canGoBack}
+              canGoForward={history.canGoForward}
+              disabled={!handle}
+              onBack={handleReturnBack}
+              onForward={handleForward}
+            />
+          </>
+        }
+        center={<ToolbarTitle title={document.title} subtitle={chapterTitle} />}
+        trailing={
+          <>
+            <AppearanceMenu
+              open={preferencesPanel.open}
+              onToggle={preferencesPanel.toggle}
+              onClose={preferencesPanel.close}
+              preferences={effectivePreferences}
+              onChange={updatePreferences}
+              format="epub"
+              disabled={!handle}
+            />
+            <MarkupToggleButton
+              visible={markup.visible}
+              highlightMode={annotationsController.highlightMode}
+              onToggle={markup.toggle}
+            />
+            <ToolbarSeparator />
+            <BookmarkToggleButton
+              bookmarked={bookmarksController.isCurrentBookmarked}
+              disabled={!handle}
+              onToggle={bookmarksController.toggleCurrentBookmark}
+            />
+            <ToolbarSearchField
+              search={search}
+              disabled={!handle}
+              onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
+            />
+          </>
+        }
       />
-      <AnnotationsPanel controller={annotationsController} />
-      {missedJump && (
-        <p role="status" className="shrink-0 border-b bg-muted px-4 py-1.5 text-xs">
-          That excerpt could not be found in this book. The file may have changed.
-        </p>
-      )}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
-        {tocOpen && (
-          <OutlineSidebar
-            items={outlineItems}
-            isActive={isTocTargetActive}
-            emptyMessage="No table of contents in this book."
-            onSelect={handleTocSelect}
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        {showSidebar && (
+          <ReaderNavigator
+            navigator={navigator}
+            bookmarks={bookmarksController}
+            annotations={annotationsController}
+            search={search}
+            groupSearchResults
+            contents={{
+              items: outlineItems,
+              currentId: currentTocId(handle?.toc ?? [], currentHref),
+              emptyMessage: 'No table of contents in this book.',
+              onSelect: handleTocSelect,
+            }}
+            annotationPlacement={annotationPlacement}
           />
         )}
-        <div className="relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden bg-muted/30 px-2 py-1.5">
-          <div
-            ref={hostRef}
-            data-testid="epub-host"
-            className={cn(
-              'relative h-full w-full overflow-hidden rounded-sm shadow-sm ring-1 ring-black/5',
-              THEME_SURFACE_CLASSES[effectivePreferences.theme],
-              readingMode === 'spread'
-                ? 'max-w-none'
-                : READING_WIDTH_CLASSES[effectivePreferences.readingWidth],
-            )}
+        {/* Notices float over the page column only, never over the sidebar. */}
+        <div ref={readerAreaRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {markup.visible && <MarkupBar controller={annotationsController} onClose={markup.hide} />}
+          <SelectionPopover
+            popover={popover}
+            annotations={annotationsController}
+            selection={activeSelection}
+            boundsRef={readerAreaRef}
+            onExcerpt={onExcerptSelection}
+            canExcerpt={canExcerpt}
+            onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
           />
-          {readingMode === 'spread' && (
+          <ReaderPopoverLayer>
+            {missedJump && (
+              <p role="status" className="bg-muted px-4 py-1.5 text-xs">
+                That excerpt could not be found in this book. The file may have changed.
+              </p>
+            )}
+          </ReaderPopoverLayer>
+          {/*
+            The page's color fills the margins too, so the page never sits in a
+            frame of bright chrome, and nothing flashes while a chapter loads.
+          */}
+          <div
+            ref={areaRef}
+            data-testid="epub-page-area"
+            data-turn-zone={zone ?? undefined}
+            className="group/page relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5"
+            style={{ ...pageSurfaceStyle(theme), cursor: zoneCursor(zone) || undefined }}
+          >
             <div
-              aria-hidden="true"
-              className="pointer-events-none absolute inset-y-3 left-1/2 w-px -translate-x-1/2 bg-black/8 max-md:hidden"
+              ref={hostRef}
+              tabIndex={-1}
+              data-testid="epub-host"
+              className={cn('relative h-full overflow-hidden', availableWidth === 0 && 'w-full')}
+              style={{
+                ...pageSurfaceStyle(theme),
+                ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
+              }}
             />
-          )}
+            {readingMode === 'spread' && layout.columns === 2 && (
+              <div
+                aria-hidden="true"
+                data-testid="epub-spine"
+                className="pointer-events-none absolute inset-y-3 left-1/2 w-12 -translate-x-1/2"
+                style={{
+                  background: `linear-gradient(to right, transparent, ${PAGE_PALETTES[theme].spine} 50%, transparent)`,
+                }}
+              />
+            )}
+            {paged && (
+              <PageTurnChevrons
+                disabled={!handle}
+                onPrevious={() => turnPage(-1)}
+                onNext={() => turnPage(1)}
+              />
+            )}
+          </div>
+          <ReaderFooter
+            readouts={readouts}
+            scrubber={scrubber}
+            backLabel={backChip.label}
+            onBack={handleReturnBack}
+            disabled={!handle}
+            style={pageFooterStyle(theme)}
+          />
         </div>
       </div>
     </div>

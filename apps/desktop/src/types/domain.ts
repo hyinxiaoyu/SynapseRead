@@ -83,6 +83,8 @@ export interface RelinkDocumentResult {
 export interface WorkspaceSession {
   openDocumentIds: string[];
   activeDocumentId: string | null;
+  /** Immersive reading: reader chrome collapsed and the toolbar auto-hiding. */
+  immersive: boolean;
 }
 
 export interface Viewport {
@@ -98,6 +100,9 @@ export interface StudyNotebook {
   createdAt: string;
 }
 
+/** How an annotation is drawn over its text. Excerpts are always highlights. */
+export type AnnotationStyle = 'highlight' | 'underline';
+
 export interface Annotation {
   id: string;
   documentId: string;
@@ -107,6 +112,7 @@ export interface Annotation {
   excerptImagePath: string | null;
   note?: string | null;
   color: string;
+  style: AnnotationStyle;
   createdAt: string;
 }
 
@@ -118,11 +124,21 @@ export interface CreateAnnotationInput {
   excerptImagePng: string | null;
   note: string | null;
   color: string;
+  style: AnnotationStyle;
 }
 
 export interface AnnotationPatch {
   note: string | null;
   color: string | null;
+  /** Omitted or `null` keeps the current style. */
+  style?: AnnotationStyle | null;
+}
+
+/** What a reader asks for when it creates an annotation from its selection. */
+export interface CreateAnnotationOptions {
+  color?: string;
+  note?: string;
+  style?: AnnotationStyle;
 }
 
 export interface NoteCard {
@@ -239,10 +255,26 @@ export function defaultBookmarkLabel(anchor: AnchorLocation): string {
   }
 }
 
-export type ReadingTheme = 'light' | 'sepia' | 'dark';
-export type ReadingFontFamily = 'serif' | 'sans' | 'mono';
-export type ReadingWidth = 'narrow' | 'medium' | 'wide' | 'full';
+/** `auto` follows the system's light or dark appearance. */
+export type ReadingTheme = 'auto' | 'light' | 'sepia' | 'dark';
+/** A theme with `auto` settled against the system appearance. */
+export type ResolvedReadingTheme = Exclude<ReadingTheme, 'auto'>;
+/** `original` keeps the publisher's fonts (EPUB) or the default serif (TXT). */
+export type ReadingFontFamily =
+  | 'original'
+  | 'charter'
+  | 'iowan'
+  | 'palatino'
+  | 'athelas'
+  | 'new-york'
+  | 'seravek'
+  | 'sf-pro'
+  | 'mono';
+/** Page padding; the text column is capped by the reading measure instead. */
+export type ReadingMargins = 'narrow' | 'normal' | 'wide';
 export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
+/** How a paged reader animates a page turn; reduced motion always turns instantly. */
+export type PageTransition = 'none' | 'slide' | 'fade';
 
 export interface ReadingPreferences {
   theme: ReadingTheme;
@@ -251,17 +283,26 @@ export interface ReadingPreferences {
   fontSize: number;
   /** Line height multiplier (`1.2..=2.4`). */
   lineSpacing: number;
-  readingWidth: ReadingWidth;
+  margins: ReadingMargins;
+  /** Justified text, hyphenated in the document's language. */
+  justify: boolean;
+  /** Dims images in the Dark theme. */
+  dimImages: boolean;
   epubReadingMode: EpubReadingMode;
+  /** Also used by PDF single and two-page modes. */
+  pageTransition: PageTransition;
 }
 
 export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
-  theme: 'light',
-  fontFamily: 'serif',
+  theme: 'auto',
+  fontFamily: 'original',
   fontSize: 100,
   lineSpacing: 1.75,
-  readingWidth: 'medium',
+  margins: 'normal',
+  justify: true,
+  dimImages: false,
   epubReadingMode: 'spread',
+  pageTransition: 'slide',
 };
 
 /**
@@ -334,6 +375,8 @@ export interface ReaderHighlight {
   annotationId: string;
   anchor: AnchorLocation;
   color: string;
+  /** Absent for marks that are not annotations, such as search matches. */
+  style?: AnnotationStyle;
 }
 
 /**
@@ -345,6 +388,11 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   document: StudyDocument & { format: F };
   /** False while another tab is showing. The viewer stays mounted to keep its state. */
   isActive: boolean;
+  /**
+   * Immersive reading: the viewer hides its sidebars and floating panels and lets
+   * the page take the theme color. Its commands keep working.
+   */
+  chromeHidden?: boolean;
   content: DocumentContentReader;
   highlights: ReaderHighlight[];
   /** Set while a jump is outstanding for this document. */
@@ -367,7 +415,7 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   /** Persisted annotations (both independent highlights/notes and card-linked excerpts) for this document. */
   annotations?: readonly Annotation[];
   /** Creates an independent highlight/note from the current selection without creating a MindMap node. */
-  onCreateAnnotation?: (options?: { color?: string; note?: string }) => void;
+  onCreateAnnotation?: (options?: CreateAnnotationOptions) => void;
   /** Updates an annotation's inline note and/or color. */
   onUpdateAnnotation?: (annotationId: string, patch: AnnotationPatch) => void;
   /** Deletes an annotation from this document. */
@@ -375,6 +423,10 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   /** Undoes the most recent annotation deletion in this session, if available. */
   canUndoAnnotationDelete?: boolean;
   onUndoAnnotationDelete?: () => void;
+  /** Sends the published selection to the MindMap, as the Excerpt to MindMap button does. */
+  onExcerptSelection?: () => void;
+  /** False while an excerpt is being written. */
+  canExcerpt?: boolean;
 }
 
 const isFiniteNumber = (value: unknown): value is number =>

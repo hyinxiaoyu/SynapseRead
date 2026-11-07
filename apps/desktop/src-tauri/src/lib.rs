@@ -3,6 +3,7 @@
 mod access;
 mod commands;
 mod error;
+mod menu;
 mod state;
 
 use tauri::{Builder, Manager, Runtime};
@@ -43,6 +44,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::relink_document,
         commands::fs_reader::read_text_stream,
         commands::fs_reader::cancel_text_stream,
+        menu::set_menu_item_states,
     ])
 }
 
@@ -55,7 +57,16 @@ pub fn run() {
             let state = AppState::open(&data_dir.join(DATABASE_FILE))?;
             access::grant_all(app, &state)?;
             app.manage(state);
+            let (menu, menu_items) = menu::build(app)?;
+            app.set_menu(menu)?;
+            app.manage(menu_items);
+            create_main_window(app)?;
             Ok(())
+        })
+        .on_menu_event(|app, event| {
+            if let Some(payload) = menu::menu_command_payload(event.id().as_ref()) {
+                let _ = tauri::Emitter::emit(app, menu::MENU_COMMAND_EVENT, &payload);
+            }
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
@@ -69,6 +80,23 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run SynapseRead");
+}
+
+/// The window is created here rather than from `tauri.conf.json` so that only
+/// macOS gets the unified title bar: the toolbar draws under the traffic lights,
+/// while Windows and Linux keep their standard frame.
+fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let Some(config) = app.config().app.windows.first().cloned() else {
+        return Ok(());
+    };
+    let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(16.0, 22.0));
+    builder.build()?;
+    Ok(())
 }
 
 #[cfg(test)]

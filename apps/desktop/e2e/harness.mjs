@@ -95,6 +95,65 @@ class Cdp {
   }
 }
 
+/**
+ * Runs in the page. Colors go through a canvas, which resolves any CSS color
+ * syntax (oklch included) to sRGB, and translucent backgrounds are composited
+ * down to the first opaque one.
+ */
+const CONTRAST_PROBE = `(rootSelector) => {
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 1;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  const rgba = (color) => {
+    context.clearRect(0, 0, 1, 1);
+    context.fillStyle = '#000';
+    context.fillStyle = color;
+    context.fillRect(0, 0, 1, 1);
+    const [r, g, b, a] = context.getImageData(0, 0, 1, 1).data;
+    return { r, g, b, a: a / 255 };
+  };
+  const over = (top, bottom) => ({
+    r: top.r * top.a + bottom.r * (1 - top.a),
+    g: top.g * top.a + bottom.g * (1 - top.a),
+    b: top.b * top.a + bottom.b * (1 - top.a),
+    a: 1,
+  });
+  const backdrop = (element) => {
+    const layers = [];
+    for (let node = element; node; node = node.parentElement) {
+      const layer = rgba(getComputedStyle(node).backgroundColor);
+      if (layer.a > 0) layers.push(layer);
+      if (layer.a >= 1) break;
+    }
+    return layers.reduceRight((below, layer) => over(layer, below), { r: 255, g: 255, b: 255, a: 1 });
+  };
+  const luminance = ({ r, g, b }) => {
+    const linear = (c) => ((c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+  };
+  const opaque = (element) => {
+    for (let node = element; node; node = node.parentElement) {
+      if (Number(getComputedStyle(node).opacity) < 1) return false;
+    }
+    return true;
+  };
+  const failures = [];
+  for (const root of document.querySelectorAll(rootSelector)) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+      const element = text.parentElement;
+      if (!text.data.trim() || !element?.checkVisibility({ visibilityProperty: true })) continue;
+      if (element.closest(':disabled, [aria-disabled="true"]') || !opaque(element)) continue;
+      const background = backdrop(element);
+      const foreground = over(rgba(getComputedStyle(element).color), background);
+      const [light, dark] = [luminance(foreground), luminance(background)].sort((a, b) => b - a);
+      const ratio = (light + 0.05) / (dark + 0.05);
+      if (ratio < 4.5) failures.push(text.data.trim().slice(0, 40) + ': ' + ratio.toFixed(2));
+    }
+  }
+  return failures;
+}`;
+
 export class Page {
   errors = [];
 
@@ -132,6 +191,42 @@ export class Page {
       if (value) return value;
       if (Date.now() > deadline) throw new Error(`timed out waiting for: ${description}`);
       await new Promise((done) => setTimeout(done, 50));
+    }
+  }
+
+  /**
+   * Resizes the viewport, as dragging the window edge would, and waits past the
+   * readers' debounced re-layout (150 ms).
+   */
+  async setViewport(width, height = 900) {
+    await this.cdp.send('Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    await this.waitFor(`window.innerWidth === ${width}`, `a ${width} px viewport`);
+    await new Promise((done) => setTimeout(done, 600));
+  }
+
+  /**
+   * Text in `rootSelector` whose contrast with what is painted beneath it falls
+   * below WCAG AA (4.5:1). Disabled controls are exempt, as WCAG exempts them.
+   */
+  async contrastFailures(rootSelector) {
+    return this.evaluate(`(${CONTRAST_PROBE})(${JSON.stringify(rootSelector)})`);
+  }
+
+  /** Fails unless `rootSelector`'s text meets AA once color transitions settle. */
+  async assertContrast(rootSelector, description) {
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      const failures = await this.contrastFailures(rootSelector);
+      if (failures.length === 0) return;
+      if (Date.now() > deadline) {
+        throw new Error(`${description}: text below 4.5:1: ${failures.join('; ')}`);
+      }
+      await new Promise((done) => setTimeout(done, 100));
     }
   }
 
@@ -177,11 +272,96 @@ export class Page {
             && !b.disabled && b.checkVisibility({ visibilityProperty: true }));
         if (!button) return null;
         const r = button.getBoundingClientRect();
-        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        const point = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+        // Only once it has stopped moving (the toolbar animates as the search field
+        // resizes) and nothing (a widened search field, a popover) covers it.
+        const key = JSON.stringify(point);
+        const settled = window.__e2eLastButtonPoint === key;
+        window.__e2eLastButtonPoint = key;
+        if (!settled) return null;
+        return button.contains(document.elementFromPoint(point.x, point.y)) ? point : null;
       })()`,
-      `an enabled, visible button named ${name}`,
+      `an enabled, visible, uncovered button named ${name}`,
     );
     await this.click(point);
+  }
+
+  /** A real key press (keydown and keyup) to whatever has focus. */
+  async press(key, code = key) {
+    for (const type of ['keyDown', 'keyUp']) {
+      await this.cdp.send('Input.dispatchKeyEvent', {
+        type,
+        key,
+        code,
+        windowsVirtualKeyCode: key === 'Escape' ? 27 : 0,
+      });
+    }
+  }
+
+  /** Leaves Find as a reader would: Esc in the field clears it and returns focus to the page. */
+  async leaveSearch() {
+    await this.evaluate(`document.querySelector('[data-testid="search-input"]').focus()`);
+    await this.press('Escape');
+    await this.waitFor(
+      `document.querySelector('[data-testid="search-input"]').value === ''
+        && !document.querySelector('[data-testid="document-search-field"]').contains(document.activeElement)
+        && document.activeElement !== document.body`,
+      'Esc to clear the search and return focus to the page',
+    );
+  }
+
+  /** Clicks a table-of-contents entry by its full title. */
+  async clickTreeItem(name) {
+    const point = await this.waitFor(
+      `(() => {
+        const item = [...document.querySelectorAll('[role="treeitem"]')].find(
+          (e) => e.getAttribute('aria-label') === ${JSON.stringify(name)}
+            && e.checkVisibility({ visibilityProperty: true }));
+        if (!item) return null;
+        item.scrollIntoView({ block: 'nearest' });
+        const r = item.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      })()`,
+      `a visible outline entry named ${name}`,
+    );
+    await this.click(point);
+  }
+
+  /** Expands a collapsed table-of-contents branch from its disclosure triangle. */
+  async expandTreeItem(name) {
+    await this.waitFor(
+      `(() => {
+        const item = [...document.querySelectorAll('[role="treeitem"]')].find(
+          (e) => e.getAttribute('aria-label') === ${JSON.stringify(name)}
+            && e.checkVisibility({ visibilityProperty: true }));
+        if (!item) return false;
+        if (item.getAttribute('aria-expanded') === 'false') {
+          item.querySelector('[data-testid="toc-disclosure"]').click();
+        }
+        return true;
+      })()`,
+      `a visible outline branch named ${name}`,
+    );
+  }
+
+  /** Opens the reader's Navigator sidebar if needed and selects the tab named `name`. */
+  async showSidebarTab(name) {
+    const tabVisible = await this.evaluate(
+      `[...document.querySelectorAll('[role="tab"]')].some(
+        (t) => t.getAttribute('aria-label') === ${JSON.stringify(name)}
+          && t.checkVisibility({ visibilityProperty: true }))`,
+    );
+    if (!tabVisible) await this.clickButton('Sidebar');
+    await this.clickButton(name);
+  }
+
+  /** Puts the reader's Navigator sidebar away if it is showing. */
+  async hideSidebar() {
+    const shown = await this.evaluate(
+      `[...document.querySelectorAll('[data-testid="navigator-sidebar"]')].some(
+        (e) => e.checkVisibility({ visibilityProperty: true }))`,
+    );
+    if (shown) await this.clickButton('Sidebar');
   }
 
   async setInputValue(selector, value) {

@@ -21,8 +21,10 @@ from.
   bookmarks (`Cmd/Ctrl+D`) without creating MindMap cards
 - In-document search (`Cmd/Ctrl+F`) across unrendered PDF pages, EPUB chapters, and
   TXT rows, with return-to-previous-location history
-- Persistent reading appearance preferences (`light`/`sepia`/`dark`, font family/size,
-  line spacing, reading width, and EPUB `spread`/`paged`/`scroll` modes)
+- An "Aa" appearance popover for EPUB and TXT: `auto`/`light`/`sepia`/`dark` themes that
+  tint the whole reader window (`auto` follows the system), named reading faces, text
+  size (`Cmd/Ctrl +`/`-`/`0`), line spacing, margins, justification, and a reading
+  measure held at 45–75 characters per line, with EPUB `spread`/`paged`/`scroll` modes
 - Jump from any card, bookmark, annotation, or search result back to its source, with
   a pulse highlight
 - Draggable nodes, parent-child nesting, and cross-link edges, with layout saved

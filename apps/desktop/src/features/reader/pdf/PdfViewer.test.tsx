@@ -1,8 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearchBar';
+import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import {
@@ -449,7 +449,7 @@ describe('PdfViewer', () => {
       }),
     );
     await waitFor(() => expect(store.getState().jumpRequest).toBeNull());
-    expect(await screen.findByRole('status')).toHaveTextContent(/does not have/);
+    expect(await screen.findByText(/does not have/)).toHaveAttribute('role', 'status');
   });
 
   it('reopens at the last reading position, including within a page', async () => {
@@ -575,22 +575,115 @@ describe('PdfViewer', () => {
     expect(pageInput).toHaveValue('1');
   });
 
+  it('shows page progress in a footer, chapter ticks, and the chapter as the toolbar subtitle', async () => {
+    window.localStorage.clear();
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+
+    expect(await screen.findByTestId('reader-toolbar-subtitle')).toHaveTextContent('Part One');
+    const readout = screen.getByTestId('reader-footer-readout');
+    // Part Two starts on page 4.
+    expect(readout).toHaveTextContent('2 pages left in chapter');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('20%');
+
+    const slider = screen.getByRole('slider', { name: 'Reading position' });
+    expect(slider).toHaveAttribute('aria-valuetext', 'Page 1 of 5, Part One, 20%');
+    const ticks = screen.getAllByTestId('progress-scrubber-tick');
+    expect(ticks).toHaveLength(1);
+    expect(ticks[0]).toHaveStyle({ left: '75%' });
+
+    vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 100, 20));
+    fireEvent.pointerMove(slider, { clientX: 100 });
+    expect(screen.getByTestId('progress-scrubber-tooltip')).toHaveTextContent('Part Two · p. 5');
+    fireEvent.pointerDown(slider, { clientX: 100, button: 0, pointerId: 1 });
+    fireEvent.pointerUp(slider, { clientX: 100, button: 0, pointerId: 1 });
+    expect(readout).toHaveTextContent('100%');
+    expect(screen.getByTestId('reader-toolbar-subtitle')).toHaveTextContent('Part Two');
+    const chip = screen.getByTestId('reader-back-chip');
+    expect(chip).toHaveTextContent('Back to page 1');
+    fireEvent.click(chip);
+    expect(readout).toHaveTextContent('20%');
+    expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
+  });
+
+  it('turns pages by edge click, swipe, and keys in single and two-page modes only', async () => {
+    window.localStorage.clear();
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    const pane = await scroller();
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+    const readout = screen.getByTestId('reader-footer-readout');
+    fireEvent.click(readout); // Page N of M
+    const edgeClick = (x: number) =>
+      fireEvent.click(pane, { clientX: x, clientY: 300, button: 0, detail: 1 });
+
+    // Continuous scroll keeps native scrolling: no zones, no chevrons, Space untouched.
+    edgeClick(PANE_PX - 10);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    expect(screen.queryByRole('button', { name: 'Next Page' })).not.toBeInTheDocument();
+    expect(fireEvent.keyDown(pane, { key: ' ', code: 'Space' })).toBe(true);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    edgeClick(PANE_PX - 10);
+    expect(readout).toHaveTextContent('Page 2 of 5');
+    edgeClick(10);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    edgeClick(PANE_PX / 2);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    expect(fireEvent.keyDown(pane, { key: ' ', code: 'Space' })).toBe(false);
+    expect(readout).toHaveTextContent('Page 2 of 5');
+    fireEvent.keyDown(pane, { key: 'PageUp', code: 'PageUp' });
+    expect(readout).toHaveTextContent('Page 1 of 5');
+    fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+    fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+    expect(readout).toHaveTextContent('Page 2 of 5');
+    fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+    expect(readout).toHaveTextContent('Page 3 of 5');
+
+    // Chapters: ⌥↓ to Part Two, End to its last page, Home back to its start.
+    fireEvent.keyDown(pane, { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+    expect(readout).toHaveTextContent('Page 4 of 5');
+    fireEvent.keyDown(pane, { key: 'End', code: 'End' });
+    expect(readout).toHaveTextContent('Page 5 of 5');
+    fireEvent.keyDown(pane, { key: 'Home', code: 'Home' });
+    expect(readout).toHaveTextContent('Page 4 of 5');
+    fireEvent.keyDown(pane, { key: 'ArrowUp', code: 'ArrowUp', altKey: true });
+    expect(readout).toHaveTextContent('Page 1 of 5');
+
+    // Two pages turn a whole spread.
+    fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+    edgeClick(PANE_PX - 10);
+    expect(readout).toHaveTextContent('Page 3 of 5');
+  });
+
   it('renders nested PDF outlines, jumps to outline destinations, and handles empty outlines', async () => {
     const { store, documentId } = await setup();
     const view = render(<Harness store={store} documentId={documentId} />);
     await pageElement(0);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    // ⌥⌘3: Contents, in Preview's mapping.
+    fireEvent.keyDown(window, { key: '3', code: 'Digit3', altKey: true, metaKey: true });
     expect(screen.getByTestId('reader-toc')).toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: 'Part One' })).toHaveAttribute(
+    expect(await screen.findByRole('treeitem', { name: 'Part One' })).toHaveAttribute(
       'aria-current',
       'location',
     );
-    const nested = screen.getByRole('button', { name: 'Blue Box Section' });
-    expect(nested).toBeInTheDocument();
+    const nested = screen.getByRole('treeitem', { name: 'Blue Box Section' });
+    expect(nested).toHaveAttribute('aria-level', '2');
+    // Page numbers sit right-aligned beside each title.
+    expect(nested).toHaveTextContent('3');
 
     fireEvent.click(nested);
     expect((await scroller()).scrollTop).toBeCloseTo(2 * (PAGE_PX + GAP_PX), 0);
+    expect(screen.getByRole('treeitem', { name: 'Blue Box Section' })).toHaveAttribute(
+      'aria-current',
+      'location',
+    );
 
     fireEvent.click(await screen.findByRole('button', { name: 'Return to previous location' }));
     expect((await scroller()).scrollTop).toBeCloseTo(0, 0);
@@ -600,7 +693,8 @@ describe('PdfViewer', () => {
     engineState.outline = [];
     render(<Harness store={store} documentId={documentId} />);
     await pageElement(0);
-    fireEvent.click(screen.getByRole('button', { name: 'Table of contents' }));
+    // The sidebar reopens on the tab chosen last time.
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
     expect(screen.getByTestId('reader-toc')).toHaveTextContent('No outline in this document.');
   });
 
@@ -707,7 +801,9 @@ describe('PdfViewer', () => {
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 5'));
     const resultItems = screen.getAllByTestId('search-result-item');
     expect(resultItems).toHaveLength(5);
-    expect(resultItems[4]).toHaveTextContent('Page 5');
+    // Grouped by page in the sidebar, with the match in bold.
+    expect(screen.getAllByTestId('search-result-location')[4]).toHaveTextContent('Page 5');
+    expect(resultItems[0]?.querySelector('mark')).toHaveTextContent('First line of page');
 
     // Direct jump to the 5th match (unrendered page index 4).
     fireEvent.click(resultItems[4] as HTMLElement);
@@ -727,7 +823,8 @@ describe('PdfViewer', () => {
     // Case-sensitive search for "fox" vs "Fox" on page 5.
     fireEvent.change(searchInput, { target: { value: 'fox' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
-    fireEvent.click(screen.getByRole('button', { name: 'Match case' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Search options' }));
+    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Match case/ }));
     await waitFor(() =>
       expect(screen.getByTestId('search-status')).toHaveTextContent('No matches'),
     );
@@ -744,7 +841,6 @@ describe('PdfViewer', () => {
     const view = render(<Harness store={store} documentId={documentId} />);
     await pageElement(0);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Find in document' }));
     const searchInput = await screen.findByTestId('search-input');
     fireEvent.change(searchInput, { target: { value: 'Second line' } });
 
@@ -799,7 +895,7 @@ describe('PdfViewer', () => {
     expect(pageInput).toHaveValue('1');
     expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
 
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    fireEvent.keyDown(window, { key: '5', code: 'Digit5', altKey: true, metaKey: true });
     await screen.findByTestId('bookmark-item');
     expect(screen.getByTestId('bookmark-label')).toHaveTextContent('Page 3');
     const jumpButton = screen.getByTestId('bookmark-jump-button');
@@ -826,14 +922,17 @@ describe('PdfViewer', () => {
     expect(await screen.findByTestId('bookmark-stale')).toHaveTextContent('Stale');
     const jumpButtons = screen.getAllByTestId('bookmark-jump-button');
     fireEvent.click(jumpButtons[1] as HTMLElement);
-    expect(await screen.findByRole('status')).toHaveTextContent(/page this file does not have/);
+    expect(await screen.findByText(/page this file does not have/)).toHaveAttribute(
+      'role',
+      'status',
+    );
 
     // Persist across reopen and remove bookmarks.
     first.unmount();
     const reopened = await reopen(backend);
     render(<Harness store={reopened} documentId={documentId} />);
     await pageElement(0);
-    fireEvent.click(screen.getByTestId('bookmarks-toggle-button'));
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
     expect(await screen.findAllByTestId('bookmark-item')).toHaveLength(2);
 
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
@@ -847,13 +946,15 @@ describe('PdfViewer', () => {
     const page0 = await pageElement(0);
     const node = textNode(page0, 0);
 
-    // Select text, pick Green highlight color, and add a note via SelectionNoteComposer.
+    // Pick Green in the markup bar, select text, and add a note from the popover.
+    fireEvent.click(screen.getByTestId('markup-toggle'));
+    fireEvent.click(screen.getByTestId('markup-color-green'));
     select([node, 0], [node, 10]);
-    fireEvent.click(screen.getByTestId('annotation-color-green'));
-    fireEvent.click(screen.getByTestId('add-note-selection-button'));
-    const noteComposerInput = await screen.findByTestId('selection-note-input');
+    const popover = await screen.findByTestId('selection-popover');
+    fireEvent.click(within(popover).getByRole('button', { name: 'Add Note' }));
+    const noteComposerInput = await screen.findByTestId('popover-note-input');
     fireEvent.change(noteComposerInput, { target: { value: 'Margin note on page 1' } });
-    fireEvent.click(screen.getByTestId('save-selection-note-button'));
+    fireEvent.click(screen.getByTestId('popover-note-save'));
 
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
     expect(store.getState().cards).toEqual([]);
@@ -864,12 +965,42 @@ describe('PdfViewer', () => {
       note: 'Margin note on page 1',
     });
 
+    // A click on the highlight opens the popover in edit mode, here to make it an underline.
+    const mark = await waitFor(() => {
+      const element = document.querySelector<HTMLElement>(
+        '[data-page-index="0"] [data-annotation-id]',
+      );
+      if (!element) throw new Error('no highlight yet');
+      return element;
+    });
+    fireEvent.click(mark);
+    const editor = await screen.findByTestId('selection-popover');
+    expect(editor).toHaveAttribute('data-popover-mode', 'edit');
+    fireEvent.click(within(editor).getByRole('button', { name: 'Underline' }));
+    await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('underline'));
+    await waitFor(() =>
+      expect(
+        document.querySelector<HTMLElement>('[data-page-index="0"] [data-annotation-id]')?.dataset
+          .annotationStyle,
+      ).toBe('underline'),
+    );
+    fireEvent.keyDown(within(editor).getByRole('button', { name: 'Underline' }), {
+      key: 'Escape',
+    });
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+
     // Open annotations panel, edit note & color, jump to annotation, delete, and undo delete.
-    fireEvent.click(screen.getByTestId('annotations-toggle-button'));
+    fireEvent.keyDown(window, { key: '4', code: 'Digit4', altKey: true, metaKey: true });
     const item = await screen.findByTestId('annotation-item');
     expect(item).toHaveTextContent('Page 1');
     expect(item).toHaveTextContent('First line');
+    expect(screen.getByTestId('annotation-note-preview')).toHaveTextContent(
+      'Margin note on page 1',
+    );
+    // Grouped under the outline chapter that holds the page.
+    expect(await screen.findByTestId('annotation-group')).toHaveTextContent('Part One');
 
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
     const editNoteInput = screen.getByTestId('annotation-note-input') as HTMLInputElement;
     expect(editNoteInput).toHaveValue('Margin note on page 1');
     fireEvent.change(editNoteInput, { target: { value: 'Revised margin note' } });
@@ -941,7 +1072,7 @@ describe('PdfViewer', () => {
     // Create a user highlight on Page 1 to verify geometry across rotation and display modes.
     const node = textNode(page0, 0);
     select([node, 0], [node, 10]);
-    fireEvent.click(screen.getByTestId('highlight-selection-button'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yellow highlight' }));
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
 
     const highlightEl = () =>
@@ -972,7 +1103,7 @@ describe('PdfViewer', () => {
     expect(pageInput).toHaveValue('1');
 
     // Lazy thumbnails sidebar shows active page and jumps on click.
-    fireEvent.click(screen.getByTestId('pdf-thumbnails-toggle'));
+    fireEvent.keyDown(window, { key: '2', code: 'Digit2', altKey: true, metaKey: true });
     expect(await screen.findByTestId('pdf-thumbnails-sidebar')).toBeInTheDocument();
     expect(screen.getByTestId('pdf-thumbnail-0')).toHaveAttribute('aria-current', 'page');
     fireEvent.click(screen.getByTestId('pdf-thumbnail-2'));
@@ -1016,13 +1147,15 @@ describe('PdfViewer', () => {
     const page0Canvas = page0.querySelector('canvas') as HTMLCanvasElement;
     expect(page0Canvas.width).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByTestId('pdf-thumbnails-toggle'));
+    fireEvent.click(screen.getByTestId('sidebar-toggle'));
+    fireEvent.click(screen.getByTestId('navigator-tab-thumbnails'));
     const thumb0 = await screen.findByTestId('pdf-thumbnail-0');
     const thumb0Canvas = thumb0.querySelector('canvas') as HTMLCanvasElement;
     expect(thumb0Canvas.width).toBeGreaterThan(0);
 
-    // Closing thumbnails sidebar unmounts thumbnail canvases and zeroes their backing store.
-    fireEvent.click(screen.getByTestId('pdf-thumbnails-toggle'));
+    // Hiding the sidebar (⌥⌘1) unmounts thumbnail canvases and zeroes their backing store.
+    fireEvent.keyDown(window, { key: '1', code: 'Digit1', altKey: true, metaKey: true });
+    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
     expect(thumb0Canvas.width).toBe(0);
     expect(thumb0Canvas.height).toBe(0);
 

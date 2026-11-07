@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 
 import { createDefaultBackend, type StudyBackend } from '@/lib/backend';
+import type { MenuItemState, WindowChromeStyle } from '@/lib/backend/types';
 import { describeError } from '@/lib/utils';
 import {
   type AnchorLocation,
@@ -9,6 +10,7 @@ import {
   type Bookmark,
   bookmarkLocationKey,
   type CardPatch,
+  type CreateAnnotationOptions,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
   type DocumentSourceStatus,
@@ -53,6 +55,11 @@ export interface StudySyncState {
   openDocumentIds: string[];
   activeDocumentId: string | null;
   isDraggingFile: boolean;
+  /** Immersive reading: chrome collapsed. Part of the session, so it survives a restart. */
+  immersive: boolean;
+  /** Whether the window is full screen, however it got there. */
+  fullscreen: boolean;
+  chromeStyle: WindowChromeStyle;
   readingPreferences: ReadingPreferences;
   bookmarks: Bookmark[];
 
@@ -84,16 +91,18 @@ export interface StudySyncState {
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
   reportCursor(documentId: string, anchor: StudyDocument['lastCursorAnchor']): void;
+  setImmersive(immersive: boolean): void;
+  setFullscreen(fullscreen: boolean): Promise<void>;
+  /** Native menu choices, as command ids. Thin pass-throughs to the backend. */
+  onMenuCommand(listener: (commandId: string) => void): () => void;
+  setMenuItemStates(states: readonly MenuItemState[]): Promise<void>;
 
   /** A loadable URL for an annotation's capture, or `null` if it has no image. */
   captureUrl(annotationId: string): Promise<string | null>;
 
   setSelection(selection: ReaderSelection | null): void;
   excerptSelection(): Promise<void>;
-  createAnnotationFromSelection(options?: {
-    color?: string;
-    note?: string;
-  }): Promise<Annotation | null>;
+  createAnnotationFromSelection(options?: CreateAnnotationOptions): Promise<Annotation | null>;
   updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<void>;
   removeAnnotation(annotationId: string): Promise<void>;
   undoRemoveAnnotation(): Promise<Annotation | null>;
@@ -138,7 +147,7 @@ export function selectHighlights(
 ): ReaderHighlight[] {
   return annotations
     .filter((annotation) => annotation.documentId === documentId)
-    .map(({ id, anchor, color }) => ({ annotationId: id, anchor, color }));
+    .map(({ id, anchor, color, style }) => ({ annotationId: id, anchor, color, style }));
 }
 
 export function selectDocumentAnnotations(
@@ -182,9 +191,9 @@ export function createStudySyncStore(backend: StudyBackend) {
     };
 
     const persistSession = () => {
-      const { openDocumentIds, activeDocumentId } = get();
+      const { openDocumentIds, activeDocumentId, immersive } = get();
       void guarded(async () => {
-        await backend.saveWorkspaceSession({ openDocumentIds, activeDocumentId });
+        await backend.saveWorkspaceSession({ openDocumentIds, activeDocumentId, immersive });
       });
     };
 
@@ -238,6 +247,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       if (opened.length > 0) persistSession();
     };
 
+    backend.onFullscreenChange((fullscreen) => set({ fullscreen }));
+
     backend.onFileDrop((event) => {
       if (event.type === 'enter') {
         set({ isDraggingFile: true });
@@ -264,6 +275,9 @@ export function createStudySyncStore(backend: StudyBackend) {
       openDocumentIds: [],
       activeDocumentId: null,
       isDraggingFile: false,
+      immersive: false,
+      fullscreen: false,
+      chromeStyle: backend.chromeStyle,
       readingPreferences: { ...DEFAULT_READING_PREFERENCES },
       bookmarks: [],
       notebook: null,
@@ -309,6 +323,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             documentSourceStatuses,
             openDocumentIds,
             activeDocumentId,
+            immersive: session.immersive,
             readingPreferences,
             bookmarks,
             ...graph,
@@ -420,6 +435,26 @@ export function createStudySyncStore(backend: StudyBackend) {
         persistSession();
       },
 
+      async setFullscreen(fullscreen) {
+        await guarded(async () => {
+          await backend.setFullscreen(fullscreen);
+          set({ fullscreen: await backend.isFullscreen() });
+        });
+      },
+
+      onMenuCommand: (listener) => backend.onMenuCommand(listener),
+
+      async setMenuItemStates(states) {
+        // A menu that lags a moment behind is harmless; an error banner for it is not.
+        await backend.setMenuItemStates(states).catch(() => undefined);
+      },
+
+      setImmersive(immersive) {
+        if (get().immersive === immersive) return;
+        set({ immersive });
+        persistSession();
+      },
+
       reportCursor(documentId, anchor) {
         if (anchor === null) return;
         set((state) => ({
@@ -483,6 +518,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             excerptImagePng: selection.imagePng,
             note: options?.note ?? null,
             color: options?.color ?? DEFAULT_EXCERPT_COLOR,
+            style: options?.style ?? 'highlight',
           });
           created = saved;
           set((state) => ({
@@ -551,6 +587,7 @@ export function createStudySyncStore(backend: StudyBackend) {
               excerptImagePng: null,
               note: last.annotation.note ?? null,
               color: last.annotation.color,
+              style: last.annotation.style,
             });
             restored = saved;
             set((state) => ({

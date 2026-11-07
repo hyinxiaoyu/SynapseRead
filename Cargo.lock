@@ -3137,6 +3137,7 @@ dependencies = [
 name = "synapseread-desktop"
 version = "0.1.0"
 dependencies = [
+ "muda",
  "serde",
  "serde_json",
  "synapse-core",

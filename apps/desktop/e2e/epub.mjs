@@ -6,6 +6,13 @@ const frameDocument = `${frame}?.contentDocument`;
 const scroller = `${visibleHost}?.querySelector('.epub-container')`;
 const excerptEnabled = `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`;
 
+/** The text `measureCharWidth` samples; see `appearance/measure.ts`. */
+const MEASURE_SAMPLE =
+  'The quick brown fox jumps over the lazy dog, and then reads a chapter or two of a good book.';
+// 45–75ch, with room for the gap between the canvas measure and the page's own.
+const MIN_PER_LINE = 45;
+const MAX_PER_LINE = 78;
+
 const openEpub = (page) => page.openUntil(visibleHost, 'the EPUB');
 
 const chapterIs = (title) => `${frameDocument}?.querySelector('h1')?.textContent === '${title}'`;
@@ -120,17 +127,31 @@ export async function epubFlow(page) {
   // Multibyte text in another paragraph.
   await excerpt(page, '汉字');
 
-  // Move to the second chapter using the Right arrow key and Next control.
-  await page.evaluate(
-    `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))`,
+  // Page turns: a click in the right edge of the page (inside the chapter frame),
+  // a real Space press, and the edge chevron, until the second chapter shows.
+  const location = `${visibleHost}.querySelector('.epub-container')?.scrollLeft ?? 0`;
+  const edge = await page.evaluate(`(() => {
+    const r = ${visibleHost}.getBoundingClientRect();
+    return { x: r.right - 6, y: r.top + r.height - 12 };
+  })()`);
+  // The excerpts above leave a selection, and the click that dismisses one only does that.
+  await page.evaluate(`${frameDocument}.getSelection().removeAllRanges()`);
+  const before = await page.evaluate(`${location}`);
+  await page.click(edge);
+  await page.waitFor(
+    `${chapterIs('Chapter Two')} || (${location}) !== ${before}`,
+    'a click in the page edge to turn the page',
   );
-  await new Promise((done) => setTimeout(done, 150));
+  await page.evaluate(`${visibleHost}.focus()`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (await page.evaluate(chapterIs('Chapter Two'))) break;
-    await page.clickButton('Next');
+    if (attempt % 2 === 0) await page.press(' ', 'Space');
+    else await page.clickButton('Next Page');
     await new Promise((done) => setTimeout(done, 120));
   }
   await page.waitFor(chapterIs('Chapter Two'), 'the second chapter');
+  // The page slides in as it turns; text moves until the transition ends.
+  await page.waitFor(`${visibleHost}.getAnimations().length === 0`, 'the page turn to settle');
   await excerpt(page, 'final target sentence');
 
   // Jump across chapters: the frame's chapter changes, and the highlight pulses.
@@ -176,45 +197,57 @@ export async function epubFlow(page) {
     (await page.evaluate(`${visibleViewer}.dataset.readingMode`)) === 'spread',
     'defaults to two-page spread mode',
   );
-  // Collapse MindMap and verify the EPUB host expands across the full reader pane without wide side margins.
+  // Collapse MindMap and verify the EPUB page area fills the full reader pane in two-page spread mode.
   await page.clickButton('Hide MindMap');
   await page.waitFor(
     `(() => {
       const reader = document.getElementById('reader').getBoundingClientRect().width;
-      const host = ${visibleHost}.getBoundingClientRect().width;
-      return reader >= window.innerWidth - 4 && host >= reader - 32;
+      const area = ${visibleViewer}.querySelector('[data-testid="epub-page-area"]').getBoundingClientRect().width;
+      return reader >= window.innerWidth - 4 && area >= reader - 4 && Number(${visibleViewer}.dataset.columns) === 2;
     })()`,
-    'EPUB host to fill the full-screen reader pane in spread mode',
+    'EPUB page area to fill the full-screen reader pane in spread mode',
   );
   await page.clickButton('Single page');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'paged'`, 'single-page mode');
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in single-page mode');
-  assert(
-    await page.evaluate(
-      `${visibleViewer}.querySelector('[data-testid="epub-chapter-page"]')?.textContent.includes('Chapter page')`,
-    ),
-    'distinguishes chapter-local pages',
+  // Progress lives in the footer under the page; the toolbar names the chapter.
+  await page.waitFor(
+    `${visibleViewer}.querySelector('[data-testid="reader-footer-readout"]')?.textContent.match(/in chapter|% of book/)`,
+    'the footer to show progress',
   );
   assert(
     await page.evaluate(
-      `${visibleViewer}.querySelector('[data-testid="epub-book-progress"]')?.textContent.includes('Ch. 2/2')`,
+      `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-subtitle"]')?.textContent.length > 0`,
     ),
-    'shows whole-book progress separately from chapter pages',
+    'the toolbar subtitle names the chapter',
+  );
+  const footer = await page.evaluate(`(() => {
+    const readout = ${visibleViewer}.querySelector('[data-testid="reader-footer-readout"]');
+    const slider = ${visibleViewer}.querySelector('[role="slider"]');
+    return {
+      fontSize: parseFloat(getComputedStyle(readout).fontSize),
+      valueText: slider?.getAttribute('aria-valuetext') ?? '',
+    };
+  })()`);
+  assert(footer.fontSize >= 11, `footer text is at least 11 pt: ${footer.fontSize}`);
+  assert(
+    /^Chapter 2 of 2, \d+%$/.test(footer.valueText),
+    `the scrubber speaks the chapter and percentage: ${footer.valueText}`,
   );
 
   // Table of contents: nested items, chapter jump, and return to previous location.
-  await page.clickButton('Table of contents');
+  await page.showSidebarTab('Table of Contents');
   await page.waitFor(
     `${visibleViewer}.querySelector('[data-testid="reader-toc"]')`,
     'EPUB table of contents sidebar',
   );
-  assert(
-    await page.evaluate(
-      `[...${visibleViewer}.querySelectorAll('[data-testid="reader-toc"] button')].some((b) => b.textContent.trim() === 'Section 1.1')`,
-    ),
+  // Only the current chapter's path starts expanded; open One to reach its section.
+  await page.expandTreeItem('One');
+  await page.waitFor(
+    `[...${visibleViewer}.querySelectorAll('[data-testid="reader-toc"] [role="treeitem"]')].some((b) => b.getAttribute('aria-label') === 'Section 1.1')`,
     'EPUB TOC renders nested entries',
   );
-  await page.clickButton('One');
+  await page.clickTreeItem('One');
   await page.waitFor(chapterIs('Chapter One'), 'TOC jump to Chapter One');
   await page.clickButton('Return to previous location');
   await page.waitFor(chapterIs('Chapter Two'), 'return to Chapter Two after TOC jump');
@@ -223,25 +256,93 @@ export async function epubFlow(page) {
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'scroll mode');
   await page.waitFor(chapterIs('Chapter Two'), 'chapter preserved in scroll mode');
 
-  // Reading appearance preferences: theme, font family, font size, line spacing, and reading width.
+  // Reading appearance: the "Aa" popover, and a theme that tints the whole reader window.
   await page.clickButton('Reading appearance');
   await page.waitFor(
-    `${visibleViewer}.querySelector('[data-testid="reading-preferences-bar"]')`,
-    'EPUB reading preferences bar',
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'EPUB appearance popover',
   );
   await page.clickButton('Sepia');
   await page.waitFor(`${visibleViewer}.dataset.readingTheme === 'sepia'`, 'sepia theme');
   const sepiaBg = await page.evaluate(`getComputedStyle(${frameDocument}.body).backgroundColor`);
   assert(sepiaBg === 'rgb(244, 236, 216)', `EPUB frame body applies sepia background: ${sepiaBg}`);
-  await page.clickButton('Light');
-  await page.waitFor(`${visibleViewer}.dataset.readingTheme === 'light'`, 'restore light theme');
-  await page.clickButton('Reading appearance');
+  const sepiaChrome = await page.evaluate(
+    `getComputedStyle(document.querySelector('[data-testid="unified-toolbar"]')).backgroundColor`,
+  );
+  assert(sepiaChrome === 'rgb(239, 230, 209)', `the toolbar takes sepia chrome: ${sepiaChrome}`);
+
+  // Chrome text meets WCAG AA in every theme, popover included.
+  for (const theme of ['Light', 'Sepia', 'Dark']) {
+    await page.clickButton(theme);
+    await page.waitFor(
+      `${visibleViewer}.dataset.resolvedTheme === '${theme.toLowerCase()}'`,
+      `${theme} theme`,
+    );
+    await page.assertContrast(
+      '[data-testid="unified-toolbar"], [aria-label="Document reader"]',
+      `EPUB ${theme} chrome`,
+    );
+  }
+  await page.clickButton('Auto');
+  await page.waitFor(
+    `${visibleViewer}.dataset.resolvedTheme === 'light'`,
+    'Auto follows the system',
+  );
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'Esc closes the appearance popover',
+  );
+  assert(
+    await page.evaluate(
+      `document.activeElement?.getAttribute('aria-label') === 'Reading appearance'`,
+    ),
+    'focus returns to the Aa button',
+  );
+
+  // The reading measure holds from a laptop to a large display.
+  await page.clickButton('Two pages');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'spread'`, 'two-page mode');
+  for (const width of [1280, 1728, 2560]) {
+    await page.setViewport(width);
+    const measure = await page.waitFor(
+      `(() => {
+        // A paginated frame is as wide as all its pages; the paragraph is one column.
+        const paragraph = ${frame}?.contentDocument?.querySelector('p');
+        if (!paragraph) return null;
+        const probe = paragraph.ownerDocument.createElement('span');
+        probe.textContent = ${JSON.stringify(MEASURE_SAMPLE)};
+        probe.style.cssText = 'position: absolute; visibility: hidden; white-space: nowrap';
+        paragraph.appendChild(probe);
+        const advance = probe.getBoundingClientRect().width / probe.textContent.length;
+        probe.remove();
+        const perLine = paragraph.getBoundingClientRect().width / advance;
+        if (perLine < ${MIN_PER_LINE} || perLine > ${MAX_PER_LINE}) return null;
+        const spine = document.querySelector('[data-testid="epub-spine"]');
+        return {
+          perLine,
+          columns: Number(${visibleViewer}.dataset.columns),
+          spine: spine ? spine.getBoundingClientRect().width : 0,
+        };
+      })()`,
+      `${MIN_PER_LINE}–${MAX_PER_LINE} characters per line at ${width} px`,
+    );
+    console.log(
+      `     epub: ${width} px, ${measure.columns} pages, ${measure.perLine.toFixed(1)} characters per line`,
+    );
+    if (width >= 1728) {
+      assert(measure.columns === 2, `two pages at ${width} px`);
+      assert(measure.spine >= 48, `a spine gutter of 48 px at ${width} px: ${measure.spine}`);
+    }
+  }
+  await page.cdp.send('Emulation.clearDeviceMetricsOverride');
+  await page.clickButton('Scroll');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'back to scroll mode');
 
   // In-document search across unrendered EPUB chapters, CFI highlight, and return.
-  await page.clickButton('Find in document');
   await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');
   await page.waitFor(
-    `${visibleViewer}?.querySelector('[data-testid="search-status"]')?.textContent === '1 of 1'`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
     'EPUB search match in unrendered Chapter One',
   );
   await page.waitFor(
@@ -255,17 +356,17 @@ export async function epubFlow(page) {
   );
   await page.clickButton('Return to previous location');
   await page.waitFor(chapterIs('Chapter Two'), 'returning from EPUB search jump to Chapter Two');
-  await page.clickButton('Close search');
+  await page.leaveSearch();
 
   // Independent bookmarks in EPUB: bookmark Chapter Two, jump to Chapter One, jump back via bookmark, and remove.
   await page.clickButton('Bookmark current location');
   await page.waitFor(
-    `${visibleViewer}?.querySelector('[data-testid="bookmarks-count"]')?.textContent === '1'`,
-    'EPUB bookmark badge count',
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="toggle-bookmark-button"]')?.getAttribute('aria-pressed') === 'true'`,
+    'EPUB bookmark toggle pressed',
   );
-  await page.clickButton('One');
+  await page.clickTreeItem('One');
   await page.waitFor(chapterIs('Chapter One'), 'EPUB jump to Chapter One before bookmark jump');
-  await page.clickButton('Bookmarks');
+  await page.showSidebarTab('Bookmarks');
   await page.waitFor(
     `${visibleViewer}?.querySelector('[data-testid="bookmark-jump-button"]')`,
     'EPUB bookmark item in list',
@@ -278,20 +379,21 @@ export async function epubFlow(page) {
     `${visibleViewer}.querySelector('[data-testid="bookmark-remove-button"]').click()`,
   );
   await page.waitFor(
-    `!${visibleViewer}?.querySelector('[data-testid="bookmarks-count"]')`,
+    `[...document.querySelectorAll('[data-testid="bookmarks-empty"]')].some((e) => e.checkVisibility({ visibilityProperty: true }))`,
     'removing EPUB bookmark',
   );
-  await page.clickButton('Bookmarks');
+  await page.hideSidebar();
 
   // Independent highlights & notes in EPUB: highlight without creating a MindMap card, delete, and undo.
   const epubPoints = await textPoints(page, 'final target sentence');
   await page.drag(epubPoints.start, epubPoints.end);
-  await page.clickButton('Highlight selection');
+  await page.clickButton('Yellow highlight');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
-    `${visibleViewer}?.querySelector('[data-testid="annotations-count"]')?.textContent === '4'`,
+    `[...document.querySelectorAll('[data-testid="annotation-item"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 4`,
     'EPUB independent highlight count (3 excerpts + 1 independent)',
   );
-  await page.clickButton('Annotations');
+  await page.showSidebarTab('Highlights & Notes');
   await page.waitFor(
     `${visibleViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 4`,
     'EPUB annotations list items',
@@ -310,5 +412,5 @@ export async function epubFlow(page) {
     `${visibleViewer}?.querySelectorAll('[data-testid="annotation-item"]').length === 4`,
     'undoing EPUB highlight deletion',
   );
-  await page.clickButton('Annotations');
+  await page.hideSidebar();
 }

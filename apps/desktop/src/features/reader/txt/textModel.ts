@@ -2,7 +2,7 @@ import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
   findSubstringMatches,
-} from '@/features/reader/DocumentSearchBar';
+} from '@/features/reader/DocumentSearch';
 import type { SourceSpan, TextChunk, TxtAnchor } from '@/types/domain';
 
 export interface TxtSearchMatch extends DocumentSearchResultItem {
@@ -109,6 +109,11 @@ export class TxtTextModel {
       this.rowStarts.push(startUnit + newline + 1);
       from = newline + 1;
     }
+  }
+
+  /** Source bytes loaded so far: the whole file once `complete`. */
+  get loadedBytes(): number {
+    return this.endByte;
   }
 
   get rowCount(): number {

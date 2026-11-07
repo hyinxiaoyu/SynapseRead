@@ -2,6 +2,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useEffect, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { forgetRecentCommandRuns } from '@/features/commands/registry';
+import type { MenuItemState } from '@/lib/backend/types';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { AnchorLocation, DocumentFormat, DocumentViewerProps } from '@/types/domain';
 
@@ -81,6 +83,7 @@ describe('StudyWorkspace', () => {
       useStudySyncStore.getState().closeDocument(id);
     }
     useStudySyncStore.setState(initialState, true);
+    forgetRecentCommandRuns();
   });
 
   const renderReady = async () => {
@@ -120,10 +123,19 @@ describe('StudyWorkspace', () => {
     await renderReady();
     const excerpt = screen.getByRole('button', { name: 'Excerpt to MindMap' });
     expect(excerpt).toBeDisabled();
+    // Inactive, it is a ghost button whose tooltip says why, not a dark primary one.
+    expect(excerpt).toHaveAttribute('aria-description', expect.stringMatching(/select text/i));
+    expect(screen.getByTestId('excerpt-button-wrapper')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/select text/i),
+    );
+    expect(excerpt.className).not.toMatch(/\bbg-primary\b/);
 
     fireEvent.click(screen.getByRole('button', { name: 'Open' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
     expect(excerpt).toBeEnabled();
+    expect(excerpt).not.toHaveAttribute('aria-description');
+    expect(excerpt.className).toMatch(/\bbg-primary\b/);
   });
 
   it('runs selection -> excerpt -> highlight -> inspector', async () => {
@@ -430,5 +442,121 @@ describe('StudyWorkspace', () => {
     expect(await screen.findByTestId('recent-documents-menu')).toBeInTheDocument();
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.queryByTestId('recent-documents-menu')).not.toBeInTheDocument();
+  });
+
+  it('puts the reader controls in one unified toolbar above the tab bar', async () => {
+    await renderReady();
+    const toolbar = screen.getByTestId('unified-toolbar');
+    // The toolbar is the first band, the tabs the second; the product name is
+    // left to the window title.
+    expect(screen.queryByText('SynapseRead')).not.toBeInTheDocument();
+    expect(toolbar).toHaveTextContent('My Notebook');
+    const mindMap = screen.getByRole('button', { name: 'Show MindMap' });
+    expect(toolbar).toContainElement(mindMap);
+    expect(mindMap.getAttribute('title')).toMatch(/^Show MindMap \((⇧⌘M|Ctrl\+Shift\+M)\)$/);
+
+    fireEvent.keyDown(window, { key: 'o', metaKey: true });
+    await screen.findByRole('tab');
+    expect(screen.getByRole('tablist').closest('header')).not.toBe(toolbar);
+    expect(toolbar).not.toHaveTextContent('My Notebook');
+  });
+
+  it('runs native menu choices as commands and keeps menu items in step with what applies', async () => {
+    let chooseMenuItem: (commandId: string) => void = () => undefined;
+    const setMenuItemStates = vi.fn<(states: readonly MenuItemState[]) => Promise<void>>(
+      async () => undefined,
+    );
+    useStudySyncStore.setState({
+      onMenuCommand: (listener) => {
+        chooseMenuItem = listener;
+        return () => undefined;
+      },
+      setMenuItemStates,
+    });
+    await renderReady();
+
+    const latestState = (id: string) =>
+      setMenuItemStates.mock.calls
+        .flatMap(([states]) => states)
+        .filter((state) => state?.id === id)
+        .at(-1);
+    await waitFor(() =>
+      expect(latestState('file.open')).toEqual({ id: 'file.open', enabled: true }),
+    );
+    expect(latestState('file.closeTab')).toEqual({ id: 'file.closeTab', enabled: false });
+    expect(latestState('view.rotateLeft')).toEqual({ id: 'view.rotateLeft', enabled: false });
+
+    act(() => chooseMenuItem('file.open'));
+    expect(await screen.findByRole('tab')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(latestState('file.closeTab')).toEqual({ id: 'file.closeTab', enabled: true }),
+    );
+
+    act(() => chooseMenuItem('window.mindMap'));
+    expect(screen.getByRole('button', { name: 'Hide MindMap' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await waitFor(() =>
+      expect(latestState('window.mindMap')).toEqual({
+        id: 'window.mindMap',
+        enabled: true,
+        title: 'Hide MindMap',
+      }),
+    );
+
+    // Ids that are not app commands (predefined items) are ignored.
+    act(() => chooseMenuItem('copy'));
+    act(() => chooseMenuItem('file.closeTab'));
+    await waitFor(() => expect(screen.queryByRole('tab')).not.toBeInTheDocument());
+  });
+
+  it('enters focus mode, collapsing panes and tabs, and Esc restores them', async () => {
+    await renderReady();
+    fireEvent.keyDown(window, { key: 'o', metaKey: true });
+    await screen.findByRole('tab');
+    fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+    expect(screen.getByRole('button', { name: 'Hide MindMap' })).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+    expect(useStudySyncStore.getState().immersive).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Show MindMap' })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole('tablist').closest('header')).toHaveClass('hidden');
+    expect(screen.getByTestId('unified-toolbar')).toHaveAttribute('data-immersive', 'true');
+    expect(screen.getByRole('button', { name: 'Exit focus mode' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    // Esc first closes what is open (here, Help ▸ Keyboard Shortcuts) and stays in focus mode.
+    fireEvent.keyDown(window, { key: '/', code: 'Slash', metaKey: true });
+    expect(screen.getByTestId('keyboard-shortcuts-dialog')).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByTestId('keyboard-shortcuts-dialog')).not.toBeInTheDocument();
+    expect(useStudySyncStore.getState().immersive).toBe(true);
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(useStudySyncStore.getState().immersive).toBe(false);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Hide MindMap' })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole('tablist').closest('header')).not.toHaveClass('hidden');
+  });
+
+  it('toggles full screen from its shortcut and retitles the command', async () => {
+    const setFullscreen = vi.fn(async (fullscreen: boolean) => {
+      useStudySyncStore.setState({ fullscreen });
+    });
+    useStudySyncStore.setState({ setFullscreen });
+    await renderReady();
+
+    // ⌃⌘F on macOS; F11 here, as on Windows and Linux.
+    fireEvent.keyDown(window, { key: 'F11', code: 'F11' });
+    expect(setFullscreen).toHaveBeenLastCalledWith(true);
+    expect(await screen.findByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Exit full screen' }));
+    expect(setFullscreen).toHaveBeenLastCalledWith(false);
   });
 });

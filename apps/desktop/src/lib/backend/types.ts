@@ -28,6 +28,20 @@ export interface DroppedDocumentsPayload {
   error: IpcError | null;
 }
 
+/** Whether a native menu item applies right now, and an optional context title. */
+export interface MenuItemState {
+  id: string;
+  enabled: boolean;
+  title?: string;
+}
+
+/**
+ * How the window frame meets the app's toolbar. `overlay`: the toolbar is the
+ * title bar (macOS), so it leaves room for the window controls and drags the
+ * window. `standard`: the OS draws its own title bar above the app.
+ */
+export type WindowChromeStyle = 'overlay' | 'standard';
+
 export type FileDropEvent =
   { type: 'enter' } | { type: 'leave' } | ({ type: 'drop' } & DroppedDocumentsPayload);
 
@@ -39,6 +53,7 @@ export type FileDropEvent =
 export interface StudyBackend extends DocumentContentReader {
   /** Which implementation is active; the UI labels non-persistent sessions. */
   readonly kind: 'tauri' | 'memory';
+  readonly chromeStyle: WindowChromeStyle;
 
   /**
    * Shows the OS file picker and registers the choice; `null` if the user cancels.
@@ -92,4 +107,13 @@ export interface StudyBackend extends DocumentContentReader {
   listBookmarks(): Promise<Bookmark[]>;
   createBookmark(input: CreateBookmarkInput): Promise<Bookmark>;
   deleteBookmark(bookmarkId: string): Promise<void>;
+
+  /** Subscribes to native menu choices, delivered as command-registry ids. */
+  onMenuCommand(listener: (commandId: string) => void): () => void;
+  /** Enables and retitles native menu items; a no-op where there is no menu. */
+  setMenuItemStates(states: readonly MenuItemState[]): Promise<void>;
+  isFullscreen(): Promise<boolean>;
+  setFullscreen(fullscreen: boolean): Promise<void>;
+  /** Also fires when the user leaves full screen through the window controls. */
+  onFullscreenChange(listener: (fullscreen: boolean) => void): () => void;
 }
