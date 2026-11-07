@@ -532,6 +532,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
             "fontSize": 100,
             "lineSpacing": 1.75,
             "margins": "normal",
+            "pageWidth": "standard",
             "justify": true,
             "dimImages": false,
             "epubReadingMode": "spread",
@@ -545,6 +546,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         "fontSize": 125,
         "lineSpacing": 1.9,
         "margins": "wide",
+        "pageWidth": "full",
         "justify": false,
         "dimImages": true,
         "epubReadingMode": "paged",
@@ -557,6 +559,21 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
     assert_eq!(saved, updated);
     assert_eq!(h.ok("get_reading_preferences", json!({})), updated);
 
+    let mut invalid_width = updated.clone();
+    invalid_width["pageWidth"] = json!("invalid");
+    assert!(
+        h.call(
+            "save_reading_preferences",
+            json!({ "preferences": invalid_width })
+        )
+        .is_err()
+    );
+
+    let mut legacy = updated.clone();
+    legacy.as_object_mut().unwrap().remove("pageWidth");
+    let saved_legacy = h.ok("save_reading_preferences", json!({ "preferences": legacy }));
+    assert_eq!(saved_legacy["pageWidth"], "standard");
+
     let bad = h
         .call(
             "save_reading_preferences",
@@ -567,6 +584,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
                     "fontSize": 40,
                     "lineSpacing": 1.9,
                     "margins": "wide",
+                    "pageWidth": "full",
                     "justify": true,
                     "dimImages": false,
                     "epubReadingMode": "paged",

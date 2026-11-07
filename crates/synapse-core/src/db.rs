@@ -1816,6 +1816,7 @@ mod tests {
             font_size: 125,
             line_spacing: 1.9,
             margins: crate::domain::ReadingMargins::Wide,
+            page_width: crate::domain::ReadingPageWidth::Full,
             justify: false,
             dim_images: true,
             epub_reading_mode: crate::domain::EpubReadingMode::Scroll,
@@ -1831,6 +1832,22 @@ mod tests {
             db.save_reading_preferences(&invalid),
             Err(CoreError::InvalidPreferences(_))
         ));
+    }
+
+    #[test]
+    fn page_width_persists_across_database_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reading-width.sqlite");
+        let preferences = ReadingPreferences {
+            page_width: crate::domain::ReadingPageWidth::Full,
+            ..ReadingPreferences::default()
+        };
+        {
+            let db = Database::open(&path).unwrap();
+            db.save_reading_preferences(&preferences).unwrap();
+        }
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(reopened.get_reading_preferences().unwrap(), preferences);
     }
 
     #[test]
@@ -1879,6 +1896,7 @@ mod tests {
             assert_eq!(prefs.theme, theme);
             assert_eq!(prefs.font_family, font_family);
             assert_eq!(prefs.margins, margins);
+            assert_eq!(prefs.page_width, crate::domain::ReadingPageWidth::Standard);
             assert!(prefs.justify);
             assert!(!prefs.dim_images);
             assert_eq!(prefs.page_transition, crate::domain::PageTransition::Slide);

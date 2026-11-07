@@ -1,11 +1,17 @@
-import type { ReadingMargins } from '@/types/domain';
+import type { ReadingMargins, ReadingPageWidth } from '@/types/domain';
 
 /**
  * The reading measure: characters per line. Below the minimum, two pages give
- * way to one; above the maximum, the column stops growing and the page centers.
+ * way to one; above the selected maximum, the column stops growing and the page centers.
  */
 export const MIN_MEASURE_CH = 45;
 export const MAX_MEASURE_CH = 75;
+
+const PAGE_MEASURE_CH: Record<ReadingPageWidth, number> = {
+  standard: MAX_MEASURE_CH,
+  wide: 110,
+  full: Number.POSITIVE_INFINITY,
+};
 
 /** The average advance of body text, in em, where the face cannot be measured. */
 export const FALLBACK_CHAR_WIDTH_EM = 0.5;
@@ -41,7 +47,7 @@ export interface ReadingLayout {
 
 /**
  * Lays out a reflowable page: two columns only where each holds at least
- * `MIN_MEASURE_CH`, every column capped at `MAX_MEASURE_CH`. Mirrors epub.js,
+ * `MIN_MEASURE_CH`, with the user-selected column cap. Mirrors epub.js,
  * where each page is its column plus one gutter.
  */
 export function computeReadingLayout({
@@ -49,18 +55,20 @@ export function computeReadingLayout({
   charWidth,
   margins,
   spread,
+  pageWidth = 'standard',
 }: {
   availableWidth: number;
   /** Average character advance at the current face and size, in px. */
   charWidth: number;
   margins: ReadingMargins;
+  pageWidth?: ReadingPageWidth;
   /** Whether the reader asked for two pages. */
   spread: boolean;
 }): ReadingLayout {
   const padding = MARGIN_PX[margins];
   const inner = Math.max(0, availableWidth - 2 * padding);
   const minColumn = MIN_MEASURE_CH * charWidth;
-  const maxColumn = MAX_MEASURE_CH * charWidth;
+  const maxColumn = PAGE_MEASURE_CH[pageWidth] * charWidth;
   const twoUpColumn = inner / 2 - PAGE_GUTTER_PX;
   const columns: 1 | 2 = spread && twoUpColumn >= minColumn ? 2 : 1;
   const fitted = columns === 2 ? twoUpColumn : inner - PAGE_GUTTER_PX;
@@ -75,14 +83,21 @@ export function computeReadingLayout({
 
 /**
  * A scrolling page of one column (TXT): the same outer margin a paginated page
- * has, and a column capped at `MAX_MEASURE_CH`.
+ * has, with the selected column cap (unbounded at Full width).
  */
 export function singleColumnPage(
   charWidth: number,
   margins: ReadingMargins,
+  pageWidth: ReadingPageWidth = 'standard',
 ): { maxWidth: number; sidePadding: number } {
   const sidePadding = PAGE_GUTTER_PX / 2 + MARGIN_PX[margins];
-  return { maxWidth: MAX_MEASURE_CH * charWidth + 2 * sidePadding, sidePadding };
+  return {
+    maxWidth:
+      pageWidth === 'full'
+        ? Number.POSITIVE_INFINITY
+        : PAGE_MEASURE_CH[pageWidth] * charWidth + 2 * sidePadding,
+    sidePadding,
+  };
 }
 
 /** Characters a column of `columnWidth` holds. */

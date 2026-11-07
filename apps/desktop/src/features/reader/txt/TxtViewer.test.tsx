@@ -415,6 +415,11 @@ describe('TxtViewer', () => {
       expect(docEl.style.lineHeight).toBe('2.1');
       // Capped at 75ch (fallback 0.5em of 17.6 px) plus 32 px a side at narrow margins.
       expect(docEl.style.maxWidth).toBe(`${75 * 8.8 + 64}px`);
+      await act(async () => {
+        screen.getByRole('radio', { name: 'Full width' }).click();
+      });
+      expect(docEl.style.maxWidth).toBe('100%');
+      expect(scroller().scrollTop).toBe(40 * ROW_PX);
       const row = docEl.querySelector<HTMLElement>('[data-index]');
       expect(row?.style.textAlign).toBe('start');
       first.unmount();
@@ -424,6 +429,8 @@ describe('TxtViewer', () => {
       await reopened.getState().openDocument();
       render(<Harness store={reopened} documentId={documentId} />);
       await waitFor(() => expect(scroller().scrollTop).toBe(40 * ROW_PX));
+      expect(screen.getByRole('document').style.maxWidth).toBe('100%');
+      expect(reopened.getState().readingPreferences.pageWidth).toBe('full');
       expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-theme', 'dark');
       expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-margins', 'narrow');
     });

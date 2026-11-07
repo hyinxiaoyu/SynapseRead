@@ -34,6 +34,27 @@ describe('computeReadingLayout', () => {
     },
   );
 
+  it.each([320, 1280, 1728, 2560])(
+    'uses available width without overflow at %i px',
+    (availableWidth) => {
+      for (const spread of [true, false]) {
+        for (const margins of ['narrow', 'normal', 'wide'] as const) {
+          const options = { availableWidth, charWidth: CHAR, margins, spread };
+          const standard = computeReadingLayout(options);
+          const wide = computeReadingLayout({ ...options, pageWidth: 'wide' });
+          const full = computeReadingLayout({ ...options, pageWidth: 'full' });
+          expect(wide.pageWidth).toBeGreaterThanOrEqual(standard.pageWidth);
+          expect(full.pageWidth).toBeGreaterThanOrEqual(wide.pageWidth);
+          expect(full.pageWidth + 2 * full.padding).toBe(availableWidth);
+          if (availableWidth === 2560) {
+            expect(wide.columnWidth).toBeGreaterThan(standard.columnWidth);
+            expect(full.columnWidth).toBeGreaterThan(wide.columnWidth);
+          }
+        }
+      }
+    },
+  );
+
   it('shows two pages only when each column holds the minimum measure', () => {
     // Two columns need 2 * (45ch + gutter) plus the margins.
     const threshold = 2 * (MIN_MEASURE_CH * CHAR + PAGE_GUTTER_PX) + 2 * MARGIN_PX.normal;
@@ -89,6 +110,17 @@ describe('computeReadingLayout', () => {
 });
 
 describe('singleColumnPage', () => {
+  it('widens scrolling text independently of margins and removes the cap at full width', () => {
+    for (const margins of ['narrow', 'normal', 'wide'] as const) {
+      const standard = singleColumnPage(CHAR, margins);
+      const wide = singleColumnPage(CHAR, margins, 'wide');
+      const full = singleColumnPage(CHAR, margins, 'full');
+      expect(wide.maxWidth).toBeGreaterThan(standard.maxWidth);
+      expect(full.maxWidth).toBe(Number.POSITIVE_INFINITY);
+      expect(full.sidePadding).toBe(standard.sidePadding);
+      expect(wide.sidePadding).toBe(standard.sidePadding);
+    }
+  });
   it('caps a scrolling column at the maximum measure, with the paginated outer margin', () => {
     const page = singleColumnPage(CHAR, 'normal');
     expect(page.sidePadding).toBe(PAGE_GUTTER_PX / 2 + MARGIN_PX.normal);

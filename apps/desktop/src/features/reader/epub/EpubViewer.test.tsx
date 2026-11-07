@@ -522,6 +522,7 @@ describe('EpubViewer', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
     fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
     fireEvent.click(screen.getByRole('radio', { name: 'Sepia' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Full width' }));
     fireEvent.click(screen.getByRole('radio', { name: 'San Francisco' }));
     fireEvent.click(screen.getByRole('button', { name: 'Increase font size' }));
     fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
@@ -537,6 +538,7 @@ describe('EpubViewer', () => {
         fontSize: 110,
         lineSpacing: 1.75,
         margins: 'wide',
+        pageWidth: 'full',
         justify: false,
         dimImages: true,
         epubReadingMode: 'paged',
@@ -549,6 +551,7 @@ describe('EpubViewer', () => {
         fontFamily: 'sf-pro',
         fontSize: 110,
         margins: 'wide',
+        pageWidth: 'full',
         justify: false,
       }),
     );

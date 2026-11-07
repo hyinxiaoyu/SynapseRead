@@ -23,8 +23,10 @@ from.
   TXT rows, with return-to-previous-location history
 - An "Aa" appearance popover for EPUB and TXT: `auto`/`light`/`sepia`/`dark` themes that
   tint the whole reader window (`auto` follows the system), named reading faces, text
-  size (`Cmd/Ctrl +`/`-`/`0`), line spacing, margins, justification, and a reading
-  measure held at 45–75 characters per line, with EPUB `spread`/`paged`/`scroll` modes
+  size (`Cmd/Ctrl +`/`-`/`0`), line spacing, margins, and justification. Page width
+  offers Standard (75 characters per line), Wide (110), and Full width (available
+  pane width), saved across restarts independently of margins. EPUB supports
+  `spread`/`paged`/`scroll` modes, with two pages only when each fits at least 45 characters
 - Jump from any card, bookmark, annotation, or search result back to its source, with
   a pulse highlight
 - Draggable nodes, parent-child nesting, and cross-link edges, with layout saved

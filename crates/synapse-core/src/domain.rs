@@ -498,6 +498,16 @@ pub enum ReadingMargins {
     Wide,
 }
 
+/// Text-column width, independent of page padding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadingPageWidth {
+    #[default]
+    Standard,
+    Wide,
+    Full,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EpubReadingMode {
@@ -527,6 +537,9 @@ pub struct ReadingPreferences {
     /// Line height multiplier (`1.2..=2.4`).
     pub line_spacing: f64,
     pub margins: ReadingMargins,
+    /// Older preference rows retain the standard 75-character measure.
+    #[serde(default)]
+    pub page_width: ReadingPageWidth,
     /// Justified text, hyphenated in the document's language.
     pub justify: bool,
     /// Dims images in the Dark theme.
@@ -546,6 +559,7 @@ impl Default for ReadingPreferences {
             font_size: 100,
             line_spacing: 1.75,
             margins: ReadingMargins::Normal,
+            page_width: ReadingPageWidth::Standard,
             justify: true,
             dim_images: false,
             epub_reading_mode: EpubReadingMode::Spread,

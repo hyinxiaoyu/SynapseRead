@@ -335,6 +335,41 @@ export async function epubFlow(page) {
       assert(measure.spine >= 48, `a spine gutter of 48 px at ${width} px: ${measure.spine}`);
     }
   }
+  for (const mode of ['Two pages', 'Single page', 'Scroll']) {
+    await page.clickButton(mode);
+    await page.clickButton('Reading appearance');
+    await page.clickButton('Standard');
+    const hostWidth = `${visibleHost}.getBoundingClientRect().width`;
+    await page.waitFor(`${hostWidth} < 1600`, `EPUB ${mode} standard width settles`);
+    const standardWidth = await page.evaluate(hostWidth);
+    await page.clickButton('Wide');
+    await page.waitFor(
+      `${hostWidth} > ${standardWidth} + 100`,
+      `EPUB ${mode} Wide expands the host`,
+    );
+    await page.clickButton('Full width');
+    await page.waitFor(
+      `${hostWidth} >= ${visibleHost}.parentElement.clientWidth - 33`,
+      `EPUB ${mode} Full width fills the pane`,
+    );
+    // Wait for epub.js's debounced resize, not just the outer React container.
+    await page.waitFor(
+      `(() => {
+      const paragraph = ${frameDocument}?.querySelector('p');
+      return paragraph && paragraph.getBoundingClientRect().width > 800;
+    })()`,
+      `EPUB ${mode} actual text expands beyond the standard cap`,
+    );
+    await page.press('Escape');
+  }
+  await page.setViewport(480);
+  await page.waitFor(
+    `${visibleHost}.getBoundingClientRect().width <= 480`,
+    'EPUB Full width fits a narrow pane',
+  );
+  await page.clickButton('Reading appearance');
+  await page.clickButton('Standard');
+  await page.press('Escape');
   await page.cdp.send('Emulation.clearDeviceMetricsOverride');
   await page.clickButton('Scroll');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'back to scroll mode');
