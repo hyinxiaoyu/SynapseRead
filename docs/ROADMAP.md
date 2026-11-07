@@ -72,6 +72,14 @@ for task IDs, acceptance evidence, and measurements.
 - [x] Desktop parity and hardening (R08–R12): PDF thumbnails/display modes/rotation/links
       and embedded annotations, recent documents/session restoration, source recovery,
       stream cancellation and bounded resource limits, and native/accessibility acceptance.
+- [x] Reader UX and visual design pass (`#20`–`#33`,
+      [ADR 0006](adr/0006-command-registry.md)): native menu bar and central command
+      registry, unified macOS overlay toolbar, immersive focus mode, Preview-style
+      Navigator sidebar, collapsible outline tree, unified toolbar search, Apple Books
+      "Aa" typography popover, constrained `45–75ch` reading measure and margins,
+      whole-window themes (`Auto`/`Light`/`Sepia`/`Dark`), Books-style footer progress
+      scrubber, page-turn click zones/trackpad swipes/transitions, contextual selection
+      popover and Markup bar, and WCAG AA chrome contrast/hit-target compliance.
 
 ## M3: Card operations (after reader experience)
 
