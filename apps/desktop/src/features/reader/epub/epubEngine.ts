@@ -565,10 +565,36 @@ export async function openEpubDocument(
 
   const contentsList = () => rendition.getContents() as unknown as Contents[];
 
+  /**
+   * epub.js resolves a display as soon as another display replaces it, and a resize
+   * re-displays the location it last reported. That can silently undo a jump whose
+   * display has not run yet, leaving the Back button consumed but the page unmoved
+   * (#41). So a display only counts once epub.js's queue has drained and the reader
+   * reports the section the jump asked for; a jump overridden on the way is re-issued.
+   */
+  const queue = (rendition as unknown as { q: { enqueue: (task: () => void) => Promise<unknown> } })
+    .q;
+  const settled = () => queue.enqueue(() => undefined).catch(() => undefined);
+  const displayedHref = () =>
+    (rendition as unknown as { location?: { start?: { href?: string } } }).location?.start?.href;
+
   const display = async (target?: string) => {
     const resolved = resolveTarget(target);
     if (resolved?.startsWith('epubcfi(')) currentCfi = resolved;
     await (rendition.display(resolved) as unknown as Promise<void>);
+    const wanted = resolved === undefined ? undefined : book.spine.get(resolved)?.href;
+    if (!wanted) return;
+    const landed = async () => {
+      await settled();
+      return displayedHref() === wanted;
+    };
+    if (await landed()) return;
+    // Each repair waits for the queue to drain first, so a late resize cannot
+    // interleave with it the way it did with the original jump.
+    for (let repair = 0; repair < 2; repair += 1) {
+      await (rendition.display(resolved) as unknown as Promise<void>);
+      if (await landed()) return;
+    }
   };
 
   /** Runs `read` on a spine chapter's document, loading it only for the call. */
