@@ -280,7 +280,11 @@ export function SelectionPopover({
       data-placement={placement}
       data-reader-popover=""
       onKeyDown={onKeyDown}
-      className="fixed z-40 flex w-max max-w-[min(26rem,calc(100vw-1rem))] flex-col gap-1.5 rounded-xl border bg-background p-1 text-foreground shadow-lg"
+      className={cn(
+        'fixed z-40 flex w-max max-w-[min(26rem,calc(100vw-1rem))] animate-in flex-col rounded-xl border bg-background p-1 text-foreground shadow-lg duration-150 fade-in-0 zoom-in-[0.96] motion-reduce:animate-none',
+        // It grows away from the anchor, so it appears to unfold from the text.
+        placement === 'above' ? 'origin-bottom' : 'origin-top',
+      )}
       style={
         position
           ? { top: position.top, left: position.left }
@@ -376,60 +380,83 @@ export function SelectionPopover({
           />
         )}
       </div>
-      {popover.noteOpen && (
-        <form
-          aria-label={editing ? 'Edit note' : 'Add note to selection'}
-          data-testid="popover-note-form"
-          className="flex flex-col gap-1.5 px-1 pb-1"
-          onSubmit={(event) => {
-            event.preventDefault();
-            saveNote();
-          }}
-        >
-          <textarea
-            ref={noteFieldRef}
-            aria-label={editing ? 'Highlight note' : 'Selection note'}
-            data-testid="popover-note-input"
-            placeholder="Write a note…"
-            rows={3}
-            value={noteValue}
-            onChange={(event) =>
-              editing
-                ? setEditNote(event.target.value)
-                : annotations.setDraftNote(event.target.value)
-            }
-            onKeyDown={(event) => {
-              // ⌘↩ saves, as in Notes; a bare Return is a new line.
-              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                event.preventDefault();
-                saveNote();
-              }
+      {/*
+        The note stays mounted so `grid-template-rows` can transition between
+        `0fr` and `1fr`, the same disclosure the appearance panel uses. `inert`
+        keeps the collapsed field out of the tab order and the accessibility
+        tree, and `pt-1.5` replaces the gap the container no longer needs.
+      */}
+      <div
+        inert={!popover.noteOpen}
+        aria-hidden={!popover.noteOpen}
+        className={cn(
+          'grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none',
+          popover.noteOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+        )}
+      >
+        <div className="overflow-hidden">
+          <form
+            aria-label={editing ? 'Edit note' : 'Add note to selection'}
+            data-testid="popover-note-form"
+            className="flex flex-col gap-1.5 px-1 pt-1.5 pb-1"
+            onSubmit={(event) => {
+              event.preventDefault();
+              saveNote();
             }}
-            className="w-full min-w-64 resize-none rounded-md border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          />
-          <div className="flex justify-end gap-1.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-6 px-2 text-xs"
-              onMouseDown={keepSelection}
-              onClick={popover.closeNote}
-            >
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              size="sm"
-              className="h-6 px-2 text-xs"
-              data-testid="popover-note-save"
-              onMouseDown={keepSelection}
-            >
-              Save Note
-            </Button>
-          </div>
-        </form>
-      )}
+          >
+            <textarea
+              ref={noteFieldRef}
+              aria-label={editing ? 'Highlight note' : 'Selection note'}
+              data-testid="popover-note-input"
+              placeholder="Write a note…"
+              rows={3}
+              value={noteValue}
+              onChange={(event) =>
+                editing
+                  ? setEditNote(event.target.value)
+                  : annotations.setDraftNote(event.target.value)
+              }
+              onKeyDown={(event) => {
+                // ⌘↩ saves, as in Notes; a bare Return is a new line.
+                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  saveNote();
+                }
+              }}
+              className={cn(
+                'w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                // `0fr` collapses height only, so the width floor is claimed
+                // only while the field is open. The mounted form still adds its
+                // own intrinsic width (the textarea's default `cols`), so the
+                // closed popover matches the one that unmounted it only while
+                // the toolbar is the wider of the two — which it is today.
+                popover.noteOpen && 'min-w-64',
+              )}
+            />
+            <div className="flex justify-end gap-1.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                onMouseDown={keepSelection}
+                onClick={popover.closeNote}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                data-testid="popover-note-save"
+                onMouseDown={keepSelection}
+              >
+                Save Note
+              </Button>
+            </div>
+          </form>
+        </div>
+      </div>
     </div>
   );
 }
