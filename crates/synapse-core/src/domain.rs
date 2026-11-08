@@ -524,6 +524,10 @@ pub enum PageTransition {
     #[default]
     Slide,
     Fade,
+    /// The incoming page swings in around its leading edge.
+    Flip,
+    /// The incoming page rises from slightly behind the one it replaces.
+    Stack,
 }
 
 /// User-configurable appearance and layout preferences for EPUB and TXT readers.
@@ -546,7 +550,9 @@ pub struct ReadingPreferences {
     pub dim_images: bool,
     pub epub_reading_mode: EpubReadingMode,
     /// Also used by PDF single and two-page modes. Rows saved before it existed
-    /// take the default, so it needs no migration.
+    /// take the default, so it needs no migration. The wire enum stays strict:
+    /// only `Database::get_reading_preferences` tolerates a mode it does not
+    /// know, because only a stored row can have been written by a newer build.
     #[serde(default)]
     pub page_transition: PageTransition,
 }
@@ -624,6 +630,56 @@ mod tests {
             nan_spacing.validate(),
             Err(CoreError::InvalidPreferences(_))
         ));
+    }
+
+    #[test]
+    fn page_transition_round_trips_every_mode_and_rejects_an_unknown_one() {
+        for (mode, wire) in [
+            (PageTransition::None, "none"),
+            (PageTransition::Slide, "slide"),
+            (PageTransition::Fade, "fade"),
+            (PageTransition::Flip, "flip"),
+            (PageTransition::Stack, "stack"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<PageTransition>(serde_json::json!(wire)).unwrap(),
+                mode
+            );
+        }
+
+        // The wire enum is what `save_reading_preferences` takes, so it stays
+        // strict: a mode this build does not know is a rejected argument, not a
+        // silently stored default. Only the read path is lenient.
+        let sent = serde_json::json!({
+            "theme": "sepia",
+            "fontFamily": "new-york",
+            "fontSize": 110,
+            "lineSpacing": 1.4,
+            "margins": "wide",
+            "pageWidth": "full",
+            "justify": false,
+            "dimImages": true,
+            "epubReadingMode": "paged",
+            "pageTransition": "curl",
+        });
+        assert!(serde_json::from_value::<ReadingPreferences>(sent).is_err());
+    }
+
+    #[test]
+    fn reading_preferences_without_a_page_transition_take_the_default() {
+        let stored = serde_json::json!({
+            "theme": "light",
+            "fontFamily": "original",
+            "fontSize": 100,
+            "lineSpacing": 1.75,
+            "margins": "normal",
+            "justify": true,
+            "dimImages": false,
+            "epubReadingMode": "spread",
+        });
+        let prefs: ReadingPreferences = serde_json::from_value(stored).unwrap();
+        assert_eq!(prefs.page_transition, PageTransition::Slide);
     }
 
     #[test]

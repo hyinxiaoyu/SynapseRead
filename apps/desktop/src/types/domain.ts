@@ -276,7 +276,7 @@ export type ReadingMargins = 'narrow' | 'normal' | 'wide';
 export type ReadingPageWidth = 'standard' | 'wide' | 'full';
 export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
 /** How a paged reader animates a page turn; reduced motion always turns instantly. */
-export type PageTransition = 'none' | 'slide' | 'fade';
+export type PageTransition = 'none' | 'slide' | 'fade' | 'flip' | 'stack';
 
 export interface ReadingPreferences {
   theme: ReadingTheme;

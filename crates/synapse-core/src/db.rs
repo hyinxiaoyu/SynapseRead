@@ -12,8 +12,8 @@ use crate::domain::{
     AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, CardPatch,
     CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document,
     DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode,
-    NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences, RelinkDocumentResult,
-    StudyNotebook, Viewport, WorkspaceSession,
+    NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, ReadingPreferences,
+    RelinkDocumentResult, StudyNotebook, Viewport, WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -747,7 +747,7 @@ impl Database {
     // ---- Reading Preferences ---------------------------------------------
 
     pub fn get_reading_preferences(&self) -> CoreResult<ReadingPreferences> {
-        let prefs: Option<ReadingPreferences> = self
+        let stored: Option<serde_json::Value> = self
             .conn
             .query_row(
                 "SELECT preferences_json FROM reading_preferences WHERE id = 1",
@@ -755,7 +755,10 @@ impl Database {
                 |row| json_column(row, 0),
             )
             .optional()?;
-        Ok(prefs.unwrap_or_default())
+        match stored {
+            Some(stored) => Ok(reading_preferences_from_stored(stored)?),
+            None => Ok(ReadingPreferences::default()),
+        }
     }
 
     pub fn save_reading_preferences(
@@ -1045,6 +1048,27 @@ fn conversion_failure(
     error: impl std::error::Error + Send + Sync + 'static,
 ) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(error))
+}
+
+/// Reads a stored preferences row, tolerating a page-turn mode this build lacks.
+///
+/// Only the read path is lenient. A newer build may have written a
+/// `pageTransition` this one cannot parse, and rejecting it would fail the whole
+/// load, so the key is dropped and `#[serde(default)]` supplies the default.
+/// IPC input keeps strict enum validation, as the memory backend does, so a
+/// garbage value from the frontend is still an error.
+fn reading_preferences_from_stored(
+    mut stored: serde_json::Value,
+) -> CoreResult<ReadingPreferences> {
+    if let Some(object) = stored.as_object_mut() {
+        let unknown = object
+            .get("pageTransition")
+            .is_some_and(|mode| serde_json::from_value::<PageTransition>(mode.clone()).is_err());
+        if unknown {
+            object.remove("pageTransition");
+        }
+    }
+    Ok(serde_json::from_value(stored)?)
 }
 
 fn json_column<T: DeserializeOwned>(row: &Row<'_>, index: usize) -> rusqlite::Result<T> {
@@ -1832,6 +1856,76 @@ mod tests {
             db.save_reading_preferences(&invalid),
             Err(CoreError::InvalidPreferences(_))
         ));
+    }
+
+    #[test]
+    fn stored_preferences_load_with_any_known_transition_and_without_the_field() {
+        let db = Database::open_in_memory().unwrap();
+        // Every mode a released build could have written, plus a row from
+        // before the field existed (no `pageTransition` key at all).
+        let cases = [
+            (Some("none"), crate::domain::PageTransition::None),
+            (Some("slide"), crate::domain::PageTransition::Slide),
+            (Some("fade"), crate::domain::PageTransition::Fade),
+            (None, crate::domain::PageTransition::Slide),
+        ];
+        for (stored, expected) in cases {
+            let mut row = serde_json::json!({
+                "theme": "sepia",
+                "fontFamily": "charter",
+                "fontSize": 110,
+                "lineSpacing": 1.4,
+                "margins": "wide",
+                "pageWidth": "full",
+                "justify": false,
+                "dimImages": true,
+                "epubReadingMode": "paged",
+            });
+            if let Some(mode) = stored {
+                row["pageTransition"] = serde_json::json!(mode);
+            }
+            db.conn
+                .execute(
+                    "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)
+                     ON CONFLICT (id) DO UPDATE SET preferences_json = excluded.preferences_json",
+                    params![row.to_string()],
+                )
+                .unwrap();
+
+            let prefs = db.get_reading_preferences().unwrap();
+            assert_eq!(prefs.page_transition, expected, "stored {row}");
+            assert_eq!(prefs.font_size, 110);
+        }
+    }
+
+    #[test]
+    fn an_unknown_stored_transition_falls_back_instead_of_failing_the_load() {
+        let db = Database::open_in_memory().unwrap();
+        // A newer build wrote a mode this one does not know.
+        let stored = serde_json::json!({
+            "theme": "dark",
+            "fontFamily": "mono",
+            "fontSize": 120,
+            "lineSpacing": 1.9,
+            "margins": "narrow",
+            "pageWidth": "standard",
+            "justify": true,
+            "dimImages": false,
+            "epubReadingMode": "spread",
+            "pageTransition": "curl",
+        });
+        db.conn
+            .execute(
+                "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)",
+                params![stored.to_string()],
+            )
+            .unwrap();
+
+        let prefs = db.get_reading_preferences().unwrap();
+        assert_eq!(prefs.page_transition, crate::domain::PageTransition::Slide);
+        // The rest of the row still loads; only the unknown field degrades.
+        assert_eq!(prefs.theme, crate::domain::ReadingTheme::Dark);
+        assert_eq!(prefs.font_size, 120);
     }
 
     #[test]

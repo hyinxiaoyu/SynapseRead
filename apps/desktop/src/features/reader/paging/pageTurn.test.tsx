@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   animatePageTurn,
+  PAGE_TURN_ANIMATION_ID,
   type PageTurnGestures,
   SWIPE_IDLE_MS,
   usePageTurnGestures,
@@ -130,29 +131,145 @@ describe('usePageTurnGestures', () => {
 });
 
 describe('animatePageTurn', () => {
-  it('slides in from the side it turned to, fades, or does nothing', () => {
+  type Animate = (keyframes: Keyframe[], options?: KeyframeAnimationOptions) => Animation;
+  const fakeAnimation = () => ({ id: '' }) as unknown as Animation;
+
+  /** A page whose Web Animations calls are recorded instead of run. */
+  const mountPage = () => {
     const element = document.createElement('div');
-    const animate = vi.fn();
+    const animate = vi.fn<Animate>();
+    animate.mockReturnValue(fakeAnimation());
     element.animate = animate as unknown as HTMLElement['animate'];
+    return { element, animate };
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('slides in from the side it turned to', () => {
+    const { element, animate } = mountPage();
     animatePageTurn(element, 1, 'slide');
     expect(animate.mock.calls[0]?.[0]).toEqual([
       { transform: 'translateX(32px)', opacity: 0.35 },
       { transform: 'translateX(0)', opacity: 1 },
     ]);
-    expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 200 });
+    expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 220 });
+
+    animatePageTurn(element, -1, 'slide');
+    expect(animate.mock.calls[1]?.[0]).toEqual([
+      { transform: 'translateX(-32px)', opacity: 0.35 },
+      { transform: 'translateX(0)', opacity: 1 },
+    ]);
+  });
+
+  it('fades the incoming page in', () => {
+    const { element, animate } = mountPage();
     animatePageTurn(element, -1, 'fade');
-    expect(animate.mock.calls[1]?.[0]).toEqual([{ opacity: 0.2 }, { opacity: 1 }]);
+    expect(animate.mock.calls[0]?.[0]).toEqual([{ opacity: 0.2 }, { opacity: 1 }]);
+    expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 200 });
+  });
+
+  it('flips around the leading edge: left for next, right for previous', () => {
+    const { element, animate } = mountPage();
+    animatePageTurn(element, 1, 'flip');
+    expect(animate.mock.calls[0]?.[0]).toEqual([
+      { transform: 'perspective(1400px) rotateY(-18deg)', transformOrigin: '0% 50%' },
+      { transform: 'perspective(1400px) rotateY(0deg)', transformOrigin: '0% 50%' },
+    ]);
+    animatePageTurn(element, -1, 'flip');
+    expect(animate.mock.calls[1]?.[0]).toEqual([
+      { transform: 'perspective(1400px) rotateY(18deg)', transformOrigin: '100% 50%' },
+      { transform: 'perspective(1400px) rotateY(0deg)', transformOrigin: '100% 50%' },
+    ]);
+    expect(animate.mock.calls[1]?.[1]).toMatchObject({ duration: 300 });
+  });
+
+  it('raises the incoming page from behind', () => {
+    const { element, animate } = mountPage();
+    animatePageTurn(element, 1, 'stack');
+    expect(animate.mock.calls[0]?.[0]).toEqual([
+      { transform: 'scale(0.965) translateX(16px)', opacity: 0.6 },
+      { transform: 'scale(1) translateX(0)', opacity: 1 },
+    ]);
+    expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 240 });
+  });
+
+  it('does nothing for none', () => {
+    const { element, animate } = mountPage();
     animatePageTurn(element, 1, 'none');
-    expect(animate).toHaveBeenCalledTimes(2);
+    expect(animate).not.toHaveBeenCalled();
+  });
+
+  it('cancels the turn still running, and only that one', () => {
+    const { element, animate } = mountPage();
+    const cancelTurn = vi.fn();
+    const cancelOther = vi.fn();
+    element.getAnimations = vi.fn(() => [
+      { id: PAGE_TURN_ANIMATION_ID, cancel: cancelTurn },
+      { id: 'pulse-annotation', cancel: cancelOther },
+    ]) as unknown as HTMLElement['getAnimations'];
+
+    animatePageTurn(element, 1, 'slide');
+    expect(cancelTurn).toHaveBeenCalledTimes(1);
+    // Another animation on the same element is none of our business.
+    expect(cancelOther).not.toHaveBeenCalled();
+    expect(animate).toHaveBeenCalledTimes(1);
+  });
+
+  it('tags its animation, and never fills forwards', () => {
+    const { element, animate } = mountPage();
+    for (const mode of ['slide', 'fade', 'flip', 'stack'] as const) {
+      animatePageTurn(element, 1, mode);
+    }
+    expect(animate).toHaveBeenCalledTimes(4);
+    for (const call of animate.mock.calls) {
+      expect(call[1]?.fill).toBeUndefined();
+    }
+    // Without the id the next turn could not tell its own animation apart.
+    expect((animate.mock.results[0]?.value as Animation).id).toBe(PAGE_TURN_ANIMATION_ID);
+  });
+
+  it('moves only the shadow of a flip, from the hinge inward', () => {
+    const { element } = mountPage();
+    const shadow = document.createElement('div');
+    const animateShadow = vi.fn<Animate>();
+    animateShadow.mockReturnValue(fakeAnimation());
+    shadow.animate = animateShadow as unknown as HTMLElement['animate'];
+
+    animatePageTurn(element, 1, 'flip', shadow);
+    expect(animateShadow).toHaveBeenCalledTimes(1);
+    expect(animateShadow.mock.calls[0]?.[0]).toEqual([
+      { opacity: 0 },
+      { opacity: 1, offset: 0.35 },
+      { opacity: 0 },
+    ]);
+    expect(shadow.style.backgroundImage).toContain('to right');
+
+    animatePageTurn(element, -1, 'flip', shadow);
+    expect(shadow.style.backgroundImage).toContain('to left');
+
+    // Every other mode leaves the shadow alone.
+    animatePageTurn(element, 1, 'stack', shadow);
+    animatePageTurn(element, 1, 'slide', shadow);
+    expect(animateShadow).toHaveBeenCalledTimes(2);
   });
 
   it('turns instantly with reduced motion', () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce') }));
-    const element = document.createElement('div');
-    const animate = vi.fn();
-    element.animate = animate as unknown as HTMLElement['animate'];
-    animatePageTurn(element, 1, 'slide');
+    const { element, animate } = mountPage();
+    const shadow = document.createElement('div');
+    const animateShadow = vi.fn();
+    shadow.animate = animateShadow as unknown as HTMLElement['animate'];
+    for (const mode of ['slide', 'fade', 'flip', 'stack'] as const) {
+      animatePageTurn(element, 1, mode, shadow);
+    }
     expect(animate).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
+    expect(animateShadow).not.toHaveBeenCalled();
+  });
+
+  it('tolerates a page that is not mounted', () => {
+    expect(() => animatePageTurn(null, 1, 'flip')).not.toThrow();
   });
 });
