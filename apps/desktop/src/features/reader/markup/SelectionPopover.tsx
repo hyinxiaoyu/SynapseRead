@@ -423,7 +423,12 @@ export function SelectionPopover({
                   saveNote();
                 }
               }}
-              className="w-full min-w-64 resize-none rounded-md border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className={cn(
+                'w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                // `0fr` collapses height only, so the width floor is only
+                // claimed while the field is open.
+                popover.noteOpen && 'min-w-64',
+              )}
             />
             <div className="flex justify-end gap-1.5">
               <Button

@@ -809,7 +809,9 @@ describe('TxtViewer', () => {
     expect(store.getState().annotations[0]?.style).toBe('underline');
     fireEvent.click(within(editor).getByRole('button', { name: 'Underline' }));
     await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('highlight'));
+    expect(screen.getByTestId('popover-note-form').closest('[inert]')).not.toBeNull();
     fireEvent.click(within(editor).getByRole('button', { name: 'Add Note' }));
+    expect(screen.getByTestId('popover-note-form').closest('[inert]')).toBeNull();
     fireEvent.change(await screen.findByTestId('popover-note-input'), {
       target: { value: 'Edited in place' },
     });

@@ -951,7 +951,10 @@ describe('PdfViewer', () => {
     fireEvent.click(screen.getByTestId('markup-color-green'));
     select([node, 0], [node, 10]);
     const popover = await screen.findByTestId('selection-popover');
+    // The composer is mounted but inert until Add Note asks for it.
+    expect(screen.getByTestId('popover-note-form').closest('[inert]')).not.toBeNull();
     fireEvent.click(within(popover).getByRole('button', { name: 'Add Note' }));
+    expect(screen.getByTestId('popover-note-form').closest('[inert]')).toBeNull();
     const noteComposerInput = await screen.findByTestId('popover-note-input');
     fireEvent.change(noteComposerInput, { target: { value: 'Margin note on page 1' } });
     fireEvent.click(screen.getByTestId('popover-note-save'));
