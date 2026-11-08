@@ -449,7 +449,7 @@ export function ToolbarSearchField<TMatch extends DocumentSearchResultItem>({
               role="menu"
               aria-label="Search options"
               data-reader-popover=""
-              className="absolute top-full left-0 z-50 mt-1 min-w-40 rounded-md border bg-background p-1 text-xs shadow-lg"
+              className="absolute top-full left-0 z-50 mt-1 min-w-40 origin-top-left animate-in rounded-md border bg-background p-1 text-xs shadow-lg duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
             >
               <button
                 type="button"

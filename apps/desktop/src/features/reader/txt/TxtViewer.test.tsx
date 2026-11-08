@@ -698,7 +698,10 @@ describe('TxtViewer', () => {
 
     await selectText('quick brown fox');
     const popover = await screen.findByTestId('selection-popover');
+    // The note stays mounted so its disclosure can grow, but inert until asked for.
+    expect(screen.getByTestId('popover-note-form').closest('[inert]')).not.toBeNull();
     fireEvent.click(within(popover).getByRole('button', { name: 'Add Note' }));
+    expect(screen.getByTestId('popover-note-form').closest('[inert]')).toBeNull();
     const composerInput = await screen.findByTestId('popover-note-input');
     fireEvent.change(composerInput, { target: { value: 'TXT note on line 2' } });
     fireEvent.click(screen.getByTestId('popover-note-save'));

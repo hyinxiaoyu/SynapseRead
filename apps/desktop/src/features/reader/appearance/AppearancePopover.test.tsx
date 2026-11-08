@@ -225,4 +225,22 @@ describe('AppearanceMenu', () => {
     fireEvent.click(turns.getByRole('radio', { name: 'Stack' }));
     expect(current().pageTransition).toBe('stack');
   });
+
+  it('keeps the Customize disclosure mounted but inert while it is closed', () => {
+    render(<Harness />);
+    fireEvent.click(trigger());
+    const customize = screen.getByRole('button', { name: 'Customize' });
+    const disclosure = document.getElementById(customize.getAttribute('aria-controls') ?? '');
+    // Mounted, so `grid-template-rows` has something to grow into...
+    expect(disclosure).not.toBeNull();
+    // ...but out of the tab order and the accessibility tree.
+    expect(disclosure).toHaveAttribute('inert');
+    expect(disclosure).toHaveAttribute('aria-hidden', 'true');
+    expect(screen.queryByRole('radiogroup', { name: 'Margins' })).not.toBeInTheDocument();
+
+    fireEvent.click(customize);
+    expect(disclosure).not.toHaveAttribute('inert');
+    expect(disclosure).toHaveAttribute('aria-hidden', 'false');
+    expect(screen.getByRole('radiogroup', { name: 'Margins' })).toBeInTheDocument();
+  });
 });

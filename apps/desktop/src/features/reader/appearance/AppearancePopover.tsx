@@ -397,49 +397,65 @@ function AppearancePanel({
           />
           Customize
         </button>
-        {customizing && (
-          <div id={ids.customize} className="mt-2 flex flex-col gap-3">
-            <TextChoices
-              label="Line spacing"
-              options={LINE_SPACINGS}
-              checkedIndex={LINE_SPACINGS.findIndex(
-                (spacing) => Math.abs(preferences.lineSpacing - spacing.value) < 0.05,
-              )}
-              onSelect={(lineSpacing) => onChange({ lineSpacing })}
-            />
-            <TextChoices
-              label="Margins"
-              options={MARGINS}
-              checkedIndex={MARGINS.findIndex((margin) => margin.value === preferences.margins)}
-              onSelect={(margins) => onChange({ margins })}
-            />
-            <TextChoices
-              label="Page turn"
-              options={PAGE_TRANSITIONS}
-              checkedIndex={PAGE_TRANSITIONS.findIndex(
-                (transition) => transition.value === preferences.pageTransition,
-              )}
-              onSelect={(pageTransition) => onChange({ pageTransition })}
-            />
-            <div className="flex flex-col gap-1">
-              <Switch
-                label="Justify"
-                description="Even edges, hyphenated in the book's language"
-                checked={preferences.justify}
-                testId="justify-switch"
-                onChange={(justify) => onChange({ justify })}
+        {/*
+          The disclosure stays mounted so `grid-template-rows` can transition
+          between `0fr` and `1fr`: no JS measures it, and the WebKit we target
+          has no `interpolate-size`. `inert` keeps the collapsed controls out of
+          the tab order and the accessibility tree.
+        */}
+        <div
+          id={ids.customize}
+          inert={!customizing}
+          aria-hidden={!customizing}
+          className={cn(
+            'grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none',
+            customizing ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]',
+          )}
+        >
+          <div className="overflow-hidden">
+            <div className="mt-2 flex flex-col gap-3">
+              <TextChoices
+                label="Line spacing"
+                options={LINE_SPACINGS}
+                checkedIndex={LINE_SPACINGS.findIndex(
+                  (spacing) => Math.abs(preferences.lineSpacing - spacing.value) < 0.05,
+                )}
+                onSelect={(lineSpacing) => onChange({ lineSpacing })}
               />
-              {format === 'epub' && (
+              <TextChoices
+                label="Margins"
+                options={MARGINS}
+                checkedIndex={MARGINS.findIndex((margin) => margin.value === preferences.margins)}
+                onSelect={(margins) => onChange({ margins })}
+              />
+              <TextChoices
+                label="Page turn"
+                options={PAGE_TRANSITIONS}
+                checkedIndex={PAGE_TRANSITIONS.findIndex(
+                  (transition) => transition.value === preferences.pageTransition,
+                )}
+                onSelect={(pageTransition) => onChange({ pageTransition })}
+              />
+              <div className="flex flex-col gap-1">
                 <Switch
-                  label="Dim images in Dark theme"
-                  checked={preferences.dimImages}
-                  testId="dim-images-switch"
-                  onChange={(dimImages) => onChange({ dimImages })}
+                  label="Justify"
+                  description="Even edges, hyphenated in the book's language"
+                  checked={preferences.justify}
+                  testId="justify-switch"
+                  onChange={(justify) => onChange({ justify })}
                 />
-              )}
+                {format === 'epub' && (
+                  <Switch
+                    label="Dim images in Dark theme"
+                    checked={preferences.dimImages}
+                    testId="dim-images-switch"
+                    onChange={(dimImages) => onChange({ dimImages })}
+                  />
+                )}
+              </div>
             </div>
           </div>
-        )}
+        </div>
       </div>
     </div>
   );
@@ -550,7 +566,7 @@ export function AppearanceMenu({
           aria-label="Appearance"
           data-testid="appearance-popover"
           data-reader-popover=""
-          className="absolute top-full right-0 z-50 mt-2 max-h-[min(75vh,640px)] w-72 overflow-y-auto rounded-xl border bg-background p-3 text-foreground shadow-xl select-none"
+          className="absolute top-full right-0 z-50 mt-2 max-h-[min(75vh,640px)] w-72 origin-top-right animate-in overflow-y-auto rounded-xl border bg-background p-3 text-foreground shadow-xl duration-150 fade-in-0 slide-in-from-top-1 select-none zoom-in-[0.96] motion-reduce:animate-none"
         >
           <AppearancePanel preferences={preferences} format={format} onChange={onChange} />
         </div>

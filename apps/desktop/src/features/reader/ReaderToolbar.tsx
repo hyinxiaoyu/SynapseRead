@@ -211,7 +211,7 @@ export function ToolbarOverflowMenu({ items }: { items: readonly OverflowItem[] 
           role="menu"
           aria-label="More toolbar items"
           data-reader-popover=""
-          className="absolute top-full right-0 z-50 mt-1 min-w-44 rounded-md border bg-background p-1 text-xs text-foreground shadow-lg"
+          className="absolute top-full right-0 z-50 mt-1 min-w-44 origin-top-right animate-in rounded-md border bg-background p-1 text-xs text-foreground shadow-lg duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
         >
           {items.map((item) => (
             <button
@@ -272,7 +272,7 @@ export function ToolbarTitle({ title, subtitle }: { title: string; subtitle?: Re
  */
 export function ReaderPopoverLayer({ children }: { children: ReactNode }) {
   return (
-    <div className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:overflow-hidden *:rounded-lg *:border *:shadow-lg">
+    <div className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none">
       {children}
     </div>
   );

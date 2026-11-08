@@ -21,7 +21,7 @@ export function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-6"
+      className="fixed inset-0 z-[60] flex animate-in items-center justify-center bg-black/30 p-6 duration-150 fade-in-0 motion-reduce:animate-none"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -32,7 +32,7 @@ export function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
         aria-labelledby="keyboard-shortcuts-title"
         data-reader-popover=""
         data-testid="keyboard-shortcuts-dialog"
-        className="flex max-h-full w-full max-w-2xl flex-col rounded-lg border bg-background text-foreground shadow-xl"
+        className="flex max-h-full w-full max-w-2xl animate-in flex-col rounded-lg border bg-background text-foreground shadow-xl duration-150 fade-in-0 zoom-in-95 motion-reduce:animate-none"
       >
         <header className="flex items-center justify-between border-b px-4 py-2.5">
           <h2 id="keyboard-shortcuts-title" className="text-sm font-semibold">
