@@ -1145,7 +1145,12 @@ export function EpubViewer({
             className="group/page relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5"
             style={{ ...pageSurfaceStyle(theme), cursor: zoneCursor(zone) || undefined }}
           >
-            <PageTurnShadow shadowRef={turnShadowRef} color={PAGE_PALETTES[theme].spine} />
+            <PageTurnShadow
+              shadowRef={turnShadowRef}
+              color={PAGE_PALETTES[theme].spine}
+              className={availableWidth > 0 ? 'inset-y-0 left-1/2 -translate-x-1/2' : 'inset-0'}
+              style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
+            />
             <div
               ref={hostRef}
               tabIndex={-1}

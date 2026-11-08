@@ -1000,7 +1000,12 @@ export function TxtViewer({
             )}
           </ReaderPopoverLayer>
           <div className="group/page relative flex min-h-0 flex-1 flex-col">
-            <PageTurnShadow shadowRef={turnShadowRef} color={PAGE_PALETTES[theme].spine} />
+            <PageTurnShadow
+              shadowRef={turnShadowRef}
+              color={PAGE_PALETTES[theme].spine}
+              className="inset-y-0 left-1/2 w-full -translate-x-1/2"
+              style={{ maxWidth: Number.isFinite(page.maxWidth) ? page.maxWidth : '100%' }}
+            />
             <div
               ref={scrollRef}
               onScroll={onScroll}

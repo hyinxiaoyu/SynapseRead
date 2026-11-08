@@ -2099,7 +2099,13 @@ function PdfPages({
             selection already made.
           */}
           <div className="group/page relative flex min-h-0 min-w-0 flex-1 flex-col">
-            <PageTurnShadow shadowRef={turnShadowRef} />
+            {/*
+              PDF pages are rendered images on white paper and the viewer has no
+              reading theme, so the shadow keeps the neutral default rather than
+              a theme's spine colour. It spans the whole pane because a PDF page
+              is scaled to fill it.
+            */}
+            <PageTurnShadow shadowRef={turnShadowRef} className="inset-0" />
             <div
               ref={scrollRef}
               onScroll={onScroll}

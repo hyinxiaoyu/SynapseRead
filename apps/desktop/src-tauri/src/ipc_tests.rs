@@ -573,6 +573,19 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         assert_eq!(h.ok("get_reading_preferences", json!({})), with_mode);
     }
 
+    // The wire enum stays strict: an unknown mode is a rejected argument, not a
+    // silently stored default. Only a stored row written by a newer build is
+    // tolerated, and that leniency lives in `get_reading_preferences`.
+    let mut unknown_mode = updated.clone();
+    unknown_mode["pageTransition"] = json!("curl");
+    assert!(
+        h.call(
+            "save_reading_preferences",
+            json!({ "preferences": unknown_mode })
+        )
+        .is_err()
+    );
+
     let mut invalid_width = updated.clone();
     invalid_width["pageWidth"] = json!("invalid");
     assert!(

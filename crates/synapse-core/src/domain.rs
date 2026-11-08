@@ -530,19 +530,6 @@ pub enum PageTransition {
     Stack,
 }
 
-/// Reads a stored transition, falling back to the default instead of failing.
-///
-/// A newer build may write a mode this one does not know. Rejecting the value
-/// would fail the whole `get_reading_preferences` load, so an unknown mode
-/// degrades to the default and the rest of the preferences survive.
-fn deserialize_page_transition<'de, D>(deserializer: D) -> Result<PageTransition, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let stored = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(stored).unwrap_or_default())
-}
-
 /// User-configurable appearance and layout preferences for EPUB and TXT readers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -563,8 +550,10 @@ pub struct ReadingPreferences {
     pub dim_images: bool,
     pub epub_reading_mode: EpubReadingMode,
     /// Also used by PDF single and two-page modes. Rows saved before it existed
-    /// take the default, so it needs no migration.
-    #[serde(default, deserialize_with = "deserialize_page_transition")]
+    /// take the default, so it needs no migration. The wire enum stays strict:
+    /// only `Database::get_reading_preferences` tolerates a mode it does not
+    /// know, because only a stored row can have been written by a newer build.
+    #[serde(default)]
     pub page_transition: PageTransition,
 }
 
@@ -644,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn page_transition_round_trips_every_mode_and_degrades_an_unknown_one() {
+    fn page_transition_round_trips_every_mode_and_rejects_an_unknown_one() {
         for (mode, wire) in [
             (PageTransition::None, "none"),
             (PageTransition::Slide, "slide"),
@@ -659,8 +648,10 @@ mod tests {
             );
         }
 
-        // A mode a newer build wrote must not fail the whole preferences load.
-        let stored = serde_json::json!({
+        // The wire enum is what `save_reading_preferences` takes, so it stays
+        // strict: a mode this build does not know is a rejected argument, not a
+        // silently stored default. Only the read path is lenient.
+        let sent = serde_json::json!({
             "theme": "sepia",
             "fontFamily": "new-york",
             "fontSize": 110,
@@ -672,10 +663,7 @@ mod tests {
             "epubReadingMode": "paged",
             "pageTransition": "curl",
         });
-        let prefs: ReadingPreferences = serde_json::from_value(stored).unwrap();
-        assert_eq!(prefs.page_transition, PageTransition::Slide);
-        assert_eq!(prefs.font_size, 110);
-        assert_eq!(prefs.theme, ReadingTheme::Sepia);
+        assert!(serde_json::from_value::<ReadingPreferences>(sent).is_err());
     }
 
     #[test]
