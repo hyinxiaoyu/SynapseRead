@@ -425,8 +425,11 @@ export function SelectionPopover({
               }}
               className={cn(
                 'w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                // `0fr` collapses height only, so the width floor is only
-                // claimed while the field is open.
+                // `0fr` collapses height only, so the width floor is claimed
+                // only while the field is open. The mounted form still adds its
+                // own intrinsic width (the textarea's default `cols`), so the
+                // closed popover matches the one that unmounted it only while
+                // the toolbar is the wider of the two — which it is today.
                 popover.noteOpen && 'min-w-64',
               )}
             />
