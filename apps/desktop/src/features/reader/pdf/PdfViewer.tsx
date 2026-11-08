@@ -70,6 +70,7 @@ import {
   zoneCursor,
 } from '@/features/reader/paging/pageTurn';
 import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
 import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
@@ -853,6 +854,7 @@ function PdfPages({
   const backChip = useBackChip(history.canGoBack);
   const markup = useMarkupToolbar();
   const pageContentRef = useRef<HTMLDivElement>(null);
+  const turnShadowRef = useRef<HTMLDivElement>(null);
   const pageInputRef = useRef<HTMLInputElement>(null);
   const pendingZoomTarget = useRef<PdfReturnLocation | null>(null);
 
@@ -1615,7 +1617,12 @@ function PdfPages({
   const turnPage = (direction: TurnDirection) => {
     backChip.dismiss();
     if (stepPage(direction) && paged) {
-      animatePageTurn(pageContentRef.current, direction, preferences?.pageTransition ?? 'slide');
+      animatePageTurn(
+        pageContentRef.current,
+        direction,
+        preferences?.pageTransition ?? 'slide',
+        turnShadowRef.current,
+      );
     }
   };
 
@@ -2092,6 +2099,7 @@ function PdfPages({
             selection already made.
           */}
           <div className="group/page relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <PageTurnShadow shadowRef={turnShadowRef} />
             <div
               ref={scrollRef}
               onScroll={onScroll}

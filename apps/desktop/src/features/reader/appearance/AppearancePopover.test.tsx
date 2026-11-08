@@ -205,4 +205,24 @@ describe('AppearanceMenu', () => {
     fireEvent.click(screen.getByRole('switch', { name: 'Dim images in Dark theme' }));
     expect(current().dimImages).toBe(true);
   });
+
+  it('offers every page-turn mode and reports the one chosen', () => {
+    render(<Harness />);
+    fireEvent.click(trigger());
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    const turns = within(screen.getByRole('radiogroup', { name: 'Page turn' }));
+    expect(turns.getAllByRole('radio').map((radio) => radio.textContent)).toEqual([
+      'None',
+      'Slide',
+      'Fade',
+      'Flip',
+      'Stack',
+    ]);
+    expect(turns.getByRole('radio', { name: 'Slide' })).toHaveAttribute('aria-checked', 'true');
+
+    fireEvent.click(turns.getByRole('radio', { name: 'Flip' }));
+    expect(current().pageTransition).toBe('flip');
+    fireEvent.click(turns.getByRole('radio', { name: 'Stack' }));
+    expect(current().pageTransition).toBe('stack');
+  });
 });

@@ -52,6 +52,7 @@ import {
   zoneCursor,
 } from '@/features/reader/paging/pageTurn';
 import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
 import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
@@ -215,6 +216,7 @@ export function EpubViewer({
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
+  const turnShadowRef = useRef<HTMLDivElement>(null);
   const readerAreaRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
@@ -875,7 +877,7 @@ export function EpubViewer({
     backChip.dismiss();
     void (direction > 0 ? handle.next() : handle.previous())
       .then(() => {
-        if (paged) animatePageTurn(hostRef.current, direction, transition);
+        if (paged) animatePageTurn(hostRef.current, direction, transition, turnShadowRef.current);
       })
       .catch(() => undefined);
   };
@@ -1143,6 +1145,7 @@ export function EpubViewer({
             className="group/page relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5"
             style={{ ...pageSurfaceStyle(theme), cursor: zoneCursor(zone) || undefined }}
           >
+            <PageTurnShadow shadowRef={turnShadowRef} color={PAGE_PALETTES[theme].spine} />
             <div
               ref={hostRef}
               tabIndex={-1}

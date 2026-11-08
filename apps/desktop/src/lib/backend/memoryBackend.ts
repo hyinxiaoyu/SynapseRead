@@ -650,8 +650,11 @@ export function createMemoryBackend({
       if (!['standard', 'wide', 'full'].includes(preferences.pageWidth)) {
         throw fail('invalid_preferences', 'pageWidth must be standard, wide, or full');
       }
-      if (!['none', 'slide', 'fade'].includes(preferences.pageTransition)) {
-        throw fail('invalid_preferences', 'pageTransition must be none, slide, or fade');
+      if (!['none', 'slide', 'fade', 'flip', 'stack'].includes(preferences.pageTransition)) {
+        throw fail(
+          'invalid_preferences',
+          'pageTransition must be none, slide, fade, flip, or stack',
+        );
       }
       readingPreferences = { ...preferences };
       return { ...readingPreferences };

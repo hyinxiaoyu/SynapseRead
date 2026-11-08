@@ -64,6 +64,8 @@ const PAGE_TRANSITIONS: readonly { value: PageTransition; label: string }[] = [
   { value: 'none', label: 'None' },
   { value: 'slide', label: 'Slide' },
   { value: 'fade', label: 'Fade' },
+  { value: 'flip', label: 'Flip' },
+  { value: 'stack', label: 'Stack' },
 ];
 
 export function useAppearancePanel() {

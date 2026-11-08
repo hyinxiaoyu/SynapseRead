@@ -1835,6 +1835,76 @@ mod tests {
     }
 
     #[test]
+    fn stored_preferences_load_with_any_known_transition_and_without_the_field() {
+        let db = Database::open_in_memory().unwrap();
+        // Every mode a released build could have written, plus a row from
+        // before the field existed (no `pageTransition` key at all).
+        let cases = [
+            (Some("none"), crate::domain::PageTransition::None),
+            (Some("slide"), crate::domain::PageTransition::Slide),
+            (Some("fade"), crate::domain::PageTransition::Fade),
+            (None, crate::domain::PageTransition::Slide),
+        ];
+        for (stored, expected) in cases {
+            let mut row = serde_json::json!({
+                "theme": "sepia",
+                "fontFamily": "charter",
+                "fontSize": 110,
+                "lineSpacing": 1.4,
+                "margins": "wide",
+                "pageWidth": "full",
+                "justify": false,
+                "dimImages": true,
+                "epubReadingMode": "paged",
+            });
+            if let Some(mode) = stored {
+                row["pageTransition"] = serde_json::json!(mode);
+            }
+            db.conn
+                .execute(
+                    "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)
+                     ON CONFLICT (id) DO UPDATE SET preferences_json = excluded.preferences_json",
+                    params![row.to_string()],
+                )
+                .unwrap();
+
+            let prefs = db.get_reading_preferences().unwrap();
+            assert_eq!(prefs.page_transition, expected, "stored {row}");
+            assert_eq!(prefs.font_size, 110);
+        }
+    }
+
+    #[test]
+    fn an_unknown_stored_transition_falls_back_instead_of_failing_the_load() {
+        let db = Database::open_in_memory().unwrap();
+        // A newer build wrote a mode this one does not know.
+        let stored = serde_json::json!({
+            "theme": "dark",
+            "fontFamily": "mono",
+            "fontSize": 120,
+            "lineSpacing": 1.9,
+            "margins": "narrow",
+            "pageWidth": "standard",
+            "justify": true,
+            "dimImages": false,
+            "epubReadingMode": "spread",
+            "pageTransition": "curl",
+        });
+        db.conn
+            .execute(
+                "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)",
+                params![stored.to_string()],
+            )
+            .unwrap();
+
+        let prefs = db.get_reading_preferences().unwrap();
+        assert_eq!(prefs.page_transition, crate::domain::PageTransition::Slide);
+        // The rest of the row still loads; only the unknown field degrades.
+        assert_eq!(prefs.theme, crate::domain::ReadingTheme::Dark);
+        assert_eq!(prefs.font_size, 120);
+    }
+
+    #[test]
     fn page_width_persists_across_database_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reading-width.sqlite");

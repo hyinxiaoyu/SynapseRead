@@ -524,6 +524,23 @@ pub enum PageTransition {
     #[default]
     Slide,
     Fade,
+    /// The incoming page swings in around its leading edge.
+    Flip,
+    /// The incoming page rises from slightly behind the one it replaces.
+    Stack,
+}
+
+/// Reads a stored transition, falling back to the default instead of failing.
+///
+/// A newer build may write a mode this one does not know. Rejecting the value
+/// would fail the whole `get_reading_preferences` load, so an unknown mode
+/// degrades to the default and the rest of the preferences survive.
+fn deserialize_page_transition<'de, D>(deserializer: D) -> Result<PageTransition, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let stored = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(stored).unwrap_or_default())
 }
 
 /// User-configurable appearance and layout preferences for EPUB and TXT readers.
@@ -547,7 +564,7 @@ pub struct ReadingPreferences {
     pub epub_reading_mode: EpubReadingMode,
     /// Also used by PDF single and two-page modes. Rows saved before it existed
     /// take the default, so it needs no migration.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_page_transition")]
     pub page_transition: PageTransition,
 }
 
@@ -624,6 +641,57 @@ mod tests {
             nan_spacing.validate(),
             Err(CoreError::InvalidPreferences(_))
         ));
+    }
+
+    #[test]
+    fn page_transition_round_trips_every_mode_and_degrades_an_unknown_one() {
+        for (mode, wire) in [
+            (PageTransition::None, "none"),
+            (PageTransition::Slide, "slide"),
+            (PageTransition::Fade, "fade"),
+            (PageTransition::Flip, "flip"),
+            (PageTransition::Stack, "stack"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<PageTransition>(serde_json::json!(wire)).unwrap(),
+                mode
+            );
+        }
+
+        // A mode a newer build wrote must not fail the whole preferences load.
+        let stored = serde_json::json!({
+            "theme": "sepia",
+            "fontFamily": "new-york",
+            "fontSize": 110,
+            "lineSpacing": 1.4,
+            "margins": "wide",
+            "pageWidth": "full",
+            "justify": false,
+            "dimImages": true,
+            "epubReadingMode": "paged",
+            "pageTransition": "curl",
+        });
+        let prefs: ReadingPreferences = serde_json::from_value(stored).unwrap();
+        assert_eq!(prefs.page_transition, PageTransition::Slide);
+        assert_eq!(prefs.font_size, 110);
+        assert_eq!(prefs.theme, ReadingTheme::Sepia);
+    }
+
+    #[test]
+    fn reading_preferences_without_a_page_transition_take_the_default() {
+        let stored = serde_json::json!({
+            "theme": "light",
+            "fontFamily": "original",
+            "fontSize": 100,
+            "lineSpacing": 1.75,
+            "margins": "normal",
+            "justify": true,
+            "dimImages": false,
+            "epubReadingMode": "spread",
+        });
+        let prefs: ReadingPreferences = serde_json::from_value(stored).unwrap();
+        assert_eq!(prefs.page_transition, PageTransition::Slide);
     }
 
     #[test]

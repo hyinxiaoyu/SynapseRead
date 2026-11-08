@@ -503,6 +503,13 @@ describe('useStudySyncStore', () => {
       await state().updateReadingPreferences({ fontSize: 300 });
       expect(state().readingPreferences.fontSize).toBe(120);
       expect(state().error).toMatch(/fontSize/);
+
+      // The newer modes are accepted by the backend's validation list too.
+      for (const pageTransition of ['flip', 'stack'] as const) {
+        await state().updateReadingPreferences({ pageTransition });
+        expect(state().readingPreferences.pageTransition).toBe(pageTransition);
+        expect((await backend.getReadingPreferences()).pageTransition).toBe(pageTransition);
+      }
     });
   });
 

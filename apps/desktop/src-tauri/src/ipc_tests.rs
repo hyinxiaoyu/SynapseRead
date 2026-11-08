@@ -559,6 +559,20 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
     assert_eq!(saved, updated);
     assert_eq!(h.ok("get_reading_preferences", json!({})), updated);
 
+    // The newer modes survive the wire in both directions.
+    for mode in ["flip", "stack"] {
+        let mut with_mode = updated.clone();
+        with_mode["pageTransition"] = json!(mode);
+        assert_eq!(
+            h.ok(
+                "save_reading_preferences",
+                json!({ "preferences": with_mode })
+            ),
+            with_mode
+        );
+        assert_eq!(h.ok("get_reading_preferences", json!({})), with_mode);
+    }
+
     let mut invalid_width = updated.clone();
     invalid_width["pageWidth"] = json!("invalid");
     assert!(

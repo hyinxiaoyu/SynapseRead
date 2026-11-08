@@ -50,6 +50,7 @@ import {
 import {
   DEFAULT_SERIF_STACK,
   fontStack,
+  PAGE_PALETTES,
   pageFooterStyle,
   pageSurfaceStyle,
 } from '@/features/reader/appearance/themes';
@@ -61,6 +62,7 @@ import {
   zoneCursor,
 } from '@/features/reader/paging/pageTurn';
 import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
+import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
 import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import { useJumpHistory } from '@/features/reader/useJumpHistory';
@@ -312,6 +314,7 @@ export function TxtViewer({
   const markup = useMarkupToolbar();
   const [currentRow, setCurrentRow] = useState(0);
   const pageRef = useRef<HTMLDivElement>(null);
+  const turnShadowRef = useRef<HTMLDivElement>(null);
   const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
   const annotationPulseTimerRef = useRef<number | null>(null);
 
@@ -750,7 +753,12 @@ export function TxtViewer({
   const turnPage = (direction: TurnDirection) => {
     backChip.dismiss();
     pageBy(direction);
-    animatePageTurn(pageRef.current, direction, effectivePreferences.pageTransition);
+    animatePageTurn(
+      pageRef.current,
+      direction,
+      effectivePreferences.pageTransition,
+      turnShadowRef.current,
+    );
   };
 
   const scrollToEdge = (edge: 'start' | 'end') => {
@@ -992,6 +1000,7 @@ export function TxtViewer({
             )}
           </ReaderPopoverLayer>
           <div className="group/page relative flex min-h-0 flex-1 flex-col">
+            <PageTurnShadow shadowRef={turnShadowRef} color={PAGE_PALETTES[theme].spine} />
             <div
               ref={scrollRef}
               onScroll={onScroll}
