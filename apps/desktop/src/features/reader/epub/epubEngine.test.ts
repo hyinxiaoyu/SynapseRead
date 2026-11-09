@@ -12,6 +12,8 @@ import { openEpubDocument } from './epubEngine';
 const fake = vi.hoisted(() => {
   const chapters = [
     { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+    // A second position in the same chapter: a jump here never changes the href.
+    { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/4/1:4)' },
     { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
   ];
   interface Pending {
@@ -31,7 +33,9 @@ const fake = vi.hoisted(() => {
     chapters.find((chapter) => chapter.href === target || chapter.cfi === target)?.href;
   const sectionOf = (target: string | undefined) => {
     const found = chapters.find((chapter) => chapter.href === target || chapter.cfi === target);
-    return found ? { index: chapters.indexOf(found), href: found.href } : null;
+    if (!found) return null;
+    const index = chapters.findIndex((chapter) => chapter.href === found.href);
+    return { index, href: found.href };
   };
   /** Resolves the pending display for `target`, as a rendered chapter would. */
   const settle = (target: string | undefined, contents = 1) => {
@@ -133,6 +137,20 @@ describe('EPUB navigation', () => {
     expect(fake.state.resizes.at(-1)).toEqual([420, 900, 'epubcfi(/6/2!/4/2/1:0)']);
     fake.settle('epubcfi(/6/2!/4/2/1:0)');
     await jump;
+  });
+
+  it('restores a jump inside one chapter on resize', async () => {
+    const handle = await open();
+    fake.rendition.location = { start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' } };
+    const jump = handle.display('epubcfi(/6/2!/4/4/1:4)');
+    // The href does not change here, so only the withheld location and the resize
+    // target keep epub.js from re-displaying the position the jump left.
+    expect(fake.rendition.location).toBeUndefined();
+    handle.resize(420, 900);
+    expect(fake.state.resizes.at(-1)).toEqual([420, 900, 'epubcfi(/6/2!/4/4/1:4)']);
+    fake.settle('epubcfi(/6/2!/4/4/1:4)');
+    await jump;
+    expect(fake.state.displays).toEqual(['epubcfi(/6/2!/4/4/1:4)']);
   });
 
   it('re-issues a jump whose views a resize cleared', async () => {
