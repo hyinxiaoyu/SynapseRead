@@ -68,8 +68,22 @@ const fake = vi.hoisted(() => {
     prev: () => Promise.resolve(),
     flow: () => undefined,
     spread: () => undefined,
-    clear: () => undefined,
-    resize: (...args: (number | string | undefined)[]) => state.resizes.push(args),
+    clear: () => {
+      state.contents = [];
+    },
+    resize: (width?: number, height?: number, epubcfi?: string) => {
+      state.resizes.push([width, height, epubcfi]);
+      // epub.js: `manager.resize` clears views; `onResized` only re-displays when
+      // `this.location && this.location.start` is truthy (`rendition.js` L479-481).
+      state.contents = [];
+      if (rendition.location?.start) {
+        const target =
+          typeof epubcfi === 'string' && epubcfi.length > 0
+            ? epubcfi
+            : rendition.location.start.cfi;
+        void rendition.display(target);
+      }
+    },
     annotations: {
       underline: () => undefined,
       highlight: () => undefined,
@@ -131,26 +145,53 @@ describe('EPUB navigation', () => {
   it('restores a jump in flight on resize, not the location epub.js reported last', async () => {
     const handle = await open();
     const jump = handle.display('epubcfi(/6/2!/4/2/1:0)');
-    // The stale location is withheld, so epub.js' resize path cannot re-display it.
-    expect(fake.rendition.location).toBeUndefined();
+    // The location is seeded with the jump's destination ahead of `reportLocation()`,
+    // so epub.js' `onResized` (`if (this.location && this.location.start)`) re-displays
+    // the destination rather than skipping re-display or restoring the pre-jump chapter.
+    expect(fake.rendition.location).toEqual({
+      start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+    });
     handle.resize(420, 900);
     expect(fake.state.resizes.at(-1)).toEqual([420, 900, 'epubcfi(/6/2!/4/2/1:0)']);
+    expect(fake.state.displays).toEqual(['epubcfi(/6/2!/4/2/1:0)', 'epubcfi(/6/2!/4/2/1:0)']);
     fake.settle('epubcfi(/6/2!/4/2/1:0)');
     await jump;
+    expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
   });
 
   it('restores a jump inside one chapter on resize', async () => {
     const handle = await open();
     fake.rendition.location = { start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' } };
     const jump = handle.display('epubcfi(/6/2!/4/4/1:4)');
-    // The href does not change here, so only the withheld location and the resize
-    // target keep epub.js from re-displaying the position the jump left.
-    expect(fake.rendition.location).toBeUndefined();
+    // The href does not change here, so seeding `location.start.cfi` and passing the
+    // target to `resize` keep epub.js from re-displaying the position the jump left.
+    expect(fake.rendition.location).toEqual({
+      start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/4/1:4)' },
+    });
     handle.resize(420, 900);
     expect(fake.state.resizes.at(-1)).toEqual([420, 900, 'epubcfi(/6/2!/4/4/1:4)']);
+    expect(fake.state.displays).toEqual(['epubcfi(/6/2!/4/4/1:4)', 'epubcfi(/6/2!/4/4/1:4)']);
     fake.settle('epubcfi(/6/2!/4/4/1:4)');
     await jump;
-    expect(fake.state.displays).toEqual(['epubcfi(/6/2!/4/4/1:4)']);
+  });
+
+  it('preserves an in-flight href jump when setColumns or setPreferences runs', async () => {
+    const host = document.createElement('div');
+    Object.defineProperty(host, 'clientWidth', { value: 640 });
+    Object.defineProperty(host, 'clientHeight', { value: 900 });
+    fake.rendition.location = { start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' } };
+    const handle = await openEpubDocument(
+      { kind: 'bytes', bytes: new Uint8Array() },
+      host,
+      'spread',
+    );
+    const jump = handle.display('chapter1.xhtml');
+    handle.setColumns(1);
+    expect(fake.state.resizes.at(-1)).toEqual([640, 900, 'chapter1.xhtml']);
+    expect(fake.state.displays.at(-1)).toBe('chapter1.xhtml');
+    fake.settle('chapter1.xhtml');
+    await jump;
+    expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
   });
 
   it('re-issues a jump whose views a resize cleared', async () => {

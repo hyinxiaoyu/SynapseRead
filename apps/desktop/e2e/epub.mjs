@@ -460,4 +460,61 @@ export async function epubFlow(page) {
   })()`);
   await page.waitFor(chapterIs('Chapter Two'), 'the newer of two back-to-back jumps to win');
   await page.hideSidebar();
+
+  // A resize that lands while a jump is in flight must not undo it or leave the viewport
+  // blank. epub.js clears its views on resize and re-displays `location.start.cfi`;
+  // forcing a resize right as the return jump starts reproduces the overlap (#41).
+  await page.showSidebarTab('Table of Contents');
+  await page.clickTreeItem('One');
+  await page.waitFor(chapterIs('Chapter One'), 'EPUB jump to Chapter One before the resize');
+  await page.hideSidebar();
+  await page.clickButton('Return to previous location');
+  await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    setTimeout(() => {
+      host.style.width = '420px';
+      host.getBoundingClientRect();
+      window.dispatchEvent(new Event('resize'));
+    }, 0);
+  })()`);
+  await page.waitFor(chapterIs('Chapter Two'), 'a resize during a jump not to undo it');
+  await page.evaluate(`(${visibleHost}).style.width = ''`);
+  await page.waitFor(
+    `${visibleHost}.getBoundingClientRect().width > 420`,
+    'the resized page area to return to its width',
+  );
+  await page.waitFor(chapterIs('Chapter Two'), 'restoring width after jump to keep Chapter Two');
+
+  // An in-chapter jump must return to where it started even if a resize lands on the
+  // return: epub.js re-displays its last reported location, which is now an anchor in
+  // this same chapter, and a section check cannot tell the two positions apart (#41).
+  const scrollerTop = `${visibleHost}.querySelector('.epub-container')?.scrollTop ?? 0`;
+  await page.showSidebarTab('Table of Contents');
+  await page.clickTreeItem('One');
+  await page.waitFor(
+    chapterIs('Chapter One'),
+    'EPUB jump to Chapter One before the in-chapter return',
+  );
+  const originTop = await page.evaluate(scrollerTop);
+  await page.expandTreeItem('One');
+  await page.clickTreeItem('Section 1.1');
+  await page.waitFor(
+    `(${scrollerTop}) > ${originTop + 200}`,
+    'the in-chapter jump to move down the chapter',
+  );
+  await page.hideSidebar();
+  await page.clickButton('Return to previous location');
+  await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    setTimeout(() => {
+      host.style.width = '420px';
+      host.getBoundingClientRect();
+      window.dispatchEvent(new Event('resize'));
+    }, 0);
+  })()`);
+  await page.waitFor(
+    `(${scrollerTop}) < ${originTop + 200}`,
+    'an in-chapter return to survive a resize',
+  );
+  await page.evaluate(`(${visibleHost}).style.width = ''`);
 }

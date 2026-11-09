@@ -606,17 +606,24 @@ export async function openEpubDocument(
   const display = async (target?: string) => {
     const resolved = resolveTarget(target);
     const epoch = beginNavigation();
-    if (resolved?.startsWith('epubcfi(')) currentCfi = resolved;
-    // epub.js' resize path re-displays the location it last reported, which lags a
-    // jump by a frame; withholding it keeps a resize in that window from restoring
-    // the pre-jump page, and `pendingTarget` tells the resize what to show instead.
+    if (resolved !== undefined) currentCfi = resolved;
+    const wanted = resolved === undefined ? undefined : book.spine.get(resolved)?.href;
+    // epub.js' resize path clears all views and re-displays `this.location.start.cfi`
+    // only when `this.location && this.location.start` is truthy (`onResized`). Seeding
+    // `location` with the destination ahead of `reportLocation()` keeps a resize during
+    // the jump from either restoring the pre-jump chapter or skipping re-display after
+    // `manager.resize()` detaches the in-flight iframe.
     pendingTarget = resolved;
-    Reflect.set(rendition, 'location', undefined);
+    Reflect.set(
+      rendition,
+      'location',
+      resolved !== undefined && wanted !== undefined
+        ? { start: { href: wanted, cfi: resolved } }
+        : undefined,
+    );
     try {
       await (rendition.display(resolved) as unknown as Promise<void>);
-      if (epoch !== navigation) return;
-      const wanted = resolved === undefined ? undefined : book.spine.get(resolved)?.href;
-      if (!wanted) return;
+      if (epoch !== navigation || !wanted) return;
       // An href match alone would also be true of a view that only scrolled, or of
       // one the resize destroyed; the contents check tells a landed jump from those.
       const landed = async () => {
@@ -773,9 +780,16 @@ export async function openEpubDocument(
       if (mode === currentMode) return;
       currentMode = mode;
       const epoch = beginNavigation();
-      const target = currentCfi;
+      const target = pendingTarget ?? currentCfi;
+      const wanted = target === undefined ? undefined : book.spine.get(target)?.href;
       pendingTarget = target;
-      Reflect.set(rendition, 'location', undefined);
+      Reflect.set(
+        rendition,
+        'location',
+        target !== undefined && wanted !== undefined
+          ? { start: { href: wanted, cfi: target } }
+          : undefined,
+      );
       rendition.flow(MODE_FLOW[mode]);
       rendition.spread(spreadFor(mode, currentColumns), 0);
       rendition.clear();
@@ -796,14 +810,18 @@ export async function openEpubDocument(
       if (before === after) return;
       // epub.js re-lays out on resize and returns to the current location then.
       rendition.spread(after, 0);
-      const target = currentCfi;
+      const target = pendingTarget ?? currentCfi;
       if (element.clientWidth > 0 && element.clientHeight > 0) {
         resizeTo(element.clientWidth, element.clientHeight, target);
       }
       if (target) {
-        beginNavigation();
-        pendingTarget = undefined;
-        void (rendition.display(target) as unknown as Promise<void>).catch(() => undefined);
+        const epoch = beginNavigation();
+        pendingTarget = target;
+        void (rendition.display(target) as unknown as Promise<void>)
+          .catch(() => undefined)
+          .finally(() => {
+            if (epoch === navigation) pendingTarget = undefined;
+          });
       }
     },
 
@@ -823,12 +841,16 @@ export async function openEpubDocument(
         element.clientWidth > 0 &&
         element.clientHeight > 0
       ) {
-        const target = currentCfi;
+        const target = pendingTarget ?? currentCfi;
         resizeTo(element.clientWidth, element.clientHeight, target);
         if (target && currentMode !== 'scroll') {
-          beginNavigation();
-          pendingTarget = undefined;
-          void (rendition.display(target) as unknown as Promise<void>).catch(() => undefined);
+          const epoch = beginNavigation();
+          pendingTarget = target;
+          void (rendition.display(target) as unknown as Promise<void>)
+            .catch(() => undefined)
+            .finally(() => {
+              if (epoch === navigation) pendingTarget = undefined;
+            });
         }
       }
     },
