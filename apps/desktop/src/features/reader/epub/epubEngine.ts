@@ -565,10 +565,84 @@ export async function openEpubDocument(
 
   const contentsList = () => rendition.getContents() as unknown as Contents[];
 
+  /**
+   * epub.js reports locations late: `display()` resolves the in-flight display as
+   * soon as another one replaces it, `reportLocation()` runs a frame after the queue
+   * drains, and the resize path clears every view and re-displays the location it
+   * last saw. A resize landing around a jump therefore silently undoes it — the Back
+   * button is consumed and the page does not move (#41).
+   *
+   * So every navigation takes an epoch (a newer one always wins), a jump withholds
+   * the lagging location from the resize path, and a jump only counts as done once
+   * the queue drained, the reader reports the location asked for, and a view exists
+   * to show it. A jump overridden on the way is re-issued.
+   */
+  const renditionState = () =>
+    rendition as unknown as {
+      location?: { start?: { href?: string; cfi?: string } };
+      q: { enqueue: (task: () => Promise<void>) => Promise<unknown> };
+    };
+  const displayedHref = () => renditionState().location?.start?.href;
+  /** epub.js' resize accepts a CFI to restore, which its typings leave out. */
+  const resizeTo = (width: number, height: number, target?: string) =>
+    (
+      rendition as unknown as {
+        resize: (width?: number, height?: number, epubcfi?: string) => void;
+      }
+    ).resize(width, height, target);
+
+  /** A newer navigation; an older one must neither repair nor wait for it. */
+  let navigation = 0;
+  const beginNavigation = () => ++navigation;
+  /** Where a jump is heading, so a resize restores it instead of the old location. */
+  let pendingTarget: string | undefined;
+
+  /** Resolves once epub.js' queue drained and its rAF-gated location report ran. */
+  const settled = () =>
+    renditionState()
+      .q.enqueue(() => new Promise<void>((done) => requestAnimationFrame(() => done())))
+      .catch(() => undefined);
+
   const display = async (target?: string) => {
     const resolved = resolveTarget(target);
-    if (resolved?.startsWith('epubcfi(')) currentCfi = resolved;
-    await (rendition.display(resolved) as unknown as Promise<void>);
+    const epoch = beginNavigation();
+    if (resolved !== undefined) currentCfi = resolved;
+    const wanted = resolved === undefined ? undefined : book.spine.get(resolved)?.href;
+    // epub.js' resize path clears all views and re-displays `this.location.start.cfi`
+    // only when `this.location && this.location.start` is truthy (`onResized`). Seeding
+    // `location` with the destination ahead of `reportLocation()` keeps a resize during
+    // the jump from either restoring the pre-jump chapter or skipping re-display after
+    // `manager.resize()` detaches the in-flight iframe.
+    pendingTarget = resolved;
+    Reflect.set(
+      rendition,
+      'location',
+      resolved !== undefined && wanted !== undefined
+        ? { start: { href: wanted, cfi: resolved } }
+        : undefined,
+    );
+    try {
+      await (rendition.display(resolved) as unknown as Promise<void>);
+      if (epoch !== navigation || !wanted) return;
+      // An href match alone would also be true of a view that only scrolled, or of
+      // one the resize destroyed; the contents check tells a landed jump from those.
+      const landed = async () => {
+        await settled();
+        const ok =
+          epoch !== navigation || (displayedHref() === wanted && contentsList().length > 0);
+        return ok;
+      };
+      if (await landed()) return;
+      // Each repair starts from a drained queue, so a late resize cannot interleave
+      // with it the way it did with the original jump.
+      for (let repair = 0; repair < 2; repair += 1) {
+        if (epoch !== navigation) return;
+        await (rendition.display(resolved) as unknown as Promise<void>);
+        if (await landed()) return;
+      }
+    } finally {
+      if (epoch === navigation) pendingTarget = undefined;
+    }
   };
 
   /** Runs `read` on a spine chapter's document, loading it only for the call. */
@@ -669,6 +743,8 @@ export async function openEpubDocument(
       await display(cfi ?? href);
     },
     async next() {
+      beginNavigation();
+      pendingTarget = undefined;
       if (currentMode === 'scroll') {
         const scroller = element.querySelector<HTMLElement>('.epub-container');
         if (
@@ -686,6 +762,8 @@ export async function openEpubDocument(
       await (rendition.next() as unknown as Promise<void>);
     },
     async previous() {
+      beginNavigation();
+      pendingTarget = undefined;
       if (currentMode === 'scroll') {
         const scroller = element.querySelector<HTMLElement>('.epub-container');
         if (scroller && scroller.clientHeight > 0 && scroller.scrollTop > 4) {
@@ -701,14 +779,27 @@ export async function openEpubDocument(
     async setReadingMode(mode) {
       if (mode === currentMode) return;
       currentMode = mode;
-      const target = currentCfi;
-      Reflect.set(rendition, 'location', undefined);
+      const epoch = beginNavigation();
+      const target = pendingTarget ?? currentCfi;
+      const wanted = target === undefined ? undefined : book.spine.get(target)?.href;
+      pendingTarget = target;
+      Reflect.set(
+        rendition,
+        'location',
+        target !== undefined && wanted !== undefined
+          ? { start: { href: wanted, cfi: target } }
+          : undefined,
+      );
       rendition.flow(MODE_FLOW[mode]);
       rendition.spread(spreadFor(mode, currentColumns), 0);
       rendition.clear();
-      await (rendition.display(target) as unknown as Promise<void>).catch(
-        () => rendition.display() as unknown as Promise<void>,
-      );
+      try {
+        await (rendition.display(target) as unknown as Promise<void>).catch(
+          () => rendition.display() as unknown as Promise<void>,
+        );
+      } finally {
+        if (epoch === navigation) pendingTarget = undefined;
+      }
     },
 
     setColumns(columns) {
@@ -719,12 +810,18 @@ export async function openEpubDocument(
       if (before === after) return;
       // epub.js re-lays out on resize and returns to the current location then.
       rendition.spread(after, 0);
+      const target = pendingTarget ?? currentCfi;
       if (element.clientWidth > 0 && element.clientHeight > 0) {
-        rendition.resize(element.clientWidth, element.clientHeight);
+        resizeTo(element.clientWidth, element.clientHeight, target);
       }
-      const target = currentCfi;
       if (target) {
-        void (rendition.display(target) as unknown as Promise<void>).catch(() => undefined);
+        const epoch = beginNavigation();
+        pendingTarget = target;
+        void (rendition.display(target) as unknown as Promise<void>)
+          .catch(() => undefined)
+          .finally(() => {
+            if (epoch === navigation) pendingTarget = undefined;
+          });
       }
     },
 
@@ -744,10 +841,16 @@ export async function openEpubDocument(
         element.clientWidth > 0 &&
         element.clientHeight > 0
       ) {
-        const target = currentCfi;
-        rendition.resize(element.clientWidth, element.clientHeight);
+        const target = pendingTarget ?? currentCfi;
+        resizeTo(element.clientWidth, element.clientHeight, target);
         if (target && currentMode !== 'scroll') {
-          void (rendition.display(target) as unknown as Promise<void>).catch(() => undefined);
+          const epoch = beginNavigation();
+          pendingTarget = target;
+          void (rendition.display(target) as unknown as Promise<void>)
+            .catch(() => undefined)
+            .finally(() => {
+              if (epoch === navigation) pendingTarget = undefined;
+            });
         }
       }
     },
@@ -810,7 +913,10 @@ export async function openEpubDocument(
     onPointer(listener) {
       pointerListener = listener;
     },
-    resize: (width, height) => rendition.resize(width, height),
+    resize: (width, height) =>
+      // A resize clears epub.js' views. Restore the jump in flight, or the current
+      // location, rather than the stale location epub.js last reported (#41).
+      resizeTo(width, height, pendingTarget ?? currentCfi),
     onSelection(listener) {
       selectionListener = listener;
     },

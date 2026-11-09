@@ -517,7 +517,7 @@ export function TxtViewer({
     (match: TxtSearchMatch) => {
       const range = model.rangeFor(match.anchor);
       if (!range) return;
-      const previousTop = lastScrollTop.current;
+      const previousTop = scrollRef.current?.scrollTop ?? lastScrollTop.current;
       pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
@@ -593,7 +593,7 @@ export function TxtViewer({
         return;
       }
       setMissedJump(false);
-      const previousTop = lastScrollTop.current;
+      const previousTop = scrollRef.current?.scrollTop ?? lastScrollTop.current;
       pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
@@ -622,7 +622,7 @@ export function TxtViewer({
         return;
       }
       setMissedJump(false);
-      const previousTop = lastScrollTop.current;
+      const previousTop = scrollRef.current?.scrollTop ?? lastScrollTop.current;
       pushHistory(previousTop);
       const targetRow = model.rowAtUnit(range.startUnit);
       setCurrentRow(targetRow);
@@ -717,7 +717,7 @@ export function TxtViewer({
     if (jumpRow === null || jumpNonce === null) return;
     if (lastHandledJumpNonce.current !== jumpNonce) {
       lastHandledJumpNonce.current = jumpNonce;
-      const previousTop = lastScrollTop.current;
+      const previousTop = scrollRef.current?.scrollTop ?? lastScrollTop.current;
       pushHistory(previousTop);
     }
     virtualizer.scrollToIndex(jumpRow, { align: 'center' });
@@ -726,13 +726,16 @@ export function TxtViewer({
   const handleReturnBack = () => {
     backChip.dismiss();
     const targetTop = history.goBack(scrollRef.current?.scrollTop ?? lastScrollTop.current);
-    if (targetTop !== undefined) scrollRef.current?.scrollTo({ top: targetTop });
+    // Through the virtualizer, not the element: a search jump leaves an unfinished
+    // `scrollToIndex` behind, and a raw `scrollTop` write would let its reconcile loop
+    // snap the view back to the match the reader is returning from (#41).
+    if (targetTop !== undefined) virtualizer.scrollToOffset(targetTop, { align: 'start' });
   };
 
   const handleForward = () => {
     backChip.dismiss();
     const targetTop = history.goForward(scrollRef.current?.scrollTop ?? lastScrollTop.current);
-    if (targetTop !== undefined) scrollRef.current?.scrollTo({ top: targetTop });
+    if (targetTop !== undefined) virtualizer.scrollToOffset(targetTop, { align: 'start' });
   };
 
   // Entering focus mode puts the panels away; leaving it does not reopen them.
