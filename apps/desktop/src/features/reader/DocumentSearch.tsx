@@ -14,6 +14,10 @@ import { cn } from '@/lib/utils';
 
 export const SEARCH_HIGHLIGHT_ID = '__search_active__';
 export const SEARCH_HIGHLIGHT_COLOR = '#fb923c';
+/** Every other match, painted behind the active one; the id starts with `__`, so it is internal. */
+export const SEARCH_MATCH_COLOR = '#fde68a';
+export const SEARCH_MATCH_ID_PREFIX = '__search_match_';
+export const searchMatchId = (index: number) => `${SEARCH_MATCH_ID_PREFIX}${index}__`;
 /**
  * How long typing must pause before the document is scanned. A whole-file search
  * cannot be cancelled once it starts (TXT runs it synchronously), so every
@@ -31,27 +35,7 @@ export interface DocumentSearchResultItem {
 
 export type DocumentSearchStatus = 'idle' | 'searching' | 'done' | 'cancelled';
 
-/** Non-overlapping substring ranges in `text` matching `query`. */
-export function findSubstringMatches(
-  text: string,
-  query: string,
-  caseSensitive: boolean,
-): { start: number; end: number }[] {
-  if (query.trim() === '' || text.length === 0) return [];
-  const haystack = caseSensitive ? text : text.toLowerCase();
-  const needle = caseSensitive ? query : query.toLowerCase();
-  if (needle.length === 0) return [];
-
-  const matches: { start: number; end: number }[] = [];
-  let fromIndex = 0;
-  while (fromIndex <= haystack.length - needle.length) {
-    const index = haystack.indexOf(needle, fromIndex);
-    if (index === -1) break;
-    matches.push({ start: index, end: index + needle.length });
-    fromIndex = index + Math.max(needle.length, 1);
-  }
-  return matches;
-}
+export { findSearchMatches, type SearchMatchRange, type SearchOptions } from './searchText';
 
 const collapseWhitespace = (value: string) => value.replace(/\s+/g, ' ');
 
@@ -78,9 +62,15 @@ export function buildSearchSnippet(
  * `onProgress` (each call carries every match up to that point), so results
  * appear while later pages are still being read; `signal` cancels.
  */
+export interface SearchMatchOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  matchDiacritics: boolean;
+}
+
 export type RunDocumentSearch<TMatch> = (
   query: string,
-  caseSensitive: boolean,
+  options: SearchMatchOptions,
   signal: AbortSignal,
   onProgress: (matchesSoFar: readonly TMatch[]) => void,
 ) => Promise<readonly TMatch[]> | readonly TMatch[];
@@ -112,6 +102,8 @@ export interface DocumentSearchController<TMatch extends DocumentSearchResultIte
   /** A query is entered: results, the active match, and the sidebar list apply. */
   active: boolean;
   caseSensitive: boolean;
+  wholeWord: boolean;
+  matchDiacritics: boolean;
   status: DocumentSearchStatus;
   results: readonly TMatch[];
   activeIndex: number;
@@ -122,6 +114,8 @@ export interface DocumentSearchController<TMatch extends DocumentSearchResultIte
   /** ⌘E: searches for the selected text. */
   findSelection: (text: string) => void;
   toggleCaseSensitive: () => void;
+  toggleWholeWord: () => void;
+  toggleMatchDiacritics: () => void;
   cancelSearch: () => void;
   nextMatch: () => void;
   previousMatch: () => void;
@@ -140,6 +134,8 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
   const [focusNonce, setFocusNonce] = useState(0);
   const [query, setQueryState] = useState('');
   const [caseSensitive, setCaseSensitiveState] = useState(false);
+  const [wholeWord, setWholeWordState] = useState(false);
+  const [matchDiacritics, setMatchDiacriticsState] = useState(false);
   const [status, setStatus] = useState<DocumentSearchStatus>('idle');
   const [results, setResults] = useState<readonly TMatch[]>([]);
   const [activeIndex, setActiveIndex] = useState(-1);
@@ -155,6 +151,8 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
     findSearchStart,
     query,
     caseSensitive,
+    wholeWord,
+    matchDiacritics,
     status,
   });
 
@@ -165,9 +163,22 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
       findSearchStart,
       query,
       caseSensitive,
+      wholeWord,
+      matchDiacritics,
       status,
     };
   });
+
+  /** The three matching switches, snapshotted for the search that is about to run. */
+  const matchOptions = useCallback(
+    (overrides: Partial<SearchMatchOptions> = {}): SearchMatchOptions => ({
+      caseSensitive,
+      wholeWord,
+      matchDiacritics,
+      ...overrides,
+    }),
+    [caseSensitive, wholeWord, matchDiacritics],
+  );
 
   const cancelPending = useCallback(() => {
     if (debounceRef.current === null) return;
@@ -187,7 +198,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
   }, []);
 
   const executeSearch = useCallback(
-    (nextQuery: string, nextCaseSensitive: boolean, autoNavigate: boolean) => {
+    (nextQuery: string, nextOptions: SearchMatchOptions, autoNavigate: boolean) => {
       runIdRef.current += 1;
       const runId = runIdRef.current;
       abortRef.current?.abort();
@@ -226,7 +237,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
 
       Promise.resolve()
         .then(() =>
-          latestRef.current.runSearch(nextQuery, nextCaseSensitive, controller.signal, (soFar) => {
+          latestRef.current.runSearch(nextQuery, nextOptions, controller.signal, (soFar) => {
             if (isCurrent()) show(soFar, false);
           }),
         )
@@ -264,10 +275,10 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
 
   /** Runs a search once typing has paused, so a burst of keys scans once. */
   const searchSoon = useCallback(
-    (nextQuery: string, nextCaseSensitive: boolean) => {
+    (nextQuery: string, nextOptions: SearchMatchOptions) => {
       cancelPending();
       if (debounceMs <= 0 || nextQuery.trim() === '') {
-        executeSearch(nextQuery, nextCaseSensitive, true);
+        executeSearch(nextQuery, nextOptions, true);
         return;
       }
       runIdRef.current += 1;
@@ -278,7 +289,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
       setActiveIndex(-1);
       debounceRef.current = window.setTimeout(() => {
         debounceRef.current = null;
-        executeSearch(nextQuery, nextCaseSensitive, true);
+        executeSearch(nextQuery, nextOptions, true);
       }, debounceMs);
     },
     [cancelPending, debounceMs, executeSearch],
@@ -287,16 +298,16 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
   const setQuery = useCallback(
     (nextQuery: string) => {
       setQueryState(nextQuery);
-      searchSoon(nextQuery, caseSensitive);
+      searchSoon(nextQuery, matchOptions());
     },
-    [caseSensitive, searchSoon],
+    [matchOptions, searchSoon],
   );
 
   const clearSearch = useCallback(() => {
     cancelPending();
     setQueryState('');
-    executeSearch('', caseSensitive, false);
-  }, [cancelPending, caseSensitive, executeSearch]);
+    executeSearch('', matchOptions(), false);
+  }, [cancelPending, executeSearch, matchOptions]);
 
   const findSelection = useCallback(
     (text: string) => {
@@ -305,18 +316,32 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
       // An explicit command, not typing: it searches now.
       cancelPending();
       setQueryState(trimmed);
-      executeSearch(trimmed, caseSensitive, true);
+      executeSearch(trimmed, matchOptions(), true);
       focusSearch();
     },
-    [cancelPending, caseSensitive, executeSearch, focusSearch],
+    [cancelPending, executeSearch, focusSearch, matchOptions],
   );
 
   const toggleCaseSensitive = useCallback(() => {
     const next = !caseSensitive;
     setCaseSensitiveState(next);
     cancelPending();
-    executeSearch(query, next, true);
-  }, [cancelPending, caseSensitive, executeSearch, query]);
+    executeSearch(query, matchOptions({ caseSensitive: next }), true);
+  }, [cancelPending, caseSensitive, executeSearch, matchOptions, query]);
+
+  const toggleWholeWord = useCallback(() => {
+    const next = !wholeWord;
+    setWholeWordState(next);
+    cancelPending();
+    executeSearch(query, matchOptions({ wholeWord: next }), true);
+  }, [cancelPending, executeSearch, matchOptions, query, wholeWord]);
+
+  const toggleMatchDiacritics = useCallback(() => {
+    const next = !matchDiacritics;
+    setMatchDiacriticsState(next);
+    cancelPending();
+    executeSearch(query, matchOptions({ matchDiacritics: next }), true);
+  }, [cancelPending, executeSearch, matchDiacritics, matchOptions, query]);
 
   const selectMatch = useCallback(
     (index: number) => {
@@ -383,10 +408,10 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
     prevRevision.current = searchRevision;
     if (latestRef.current.query.trim() === '' || debounceRef.current !== null) return;
     const timer = window.setTimeout(() => {
-      executeSearch(latestRef.current.query, latestRef.current.caseSensitive, false);
+      executeSearch(latestRef.current.query, matchOptions(), false);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [executeSearch, searchRevision]);
+  }, [executeSearch, matchOptions, searchRevision]);
 
   useEffect(
     () => () => {
@@ -405,6 +430,8 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
     query,
     active,
     caseSensitive,
+    wholeWord,
+    matchDiacritics,
     status,
     results,
     activeIndex,
@@ -414,6 +441,8 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
     setQuery,
     findSelection,
     toggleCaseSensitive,
+    toggleWholeWord,
+    toggleMatchDiacritics,
     cancelSearch,
     nextMatch,
     previousMatch,
@@ -549,24 +578,33 @@ export function ToolbarSearchField<TMatch extends DocumentSearchResultItem>({
               role="menu"
               aria-label="Search options"
               data-reader-popover=""
-              className="absolute top-full left-0 z-50 mt-1 min-w-40 origin-top-left animate-in rounded-md border bg-background p-1 text-xs shadow-lg duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
+              className="absolute top-full left-0 z-50 mt-1 min-w-48 origin-top-left animate-in rounded-md border bg-background p-1 text-xs shadow-lg duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
             >
-              <button
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={search.caseSensitive}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  setMenuOpen(false);
-                  search.toggleCaseSensitive();
-                }}
-                className="flex w-full items-center justify-between gap-3 rounded px-2 py-1.5 text-left outline-none hover:bg-accent focus-visible:bg-accent"
-              >
-                <span>
-                  Match case <span className="font-mono text-muted-foreground">Aa</span>
-                </span>
-                {search.caseSensitive && <span aria-hidden="true">✓</span>}
-              </button>
+              {(
+                [
+                  ['Match case', search.caseSensitive, search.toggleCaseSensitive, 'Aa'],
+                  ['Whole word', search.wholeWord, search.toggleWholeWord, 'W'],
+                  ['Match diacritics', search.matchDiacritics, search.toggleMatchDiacritics, 'á'],
+                ] as const
+              ).map(([label, checked, toggle, hint]) => (
+                <button
+                  key={label}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={checked}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    toggle();
+                  }}
+                  className="flex w-full items-center justify-between gap-3 rounded px-2 py-1.5 text-left whitespace-nowrap outline-none hover:bg-accent focus-visible:bg-accent"
+                >
+                  <span>
+                    {label} <span className="font-mono text-muted-foreground">{hint}</span>
+                  </span>
+                  {checked && <span aria-hidden="true">✓</span>}
+                </button>
+              ))}
             </div>
           )}
         </div>
@@ -713,7 +751,8 @@ export function SearchResultsList<TMatch extends DocumentSearchResultItem>({
       </div>
       {search.active && count === 0 && !searching ? (
         <p className="px-3 py-3 text-[13px] text-muted-foreground">
-          No matches. Check the spelling, or turn off Match Case in the search field’s menu.
+          No matches. Check the spelling, or adjust Match Case, Whole Word, or Match Diacritics in
+          the search field’s menu.
         </p>
       ) : (
         <ol

@@ -19,6 +19,8 @@ import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/
 import {
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  SEARCH_MATCH_COLOR,
+  searchMatchId,
   ToolbarSearchField,
   useDocumentSearch,
 } from '@/features/reader/DocumentSearch';
@@ -63,7 +65,11 @@ import {
 } from '@/features/reader/paging/pageTurn';
 import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
 import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
-import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import {
+  ReaderFooter,
+  type ScrubberModel,
+  scrubberSearchMarks,
+} from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
@@ -581,7 +587,7 @@ export function TxtViewer({
 
   const search = useDocumentSearch<TxtSearchMatch>({
     isActive,
-    runSearch: (query, caseSensitive) => model.search(query, { caseSensitive }),
+    runSearch: (query, options) => model.search(query, options),
     onNavigateToMatch: navigateToSearchMatch,
     findSearchStart,
     searchRevision: `${rowCount}:${complete}`,
@@ -740,6 +746,24 @@ export function TxtViewer({
     [model, rowCount, complete, activeSearchMatch],
   );
 
+  /** Every match painted in a light tint; the active one is added orange on top. */
+  const searchRanges = useMemo(() => {
+    const ranges: PaintedRange[] = [];
+    for (const [index, match] of search.results.entries()) {
+      const range = model.rangeFor(match.anchor);
+      if (!range) continue;
+      ranges.push({
+        annotationId: searchMatchId(index),
+        color: SEARCH_MATCH_COLOR,
+        style: 'highlight',
+        ...range,
+      });
+    }
+    return ranges;
+    // `rowCount` and `complete` stand in for the mutable model's loaded length.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [model, rowCount, complete, search.results]);
+
   const pulsingAnnotationId = jumpResolved
     ? (jumpRequest?.annotationId ?? null)
     : annotationPulsingId
@@ -831,6 +855,9 @@ export function TxtViewer({
           value: fraction,
           valueText: `Line ${currentRow + 1} of ${rowCount}, ${percent}%`,
           ticks: [],
+          searchMarks: scrubberSearchMarks(
+            search.results.map((match) => (match.lineNumber - 1) / Math.max(rowCount, 1)),
+          ),
           describe: (at) => `Line ${rowAtFraction(at) + 1} · ${Math.round(at * 100)}%`,
           onCommit: (at) => {
             const origin = currentRow + 1;
@@ -916,6 +943,7 @@ export function TxtViewer({
         ...jumpRange,
       });
     }
+    for (const range of searchRanges) painted.push(range);
     if (activeSearchRange) {
       painted.push({
         annotationId: SEARCH_HIGHLIGHT_ID,
@@ -935,6 +963,7 @@ export function TxtViewer({
     jumpRequest,
     jumpRange?.startUnit,
     jumpRange?.endUnit,
+    searchRanges,
     activeSearchRange?.startUnit,
     activeSearchRange?.endUnit,
   ]);

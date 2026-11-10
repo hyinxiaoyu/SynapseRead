@@ -21,7 +21,7 @@ describe('useDocumentSearch', () => {
     let finish: (() => void) | undefined;
     const runSearch: RunDocumentSearch<DocumentSearchResultItem> = async (
       _query,
-      _caseSensitive,
+      _options,
       _signal,
       onProgress,
     ) => {
@@ -65,7 +65,49 @@ describe('useDocumentSearch', () => {
     expect(runSearch).not.toHaveBeenCalled();
 
     await waitFor(() => expect(runSearch).toHaveBeenCalledTimes(1));
-    expect(runSearch).toHaveBeenCalledWith('fox', false, expect.anything(), expect.any(Function));
+    expect(runSearch).toHaveBeenCalledWith(
+      'fox',
+      { caseSensitive: false, wholeWord: false, matchDiacritics: false },
+      expect.anything(),
+      expect.any(Function),
+    );
+  });
+
+  it('reruns the query with Whole Word and Match Diacritics toggles', async () => {
+    const runSearch = vi.fn(() => [match('1')]);
+    const { result } = renderHook(() =>
+      useDocumentSearch({
+        isActive: true,
+        runSearch,
+        onNavigateToMatch: vi.fn(),
+        debounceMs: 0,
+      }),
+    );
+
+    act(() => result.current.setQuery('fox'));
+    await waitFor(() => expect(result.current.status).toBe('done'));
+
+    act(() => result.current.toggleWholeWord());
+    expect(result.current.wholeWord).toBe(true);
+    await waitFor(() =>
+      expect(runSearch).toHaveBeenLastCalledWith(
+        'fox',
+        { caseSensitive: false, wholeWord: true, matchDiacritics: false },
+        expect.anything(),
+        expect.any(Function),
+      ),
+    );
+
+    act(() => result.current.toggleMatchDiacritics());
+    expect(result.current.matchDiacritics).toBe(true);
+    await waitFor(() =>
+      expect(runSearch).toHaveBeenLastCalledWith(
+        'fox',
+        { caseSensitive: false, wholeWord: true, matchDiacritics: true },
+        expect.anything(),
+        expect.any(Function),
+      ),
+    );
   });
 
   it('starts at the first match at or after the reading position', async () => {
@@ -93,7 +135,7 @@ describe('useDocumentSearch', () => {
     let finish: (() => void) | undefined;
     const runSearch: RunDocumentSearch<DocumentSearchResultItem> = async (
       _query,
-      _caseSensitive,
+      _options,
       _signal,
       onProgress,
     ) => {
@@ -168,7 +210,7 @@ describe('useDocumentSearch', () => {
     let signal: AbortSignal | undefined;
     const runSearch: RunDocumentSearch<DocumentSearchResultItem> = (
       _query,
-      _caseSensitive,
+      _options,
       abort,
       onProgress,
     ) => {

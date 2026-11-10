@@ -155,6 +155,9 @@ document.documentElement.setAttribute('data-book-script-ran', 'true');</script>
 <p><a href="chapter2.xhtml">Go to Chapter Two</a></p>
 <p>The quick brown fox jumps over the lazy dog.</p>
 <p>Café, 汉字, and 😀 sit in this second paragraph.</p>
+<p>A “curly quote” — an em dash, and we co­operate across a break.
+An end-of-line hyphen-
+ated word wraps in this paragraph.</p>
 <p><img src="box.png" alt="a small box"/></p>
 <p><img src="missing.png" alt="" onerror="document.documentElement.setAttribute('data-book-handler-ran', 'true')"/></p>""" + filler + """<h2 id="section-1-1">Section 1.1</h2>"""),
         "OEBPS/chapter2.xhtml": chapter("Two", """<h1>Chapter Two</h1>

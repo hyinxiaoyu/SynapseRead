@@ -12,6 +12,9 @@ import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/
 import {
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  SEARCH_MATCH_COLOR,
+  searchMatchId,
+  type SearchOptions,
   ToolbarSearchField,
   useDocumentSearch,
 } from '@/features/reader/DocumentSearch';
@@ -53,7 +56,11 @@ import {
 } from '@/features/reader/paging/pageTurn';
 import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
 import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
-import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import {
+  ReaderFooter,
+  type ScrubberModel,
+  scrubberSearchMarks,
+} from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
@@ -538,7 +545,7 @@ export function EpubViewer({
   const runEpubSearch = useCallback(
     async (
       query: string,
-      caseSensitive: boolean,
+      options: SearchOptions,
       signal: AbortSignal,
       onProgress: (matchesSoFar: readonly EpubSearchMatch[]) => void,
     ): Promise<readonly EpubSearchMatch[]> => {
@@ -547,7 +554,7 @@ export function EpubViewer({
       const matches: EpubSearchMatch[] = [];
       for (let chapterIndex = 0; chapterIndex < count; chapterIndex += 1) {
         if (signal.aborted) return [];
-        const chapterMatches = await handle.searchChapter(chapterIndex, query, { caseSensitive });
+        const chapterMatches = await handle.searchChapter(chapterIndex, query, options);
         if (signal.aborted) return [];
         if (chapterMatches.length > 0) {
           matches.push(...chapterMatches);
@@ -730,6 +737,15 @@ export function EpubViewer({
         style: 'highlight',
       });
     }
+    for (const [index, match] of search.results.entries()) {
+      if (index === search.activeIndex) continue;
+      if (currentHref && !sameChapter(match.chapterHref, currentHref)) continue;
+      wanted.set(searchMatchId(index), {
+        cfiRange: match.cfiRange,
+        color: SEARCH_MATCH_COLOR,
+        style: 'highlight',
+      });
+    }
     if (activeSearchMatch) {
       wanted.set(SEARCH_HIGHLIGHT_ID, {
         cfiRange: activeSearchMatch.cfiRange,
@@ -756,7 +772,15 @@ export function EpubViewer({
         painted.current.set(annotationId, mark);
       }
     }
-  }, [handle, effectiveHighlights, jumpRequest, activeSearchMatch]);
+  }, [
+    handle,
+    effectiveHighlights,
+    jumpRequest,
+    search.results,
+    search.activeIndex,
+    activeSearchMatch,
+    currentHref,
+  ]);
 
   // ---- Jumping -------------------------------------------------------------
 
@@ -975,6 +999,9 @@ export function EpubViewer({
           value: Math.min(Math.max(bookProgress.fraction, 0), 1),
           valueText: `Chapter ${bookProgress.chapter} of ${chapterCount}, ${bookProgress.percent}%`,
           ticks,
+          searchMarks: scrubberSearchMarks(
+            search.results.map((match) => (match.chapterIndex + 0.5) / Math.max(chapterCount, 1)),
+          ),
           describe: (fraction) => {
             const index = Math.min(Math.floor(fraction * chapterCount), chapterCount - 1);
             const title = chapterTitles[index] ?? `Chapter ${index + 1}`;

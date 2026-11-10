@@ -209,6 +209,32 @@ describe('TxtTextModel', () => {
     expect(sensitive[0]?.matchText).toBe('fox');
     expect(sensitive[0]?.lineNumber).toBe(2);
   });
+
+  it('finds folded matches across a break and an accent without moving byte anchors', () => {
+    const source = new TextEncoder().encode('The lazy dog.\nPack my box. A café.');
+    const model = modelOf(source, 16);
+
+    const [wrapped] = model.search('dog. Pack');
+    expect(wrapped).toBeDefined();
+    expect(wrapped?.matchText).toBe('dog. Pack');
+    const wrappedBytes = source.slice(
+      wrapped!.anchor.startByteOffset,
+      wrapped!.anchor.endByteOffset,
+    );
+    expect(new TextDecoder().decode(wrappedBytes)).toBe('dog.\nPack');
+
+    const [accented] = model.search('cafe');
+    expect(accented).toBeDefined();
+    expect(accented?.matchText).toBe('café');
+    const accentedBytes = source.slice(
+      accented!.anchor.startByteOffset,
+      accented!.anchor.endByteOffset,
+    );
+    expect(new TextDecoder().decode(accentedBytes)).toBe('café');
+
+    expect(model.search('cafe', { matchDiacritics: true })).toEqual([]);
+    expect(model.search('dog', { wholeWord: true })).toHaveLength(1);
+  });
 });
 
 function collect(source: string, chunkBytes: number): TextChunk[] {

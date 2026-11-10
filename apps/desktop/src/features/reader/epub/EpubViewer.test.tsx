@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   buildSearchSnippet,
-  findSubstringMatches,
+  findSearchMatches,
+  type SearchOptions,
   SEARCH_HIGHLIGHT_ID,
+  searchMatchId,
 } from '@/features/reader/DocumentSearch';
 import type { PageGestureSample, WheelSample } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
@@ -85,11 +87,11 @@ vi.mock('./epubEngine', () => ({
     async searchChapter(
       chapterIndex: number,
       query: string,
-      options?: { caseSensitive?: boolean },
+      options?: SearchOptions,
     ): Promise<readonly EpubSearchMatch[]> {
       const chapter = engine.chapters[chapterIndex];
       if (!chapter) return [];
-      const matches = findSubstringMatches(chapter.text, query, options?.caseSensitive ?? false);
+      const matches = findSearchMatches(chapter.text, query, options);
       return matches.map((match, index) => ({
         id: `epub-${chapterIndex}-${index}`,
         cfiRange: chapter.cfi,
@@ -887,6 +889,35 @@ describe('EpubViewer', () => {
     expect(screen.getByTestId('reader-toc')).toHaveTextContent(
       'No table of contents in this book.',
     );
+  });
+
+  it('tints every match in the rendered chapter and marks it on the scrubber', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 1,
+        totalPages: 2,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 25,
+      }),
+    );
+
+    fireEvent.keyDown(window, { key: 'f', metaKey: true });
+    const searchInput = await screen.findByTestId('search-input');
+    // "The" opens Chapter One and "the" sits later in the same sentence: two
+    // matches on the rendered chapter, one of which is not the active match.
+    fireEvent.change(searchInput, { target: { value: 'the' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 2'));
+
+    expect(engine.highlighted.get(searchMatchId(1))).toBe(CFI);
+    expect(engine.highlightStyles.get(searchMatchId(1))).toBe('highlight');
+    expect(screen.getAllByTestId('progress-scrubber-search-mark')).toHaveLength(1);
   });
 
   it('opens search via iframe Cmd/Ctrl+F, searches across chapters, highlights CFI matches, and supports return', async () => {

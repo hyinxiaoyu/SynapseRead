@@ -131,3 +131,5 @@ Filler line 119 keeps the document long enough to scroll through.
 Filler line 120 keeps the document long enough to scroll through.
 
 The final target sentence sits at the very end of the file.
+
+A “curly quote” — an em dash, and we co­operate across the fold.
