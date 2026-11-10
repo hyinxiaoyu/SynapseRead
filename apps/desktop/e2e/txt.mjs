@@ -7,6 +7,8 @@ const MEASURE_SAMPLE =
 const SEGMENT = '[data-testid="txt-scroll"] [data-unit]';
 const scrollTop = `document.querySelector('[data-testid="txt-scroll"]').scrollTop`;
 const visibleScroller = `[...document.querySelectorAll('[data-testid="txt-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+const statusIs = (value) =>
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '${value}'`;
 
 export async function txtFlow(page) {
   await page.clickButton('Show MindMap');
@@ -124,7 +126,73 @@ export async function txtFlow(page) {
     `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
     'returning from TXT search jump to previous scroll offset',
   );
+
+  // A reader types the phrase as it reads: across a line break, without accents,
+  // and with straight quotes where the file has curly ones.
+  await page.setInputValue('[data-testid="search-input"]', 'dog. Pack');
+  await page.waitFor(statusIs('1 of 1'), 'TXT search across a line break');
+  await page.waitFor(
+    `${visibleTxtViewer}?.querySelector('[data-annotation-id="__search_active__"]')`,
+    'TXT active highlight for the wrapped phrase',
+  );
+
+  await page.setInputValue('[data-testid="search-input"]', 'cafe');
+  await page.waitFor(statusIs('1 of 1'), 'TXT accent-insensitive search');
+  await page.waitFor(
+    `[...${visibleTxtViewer}.querySelectorAll('[data-annotation-id="__search_active__"]')].some((e) => e.textContent.includes('café'))`,
+    'TXT accent-folded highlight covering the source accent',
+  );
+
+  // The field's menu exposes all three switches; Match Diacritics must make the
+  // accent matter again.
+  await page.clickButton('Search options');
+  await page.waitFor(
+    `[...document.querySelectorAll('[role="menuitemcheckbox"]')].filter((e) => e.checkVisibility({ visibilityProperty: true })).length === 3`,
+    'all three search options in the field menu',
+  );
+  await page.evaluate(
+    `[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((e) => e.textContent.includes('Match diacritics')).click()`,
+  );
+  await page.waitFor(statusIs('No matches'), 'Match Diacritics excluding the unaccented query');
+  await page.clickButton('Search options');
+  await page.evaluate(
+    `[...document.querySelectorAll('[role="menuitemcheckbox"]')].find((e) => e.textContent.includes('Match diacritics')).click()`,
+  );
+  await page.waitFor(statusIs('1 of 1'), 'Match Diacritics turned back off');
+
+  await page.setInputValue('[data-testid="search-input"]', '"curly quote" - an em dash');
+  await page.waitFor(statusIs('1 of 1'), 'TXT quote and dash folding');
+  await page.waitFor(
+    `[...${visibleTxtViewer}.querySelectorAll('[data-annotation-id="__search_active__"]')].some((e) => e.textContent.includes('curly quote'))`,
+    'TXT curly-quote highlight',
+  );
+
+  await page.setInputValue('[data-testid="search-input"]', 'cooperate');
+  await page.waitFor(statusIs('1 of 1'), 'TXT soft-hyphen folding');
+  await page.waitFor(
+    `[...${visibleTxtViewer}.querySelectorAll('[data-annotation-id="__search_active__"]')].some((e) => e.textContent.replace(/\u00ad/g, '').includes('cooperate'))`,
+    'TXT soft-hyphen highlight',
+  );
+
+  // Both matches stay tinted; the active one is still the orange one, and the
+  // scrubber marks where they are.
+  await page.setInputValue('[data-testid="search-input"]', 'quick');
+  await page.waitFor(statusIs('1 of 2'), 'TXT multiple matches');
+  await page.waitFor(
+    `${visibleTxtViewer}?.querySelector('[data-annotation-id^="__search_match_"]')`,
+    'TXT inactive matches tinted',
+  );
+  await page.waitFor(
+    `document.querySelectorAll('[data-testid="progress-scrubber-search-mark"]').length === 2`,
+    'TXT search matches marked on the scrubber',
+  );
   await page.leaveSearch();
+  // Back to the position the bookmark flow below expects.
+  await page.evaluate(`${visibleScroller}.scrollTop = 1500`);
+  await page.waitFor(
+    `Math.abs(${visibleScroller}?.scrollTop - 1500) < 40`,
+    'restoring the TXT scroll position after the folding checks',
+  );
   // Clearing the query leaves the sidebar as the reader left it.
   await page.waitFor(sidebarShown, 'the sidebar to stay open after the search is cleared');
 

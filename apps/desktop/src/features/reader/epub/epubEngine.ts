@@ -10,7 +10,8 @@ import {
 import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
-  findSubstringMatches,
+  type SearchOptions,
+  findSearchMatches,
 } from '@/features/reader/DocumentSearch';
 import {
   markViewportRect,
@@ -76,7 +77,7 @@ export interface EpubHandle {
   searchChapter?(
     chapterIndex: number,
     query: string,
-    options?: { caseSensitive?: boolean },
+    options?: SearchOptions,
   ): Promise<readonly EpubSearchMatch[]>;
   /** Shows a CFI or chapter, or the first chapter with no target. Rejects if it cannot. */
   display(target?: string): Promise<void>;
@@ -710,8 +711,7 @@ export async function openEpubDocument(
         chapterIndex,
         (section, chapterDoc) => {
           const { fullText, nodes } = collectText(chapterDoc);
-          const caseSensitive = options?.caseSensitive ?? false;
-          const rawMatches = findSubstringMatches(fullText, query, caseSensitive);
+          const rawMatches = findSearchMatches(fullText, query, options);
           const locationLabel = findTocLabel(toc, section.href) ?? `Ch. ${chapterIndex + 1}`;
           const matches: EpubSearchMatch[] = [];
 
@@ -899,6 +899,8 @@ export async function openEpubDocument(
     highlight(annotationId, cfiRange, color, style = 'highlight') {
       // marks-pane forwards clicks in the frame to the mark under them.
       const onClick = () => {
+        // Search marks are painted by the reader, not annotations it can open.
+        if (annotationId.startsWith('__')) return;
         // A drag that ends over a mark clicks it too; that press made a selection instead.
         const selecting = contentsList().some((contents) => {
           const selection = contents.window.getSelection();

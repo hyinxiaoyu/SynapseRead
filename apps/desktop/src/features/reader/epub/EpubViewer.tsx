@@ -12,6 +12,9 @@ import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/
 import {
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  SEARCH_MATCH_COLOR,
+  searchMatchId,
+  type SearchOptions,
   ToolbarSearchField,
   useDocumentSearch,
 } from '@/features/reader/DocumentSearch';
@@ -53,7 +56,11 @@ import {
 } from '@/features/reader/paging/pageTurn';
 import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
 import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
-import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import {
+  ReaderFooter,
+  type ScrubberModel,
+  scrubberSearchMarks,
+} from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
@@ -475,19 +482,9 @@ export function EpubViewer({
         handle.setPulse(SEARCH_HIGHLIGHT_ID, false);
       };
 
-      const existingSearch = painted.current.get(SEARCH_HIGHLIGHT_ID);
-      if (existingSearch && existingSearch.cfiRange !== match.cfiRange) {
-        handle.removeHighlight(existingSearch.cfiRange);
-        painted.current.delete(SEARCH_HIGHLIGHT_ID);
-      }
-      if (!painted.current.has(SEARCH_HIGHLIGHT_ID)) {
-        handle.highlight(SEARCH_HIGHLIGHT_ID, match.cfiRange, SEARCH_HIGHLIGHT_COLOR);
-        painted.current.set(SEARCH_HIGHLIGHT_ID, {
-          cfiRange: match.cfiRange,
-          color: SEARCH_HIGHLIGHT_COLOR,
-          style: 'highlight',
-        });
-      }
+      // The highlight sync effect owns every mark, including the active search
+      // one; painting here as well would race a search-tint cleanup for the same
+      // CFI and let epub.js remove both marks at once.
 
       const startPulse = () => {
         const waitedSince = performance.now();
@@ -538,7 +535,7 @@ export function EpubViewer({
   const runEpubSearch = useCallback(
     async (
       query: string,
-      caseSensitive: boolean,
+      options: SearchOptions,
       signal: AbortSignal,
       onProgress: (matchesSoFar: readonly EpubSearchMatch[]) => void,
     ): Promise<readonly EpubSearchMatch[]> => {
@@ -547,7 +544,7 @@ export function EpubViewer({
       const matches: EpubSearchMatch[] = [];
       for (let chapterIndex = 0; chapterIndex < count; chapterIndex += 1) {
         if (signal.aborted) return [];
-        const chapterMatches = await handle.searchChapter(chapterIndex, query, { caseSensitive });
+        const chapterMatches = await handle.searchChapter(chapterIndex, query, options);
         if (signal.aborted) return [];
         if (chapterMatches.length > 0) {
           matches.push(...chapterMatches);
@@ -717,21 +714,49 @@ export function EpubViewer({
   useEffect(() => {
     if (!handle) return;
     const wanted = new Map<string, { cfiRange: string; color: string; style: AnnotationStyle }>();
+    // epub.js keys marks by `(cfiRange, style)`, not by our annotation id, and
+    // overwrites an existing mark at the same range without detaching it. Keep
+    // one owner per mark so a search tint can never orphan a user highlight.
+    const ownerByMark = new Map<string, string>();
+    const markKey = (mark: { cfiRange: string; style: AnnotationStyle }) =>
+      `${mark.style}\u0000${mark.cfiRange}`;
+    const setWanted = (
+      annotationId: string,
+      mark: { cfiRange: string; color: string; style: AnnotationStyle },
+    ) => {
+      const key = markKey(mark);
+      const previousOwner = ownerByMark.get(key);
+      if (previousOwner !== undefined && previousOwner !== annotationId) {
+        wanted.delete(previousOwner);
+      }
+      wanted.set(annotationId, mark);
+      ownerByMark.set(key, annotationId);
+    };
+
     for (const { annotationId, anchor, color, style = 'highlight' } of effectiveHighlights) {
       const epubAnchor = asEpubAnchor(anchor);
-      if (epubAnchor) wanted.set(annotationId, { cfiRange: epubAnchor.cfiRange, color, style });
+      if (epubAnchor) setWanted(annotationId, { cfiRange: epubAnchor.cfiRange, color, style });
     }
     // A jump can target an annotation from another notebook, with no highlight here.
     const jumpAnchor = asEpubAnchor(jumpRequest?.anchor);
     if (jumpRequest && jumpAnchor && !wanted.has(jumpRequest.annotationId)) {
-      wanted.set(jumpRequest.annotationId, {
+      setWanted(jumpRequest.annotationId, {
         cfiRange: jumpAnchor.cfiRange,
         color: FALLBACK_HIGHLIGHT,
         style: 'highlight',
       });
     }
+    for (const [index, match] of search.results.entries()) {
+      if (index === search.activeIndex) continue;
+      if (currentHref && !sameChapter(match.chapterHref, currentHref)) continue;
+      setWanted(searchMatchId(index), {
+        cfiRange: match.cfiRange,
+        color: SEARCH_MATCH_COLOR,
+        style: 'highlight',
+      });
+    }
     if (activeSearchMatch) {
-      wanted.set(SEARCH_HIGHLIGHT_ID, {
+      setWanted(SEARCH_HIGHLIGHT_ID, {
         cfiRange: activeSearchMatch.cfiRange,
         color: SEARCH_HIGHLIGHT_COLOR,
         style: 'highlight',
@@ -756,7 +781,15 @@ export function EpubViewer({
         painted.current.set(annotationId, mark);
       }
     }
-  }, [handle, effectiveHighlights, jumpRequest, activeSearchMatch]);
+  }, [
+    handle,
+    effectiveHighlights,
+    jumpRequest,
+    search.results,
+    search.activeIndex,
+    activeSearchMatch,
+    currentHref,
+  ]);
 
   // ---- Jumping -------------------------------------------------------------
 
@@ -975,6 +1008,9 @@ export function EpubViewer({
           value: Math.min(Math.max(bookProgress.fraction, 0), 1),
           valueText: `Chapter ${bookProgress.chapter} of ${chapterCount}, ${bookProgress.percent}%`,
           ticks,
+          searchMarks: scrubberSearchMarks(
+            search.results.map((match) => (match.chapterIndex + 0.5) / Math.max(chapterCount, 1)),
+          ),
           describe: (fraction) => {
             const index = Math.min(Math.floor(fraction * chapterCount), chapterCount - 1);
             const title = chapterTitles[index] ?? `Chapter ${index + 1}`;

@@ -2,6 +2,8 @@ import { assert } from './harness.mjs';
 
 const TEXT = '.textLayer span';
 const visibleScroller = `[...document.querySelectorAll('[data-testid="pdf-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+const statusIs = (value) =>
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '${value}'`;
 const excerptEnabled = `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`;
 
 /** Dark or coloured pixels in a page's canvas: a blank canvas would have none. */
@@ -292,6 +294,26 @@ export async function pdfFlow(page) {
   await page.waitFor(
     `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '1'`,
     'returning from PDF search jump to page 1',
+  );
+
+  // A phrase split across two PDF lines is found as the reader types it.
+  await page.setInputValue('[data-testid="search-input"]', 'dog. Pack');
+  await page.waitFor(statusIs('1 of 1'), 'PDF search across a line break');
+  await page.waitFor(
+    `document.querySelector('[data-page-index="0"] [data-annotation-id="__search_active__"]')`,
+    'PDF active highlight for the wrapped phrase',
+  );
+
+  // Two pages hold matches: every match is tinted and the scrubber marks both.
+  await page.setInputValue('[data-testid="search-input"]', 'line');
+  await page.waitFor(statusIs('1 of 30'), 'PDF multiple matches on two pages');
+  await page.waitFor(
+    `document.querySelector('[data-annotation-id^="__search_match_"]')`,
+    'PDF inactive matches tinted',
+  );
+  await page.waitFor(
+    `document.querySelectorAll('[data-testid="progress-scrubber-search-mark"]').length === 2`,
+    'PDF search matches marked on the scrubber',
   );
   await page.leaveSearch();
 

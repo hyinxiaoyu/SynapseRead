@@ -1,7 +1,8 @@
 import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
-  findSubstringMatches,
+  type SearchOptions,
+  findSearchMatches,
 } from '@/features/reader/DocumentSearch';
 import type { SourceSpan, TextChunk, TxtAnchor } from '@/types/domain';
 
@@ -263,11 +264,10 @@ export class TxtTextModel {
    * Searches all loaded text (including unrendered rows) and maps every match
    * to source-file byte offsets (`TxtAnchor`).
    */
-  search(query: string, options?: { caseSensitive?: boolean }): TxtSearchMatch[] {
+  search(query: string, options: SearchOptions = {}): TxtSearchMatch[] {
     if (query.trim() === '' || this.units === 0) return [];
-    const caseSensitive = options?.caseSensitive ?? false;
     const fullText = this.slice(0, this.units);
-    const rawMatches = findSubstringMatches(fullText, query, caseSensitive);
+    const rawMatches = findSearchMatches(fullText, query, options);
     return rawMatches.map(({ start, end }, index) => {
       const anchor = this.anchor(start, end);
       const rowIndex = this.rowAtUnit(start);

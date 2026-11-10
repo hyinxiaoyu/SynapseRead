@@ -590,6 +590,33 @@ describe('TxtViewer', () => {
     expect(scroller()).toHaveFocus();
   });
 
+  it('finds a phrase across a line break and tints every match on the rendered rows', async () => {
+    const bytes = documentFixture('sample.txt');
+    const { store, documentId } = await setup(bytes);
+    render(<Harness store={store} documentId={documentId} />);
+    await segmentWith('SynapseRead sample text');
+
+    fireEvent.keyDown(window, { key: 'f', metaKey: true });
+    const searchInput = await screen.findByTestId('search-input');
+
+    // The fixture has "lazy dog." on one line and "Pack my box" on the next.
+    fireEvent.change(searchInput, { target: { value: 'dog. Pack' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+
+    fireEvent.change(searchInput, { target: { value: 'quick' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 2'));
+    // "quick" sits on two rendered lines: the inactive one is tinted, and the
+    // active one keeps its orange highlight; both tick the scrubber.
+    expect(document.querySelectorAll('[data-annotation-id^="__search_match_"]')).toHaveLength(1);
+    const activeMark = document.querySelector('[data-annotation-id="__search_active__"]');
+    expect(activeMark).not.toBeNull();
+    // The active match keeps its own orange layer; no inactive tint is stacked on it.
+    expect(
+      activeMark?.closest('[data-index]')?.querySelector('[data-annotation-id^="__search_match_"]'),
+    ).toBeNull();
+    expect(screen.queryAllByTestId('progress-scrubber-search-mark')).toHaveLength(2);
+  });
+
   it('uses the selection for Find with Cmd/Ctrl+E', async () => {
     const bytes = documentFixture('sample.txt');
     const { store, documentId } = await setup(bytes);

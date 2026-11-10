@@ -34,6 +34,8 @@ export interface ScrubberModel {
   /** Spoken for the current position, e.g. "Chapter 11 of 23, 45%". */
   valueText: string;
   ticks: readonly ScrubberTick[];
+  /** Where search matches sit, as fractions `0..1`; drawn as amber ticks. */
+  searchMarks?: readonly number[];
   /** The tooltip for a position under the pointer: chapter and location. */
   describe: (fraction: number) => string;
   /** Goes to a position the reader released the scrubber at. */
@@ -43,6 +45,19 @@ export interface ScrubberModel {
 }
 
 const clamp01 = (value: number) => Math.min(Math.max(value, 0), 1);
+
+/** A scrubber cannot draw a mark per match in a huge file; sample the spread instead. */
+export const MAX_SCRUBBER_SEARCH_MARKS = 240;
+
+export function scrubberSearchMarks(positions: Iterable<number>): number[] {
+  const unique = [...new Set([...positions].map(clamp01).filter(Number.isFinite))];
+  if (unique.length <= MAX_SCRUBBER_SEARCH_MARKS) return unique;
+  return Array.from(
+    { length: MAX_SCRUBBER_SEARCH_MARKS },
+    (_value, index) =>
+      unique[Math.round((index * (unique.length - 1)) / (MAX_SCRUBBER_SEARCH_MARKS - 1))] as number,
+  );
+}
 
 function ProgressScrubber({ model, disabled }: { model: ScrubberModel; disabled: boolean }) {
   const trackRef = useRef<HTMLDivElement>(null);
@@ -141,6 +156,15 @@ function ProgressScrubber({ model, disabled }: { model: ScrubberModel; disabled:
             className="absolute inset-y-0 left-0 rounded-full bg-current/70"
             style={{ width: `${shown * 100}%` }}
           />
+          {model.searchMarks?.map((position, index) => (
+            <span
+              key={`search-${index}`}
+              aria-hidden="true"
+              data-testid="progress-scrubber-search-mark"
+              className="absolute top-1/2 h-3 w-0.5 -translate-y-1/2 rounded-full bg-amber-500/90"
+              style={{ left: `${clamp01(position) * 100}%` }}
+            />
+          ))}
           {model.ticks.map((tick) => (
             <span
               key={`${tick.position}:${tick.label}`}

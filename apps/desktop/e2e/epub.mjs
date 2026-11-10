@@ -15,6 +15,8 @@ const MAX_PER_LINE = 78;
 
 const openEpub = (page) => page.openUntil(visibleHost, 'the EPUB');
 
+const statusIs = (value) =>
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '${value}'`;
 const chapterIs = (title) => `${frameDocument}?.querySelector('h1')?.textContent === '${title}'`;
 
 /** Where text in the book's frame sits on screen, for a real mouse drag. */
@@ -425,6 +427,46 @@ export async function epubFlow(page) {
   );
   await page.clickButton('Return to previous location');
   await page.waitFor(chapterIs('Chapter Two'), 'returning from EPUB search jump to Chapter Two');
+
+  // The same folded matcher reads accents, curly quotes, a soft hyphen, and a
+  // word split at a line end.
+  await page.setInputValue('[data-testid="search-input"]', 'cafe');
+  await page.waitFor(statusIs('1 of 1'), 'EPUB accent-insensitive search');
+  await page.waitFor(
+    `${visibleHost}?.querySelector('g[data-annotation-id="__search_active__"] rect')`,
+    'EPUB accent-folded highlight',
+  );
+
+  await page.setInputValue('[data-testid="search-input"]', 'hyphenated');
+  await page.waitFor(statusIs('1 of 1'), 'EPUB search across a line-end hyphen');
+  await page.waitFor(
+    `${visibleHost}?.querySelector('g[data-annotation-id="__search_active__"] rect')`,
+    'EPUB line-end hyphen highlight',
+  );
+
+  await page.setInputValue('[data-testid="search-input"]', '"curly quote" - an em dash');
+  await page.waitFor(statusIs('1 of 1'), 'EPUB quote and dash folding');
+  await page.waitFor(
+    `${visibleHost}?.querySelector('g[data-annotation-id="__search_active__"] rect')`,
+    'EPUB curly-quote highlight',
+  );
+
+  // Two matches in the rendered chapter: the inactive one is tinted and lands on
+  // the scrubber together with the active one.
+  await page.setInputValue('[data-testid="search-input"]', 'and');
+  await page.waitFor(statusIs('1 of 2'), 'EPUB multiple matches in one chapter');
+  await page.waitFor(
+    `${visibleHost}?.querySelector('g[data-annotation-id^="__search_match_"] rect')`,
+    'EPUB inactive matches tinted',
+  );
+  await page.waitFor(
+    `document.querySelectorAll('[data-testid="progress-scrubber-search-mark"]').length === 1`,
+    'EPUB search matches marked on the scrubber',
+  );
+  // The bookmark flow below starts from Chapter Two, so put the reader back there.
+  await page.showSidebarTab('Table of Contents');
+  await page.clickTreeItem('Two');
+  await page.waitFor(chapterIs('Chapter Two'), 'returning to Chapter Two after the folding checks');
   await page.leaveSearch();
   // Clearing the query puts the view back and leaves the sidebar open.
   await page.waitFor(

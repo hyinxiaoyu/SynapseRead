@@ -44,9 +44,12 @@ import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/
 import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
-  findSubstringMatches,
+  findSearchMatches,
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
+  SEARCH_MATCH_COLOR,
+  searchMatchId,
+  type SearchOptions,
   ToolbarSearchField,
   useDocumentSearch,
 } from '@/features/reader/DocumentSearch';
@@ -71,7 +74,11 @@ import {
 } from '@/features/reader/paging/pageTurn';
 import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
 import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
-import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
+import {
+  ReaderFooter,
+  type ScrubberModel,
+  scrubberSearchMarks,
+} from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
@@ -274,7 +281,7 @@ export interface PdfSearchMatch extends DocumentSearchResultItem {
 function searchPdfPage(
   pageText: PdfPageText,
   query: string,
-  caseSensitive: boolean,
+  options: SearchOptions,
 ): PdfSearchMatch[] {
   let fullText = '';
   const spans: { start: number; end: number; rect: NormalizedRect }[] = [];
@@ -297,7 +304,7 @@ function searchPdfPage(
     prevHadEOL = Boolean(run.hasEOL);
   }
 
-  const rawMatches = findSubstringMatches(fullText, query, caseSensitive);
+  const rawMatches = findSearchMatches(fullText, query, options);
   return rawMatches.map(({ start, end }, matchIndex) => {
     const rawRects: NormalizedRect[] = [];
     for (const span of spans) {
@@ -1574,7 +1581,7 @@ function PdfPages({
   const runPdfSearch = useCallback(
     async (
       query: string,
-      caseSensitive: boolean,
+      options: SearchOptions,
       signal: AbortSignal,
       onProgress: (matchesSoFar: readonly PdfSearchMatch[]) => void,
     ): Promise<readonly PdfSearchMatch[]> => {
@@ -1584,7 +1591,7 @@ function PdfPages({
         if (signal.aborted) return [];
         const pageText = await engine.getPageText(pageIndex);
         if (signal.aborted) return [];
-        const pageMatches = searchPdfPage(pageText, query, caseSensitive);
+        const pageMatches = searchPdfPage(pageText, query, options);
         if (pageMatches.length > 0) {
           matches.push(...pageMatches);
           onProgress([...matches]);
@@ -1745,6 +1752,9 @@ function PdfPages({
               position: start / lastPage,
               label: chapterOfPage(outlineNodes, start) ?? `Page ${start + 1}`,
             })),
+          searchMarks: scrubberSearchMarks(
+            search.results.map((match) => match.pageIndex / Math.max(lastPage, 1)),
+          ),
           describe: (fraction) => describePage(pageAt(fraction)),
           onCommit: (fraction) => jumpToPage(pageAt(fraction)),
           onStepPage: turnPage,
@@ -1879,6 +1889,10 @@ function PdfPages({
         addPageHighlight(anchor.pageIndex, annotationId, anchor.rects, color, style);
       }
     }
+    for (const [index, match] of search.results.entries()) {
+      if (index === search.activeIndex) continue;
+      addPageHighlight(match.pageIndex, searchMatchId(index), [...match.rects], SEARCH_MATCH_COLOR);
+    }
     if (activeSearchMatch) {
       addPageHighlight(
         activeSearchMatch.pageIndex,
@@ -1888,7 +1902,7 @@ function PdfPages({
       );
     }
     return pages;
-  }, [effectiveHighlights, activeSearchMatch]);
+  }, [effectiveHighlights, search.results, search.activeIndex, activeSearchMatch]);
 
   const virtualItems = virtualizer.getVirtualItems();
   const maxRowWidth = virtualItems.reduce(
