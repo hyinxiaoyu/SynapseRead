@@ -1221,26 +1221,25 @@ function PdfPages({
   // ---- Reporting the reading position --------------------------------------
 
   const navigateToPage = useCallback(
-    (targetPageIndex: number, targetFraction = 0) => {
-      if (targetPageIndex < 0 || targetPageIndex >= engine.pageCount) return;
+    (targetPageIndex: number, targetFraction = 0): boolean => {
+      if (targetPageIndex < 0 || targetPageIndex >= engine.pageCount) return false;
       const previous = currentReturnLocation();
-      if (
+      const moved =
         previous.pageIndex !== targetPageIndex ||
-        Math.abs(previous.fraction - targetFraction) > 0.05
-      ) {
+        Math.abs(previous.fraction - targetFraction) > 0.05;
+      if (moved) {
         pushHistory(previous);
       }
       scrollToPageOffset(targetPageIndex, offsetWithin(targetPageIndex, targetFraction));
+      return moved;
     },
     [pushHistory, engine.pageCount, currentReturnLocation, offsetWithin, scrollToPageOffset],
   );
 
   const navigateToInternalLink = useCallback(
     (link: PdfInternalLink) => {
-      const targetFraction = link.targetFraction ?? 0;
       const origin = currentPageIndex + 1;
-      navigateToPage(link.targetPageIndex, targetFraction);
-      if (link.targetPageIndex !== currentPageIndex || targetFraction > 0.001) {
+      if (navigateToPage(link.targetPageIndex, link.targetFraction ?? 0)) {
         offerBackChip(`Back to page ${origin}`);
       }
     },
@@ -1655,8 +1654,7 @@ function PdfPages({
   const jumpToPage = (page: number) => {
     const target = Math.min(Math.max(page, 0), engine.pageCount - 1);
     const origin = currentPageIndex + 1;
-    navigateToPage(target);
-    if (target !== currentPageIndex) backChip.offer(`Back to page ${origin}`);
+    if (navigateToPage(target)) backChip.offer(`Back to page ${origin}`);
   };
 
   const lastPage = Math.max(engine.pageCount - 1, 0);

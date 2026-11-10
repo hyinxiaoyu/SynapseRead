@@ -741,6 +741,22 @@ describe('EpubViewer', () => {
     fireEvent.click(chip);
     expect(engine.displayed.at(-1)).toBe(CFI);
     await waitFor(() => expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument());
+
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 1,
+        totalPages: 4,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 12,
+        fraction: 0,
+      }),
+    );
+    act(() => engine.emitInternalLink('/OEBPS/chapter1.xhtml'));
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe('/OEBPS/chapter1.xhtml'));
+    expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
   });
 
   it('turns pages from the page edges, swipes, and Space, never over text', async () => {

@@ -857,11 +857,19 @@ export function EpubViewer({
   /** A big jump: remembered in history, with a chip that leads back. */
   const jumpWithBackChip = useCallback(
     (go: () => Promise<void>, target?: string) => {
-      const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+      const loc = currentLocationRef.current;
+      const previous = loc?.cfi ?? loc?.href ?? null;
+      const alreadyAtTarget =
+        target !== undefined &&
+        (target === previous ||
+          (!target.includes('#') &&
+            loc?.href !== undefined &&
+            sameChapter(target, loc.href) &&
+            (loc.page ?? 1) === 1));
       const origin = describeHere();
       void go()
         .then(() => {
-          if (previous && previous !== target) {
+          if (previous && !alreadyAtTarget) {
             pushHistory(previous);
             offerBackChip(`Back to ${origin}`);
           }
