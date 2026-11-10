@@ -49,7 +49,7 @@ describe('useDocumentSearch', () => {
     expect(searchStatusLabel(result.current)).toBe('1 of 2');
   });
 
-  it('scans once typing pauses, not on every keystroke', async () => {
+  it('scans once typing pauses, not on every keystroke, and reports searching while waiting', async () => {
     const runSearch = vi.fn(() => [match('1')]);
     const { result } = renderHook(() =>
       useDocumentSearch({ isActive: true, runSearch, onNavigateToMatch: vi.fn() }),
@@ -58,8 +58,10 @@ describe('useDocumentSearch', () => {
     act(() => result.current.setQuery('f'));
     act(() => result.current.setQuery('fo'));
     act(() => result.current.setQuery('fox'));
-    // The field shows every keystroke; the document is read once, after the pause.
+    // The field shows every keystroke; while typing pauses, status is searching (never "No matches").
     expect(result.current.query).toBe('fox');
+    expect(result.current.status).toBe('searching');
+    expect(searchStatusLabel(result.current)).toBe('Searching…');
     expect(runSearch).not.toHaveBeenCalled();
 
     await waitFor(() => expect(runSearch).toHaveBeenCalledTimes(1));
@@ -124,14 +126,16 @@ describe('useDocumentSearch', () => {
     expect(onNavigateToMatch).toHaveBeenCalledWith(match('1'), 0, expect.any(Number));
   });
 
-  it('keeps one trip across the steps of a search and starts a new one per search', async () => {
+  it('keeps one trip across the steps of a search and background revisions, and starts a new one per search', async () => {
     const onNavigateToMatch = vi.fn();
-    const { result } = renderHook(() =>
+    let revision = 1;
+    const { result, rerender } = renderHook(() =>
       useDocumentSearch({
         isActive: true,
         runSearch: () => [match('1'), match('2')],
         onNavigateToMatch,
         debounceMs: 0,
+        searchRevision: revision,
       }),
     );
 
@@ -144,6 +148,16 @@ describe('useDocumentSearch', () => {
     expect(onNavigateToMatch).toHaveBeenLastCalledWith(match('2'), 1, trip);
     act(() => result.current.previousMatch());
     expect(onNavigateToMatch).toHaveBeenLastCalledWith(match('1'), 0, trip);
+
+    // Background searchRevision refresh must not start a new trip.
+    revision = 2;
+    rerender();
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 10));
+    });
+    await waitFor(() => expect(result.current.status).toBe('done'));
+    act(() => result.current.nextMatch());
+    expect(onNavigateToMatch).toHaveBeenLastCalledWith(match('2'), 1, trip);
 
     act(() => result.current.setQuery('foxy'));
     await waitFor(() => expect(result.current.status).toBe('done'));

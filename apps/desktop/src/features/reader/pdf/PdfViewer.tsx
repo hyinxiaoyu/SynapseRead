@@ -1493,13 +1493,45 @@ function PdfPages({
   const isSearchMatchOnScreen = useCallback(
     (match: PdfSearchMatch): boolean => {
       const scroller = scrollRef.current;
-      if (!scroller) return false;
-      const rect = match.rects[0];
-      const top = offsetWithin(match.pageIndex, rect?.y ?? 0);
-      const bottom = top + pageHeight(match.pageIndex) * (rect?.height ?? 0);
-      return top >= scroller.scrollTop && bottom <= scroller.scrollTop + scroller.clientHeight;
+      if (!scroller || match.rects.length === 0) return false;
+      if (displayMode === 'single' && match.pageIndex !== currentPageIndex) return false;
+      const minY = Math.min(...match.rects.map((rect) => rect.y));
+      const maxBottom = Math.max(...match.rects.map((rect) => rect.y + rect.height));
+      const top = offsetWithin(match.pageIndex, minY);
+      const bottom = offsetWithin(match.pageIndex, maxBottom);
+      if (top < scroller.scrollTop || bottom > scroller.scrollTop + scroller.clientHeight) {
+        return false;
+      }
+      if (scroller.scrollWidth > scroller.clientWidth + 1) {
+        const rowIndex = rowOfPage(match.pageIndex);
+        const pages = pagesInRow(rowIndex);
+        const rowLeft = Math.max(SIDE_PADDING_PX, (width - rowWidth(rowIndex)) / 2);
+        let pageLeft = rowLeft;
+        for (const page of pages) {
+          if (page === match.pageIndex) break;
+          pageLeft += pageWidth(page) + PAGE_GAP_PX;
+        }
+        const pw = pageWidth(match.pageIndex);
+        const minX = Math.min(...match.rects.map((rect) => rect.x));
+        const maxRight = Math.max(...match.rects.map((rect) => rect.x + rect.width));
+        const left = pageLeft + minX * pw;
+        const right = pageLeft + maxRight * pw;
+        if (left < scroller.scrollLeft || right > scroller.scrollLeft + scroller.clientWidth) {
+          return false;
+        }
+      }
+      return true;
     },
-    [offsetWithin, pageHeight],
+    [
+      currentPageIndex,
+      displayMode,
+      offsetWithin,
+      pageWidth,
+      pagesInRow,
+      rowOfPage,
+      rowWidth,
+      width,
+    ],
   );
 
   const navigateToSearchMatch = useCallback(

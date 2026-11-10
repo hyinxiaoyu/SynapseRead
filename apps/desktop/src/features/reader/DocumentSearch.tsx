@@ -200,7 +200,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
         return;
       }
 
-      tripRef.current += 1;
+      if (autoNavigate) tripRef.current += 1;
       const trip = tripRef.current;
       const controller = new AbortController();
       abortRef.current = controller;
@@ -249,10 +249,11 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
   );
 
   const cancelSearch = useCallback(() => {
+    const hadPending = debounceRef.current !== null;
     cancelPending();
-    if (!abortRef.current) return;
+    if (!abortRef.current && !hadPending) return;
     runIdRef.current += 1;
-    abortRef.current.abort();
+    abortRef.current?.abort();
     abortRef.current = null;
     setStatus('cancelled');
   }, [cancelPending]);
@@ -265,10 +266,16 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
   const searchSoon = useCallback(
     (nextQuery: string, nextCaseSensitive: boolean) => {
       cancelPending();
-      if (debounceMs <= 0) {
+      if (debounceMs <= 0 || nextQuery.trim() === '') {
         executeSearch(nextQuery, nextCaseSensitive, true);
         return;
       }
+      runIdRef.current += 1;
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setStatus('searching');
+      setResults([]);
+      setActiveIndex(-1);
       debounceRef.current = window.setTimeout(() => {
         debounceRef.current = null;
         executeSearch(nextQuery, nextCaseSensitive, true);
@@ -359,10 +366,11 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
   // Cancel any in-flight search if the user switches away from this document tab.
   useEffect(() => {
     if (isActive) return;
+    const hadPending = debounceRef.current !== null;
     cancelPending();
-    if (!abortRef.current) return;
+    if (!abortRef.current && !hadPending) return;
     runIdRef.current += 1;
-    abortRef.current.abort();
+    abortRef.current?.abort();
     abortRef.current = null;
     const timer = window.setTimeout(() => setStatus('cancelled'), 0);
     return () => window.clearTimeout(timer);
@@ -373,7 +381,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
   useEffect(() => {
     if (prevRevision.current === searchRevision) return;
     prevRevision.current = searchRevision;
-    if (latestRef.current.query.trim() === '') return;
+    if (latestRef.current.query.trim() === '' || debounceRef.current !== null) return;
     const timer = window.setTimeout(() => {
       executeSearch(latestRef.current.query, latestRef.current.caseSensitive, false);
     }, 0);
@@ -424,6 +432,8 @@ export function searchStatusLabel(
   const count = search.results.length;
   const position = `${Math.max(search.activeIndex, 0) + 1} of ${count}`;
   switch (search.status) {
+    case 'idle':
+      return '';
     case 'searching':
       return count > 0 ? `${position}…` : 'Searching…';
     case 'cancelled':

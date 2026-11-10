@@ -831,6 +831,16 @@ describe('PdfViewer', () => {
     await waitFor(() =>
       expect(screen.getByTestId('search-status')).toHaveTextContent('No matches'),
     );
+
+    // Single-page mode: searching from page 1 for a match on page 5 still turns to page 5 (#55).
+    fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+    expect(screen.getByLabelText('Page number')).toHaveValue('1');
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    expect(screen.getByLabelText('Page number')).toHaveValue('1');
+    fireEvent.change(searchInput, { target: { value: 'Fox' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+    expect(screen.getByLabelText('Page number')).toHaveValue('5');
   });
 
   it('cancels an in-flight PDF search on explicit cancel or tab deactivation', async () => {
