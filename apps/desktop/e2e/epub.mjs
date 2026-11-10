@@ -160,6 +160,19 @@ export async function epubFlow(page) {
   await page.waitFor(`${visibleHost}.querySelector('g.anchor-pulse')`, 'the highlight to pulse');
   await page.waitFor(`!${visibleHost}.querySelector('g.anchor-pulse')`, 'the pulse to end');
 
+  // An internal book link joins the jump history, and its chip returns to the page
+  // it was followed from.
+  const linkPoint = await textPoints(page, 'Go to Chapter Two');
+  await page.click(linkPoint.start);
+  await page.waitFor(chapterIs('Chapter Two'), 'an internal link to change chapter');
+  const linkChip = await page.waitFor(
+    `document.querySelector('[data-testid="reader-back-chip"]')?.textContent`,
+    'the Back chip after an internal link',
+  );
+  assert(linkChip.startsWith('Back to'), `internal link Back chip: ${linkChip}`);
+  await page.evaluate(`document.querySelector('[data-testid="reader-back-chip"]').click()`);
+  await page.waitFor(chapterIs('Chapter One'), 'the internal link Back chip to return');
+
   // And back: a highlight in the other chapter must repaint when it is shown again.
   // The newest card can sit outside the canvas viewport, where a mouse cannot reach it.
   await page.evaluate(
@@ -172,9 +185,29 @@ export async function epubFlow(page) {
   // Long enough for the debounced position to be saved.
   await new Promise((done) => setTimeout(done, 700));
 
-  // Per-tab state: the book and its chapter survive a tab switch.
-  await page.evaluate(`[...document.querySelectorAll('[role="tab"]')].at(0).click()`);
-  await page.waitFor(`!${visibleHost}`, 'the book tab to be hidden');
+  // Per-tab state: the book and its chapter survive a tab switch. The TXT, PDF,
+  // and EPUB tabs were opened in that order, so switching back reaches both of the
+  // earlier ones.
+  for (const tab of [0, 1]) {
+    await page.evaluate(`[...document.querySelectorAll('[role="tab"]')].at(${tab}).click()`);
+    await page.waitFor(`!${visibleHost}`, `the book tab to be hidden behind tab ${tab + 1}`);
+    // #43: epub.js marks its views visible inline, which used to paint a background
+    // EPUB over the active one. The inert panel keeps the frame hidden, not removed.
+    const backgroundFrame = await page.evaluate(`(() => {
+      const panel = [...document.querySelectorAll('[role="tabpanel"]')].find(
+        (p) => p.querySelector('[data-testid="epub-host"]'));
+      const frame = panel?.querySelector('iframe');
+      const view = panel?.querySelector('.epub-view');
+      return {
+        frame: frame ? getComputedStyle(frame).visibility : null,
+        view: view ? getComputedStyle(view).visibility : null,
+      };
+    })()`);
+    assert(
+      backgroundFrame.frame === 'hidden' && backgroundFrame.view === 'hidden',
+      `a background EPUB frame must stay hidden behind tab ${tab + 1}: ${JSON.stringify(backgroundFrame)}`,
+    );
+  }
   await page.evaluate(`[...document.querySelectorAll('[role="tab"]')].at(2).click()`);
   await page.waitFor(chapterIs('Chapter Two'), 'the chapter to survive a tab switch');
 

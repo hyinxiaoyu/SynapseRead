@@ -672,6 +672,7 @@ function PdfPage({
             type="button"
             data-testid="pdf-internal-link"
             data-target-page={link.targetPageIndex}
+            data-target-fraction={link.targetFraction}
             aria-label={`Jump to linked page ${link.targetPageIndex + 1}`}
             onClick={(event) => {
               event.stopPropagation();
@@ -852,6 +853,7 @@ function PdfPages({
   const history = useJumpHistory<PdfReturnLocation>(isSamePdfLocation);
   const pushHistory = history.push;
   const backChip = useBackChip(history.canGoBack);
+  const offerBackChip = backChip.offer;
   const markup = useMarkupToolbar();
   const pageContentRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
@@ -1219,25 +1221,29 @@ function PdfPages({
   // ---- Reporting the reading position --------------------------------------
 
   const navigateToPage = useCallback(
-    (targetPageIndex: number, targetFraction = 0) => {
-      if (targetPageIndex < 0 || targetPageIndex >= engine.pageCount) return;
+    (targetPageIndex: number, targetFraction = 0): boolean => {
+      if (targetPageIndex < 0 || targetPageIndex >= engine.pageCount) return false;
       const previous = currentReturnLocation();
-      if (
+      const moved =
         previous.pageIndex !== targetPageIndex ||
-        Math.abs(previous.fraction - targetFraction) > 0.05
-      ) {
+        Math.abs(previous.fraction - targetFraction) > 0.05;
+      if (moved) {
         pushHistory(previous);
       }
       scrollToPageOffset(targetPageIndex, offsetWithin(targetPageIndex, targetFraction));
+      return moved;
     },
     [pushHistory, engine.pageCount, currentReturnLocation, offsetWithin, scrollToPageOffset],
   );
 
   const navigateToInternalLink = useCallback(
     (link: PdfInternalLink) => {
-      navigateToPage(link.targetPageIndex, 0);
+      const origin = currentPageIndex + 1;
+      if (navigateToPage(link.targetPageIndex, link.targetFraction ?? 0)) {
+        offerBackChip(`Back to page ${origin}`);
+      }
     },
-    [navigateToPage],
+    [currentPageIndex, navigateToPage, offerBackChip],
   );
 
   const handleReturnBack = () => {
@@ -1648,8 +1654,7 @@ function PdfPages({
   const jumpToPage = (page: number) => {
     const target = Math.min(Math.max(page, 0), engine.pageCount - 1);
     const origin = currentPageIndex + 1;
-    navigateToPage(target);
-    if (target !== currentPageIndex) backChip.offer(`Back to page ${origin}`);
+    if (navigateToPage(target)) backChip.offer(`Back to page ${origin}`);
   };
 
   const lastPage = Math.max(engine.pageCount - 1, 0);

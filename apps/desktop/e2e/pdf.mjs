@@ -395,6 +395,17 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-unsupported-annotations-notice"]')?.textContent.includes('Stamp')`,
     'unsupported PDF Stamp annotation disclosure banner',
   );
+  const linkTarget = await page.evaluate(`(() => {
+    const link = document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-internal-link"]');
+    return {
+      page: Number(link?.dataset.targetPage ?? -1),
+      fraction: Number(link?.dataset.targetFraction ?? 0),
+    };
+  })()`);
+  assert(
+    linkTarget.page === 3 && linkTarget.fraction > 0.05,
+    `the fixture link must name a page-relative destination: ${JSON.stringify(linkTarget)}`,
+  );
   await page.evaluate(
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-internal-link"]').click()`,
   );
@@ -402,10 +413,28 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '4'`,
     'PDF internal link jump to page 4',
   );
-  await page.clickButton('Return to previous location');
+  // The destination's vertical fraction puts the line above the target at the top,
+  // rather than showing the page from its first line as a hard-coded zero would.
+  await page.waitFor(
+    `(() => {
+      const scroller = ${visibleScroller};
+      const page = document.querySelector('[data-page-index="${linkTarget.page}"]');
+      if (!scroller || !page) return false;
+      const height = page.getBoundingClientRect().height;
+      const top = page.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+      return height > 0 && Math.abs(top + ${linkTarget.fraction} * height) < 6;
+    })()`,
+    'PDF internal link to land on the destination fraction',
+  );
+  const linkChip = await page.waitFor(
+    `document.querySelector('[data-testid="reader-back-chip"]')?.textContent`,
+    'the Back chip after a PDF internal link',
+  );
+  assert(linkChip === 'Back to page 1', `PDF internal link Back chip: ${linkChip}`);
+  await page.evaluate(`document.querySelector('[data-testid="reader-back-chip"]').click()`);
   await page.waitFor(
     `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '1'`,
-    'returning from PDF internal link jump to page 1',
+    'the PDF internal link Back chip to return to page 1',
   );
   await page.evaluate(
     `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-mode-single"]').click()`,

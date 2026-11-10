@@ -76,10 +76,11 @@ def build_pdf():
     )
     objects[19] = b"<</Title(Blue Box Section)/Parent 18 0 R/Dest[11 0 R /XYZ 0 792 null]>>"
     objects[20] = b"<</Title(Part Two)/Parent 17 0 R/Prev 18 0 R/Dest[13 0 R /XYZ 0 595 null]>>"
-    # Page 1 annotations: internal link to Page 4, embedded Highlight with note, and unsupported Stamp.
+    # Page 1 annotations: internal link partway down Page 4, an embedded Highlight
+    # with a note, and an unsupported Stamp.
     objects[21] = (
         b"<</Type/Annot/Subtype/Link/Rect[72 620 260 640]/Border[0 0 0]"
-        b"/Dest[13 0 R /XYZ 0 595 null]>>"
+        b"/Dest[13 0 R /XYZ 0 520 null]>>"
     )
     objects[22] = (
         b"<</Type/Annot/Subtype/Highlight/Rect[72 670 300 688]"
@@ -151,6 +152,7 @@ epub:type="toc"><ol><li><a href="chapter1.xhtml">One</a><ol><li><a href="chapter
         "OEBPS/chapter1.xhtml": chapter("One", """<h1>Chapter One</h1>
 <script>try { window.parent.__bookScriptRan = true; } catch (e) {}
 document.documentElement.setAttribute('data-book-script-ran', 'true');</script>
+<p><a href="chapter2.xhtml">Go to Chapter Two</a></p>
 <p>The quick brown fox jumps over the lazy dog.</p>
 <p>Café, 汉字, and 😀 sit in this second paragraph.</p>
 <p><img src="box.png" alt="a small box"/></p>
