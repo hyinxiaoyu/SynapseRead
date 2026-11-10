@@ -750,6 +750,7 @@ export function TxtViewer({
   const searchRanges = useMemo(() => {
     const ranges: PaintedRange[] = [];
     for (const [index, match] of search.results.entries()) {
+      if (index === search.activeIndex) continue;
       const range = model.rangeFor(match.anchor);
       if (!range) continue;
       ranges.push({
@@ -762,7 +763,7 @@ export function TxtViewer({
     return ranges;
     // `rowCount` and `complete` stand in for the mutable model's loaded length.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [model, rowCount, complete, search.results]);
+  }, [model, rowCount, complete, search.results, search.activeIndex]);
 
   const pulsingAnnotationId = jumpResolved
     ? (jumpRequest?.annotationId ?? null)

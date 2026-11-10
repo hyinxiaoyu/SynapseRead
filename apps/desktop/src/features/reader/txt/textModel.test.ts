@@ -234,6 +234,20 @@ describe('TxtTextModel', () => {
 
     expect(model.search('cafe', { matchDiacritics: true })).toEqual([]);
     expect(model.search('dog', { wholeWord: true })).toHaveLength(1);
+
+    const decomposed = new TextEncoder().encode('A cafe\u0301.\n');
+    const nfdModel = modelOf(decomposed, 8);
+    const [decomposedMatch] = nfdModel.search('café');
+    expect(decomposedMatch).toBeDefined();
+    expect(
+      new TextDecoder().decode(
+        decomposed.slice(
+          decomposedMatch!.anchor.startByteOffset,
+          decomposedMatch!.anchor.endByteOffset,
+        ),
+      ),
+    ).toBe('cafe\u0301');
+    expect(nfdModel.search('café', { matchDiacritics: true })).toHaveLength(1);
   });
 });
 

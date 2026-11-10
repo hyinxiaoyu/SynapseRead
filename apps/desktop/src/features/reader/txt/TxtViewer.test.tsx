@@ -608,7 +608,12 @@ describe('TxtViewer', () => {
     // "quick" sits on two rendered lines: the inactive one is tinted, and the
     // active one keeps its orange highlight; both tick the scrubber.
     expect(document.querySelectorAll('[data-annotation-id^="__search_match_"]')).toHaveLength(1);
-    expect(document.querySelector('[data-annotation-id="__search_active__"]')).not.toBeNull();
+    const activeMark = document.querySelector('[data-annotation-id="__search_active__"]');
+    expect(activeMark).not.toBeNull();
+    // The active match keeps its own orange layer; no inactive tint is stacked on it.
+    expect(
+      activeMark?.closest('[data-index]')?.querySelector('[data-annotation-id^="__search_match_"]'),
+    ).toBeNull();
     expect(screen.queryAllByTestId('progress-scrubber-search-mark')).toHaveLength(2);
   });
 

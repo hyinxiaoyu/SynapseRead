@@ -804,6 +804,10 @@ describe('PdfViewer', () => {
       expect(document.querySelector('[data-annotation-id^="__search_match_"]')).not.toBeNull(),
     );
     expect(screen.getAllByTestId('progress-scrubber-search-mark')).toHaveLength(5);
+    // The active match paints once (orange); no inactive tint is stacked on its page.
+    expect(
+      document.querySelector('[data-page-index="0"] [data-annotation-id^="__search_match_"]'),
+    ).toBeNull();
     // Typing leaves the sidebar alone, so the field's list button opens the results.
     expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Show search results' }));

@@ -24,8 +24,17 @@ describe('findSearchMatches', () => {
     const line = 'A hyphen-\nated word.';
     expect(slice(soft, findSearchMatches(soft, 'cooperate')[0]!)).toBe('co\u00adoperate');
     expect(slice(line, findSearchMatches(line, 'hyphenated')[0]!)).toBe('hyphen-\nated');
+    const broken = 'A co\u00ad\noperate sentence.';
+    expect(slice(broken, findSearchMatches(broken, 'cooperate')[0]!)).toBe('co\u00ad\noperate');
     // A hyphen inside a word is not a line-end break.
     expect(findSearchMatches('A state-of-the-art book.', 'stateoftheart')).toEqual([]);
+    // A suspended hyphen on one line keeps its space and stays searchable.
+    const suspended = 'A pre- and post-war sentence.';
+    expect(findSearchMatches(suspended, 'pre- and')).toHaveLength(1);
+    expect(findSearchMatches(suspended, 'preand')).toEqual([]);
+    expect(slice(suspended, findSearchMatches(suspended, 'and', { wholeWord: true })[0]!)).toBe(
+      'and',
+    );
   });
 
   it('folds accents unless the reader asks to match them', () => {
@@ -38,10 +47,23 @@ describe('findSearchMatches', () => {
     expect(slice(text, findSearchMatches(text, 'cafe')[0]!)).toBe('café');
   });
 
-  it('matches composed input against decomposed text', () => {
+  it('matches composed input against decomposed text and covers the trailing mark', () => {
     const text = 'A cafe\u0301 sentence.';
-    expect(findSearchMatches(text, 'café')).toHaveLength(1);
+    const folded = findSearchMatches(text, 'café');
+    expect(folded).toHaveLength(1);
+    expect(slice(text, folded[0]!)).toBe('cafe\u0301');
     expect(findSearchMatches(text, 'cafe')).toHaveLength(1);
+    // Match Diacritics composes both spellings before comparing them.
+    expect(findSearchMatches(text, 'café', { matchDiacritics: true })).toHaveLength(1);
+    expect(findSearchMatches(text, 'cafe', { matchDiacritics: true })).toEqual([]);
+  });
+
+  it('does not let a leading dropped mark shift the match start', () => {
+    const text = '\u00adaccuracy';
+    const [match] = findSearchMatches(text, 'accuracy');
+    expect(match).toBeDefined();
+    expect(match?.start).toBe(1);
+    expect(slice(text, match!)).toBe('accuracy');
   });
 
   it('folds case by default and honors Match Case', () => {

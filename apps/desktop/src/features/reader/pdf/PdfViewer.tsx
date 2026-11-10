@@ -1890,6 +1890,7 @@ function PdfPages({
       }
     }
     for (const [index, match] of search.results.entries()) {
+      if (index === search.activeIndex) continue;
       addPageHighlight(match.pageIndex, searchMatchId(index), [...match.rects], SEARCH_MATCH_COLOR);
     }
     if (activeSearchMatch) {
@@ -1901,7 +1902,7 @@ function PdfPages({
       );
     }
     return pages;
-  }, [effectiveHighlights, search.results, activeSearchMatch]);
+  }, [effectiveHighlights, search.results, search.activeIndex, activeSearchMatch]);
 
   const virtualItems = virtualizer.getVirtualItems();
   const maxRowWidth = virtualItems.reduce(

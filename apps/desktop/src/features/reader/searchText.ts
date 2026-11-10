@@ -40,7 +40,7 @@ class OffsetMap {
 
   /** The source offset where a target range starts. */
   sourceStartAt(target: number): number {
-    if (this.spans.length === 0 || target <= 0) return 0;
+    if (this.spans.length === 0 || target < 0) return 0;
     let low = 0;
     let high = this.spans.length - 1;
     while (low < high) {
@@ -127,15 +127,18 @@ const QUOTE_RE =
   /[\u2018\u2019\u201a\u201b\u2032\u02bc\uff07\u00b4\u201c\u201d\u201e\u201f\u2033]/g;
 /** Hyphen-like characters that should behave like a typed hyphen. */
 const DASH_RE = /[\u2010-\u2015\u2212\ufe58\ufe63\uff0d]/g;
-/** Latin letters and combining marks whose accent can be folded. */
-const DIACRITIC_CHAR_RE = /[\u00c0-\u024f\u1e00-\u1eff]|\p{M}/gu;
-const DIACRITIC_CHAR_TEST = /[\u00c0-\u024f\u1e00-\u1eff]|\p{M}/u;
+/** Latin letters and combining marks whose accent can be folded. A base letter
+ * and its trailing marks are one unit, so NFC can compose them without losing
+ * the mark's source range. */
+const DIACRITIC_CHAR_RE = /\P{M}\p{M}+|[\u00c0-\u024f\u1e00-\u1eff]|\p{M}+/gu;
+const DIACRITIC_CHAR_TEST = /\P{M}\p{M}+|[\u00c0-\u024f\u1e00-\u1eff]|\p{M}+/u;
 const HAS_MARK_RE = /\p{M}/u;
 const MARKS_RE = /\p{M}+/gu;
 /** A character that carries word meaning, for Whole Word boundaries. */
 const WORD_CHAR_RE = /\p{L}|\p{N}/u;
 const WHITESPACE_TEST = /\s/u;
 const SOFT_HYPHEN = '\u00ad';
+const LINE_BREAK_RE = /[\r\n\u2028\u2029]/u;
 /** Only runs of two or more spaces need a rewrite; a single one maps one-to-one. */
 const COLLAPSE_RE = /\s{2,}|\u00ad|-(?=\s)/g;
 const ALL_WHITESPACE_RE = /\s/g;
@@ -148,11 +151,15 @@ const stripAccents = (value: string): string => {
   return HAS_MARK_RE.test(decomposed) ? decomposed.replace(MARKS_RE, '') : value;
 };
 
-/** One character folded: case, punctuation, and (unless asked to keep it) accents. */
+/** One unit folded: case, punctuation, and accents.
+ *
+ * With Match Diacritics, canonically equivalent spellings still compare equal,
+ * so a decomposed `e` + mark composes to the same `é` an NFC query contains.
+ */
 function foldCharacter(character: string, options: SearchOptions): string {
   const cased = options.caseSensitive ? character : character.toLowerCase();
   const punctuated = normalizePunctuation(cased);
-  return options.matchDiacritics ? punctuated : stripAccents(punctuated);
+  return options.matchDiacritics ? punctuated.normalize('NFC') : stripAccents(punctuated);
 }
 
 function addLinearSpan(
@@ -277,20 +284,25 @@ function buildCharacterBase(text: string, options: SearchOptions): SourceText {
 
   let index = 0;
   while (index < text.length) {
-    const width = (text.codePointAt(index) ?? 0) > 0xffff ? 2 : 1;
-    const original = text.slice(index, index + width);
+    let end = index + ((text.codePointAt(index) ?? 0) > 0xffff ? 2 : 1);
+    // A base letter owns its trailing combining marks, so accent folding and
+    // NFC see the whole grapheme at once.
+    while (end < text.length && isMarkAt(text, end)) {
+      end += (text.codePointAt(end) ?? 0) > 0xffff ? 2 : 1;
+    }
+    const original = text.slice(index, end);
     const folded = foldCharacter(original, options);
     if (folded.length === original.length) {
       if (pending.length === 0) pendingStart = index;
       pending += folded;
     } else {
       flush(index);
-      addSpecialSpan(spans, index, index + width, targetLength, folded.length);
+      addSpecialSpan(spans, index, end, targetLength, folded.length);
       parts.push(folded);
       targetLength += folded.length;
-      pendingStart = index + width;
+      pendingStart = end;
     }
-    index += width;
+    index = end;
   }
   flush(text.length);
 
@@ -304,11 +316,18 @@ function buildCharacterBase(text: string, options: SearchOptions): SourceText {
 function buildBase(text: string, options: SearchOptions): SourceText {
   const cased = options.caseSensitive ? text : text.toLowerCase();
   if (cased.length !== text.length) return buildCharacterBase(text, options);
-  if (!options.matchDiacritics && DIACRITIC_CHAR_TEST.test(text)) {
+  // Trailing marks need the unit-aware builder even with Match Diacritics, so an
+  // NFD `cafe\u0301` composes to the same `café` a reader may type.
+  if (HAS_MARK_RE.test(text) || (!options.matchDiacritics && DIACRITIC_CHAR_TEST.test(text))) {
     return buildAccentedBase(text, options);
   }
   return buildPlainBase(text, options);
 }
+
+const isMarkAt = (text: string, index: number): boolean => {
+  const codePoint = text.codePointAt(index);
+  return codePoint !== undefined && HAS_MARK_RE.test(String.fromCodePoint(codePoint));
+};
 
 const isWordCharacterAt = (text: string, index: number): boolean => {
   if (index < 0 || index >= text.length) return false;
@@ -355,6 +374,28 @@ function collapseWhitespace(base: SourceText): SourceText {
     appendPlain(start);
 
     if (token === SOFT_HYPHEN) {
+      let afterWhitespace = start + 1;
+      while (
+        afterWhitespace < base.text.length &&
+        WHITESPACE_TEST.test(base.text[afterWhitespace] as string)
+      ) {
+        afterWhitespace += 1;
+      }
+      const breaksLine =
+        afterWhitespace > start + 1 &&
+        LINE_BREAK_RE.test(base.text.slice(start + 1, afterWhitespace));
+      const joinsWord =
+        breaksLine &&
+        afterWhitespace < base.text.length &&
+        isWordCharacterAt(base.text, afterWhitespace) &&
+        isWordCharacterBefore(base.text, start);
+      if (joinsWord) {
+        // `co\u00ad\noperate`: drop the hyphen and the line break it caused.
+        addSpecialSpan(spans, start, afterWhitespace, targetLength, 0);
+        sourceCursor = afterWhitespace;
+        COLLAPSE_RE.lastIndex = afterWhitespace;
+        continue;
+      }
       addSpecialSpan(spans, start, start + 1, targetLength, 0);
       sourceCursor = start + 1;
       COLLAPSE_RE.lastIndex = sourceCursor;
@@ -371,6 +412,7 @@ function collapseWhitespace(base: SourceText): SourceText {
       }
       const joinsWord =
         afterWhitespace > start + 1 &&
+        LINE_BREAK_RE.test(base.text.slice(start + 1, afterWhitespace)) &&
         afterWhitespace < base.text.length &&
         isWordCharacterAt(base.text, afterWhitespace) &&
         isWordCharacterBefore(base.text, start);

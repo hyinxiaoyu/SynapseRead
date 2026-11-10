@@ -94,7 +94,8 @@ vi.mock('./epubEngine', () => ({
       const matches = findSearchMatches(chapter.text, query, options);
       return matches.map((match, index) => ({
         id: `epub-${chapterIndex}-${index}`,
-        cfiRange: chapter.cfi,
+        // Distinct ranges: epub.js keys marks by CFI, not by annotation id.
+        cfiRange: index === 0 ? chapter.cfi : `${chapter.cfi}@${index}`,
         chapterHref: chapter.href,
         chapterIndex,
         locationLabel: chapter.label,
@@ -123,7 +124,13 @@ vi.mock('./epubEngine', () => ({
       engine.highlighted.set(annotationId, cfiRange);
       engine.highlightStyles.set(annotationId, style);
     },
-    removeHighlight: (cfiRange: string) => void engine.removed.push(cfiRange),
+    removeHighlight: (cfiRange: string) => {
+      engine.removed.push(cfiRange);
+      // epub.js keys marks by CFI, so removing one removes every id at that range.
+      for (const [id, range] of engine.highlighted) {
+        if (range === cfiRange) engine.highlighted.delete(id);
+      }
+    },
     setPulse(annotationId: string, pulsing: boolean) {
       if (pulsing) engine.pulsing.add(annotationId);
       else engine.pulsing.delete(annotationId);
@@ -891,6 +898,31 @@ describe('EpubViewer', () => {
     );
   });
 
+  it('keeps one mark per CFI when a search match coincides with a user highlight', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    select();
+    await act(() => store.getState().excerptSelection());
+    const annotationId = store.getState().annotations[0]?.id as string;
+    await waitFor(() => expect(engine.highlighted.get(annotationId)).toBe(CFI));
+
+    fireEvent.keyDown(window, { key: 'f', metaKey: true });
+    const searchInput = await screen.findByTestId('search-input');
+    fireEvent.change(searchInput, { target: { value: 'quick brown fox' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+
+    // The search mark and the user highlight share one CFI: epub.js can hold
+    // only one, so the search mark owns it while search is active.
+    await waitFor(() => expect(engine.highlighted.get(SEARCH_HIGHLIGHT_ID)).toBe(CFI));
+    expect(engine.highlighted.has(annotationId)).toBe(false);
+    expect(engine.removed).toContain(CFI);
+
+    fireEvent.change(searchInput, { target: { value: '' } });
+    await waitFor(() => expect(engine.highlighted.get(annotationId)).toBe(CFI));
+    expect(engine.highlighted.has(SEARCH_HIGHLIGHT_ID)).toBe(false);
+  });
+
   it('tints every match in the rendered chapter and marks it on the scrubber', async () => {
     const { store, documentId } = await setup();
     render(<Harness store={store} documentId={documentId} />);
@@ -915,7 +947,7 @@ describe('EpubViewer', () => {
     fireEvent.change(searchInput, { target: { value: 'the' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 2'));
 
-    expect(engine.highlighted.get(searchMatchId(1))).toBe(CFI);
+    expect(engine.highlighted.get(searchMatchId(1))).toBe(`${CFI}@1`);
     expect(engine.highlightStyles.get(searchMatchId(1))).toBe('highlight');
     expect(screen.getAllByTestId('progress-scrubber-search-mark')).toHaveLength(1);
   });
