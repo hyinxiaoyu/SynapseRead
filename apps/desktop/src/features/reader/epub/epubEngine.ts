@@ -1,4 +1,4 @@
-import ePub, { type Contents, type Location, type NavItem } from 'epubjs';
+import ePub, { type Contents, EpubCFI, type Location, type NavItem } from 'epubjs';
 
 import { PAGE_GUTTER_PX } from '@/features/reader/appearance/measure';
 import {
@@ -55,6 +55,8 @@ export interface EpubSelection {
 
 export interface EpubLocation {
   cfi: string;
+  /** The last location on the visible page, so a match can be placed on it. */
+  endCfi?: string;
   href: string;
   page?: number;
   totalPages?: number;
@@ -78,6 +80,11 @@ export interface EpubHandle {
   ): Promise<readonly EpubSearchMatch[]>;
   /** Shows a CFI or chapter, or the first chapter with no target. Rejects if it cannot. */
   display(target?: string): Promise<void>;
+  /**
+   * Which of two CFIs comes first in the book: `-1`, `0`, or `1`. Readers compare
+   * positions with it; nothing outside this module parses a CFI.
+   */
+  compareCfi(one: string, two: string): number;
   /** A click on an internal book link, as the href epub.js resolved against the book. */
   onInternalLink(listener: (href: string) => void): void;
   /** The spine position of a chapter file, or -1. */
@@ -584,6 +591,7 @@ export async function openEpubDocument(
         : 0;
     locationListener({
       cfi: location.start.cfi,
+      endCfi: location.end.cfi,
       href: location.start.href,
       chapterIndex,
       totalChapters,
@@ -735,6 +743,9 @@ export async function openEpubDocument(
       );
     },
     display,
+    compareCfi(one, two) {
+      return new EpubCFI().compare(one, two);
+    },
     spineIndexOf(href) {
       const clean = (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
       if (!clean) return -1;

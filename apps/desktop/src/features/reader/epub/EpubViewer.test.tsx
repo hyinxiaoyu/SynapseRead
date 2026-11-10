@@ -103,6 +103,8 @@ vi.mock('./epubEngine', () => ({
       if (target && target === engine.failCfi) throw new Error('no such location');
       engine.displayed.push(target);
     },
+    // Stands in for `EpubCFI.compare`: the fixture's CFIs sort in book order.
+    compareCfi: (one: string, two: string) => (one === two ? 0 : one < two ? -1 : 1),
     spineIndexOf: (href: string) =>
       engine.chapters.findIndex((chapter) => chapter.href === href.split('#')[0]),
     spineHref: (index: number) => engine.chapters[index]?.href,
@@ -915,6 +917,8 @@ describe('EpubViewer', () => {
     // Search for "fox", matching both Chapter One ("fox") and unrendered Chapter Two ("Fox").
     fireEvent.change(searchInput, { target: { value: 'fox' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 2'));
+    // Typing leaves the sidebar alone: opening it would resize the page.
+    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
     expect(engine.highlighted.get(SEARCH_HIGHLIGHT_ID)).toBe(CFI);
 
     // Jump to the next match in Chapter Two.
@@ -934,6 +938,9 @@ describe('EpubViewer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Search options' }));
     fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Match case/ }));
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
+    // The field's list button lists the results where the reader asks for them.
+    fireEvent.click(screen.getByRole('button', { name: 'Show search results' }));
+    expect(screen.getByTestId('navigator-sidebar')).toHaveAttribute('data-navigator-tab', 'search');
     expect(screen.getByTestId('search-result-location')).toHaveTextContent('Two');
   });
 

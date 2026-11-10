@@ -79,15 +79,28 @@ describe('useNavigator', () => {
     expect(epub.result.current.width).toBe(NAVIGATOR_DEFAULT_WIDTH);
   });
 
-  it('shows search results while a query runs and then restores the previous view', () => {
+  it('shows search results in the sidebar it already has, and never opens or closes it', () => {
     const { result } = renderHook(() => useNavigator('txt', ['notes', 'bookmarks']));
+
+    // Typing must not open the sidebar: that resizes the page.
     act(() => result.current.beginSearch());
-    expect(result.current).toMatchObject({ open: true, tab: 'search' });
+    expect(result.current).toMatchObject({ open: false, tab: 'notes' });
     act(() => result.current.endSearch());
     expect(result.current).toMatchObject({ open: false, tab: 'notes' });
 
+    // An open sidebar lends itself to the results, and gets its view back after.
     act(() => result.current.show('bookmarks'));
     act(() => result.current.beginSearch());
+    expect(result.current).toMatchObject({ open: true, tab: 'search' });
+    act(() => result.current.endSearch());
+    expect(result.current).toMatchObject({ open: true, tab: 'bookmarks' });
+
+    // A sidebar the reader opened for results stays open once the query is cleared.
+    act(() => result.current.hide());
+    act(() => result.current.beginSearch());
+    expect(result.current).toMatchObject({ open: false, tab: 'bookmarks' });
+    act(() => result.current.show('search'));
+    expect(result.current).toMatchObject({ open: true, tab: 'search' });
     act(() => result.current.endSearch());
     expect(result.current).toMatchObject({ open: true, tab: 'bookmarks' });
   });

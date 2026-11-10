@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 /**
  * Back and Forward through the places a reader jumped from (⌘[ and ⌘]), as in a
@@ -45,4 +45,25 @@ export function useJumpHistory<T>(isSameLocation: (a: T, b: T) => boolean = Obje
     goBack,
     goForward,
   };
+}
+
+/**
+ * A search is one trip through the document, not one jump per match: the first
+ * step that moves the view is remembered, and the steps after it are not, so ⌘[
+ * and the Back chip return to where the search started. `trip` changes when a
+ * new search runs; the return value says whether this step was the trip's first
+ * move, which is when the way back is offered.
+ */
+export function useSearchTrip<T>(push: (from: T) => void) {
+  const trip = useRef<{ id: number; pushed: boolean }>({ id: -1, pushed: false });
+  return useCallback(
+    (id: number, from: T): boolean => {
+      if (trip.current.id !== id) trip.current = { id, pushed: false };
+      if (trip.current.pushed) return false;
+      trip.current.pushed = true;
+      push(from);
+      return true;
+    },
+    [push],
+  );
 }

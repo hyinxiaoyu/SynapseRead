@@ -65,7 +65,7 @@ import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
 import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
 import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
-import { useJumpHistory } from '@/features/reader/useJumpHistory';
+import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
 import {
@@ -310,7 +310,9 @@ export function TxtViewer({
   const [missedJump, setMissedJump] = useState(false);
   const history = useJumpHistory<number>();
   const pushHistory = history.push;
+  const searchTrip = useSearchTrip(pushHistory);
   const backChip = useBackChip(history.canGoBack);
+  const offerBackChip = backChip.offer;
   const markup = useMarkupToolbar();
   const [currentRow, setCurrentRow] = useState(0);
   const pageRef = useRef<HTMLDivElement>(null);
@@ -513,15 +515,47 @@ export function TxtViewer({
   const [searchPulsing, setSearchPulsing] = useState(false);
   const searchPulseTimerRef = useRef<number | null>(null);
 
+  /** The row at the top of the viewport, which is where the reader is. */
+  const readingRow = useCallback(
+    () => virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? currentRow,
+    [virtualizer, currentRow],
+  );
+
+  /** A search starts at the first match at or after the reading position. */
+  const findSearchStart = useCallback(
+    (matches: readonly TxtSearchMatch[]): number => {
+      const here = readingRow();
+      return matches.findIndex((match) => match.rowIndex >= here);
+    },
+    [readingRow],
+  );
+
+  /** Whether a row is wholly inside the viewport, so a match there needs no move. */
+  const isRowOnScreen = useCallback((row: number): boolean => {
+    const scroller = scrollRef.current;
+    if (!scroller) return false;
+    const element = scroller.querySelector(`[data-index="${row}"]`);
+    if (!element) return false;
+    const box = element.getBoundingClientRect();
+    const viewport = scroller.getBoundingClientRect();
+    return box.top >= viewport.top && box.bottom <= viewport.bottom;
+  }, []);
+
   const navigateToSearchMatch = useCallback(
-    (match: TxtSearchMatch) => {
+    (match: TxtSearchMatch, _index: number, trip: number) => {
       const range = model.rangeFor(match.anchor);
       if (!range) return;
-      const previousTop = scrollRef.current?.scrollTop ?? lastScrollTop.current;
-      pushHistory(previousTop);
-      const targetRow = model.rowAtUnit(range.startUnit);
-      setCurrentRow(targetRow);
-      virtualizer.scrollToIndex(targetRow, { align: 'center' });
+      if (!isRowOnScreen(match.rowIndex)) {
+        const previousTop = scrollRef.current?.scrollTop ?? lastScrollTop.current;
+        // One history entry per search, not one per match.
+        if (searchTrip(trip, previousTop)) {
+          const origin = (virtualizer.getVirtualItemForOffset(previousTop)?.index ?? 0) + 1;
+          offerBackChip(`Back to line ${origin}`);
+        }
+        const targetRow = model.rowAtUnit(range.startUnit);
+        setCurrentRow(targetRow);
+        virtualizer.scrollToIndex(targetRow, { align: 'center' });
+      }
       if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
       setSearchPulsing(true);
       searchPulseTimerRef.current = window.setTimeout(() => {
@@ -529,7 +563,7 @@ export function TxtViewer({
         setSearchPulsing(false);
       }, PULSE_MS);
     },
-    [pushHistory, model, virtualizer],
+    [isRowOnScreen, offerBackChip, searchTrip, model, virtualizer],
   );
 
   useEffect(
@@ -549,6 +583,7 @@ export function TxtViewer({
     isActive,
     runSearch: (query, caseSensitive) => model.search(query, { caseSensitive }),
     onNavigateToMatch: navigateToSearchMatch,
+    findSearchStart,
     searchRevision: `${rowCount}:${complete}`,
   });
 
@@ -801,7 +836,7 @@ export function TxtViewer({
             const origin = currentRow + 1;
             pushHistory(lastScrollTop.current);
             showRow(rowAtFraction(at));
-            backChip.offer(`Back to line ${origin}`);
+            offerBackChip(`Back to line ${origin}`);
           },
           onStepPage: turnPage,
           onStepChapter: (direction) => {
@@ -965,6 +1000,7 @@ export function TxtViewer({
             <ToolbarSearchField
               search={search}
               onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+              onShowResults={() => navigator.show('search')}
             />
           </>
         }

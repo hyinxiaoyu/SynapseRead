@@ -550,7 +550,10 @@ describe('TxtViewer', () => {
     // Search for a phrase that exists both near the top and in an unrendered row at the end.
     fireEvent.change(searchInput, { target: { value: 'final target sentence' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
-    // Results list in the sidebar, which opened on its Search tab.
+    // Typing does not open the sidebar: that would resize the page under the reader.
+    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
+    // The field's list button lists the results where the reader asks for them.
+    fireEvent.click(screen.getByRole('button', { name: 'Show search results' }));
     expect(screen.getByTestId('navigator-sidebar')).toHaveAttribute('data-navigator-tab', 'search');
     expect(screen.getByTestId('search-result-location')).toHaveTextContent(/Line \d+/);
     expect(screen.getByTestId('search-result-snippet')).toHaveTextContent('final target sentence');
@@ -574,10 +577,10 @@ describe('TxtViewer', () => {
       expect(screen.getByTestId('search-status')).toHaveTextContent('No matches'),
     );
 
-    // Empty query resets search state and puts the sidebar back as it was.
+    // Empty query resets search state, and the sidebar the reader opened stays as it is.
     fireEvent.change(searchInput, { target: { value: '   ' } });
     expect(screen.getByTestId('search-status').textContent).toBe('');
-    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
+    expect(screen.getByTestId('navigator-sidebar')).toHaveAttribute('data-navigator-tab', 'notes');
 
     // Esc clears the query and gives focus back to the text.
     fireEvent.change(searchInput, { target: { value: 'quick' } });

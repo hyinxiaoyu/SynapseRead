@@ -74,7 +74,7 @@ import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
 import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
-import { useJumpHistory } from '@/features/reader/useJumpHistory';
+import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
 import type {
@@ -852,6 +852,7 @@ function PdfPages({
   const [missedJump, setMissedJump] = useState(false);
   const history = useJumpHistory<PdfReturnLocation>(isSamePdfLocation);
   const pushHistory = history.push;
+  const searchTrip = useSearchTrip(pushHistory);
   const backChip = useBackChip(history.canGoBack);
   const offerBackChip = backChip.offer;
   const markup = useMarkupToolbar();
@@ -1471,20 +1472,47 @@ function PdfPages({
     onSelectAnnotation: navigateToAnnotation,
   });
 
+  /**
+   * A search starts at the first match at or after the reading position, and a
+   * match already on screen is shown without moving the page.
+   */
+  const findSearchStart = useCallback(
+    (matches: readonly PdfSearchMatch[]): number => {
+      const here = currentReturnLocation();
+      return matches.findIndex((match) => {
+        const y = match.rects[0]?.y ?? 0;
+        return (
+          match.pageIndex > here.pageIndex ||
+          (match.pageIndex === here.pageIndex && y >= here.fraction)
+        );
+      });
+    },
+    [currentReturnLocation],
+  );
+
+  const isSearchMatchOnScreen = useCallback(
+    (match: PdfSearchMatch): boolean => {
+      const scroller = scrollRef.current;
+      if (!scroller) return false;
+      const rect = match.rects[0];
+      const top = offsetWithin(match.pageIndex, rect?.y ?? 0);
+      const bottom = top + pageHeight(match.pageIndex) * (rect?.height ?? 0);
+      return top >= scroller.scrollTop && bottom <= scroller.scrollTop + scroller.clientHeight;
+    },
+    [offsetWithin, pageHeight],
+  );
+
   const navigateToSearchMatch = useCallback(
-    (match: PdfSearchMatch) => {
-      const previous = currentReturnLocation();
-      const targetFraction = match.rects[0]?.y ?? 0;
-      if (
-        previous.pageIndex !== match.pageIndex ||
-        Math.abs(previous.fraction - targetFraction) > 0.02
-      ) {
-        pushHistory(previous);
+    (match: PdfSearchMatch, _index: number, trip: number) => {
+      if (!isSearchMatchOnScreen(match)) {
+        const previous = currentReturnLocation();
+        // One history entry per search, not one per match.
+        if (searchTrip(trip, previous)) offerBackChip(`Back to page ${previous.pageIndex + 1}`);
+        const pageStart = offsetWithin(match.pageIndex, 0);
+        const top = offsetWithin(match.pageIndex, match.rects[0]?.y ?? 0);
+        const currentViewportHeight = scrollRef.current?.clientHeight ?? 0;
+        scrollToPageOffset(match.pageIndex, Math.max(top - currentViewportHeight / 3, pageStart));
       }
-      const pageStart = offsetWithin(match.pageIndex, 0);
-      const top = offsetWithin(match.pageIndex, targetFraction);
-      const currentViewportHeight = scrollRef.current?.clientHeight ?? 0;
-      scrollToPageOffset(match.pageIndex, Math.max(top - currentViewportHeight / 3, pageStart));
       if (searchPulseTimerRef.current !== null) window.clearTimeout(searchPulseTimerRef.current);
       setSearchPulsing(true);
       searchPulseTimerRef.current = window.setTimeout(() => {
@@ -1492,7 +1520,14 @@ function PdfPages({
         setSearchPulsing(false);
       }, PULSE_MS);
     },
-    [pushHistory, currentReturnLocation, offsetWithin, scrollToPageOffset],
+    [
+      isSearchMatchOnScreen,
+      offerBackChip,
+      currentReturnLocation,
+      offsetWithin,
+      scrollToPageOffset,
+      searchTrip,
+    ],
   );
 
   useEffect(
@@ -1532,6 +1567,7 @@ function PdfPages({
     isActive,
     runSearch: runPdfSearch,
     onNavigateToMatch: navigateToSearchMatch,
+    findSearchStart,
   });
 
   const activeSearchMatch = search.activeMatch;
@@ -2030,6 +2066,7 @@ function PdfPages({
             <ToolbarSearchField
               search={search}
               onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+              onShowResults={() => navigator.show('search')}
             />
           </>
         }

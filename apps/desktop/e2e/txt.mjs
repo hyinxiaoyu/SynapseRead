@@ -99,11 +99,18 @@ export async function txtFlow(page) {
 
   // In-document search across virtualized TXT rows, active match highlight, and return.
   const visibleTxtViewer = `[...document.querySelectorAll('[data-testid="txt-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  const sidebarShown = `[...document.querySelectorAll('[data-testid="navigator-sidebar"]')].some((e) => e.checkVisibility({ visibilityProperty: true }))`;
   await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');
   await page.waitFor(
     `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
     'TXT search match count',
   );
+  // Find keeps the reader's place: typing must not open the sidebar, which would
+  // resize the page under them (#44).
+  await page.waitFor(`!${sidebarShown}`, 'the sidebar to stay closed while typing');
+  // The field's list button is how the reader asks for the results.
+  await page.clickButton('Show search results');
+  await page.waitFor(sidebarShown, 'the search results to open on request');
   await page.waitFor(
     `${visibleTxtViewer}?.querySelector('[data-testid="search-result-location"]')?.textContent === 'Line 6'`,
     'TXT search match location',
@@ -118,6 +125,8 @@ export async function txtFlow(page) {
     'returning from TXT search jump to previous scroll offset',
   );
   await page.leaveSearch();
+  // Clearing the query leaves the sidebar as the reader left it.
+  await page.waitFor(sidebarShown, 'the sidebar to stay open after the search is cleared');
 
   // Independent bookmarks in TXT: bookmark at scrollTop 1500, scroll to top, jump back, and remove.
   await page.clickButton('Bookmark current location');

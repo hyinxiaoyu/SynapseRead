@@ -33,7 +33,9 @@ interface ReflowableOptions {
 
 /**
  * Shows search results in the Navigator while a query is entered, and puts back
- * the tab it replaced once the query is cleared.
+ * the tab it replaced once the query is cleared. The sidebar itself is left
+ * alone: typing must not open or close it, because that resizes the page and a
+ * fit-width PDF would rescale and jump.
  */
 function useSearchInNavigator(searchActive: boolean, navigator: NavigatorController) {
   const [wasActive, setWasActive] = useState(searchActive);

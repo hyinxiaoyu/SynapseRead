@@ -57,7 +57,7 @@ import { ReaderFooter, type ScrubberModel } from '@/features/reader/progress/Rea
 import { useBackChip } from '@/features/reader/progress/useBackChip';
 import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
-import { useJumpHistory } from '@/features/reader/useJumpHistory';
+import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
@@ -283,6 +283,7 @@ export function EpubViewer({
   } | null>(null);
   const history = useJumpHistory<string>();
   const pushHistory = history.push;
+  const searchTrip = useSearchTrip(pushHistory);
   const backChip = useBackChip(history.canGoBack);
   const offerBackChip = backChip.offer;
   const markup = useMarkupToolbar();
@@ -428,9 +429,38 @@ export function EpubViewer({
     new Map<string, { cfiRange: string; color: string; style: AnnotationStyle }>(),
   );
   const searchPulseCleanupRef = useRef<(() => void) | null>(null);
+  /**
+   * `describeHere` is built below, where the chapter title is known, but a search
+   * jump needs it to name where the trip started; it is read through a ref.
+   */
+  const describeHereRef = useRef<() => string>(() => 'previous location');
+
+  /** A search starts at the first match at or after the reading position. */
+  const findSearchStart = useCallback(
+    (matches: readonly EpubSearchMatch[]): number => {
+      const here = currentLocationRef.current;
+      // Nothing has been read yet: start at the first match.
+      if (!handle || !here) return 0;
+      return matches.findIndex((match) => handle.compareCfi(match.cfiRange, here.cfi) >= 0);
+    },
+    [handle],
+  );
+
+  /** Whether the visible page already holds the match, so no move is needed. */
+  const isSearchMatchOnScreen = useCallback(
+    (match: EpubSearchMatch): boolean => {
+      const here = currentLocationRef.current;
+      if (!handle || !here || !here.endCfi) return false;
+      return (
+        handle.compareCfi(match.cfiRange, here.cfi) >= 0 &&
+        handle.compareCfi(match.cfiRange, here.endCfi) <= 0
+      );
+    },
+    [handle],
+  );
 
   const navigateToSearchMatch = useCallback(
-    (match: EpubSearchMatch) => {
+    (match: EpubSearchMatch, _index: number, trip: number) => {
       if (!handle) return;
       searchPulseCleanupRef.current?.();
       searchPulseCleanupRef.current = null;
@@ -459,31 +489,43 @@ export function EpubViewer({
         });
       }
 
+      const startPulse = () => {
+        const waitedSince = performance.now();
+        const pulse = () => {
+          if (cancelled) return;
+          const hasMarks = handle.setPulse(SEARCH_HIGHLIGHT_ID, true);
+          if (!hasMarks && performance.now() - waitedSince < MARK_WAIT_MS) {
+            pollForMarks = window.setTimeout(pulse, MARK_POLL_MS);
+            return;
+          }
+          endPulse = window.setTimeout(() => {
+            handle.setPulse(SEARCH_HIGHLIGHT_ID, false);
+          }, PULSE_MS);
+        };
+        pulse();
+      };
+
+      // The match is already in view: show it without moving the page.
+      if (isSearchMatchOnScreen(match)) {
+        startPulse();
+        return;
+      }
+
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+      const origin = describeHereRef.current();
       void handle
         .display(match.cfiRange)
         .then(() => {
           if (cancelled) return;
-          if (previous && previous !== match.cfiRange) {
-            pushHistory(previous);
+          // One history entry per search, not one per match.
+          if (previous && previous !== match.cfiRange && searchTrip(trip, previous)) {
+            offerBackChip(`Back to ${origin}`);
           }
-          const waitedSince = performance.now();
-          const startPulse = () => {
-            if (cancelled) return;
-            const hasMarks = handle.setPulse(SEARCH_HIGHLIGHT_ID, true);
-            if (!hasMarks && performance.now() - waitedSince < MARK_WAIT_MS) {
-              pollForMarks = window.setTimeout(startPulse, MARK_POLL_MS);
-              return;
-            }
-            endPulse = window.setTimeout(() => {
-              handle.setPulse(SEARCH_HIGHLIGHT_ID, false);
-            }, PULSE_MS);
-          };
           startPulse();
         })
         .catch(() => undefined);
     },
-    [handle, pushHistory],
+    [handle, isSearchMatchOnScreen, offerBackChip, searchTrip],
   );
 
   useEffect(
@@ -521,6 +563,7 @@ export function EpubViewer({
     isActive,
     runSearch: runEpubSearch,
     onNavigateToMatch: navigateToSearchMatch,
+    findSearchStart,
     searchRevision: Boolean(handle),
   });
 
@@ -854,6 +897,10 @@ export function EpubViewer({
     return paged && pageInfo ? `${place}, page ${pageInfo.page}` : place;
   }, [chapterTitle, paged, pageInfo]);
 
+  useEffect(() => {
+    describeHereRef.current = describeHere;
+  }, [describeHere]);
+
   /** A big jump: remembered in history, with a chip that leads back. */
   const jumpWithBackChip = useCallback(
     (go: () => Promise<void>, target?: string) => {
@@ -1119,6 +1166,7 @@ export function EpubViewer({
               search={search}
               disabled={!handle}
               onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
+              onShowResults={() => navigator.show('search')}
             />
           </>
         }
