@@ -672,6 +672,7 @@ function PdfPage({
             type="button"
             data-testid="pdf-internal-link"
             data-target-page={link.targetPageIndex}
+            data-target-fraction={link.targetFraction}
             aria-label={`Jump to linked page ${link.targetPageIndex + 1}`}
             onClick={(event) => {
               event.stopPropagation();
@@ -852,6 +853,7 @@ function PdfPages({
   const history = useJumpHistory<PdfReturnLocation>(isSamePdfLocation);
   const pushHistory = history.push;
   const backChip = useBackChip(history.canGoBack);
+  const offerBackChip = backChip.offer;
   const markup = useMarkupToolbar();
   const pageContentRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
@@ -1235,9 +1237,14 @@ function PdfPages({
 
   const navigateToInternalLink = useCallback(
     (link: PdfInternalLink) => {
-      navigateToPage(link.targetPageIndex, 0);
+      const targetFraction = link.targetFraction ?? 0;
+      const origin = currentPageIndex + 1;
+      navigateToPage(link.targetPageIndex, targetFraction);
+      if (link.targetPageIndex !== currentPageIndex || targetFraction > 0.001) {
+        offerBackChip(`Back to page ${origin}`);
+      }
     },
-    [navigateToPage],
+    [currentPageIndex, navigateToPage, offerBackChip],
   );
 
   const handleReturnBack = () => {

@@ -52,6 +52,8 @@ export interface PdfInternalLink {
   id: string;
   rect: NormalizedRect;
   targetPageIndex: number;
+  /** Where the destination points within the target page, `0` its top to `1` its bottom. */
+  targetFraction?: number;
   title?: string;
 }
 
@@ -112,26 +114,76 @@ interface RawOutlineNode {
   items?: readonly RawOutlineNode[];
 }
 
-async function resolveDestPageIndex(pdf: PDFDocumentProxy, dest: unknown): Promise<number | null> {
+interface PdfDestination {
+  pageIndex: number;
+  /** The destination's top edge in PDF user space, when the destination names one. */
+  top: number | null;
+}
+
+/**
+ * The vertical coordinate of an explicit destination, or null when it names no
+ * position (For example `Fit`, which shows the whole page).
+ */
+function destinationTop(dest: readonly unknown[]): number | null {
+  const zoom = dest[1];
+  const name =
+    typeof zoom === 'string'
+      ? zoom
+      : typeof zoom === 'object' && zoom !== null && 'name' in zoom
+        ? (zoom as { name?: unknown }).name
+        : null;
+  // The arguments follow the zoom name: XYZ takes [left, top, zoom], FitH/FitBH
+  // take [top], and FitR takes [left, bottom, right, top].
+  if (name === 'XYZ' && typeof dest[3] === 'number') return dest[3];
+  if ((name === 'FitH' || name === 'FitBH') && typeof dest[2] === 'number') return dest[2];
+  if (name === 'FitR' && typeof dest[5] === 'number') return dest[5];
+  return null;
+}
+
+async function resolveDestination(
+  pdf: PDFDocumentProxy,
+  dest: unknown,
+): Promise<PdfDestination | null> {
   try {
     const resolved = typeof dest === 'string' ? await pdf.getDestination(dest) : dest;
     if (!Array.isArray(resolved) || resolved.length === 0) return null;
     const target = resolved[0] as unknown;
+    let pageIndex: number | null = null;
     if (
       typeof target === 'number' &&
       Number.isInteger(target) &&
       target >= 0 &&
       target < pdf.numPages
     ) {
-      return target;
-    }
-    if (typeof target === 'object' && target !== null) {
+      pageIndex = target;
+    } else if (typeof target === 'object' && target !== null) {
       const index = await pdf.getPageIndex(
         target as Parameters<PDFDocumentProxy['getPageIndex']>[0],
       );
-      return index >= 0 && index < pdf.numPages ? index : null;
+      pageIndex = index >= 0 && index < pdf.numPages ? index : null;
     }
+    if (pageIndex === null) return null;
+    return { pageIndex, top: destinationTop(resolved) };
+  } catch {
     return null;
+  }
+}
+
+/**
+ * A destination's vertical position as a fraction of the target page, so a jump
+ * can show the linked passage rather than the top of its page.
+ */
+async function destinationFraction(
+  pdf: PDFDocumentProxy,
+  target: PdfDestination,
+): Promise<number | null> {
+  if (target.top === null) return null;
+  try {
+    const page = await pdf.getPage(target.pageIndex + 1);
+    const viewport = page.getViewport({ scale: 1 });
+    if (viewport.height <= 0) return null;
+    const [, y] = viewport.convertToViewportPoint(0, target.top);
+    return Math.min(Math.max(y / viewport.height, 0), 1);
   } catch {
     return null;
   }
@@ -147,7 +199,8 @@ async function mapPdfOutline(
     const node = nodes[index];
     if (!node) continue;
     const id = `${prefix}-${index}`;
-    const pageIndex = await resolveDestPageIndex(pdf, node.dest);
+    const destination = await resolveDestination(pdf, node.dest);
+    const pageIndex = destination?.pageIndex ?? null;
     const children = node.items ? await mapPdfOutline(pdf, node.items, id) : [];
     items.push({
       id,
@@ -328,8 +381,9 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
           if (subtype === 'Link') {
             const rect = normalizePdfRect(raw.rect);
             if (!rect) continue;
-            const targetPageIndex = await resolveDestPageIndex(pdf, raw.dest);
-            if (targetPageIndex !== null) {
+            const destination = await resolveDestination(pdf, raw.dest);
+            if (destination !== null) {
+              const targetFraction = await destinationFraction(pdf, destination);
               const titleObj = raw.contentsObj as { str?: string } | undefined;
               const title = (
                 titleObj?.str ?? (typeof raw.contents === 'string' ? raw.contents : '')
@@ -337,7 +391,8 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
               links.push({
                 id,
                 rect,
-                targetPageIndex,
+                targetPageIndex: destination.pageIndex,
+                ...(targetFraction === null ? {} : { targetFraction }),
                 ...(title ? { title } : {}),
               });
             }

@@ -1043,6 +1043,7 @@ describe('PdfViewer', () => {
           id: 'link-0-0',
           rect: { x: 0.1, y: 0.2, width: 0.3, height: 0.04 },
           targetPageIndex: 3,
+          targetFraction: 0.25,
         },
       ],
       embeddedAnnotations: [
@@ -1098,10 +1099,13 @@ describe('PdfViewer', () => {
     expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-rotation', '0');
     expect(highlightEl()?.style.left).toBe('10%');
 
-    // Internal link on Page 1 navigates to Page 4 (pageIndex 3) and supports Return Back.
+    // Internal link on Page 1 navigates to Page 4 (pageIndex 3), partway down it,
+    // with a chip that leads back.
     const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
     fireEvent.click(await screen.findByTestId('pdf-internal-link'));
     expect(pageInput).toHaveValue('4');
+    expect((await scroller()).scrollTop).toBeCloseTo(3 * (PAGE_PX + GAP_PX) + 0.25 * PAGE_PX, 0);
+    expect(screen.getByTestId('reader-back-chip')).toHaveTextContent('Back to page 1');
     fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
     expect(pageInput).toHaveValue('1');
 

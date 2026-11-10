@@ -284,6 +284,7 @@ export function EpubViewer({
   const history = useJumpHistory<string>();
   const pushHistory = history.push;
   const backChip = useBackChip(history.canGoBack);
+  const offerBackChip = backChip.offer;
   const markup = useMarkupToolbar();
   const [error, setError] = useState<string | null>(null);
   const [missedJump, setMissedJump] = useState(false);
@@ -848,29 +849,45 @@ export function EpubViewer({
   const paged = readingMode !== 'scroll';
 
   /** Where the reader is, for "Back to …". */
-  const describeHere = () => {
+  const describeHere = useCallback(() => {
     const place = chapterTitle ?? 'previous location';
     return paged && pageInfo ? `${place}, page ${pageInfo.page}` : place;
-  };
+  }, [chapterTitle, paged, pageInfo]);
 
   /** A big jump: remembered in history, with a chip that leads back. */
-  const jumpWithBackChip = (go: () => Promise<void>, target?: string) => {
-    const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
-    const origin = describeHere();
-    void go()
-      .then(() => {
-        if (previous && previous !== target) {
-          pushHistory(previous);
-          backChip.offer(`Back to ${origin}`);
-        }
-      })
-      .catch(() => undefined);
-  };
+  const jumpWithBackChip = useCallback(
+    (go: () => Promise<void>, target?: string) => {
+      const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+      const origin = describeHere();
+      void go()
+        .then(() => {
+          if (previous && previous !== target) {
+            pushHistory(previous);
+            offerBackChip(`Back to ${origin}`);
+          }
+        })
+        .catch(() => undefined);
+    },
+    [describeHere, offerBackChip, pushHistory],
+  );
 
   const handleTocSelect = (target: string) => {
     if (!handle) return;
     jumpWithBackChip(() => handle.display(target), target);
   };
+
+  // An internal link comes from the chapter's frame. The engine only forwards the
+  // href, so the jump joins the reader's history and offers the way back here.
+  useEffect(() => {
+    if (!handle) return;
+    handle.onInternalLink((href) => {
+      if (!isActive) return;
+      jumpWithBackChip(() => handle.display(href), href);
+    });
+    return () => {
+      handle.onInternalLink(() => undefined);
+    };
+  }, [handle, isActive, jumpWithBackChip]);
 
   const turnPage = (direction: TurnDirection) => {
     if (!handle) return;

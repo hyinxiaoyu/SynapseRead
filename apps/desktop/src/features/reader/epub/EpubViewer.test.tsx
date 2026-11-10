@@ -56,6 +56,7 @@ const engine = vi.hoisted(() => ({
   failCfi: null as string | null,
   emitSelection: (() => undefined) as (selection: unknown) => void,
   emitLocation: (() => undefined) as (location: unknown) => void,
+  emitInternalLink: (() => undefined) as (href: string) => void,
   emitKeyDown: (() => undefined) as (event: KeyboardEvent) => void,
   emitGesture: (() => undefined) as (sample: PageGestureSample) => void,
   emitWheel: (() => false) as (wheel: WheelSample) => boolean,
@@ -140,6 +141,9 @@ vi.mock('./epubEngine', () => ({
     },
     onLocation(listener: (location: EpubLocation) => void) {
       engine.emitLocation = listener as (location: unknown) => void;
+    },
+    onInternalLink(listener: (href: string) => void) {
+      engine.emitInternalLink = listener;
     },
     onKeyDown(listener: (event: KeyboardEvent) => void) {
       engine.emitKeyDown = listener;
@@ -710,6 +714,33 @@ describe('EpubViewer', () => {
     expect(engine.next).toHaveBeenCalledOnce();
     fireEvent.keyDown(slider, { key: 'PageDown' });
     expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml');
+  });
+
+  it('follows an internal book link, remembers where it came from, and returns', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 3,
+        totalPages: 4,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 38,
+        fraction: 0.25,
+      }),
+    );
+
+    act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml'));
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+    const chip = await screen.findByTestId('reader-back-chip');
+    expect(chip).toHaveTextContent('Back to One, page 3');
+
+    fireEvent.click(chip);
+    expect(engine.displayed.at(-1)).toBe(CFI);
+    await waitFor(() => expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument());
   });
 
   it('turns pages from the page edges, swipes, and Space, never over text', async () => {

@@ -78,6 +78,8 @@ export interface EpubHandle {
   ): Promise<readonly EpubSearchMatch[]>;
   /** Shows a CFI or chapter, or the first chapter with no target. Rejects if it cannot. */
   display(target?: string): Promise<void>;
+  /** A click on an internal book link, as the href epub.js resolved against the book. */
+  onInternalLink(listener: (href: string) => void): void;
   /** The spine position of a chapter file, or -1. */
   spineIndexOf(href: string): number;
   /** The chapter file at a spine position. */
@@ -451,6 +453,7 @@ export async function openEpubDocument(
 
   let selectionListener: (selection: EpubSelection | null) => void = () => undefined;
   let locationListener: (location: EpubLocation) => void = () => undefined;
+  let internalLinkListener: (href: string) => void = () => undefined;
   let keyDownListener: (event: KeyboardEvent) => void = () => undefined;
   let gestureListener: (sample: PageGestureSample) => void = () => undefined;
   let wheelListener: (wheel: WheelSample) => boolean = () => false;
@@ -461,6 +464,33 @@ export async function openEpubDocument(
 
   rendition.hooks.content.register((contents: Contents) => {
     contents.document.body?.classList.toggle('epubjs-scrolled', currentMode === 'scroll');
+    // epub.js puts a click handler on every relative link that calls `display()`
+    // directly, before the viewer hears about it, so an internal link would jump
+    // without joining the reader's jump history or offering the way back. Capture
+    // the click first and let the viewer navigate. Absolute links keep their own
+    // behaviour (epub.js already sends them to a new tab).
+    contents.document.addEventListener(
+      'click',
+      (event: MouseEvent) => {
+        if (event.button !== 0) return;
+        const target = event.target as Element | null;
+        const anchor = target?.closest?.('a[href]') ?? null;
+        const raw = anchor?.getAttribute('href') ?? '';
+        if (!raw || /^[a-z][a-z0-9+.-]*:/.test(raw) || raw.startsWith('//')) return;
+        let href: URL;
+        try {
+          const base = new URL(contents.document.baseURI);
+          href = new URL(raw, base);
+          if (href.origin !== base.origin) return;
+        } catch {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        internalLinkListener(`${href.pathname}${href.search}${href.hash}`);
+      },
+      true,
+    );
     // `selected` only reports new selections, not one that has been cleared.
     contents.document.addEventListener('selectionchange', () => {
       const selection = contents.window.getSelection();
@@ -919,6 +949,9 @@ export async function openEpubDocument(
       resizeTo(width, height, pendingTarget ?? currentCfi),
     onSelection(listener) {
       selectionListener = listener;
+    },
+    onInternalLink(listener) {
+      internalLinkListener = listener;
     },
     onLocation(listener) {
       locationListener = listener;

@@ -93,6 +93,17 @@
   }
 }
 
+/*
+ * epub.js sets `visibility: visible` inline on its `.epub-view` and on the iframe
+ * inside it. That inline value beats the `visibility: hidden` an inactive tab
+ * panel would otherwise pass down, so a background EPUB keeps painting over the
+ * active reader and swallowing its clicks. `visibility` rather than `display`
+ * keeps the frame's layout and scroll offset alive for when the tab returns.
+ */
+[role='tabpanel'][inert] :is(.epub-view, iframe) {
+  visibility: hidden !important;
+}
+
 /* Source-excerpt pulse played by readers when they complete a jump. */
 @keyframes anchor-pulse {
   0%,
