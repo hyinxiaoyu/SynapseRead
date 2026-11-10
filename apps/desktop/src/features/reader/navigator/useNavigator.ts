@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import type { DocumentFormat } from '@/types/domain';
 
@@ -66,9 +66,9 @@ export interface NavigatorController {
   /** Opens the sidebar on `tab`. */
   show: (tab: NavigatorTab) => void;
   setWidth: (width: number) => void;
-  /** A query started: show its results, remembering what was there before. */
+  /** A query started: its results take over the sidebar if it is open. */
   beginSearch: () => void;
-  /** The query was cleared: put back what search replaced. */
+  /** The query was cleared: the view search replaced comes back. */
   endSearch: () => void;
   /** Notes a deletion from the sidebar, so ⌘Z restores the most recent kind first. */
   recordDeletion: (kind: DeletedKind) => void;
@@ -97,9 +97,8 @@ export function useNavigator(
   );
   const [dimReadChapters, setDimState] = useState(() => readStored().dimReadChapters === true);
   const [deletions, setDeletions] = useState<readonly DeletedKind[]>([]);
-  const [beforeSearch, setBeforeSearch] = useState<{ open: boolean; tab: NavigatorTab } | null>(
-    null,
-  );
+  /** The last tab that was not Search, so clearing a query can put it back. */
+  const lastTab = useRef<NavigatorTab>(tab);
 
   const rememberFormat = useCallback(
     (patch: StoredFormatPrefs) => {
@@ -115,7 +114,7 @@ export function useNavigator(
     (next: NavigatorTab) => {
       setTabState(next);
       if (next !== 'search') {
-        setBeforeSearch(null);
+        lastTab.current = next;
         rememberFormat({ tab: next });
       }
     },
@@ -144,20 +143,26 @@ export function useNavigator(
     writeStored((current) => ({ ...current, dimReadChapters: value }));
   }, []);
 
+  /**
+   * A query started. Results replace the current view only when the sidebar is
+   * already open: opening it would resize the page, and a fit-width PDF would
+   * rescale and jump. Otherwise the reader asks for results from the search
+   * field's list button or `view.sidebarSearch`.
+   */
   const beginSearch = useCallback(() => {
-    if (tab === 'search' && open) return;
-    setBeforeSearch((current) => current ?? { open, tab });
-    setOpen(true);
+    if (!open || tab === 'search') return;
     setTabState('search');
   }, [open, tab]);
 
+  /**
+   * The query was cleared. The view search replaced comes back and the sidebar
+   * stays as it is: clearing must not resize the page either, and a sidebar the
+   * reader opened for results stays open.
+   */
   const endSearch = useCallback(() => {
     if (tab !== 'search') return;
-    const previous = beforeSearch ?? { open, tab: fallbackTab };
-    setBeforeSearch(null);
-    setOpen(previous.open);
-    setTabState(previous.tab === 'search' ? fallbackTab : previous.tab);
-  }, [beforeSearch, fallbackTab, open, tab]);
+    setTabState(lastTab.current);
+  }, [tab]);
 
   return {
     open,

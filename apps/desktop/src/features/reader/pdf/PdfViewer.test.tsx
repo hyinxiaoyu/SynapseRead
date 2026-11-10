@@ -799,6 +799,9 @@ describe('PdfViewer', () => {
     // Search for "First line of page", which matches all 5 pages.
     fireEvent.change(searchInput, { target: { value: 'First line of page' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 5'));
+    // Typing leaves the sidebar alone, so the field's list button opens the results.
+    expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Show search results' }));
     const resultItems = screen.getAllByTestId('search-result-item');
     expect(resultItems).toHaveLength(5);
     // Grouped by page in the sidebar, with the match in bold.

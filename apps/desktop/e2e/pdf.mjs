@@ -496,4 +496,31 @@ export async function pdfFlow(page) {
     'PDF continuous display mode restored',
   );
   await page.hideSidebar();
+
+  // Find keeps the reader's place (#44): with the sidebar closed, typing must not
+  // open it, because opening it rescales a fit-width page and jumps.
+  await scrollToPage(page, 0);
+  await page.waitFor(`${pageField} === '1'`, 'PDF back on page 1 before searching');
+  const sidebarShown = `[...document.querySelectorAll('[data-testid="navigator-sidebar"]')].some((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  await page.setInputValue('[data-testid="search-input"]', '汉字');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
+    'PDF search with the sidebar closed',
+  );
+  await page.waitFor(`!${sidebarShown}`, 'the sidebar to stay closed while typing');
+  await page.waitFor(`${pageField} === '5'`, 'the search to reach page 5 with the sidebar closed');
+  // A search is one trip: one history entry, and a chip back to where it started.
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="reader-back-chip"]')?.textContent.includes('Back to page 1')`,
+    'a Back chip naming where the search started',
+  );
+  await page.clickButton('Show search results');
+  await page.waitFor(sidebarShown, 'the search results to open on request');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="search-result-location"]')?.textContent === 'Page 5'`,
+    'PDF search result location for page 5',
+  );
+  await page.leaveSearch();
+  // Clearing the query leaves the sidebar as the reader left it.
+  await page.waitFor(sidebarShown, 'the sidebar to stay open after the search is cleared');
 }

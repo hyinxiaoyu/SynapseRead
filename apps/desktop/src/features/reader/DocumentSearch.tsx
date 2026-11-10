@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Search, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, List, Search, X } from 'lucide-react';
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
@@ -14,6 +14,12 @@ import { cn } from '@/lib/utils';
 
 export const SEARCH_HIGHLIGHT_ID = '__search_active__';
 export const SEARCH_HIGHLIGHT_COLOR = '#fb923c';
+/**
+ * How long typing must pause before the document is scanned. A whole-file search
+ * cannot be cancelled once it starts (TXT runs it synchronously), so every
+ * keystroke would otherwise cost a full pass and a jump.
+ */
+export const SEARCH_DEBOUNCE_MS = 200;
 
 export interface DocumentSearchResultItem {
   id: string;
@@ -82,8 +88,21 @@ export type RunDocumentSearch<TMatch> = (
 export interface UseDocumentSearchOptions<TMatch extends DocumentSearchResultItem> {
   isActive: boolean;
   runSearch: RunDocumentSearch<TMatch>;
-  onNavigateToMatch: (match: TMatch, index: number) => void;
+  /**
+   * Shows a match. `trip` changes when a new search runs, and not between the
+   * steps of one search: a reader remembers one place per trip, not per match.
+   */
+  onNavigateToMatch: (match: TMatch, index: number, trip: number) => void;
   searchRevision?: unknown;
+  /** How long typing must pause before the document is scanned. */
+  debounceMs?: number;
+  /**
+   * The index of the first match at or after the reading position, or `-1` when
+   * none of `matches` is. A search starts there and wraps to the first match only
+   * once it has finished, so a match further on is never skipped. Only a reader
+   * may compare positions.
+   */
+  findSearchStart?: (matches: readonly TMatch[]) => number;
 }
 
 export interface DocumentSearchController<TMatch extends DocumentSearchResultItem> {
@@ -115,6 +134,8 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
   runSearch,
   onNavigateToMatch,
   searchRevision,
+  debounceMs = SEARCH_DEBOUNCE_MS,
+  findSearchStart,
 }: UseDocumentSearchOptions<TMatch>): DocumentSearchController<TMatch> {
   const [focusNonce, setFocusNonce] = useState(0);
   const [query, setQueryState] = useState('');
@@ -125,11 +146,45 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
 
   const abortRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
-  const latestRef = useRef({ runSearch, onNavigateToMatch, query, caseSensitive, status });
+  /** Bumped per search run, so a reader records one history entry per search. */
+  const tripRef = useRef(0);
+  const debounceRef = useRef<number | null>(null);
+  const latestRef = useRef({
+    runSearch,
+    onNavigateToMatch,
+    findSearchStart,
+    query,
+    caseSensitive,
+    status,
+  });
 
   useEffect(() => {
-    latestRef.current = { runSearch, onNavigateToMatch, query, caseSensitive, status };
+    latestRef.current = {
+      runSearch,
+      onNavigateToMatch,
+      findSearchStart,
+      query,
+      caseSensitive,
+      status,
+    };
   });
+
+  const cancelPending = useCallback(() => {
+    if (debounceRef.current === null) return;
+    window.clearTimeout(debounceRef.current);
+    debounceRef.current = null;
+  }, []);
+
+  /** The match a search starts at, or null while that cannot be known yet. */
+  const pickStart = useCallback((matches: readonly TMatch[], complete: boolean): number | null => {
+    if (matches.length === 0) return null;
+    const atOrAfter = latestRef.current.findSearchStart?.(matches) ?? 0;
+    if (atOrAfter >= 0 && atOrAfter < matches.length) return atOrAfter;
+    // Nothing at or after the reading position, so the search wraps to the start
+    // of the document — but only once every match is known, or a match further on
+    // would be skipped.
+    return complete ? 0 : null;
+  }, []);
 
   const executeSearch = useCallback(
     (nextQuery: string, nextCaseSensitive: boolean, autoNavigate: boolean) => {
@@ -145,6 +200,8 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
         return;
       }
 
+      tripRef.current += 1;
+      const trip = tripRef.current;
       const controller = new AbortController();
       abortRef.current = controller;
       setStatus('searching');
@@ -152,27 +209,31 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
       setActiveIndex(-1);
 
       const isCurrent = () => !controller.signal.aborted && runIdRef.current === runId;
-      // The first match is shown as soon as it is found, not when the last page is read.
+      // The match the search starts at is shown as soon as it is found, not when
+      // the last page is read.
       let navigated = false;
-      const show = (matches: readonly TMatch[]) => {
+      const show = (matches: readonly TMatch[], complete: boolean) => {
         setResults(matches);
-        const first = matches[0];
-        if (navigated || !first) return;
+        if (navigated) return;
+        const start = pickStart(matches, complete);
+        if (start === null) return;
+        const startMatch = matches[start];
+        if (!startMatch) return;
         navigated = true;
-        setActiveIndex(0);
-        if (autoNavigate) latestRef.current.onNavigateToMatch(first, 0);
+        setActiveIndex(start);
+        if (autoNavigate) latestRef.current.onNavigateToMatch(startMatch, start, trip);
       };
 
       Promise.resolve()
         .then(() =>
           latestRef.current.runSearch(nextQuery, nextCaseSensitive, controller.signal, (soFar) => {
-            if (isCurrent()) show(soFar);
+            if (isCurrent()) show(soFar, false);
           }),
         )
         .then((matches) => {
           if (!isCurrent()) return;
           abortRef.current = null;
-          show(matches);
+          show(matches, true);
           if (matches.length === 0) setActiveIndex(-1);
           setStatus('done');
         })
@@ -184,56 +245,78 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
           setStatus('done');
         });
     },
-    [],
+    [pickStart],
   );
 
   const cancelSearch = useCallback(() => {
+    cancelPending();
     if (!abortRef.current) return;
     runIdRef.current += 1;
     abortRef.current.abort();
     abortRef.current = null;
     setStatus('cancelled');
-  }, []);
+  }, [cancelPending]);
 
   const focusSearch = useCallback(() => {
     setFocusNonce((nonce) => nonce + 1);
   }, []);
 
+  /** Runs a search once typing has paused, so a burst of keys scans once. */
+  const searchSoon = useCallback(
+    (nextQuery: string, nextCaseSensitive: boolean) => {
+      cancelPending();
+      if (debounceMs <= 0) {
+        executeSearch(nextQuery, nextCaseSensitive, true);
+        return;
+      }
+      debounceRef.current = window.setTimeout(() => {
+        debounceRef.current = null;
+        executeSearch(nextQuery, nextCaseSensitive, true);
+      }, debounceMs);
+    },
+    [cancelPending, debounceMs, executeSearch],
+  );
+
   const setQuery = useCallback(
     (nextQuery: string) => {
       setQueryState(nextQuery);
-      executeSearch(nextQuery, caseSensitive, true);
+      searchSoon(nextQuery, caseSensitive);
     },
-    [caseSensitive, executeSearch],
+    [caseSensitive, searchSoon],
   );
 
   const clearSearch = useCallback(() => {
+    cancelPending();
     setQueryState('');
     executeSearch('', caseSensitive, false);
-  }, [caseSensitive, executeSearch]);
+  }, [cancelPending, caseSensitive, executeSearch]);
 
   const findSelection = useCallback(
     (text: string) => {
       const trimmed = collapseWhitespace(text).trim();
       if (!trimmed) return;
-      setQuery(trimmed);
+      // An explicit command, not typing: it searches now.
+      cancelPending();
+      setQueryState(trimmed);
+      executeSearch(trimmed, caseSensitive, true);
       focusSearch();
     },
-    [focusSearch, setQuery],
+    [cancelPending, caseSensitive, executeSearch, focusSearch],
   );
 
   const toggleCaseSensitive = useCallback(() => {
     const next = !caseSensitive;
     setCaseSensitiveState(next);
+    cancelPending();
     executeSearch(query, next, true);
-  }, [caseSensitive, executeSearch, query]);
+  }, [cancelPending, caseSensitive, executeSearch, query]);
 
   const selectMatch = useCallback(
     (index: number) => {
       const target = results[index];
       if (!target) return;
       setActiveIndex(index);
-      latestRef.current.onNavigateToMatch(target, index);
+      latestRef.current.onNavigateToMatch(target, index, tripRef.current);
     },
     [results],
   );
@@ -275,13 +358,15 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
 
   // Cancel any in-flight search if the user switches away from this document tab.
   useEffect(() => {
-    if (isActive || !abortRef.current) return;
+    if (isActive) return;
+    cancelPending();
+    if (!abortRef.current) return;
     runIdRef.current += 1;
     abortRef.current.abort();
     abortRef.current = null;
     const timer = window.setTimeout(() => setStatus('cancelled'), 0);
     return () => window.clearTimeout(timer);
-  }, [isActive]);
+  }, [cancelPending, isActive]);
 
   // Re-run an active query when the underlying document model finishes loading more content.
   const prevRevision = useRef(searchRevision);
@@ -299,6 +384,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
     () => () => {
       runIdRef.current += 1;
       abortRef.current?.abort();
+      if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
     },
     [],
   );
@@ -350,17 +436,21 @@ export function searchStatusLabel(
 /**
  * The one search field, in the toolbar's trailing group (Preview). It widens on
  * focus; the match count and Previous/Next sit inside it, and Match Case lives
- * in the field's menu. Results list in the Navigator sidebar.
+ * in the field's menu. Results list in the Navigator sidebar, which the field's
+ * list button opens: typing never opens or closes the sidebar by itself.
  */
 export function ToolbarSearchField<TMatch extends DocumentSearchResultItem>({
   search,
   disabled = false,
   onReturnFocus,
+  onShowResults,
 }: {
   search: DocumentSearchController<TMatch>;
   disabled?: boolean;
   /** Esc gives focus back to the page. */
   onReturnFocus?: () => void;
+  /** Opens the Navigator on this search's results. */
+  onShowResults?: () => void;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -498,6 +588,19 @@ export function ToolbarSearchField<TMatch extends DocumentSearchResultItem>({
         </span>
         {search.active && (
           <>
+            {onShowResults && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-5.5 shrink-0"
+                aria-label="Show search results"
+                title="Show search results"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={onShowResults}
+              >
+                <List />
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon"

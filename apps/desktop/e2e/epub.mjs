@@ -408,6 +408,7 @@ export async function epubFlow(page) {
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'back to scroll mode');
 
   // In-document search across unrendered EPUB chapters, CFI highlight, and return.
+  // The sidebar is already open, so the results take over its view (#44).
   await page.setInputValue('[data-testid="search-input"]', 'quick brown fox');
   await page.waitFor(
     `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '1 of 1'`,
@@ -425,6 +426,11 @@ export async function epubFlow(page) {
   await page.clickButton('Return to previous location');
   await page.waitFor(chapterIs('Chapter Two'), 'returning from EPUB search jump to Chapter Two');
   await page.leaveSearch();
+  // Clearing the query puts the view back and leaves the sidebar open.
+  await page.waitFor(
+    `[...document.querySelectorAll('[data-testid="navigator-sidebar"]')].some((e) => e.checkVisibility({ visibilityProperty: true }))`,
+    'the sidebar to stay open after the search is cleared',
+  );
 
   // Independent bookmarks in EPUB: bookmark Chapter Two, jump to Chapter One, jump back via bookmark, and remove.
   await page.clickButton('Bookmark current location');
