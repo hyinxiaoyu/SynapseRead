@@ -12,6 +12,7 @@ import {
   fontStack,
   FONT_FACES,
   PAGE_PALETTES,
+  pdfCanvasFilter,
   readerChromeStyle,
   resolveReadingTheme,
 } from './themes';
@@ -121,6 +122,12 @@ describe('reading themes', () => {
       expect(style['--muted-foreground']).toBe(CHROME_PALETTES[theme]?.mutedForeground);
       expect(style.colorScheme).toBe(PAGE_PALETTES[theme].colorScheme);
     }
+  });
+
+  it('tints PDF canvases for Dark and Sepia, and leaves Light paper alone', () => {
+    expect(pdfCanvasFilter('light')).toBeUndefined();
+    expect(pdfCanvasFilter('dark')).toContain('invert');
+    expect(pdfCanvasFilter('sepia')).toContain('sepia');
   });
 
   it('keeps publisher fonts for Original and gives every other face fallbacks', () => {

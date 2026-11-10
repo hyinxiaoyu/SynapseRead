@@ -225,16 +225,88 @@ function swatchBackground(theme: ReadingTheme): string {
   return PAGE_PALETTES[theme].background;
 }
 
+/** The theme row every reader shows, including PDF, whose pages take a tint. */
+function ThemeChoices({
+  theme,
+  onChange,
+}: {
+  theme: ReadingTheme;
+  onChange: (theme: ReadingTheme) => void;
+}) {
+  const id = useId();
+  const themeIndex = THEMES.findIndex((candidate) => candidate.value === theme);
+  const themeRadio = useRadioGroup(
+    THEMES.map((candidate) => candidate.value),
+    themeIndex,
+    onChange,
+  );
+  return (
+    <div>
+      <SectionLabel id={id}>Theme</SectionLabel>
+      <div role="radiogroup" aria-labelledby={id} className="flex justify-between px-1">
+        {THEMES.map((option, index) => {
+          const checked = index === themeIndex;
+          return (
+            <button
+              key={option.value}
+              {...themeRadio(index)}
+              aria-label={option.label}
+              data-testid={`theme-swatch-${option.value}`}
+              className="group flex w-14 flex-col items-center gap-1 rounded-md py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <span
+                aria-hidden="true"
+                className={cn(
+                  'flex size-8 items-center justify-center rounded-full border border-black/20 shadow-xs',
+                  checked && 'ring-2 ring-primary ring-offset-2 ring-offset-background',
+                )}
+                style={{
+                  background: swatchBackground(option.value),
+                  color:
+                    option.value === 'auto'
+                      ? PAGE_PALETTES.light.text
+                      : PAGE_PALETTES[option.value].text,
+                }}
+              >
+                {checked && (
+                  <Check
+                    className="size-4"
+                    strokeWidth={3}
+                    style={
+                      option.value === 'auto'
+                        ? { color: '#fff', mixBlendMode: 'difference' }
+                        : undefined
+                    }
+                  />
+                )}
+              </span>
+              <span
+                aria-hidden="true"
+                className={cn(
+                  'text-[11px] text-muted-foreground',
+                  checked && 'font-semibold text-foreground',
+                )}
+              >
+                {option.label}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function AppearancePanel({
   preferences,
   format,
   onChange,
 }: {
   preferences: ReadingPreferences;
-  format: 'epub' | 'txt';
+  format: 'epub' | 'txt' | 'pdf';
   onChange: (patch: Partial<ReadingPreferences>) => void;
 }) {
-  const ids = { theme: useId(), font: useId(), customize: useId() };
+  const ids = { font: useId(), customize: useId() };
   const [customizing, setCustomizing] = useState(false);
   const canDecrease = preferences.fontSize > MIN_FONT_SIZE;
   const canIncrease = preferences.fontSize < MAX_FONT_SIZE;
@@ -243,18 +315,37 @@ function AppearancePanel({
     if (next !== preferences.fontSize) onChange({ fontSize: next });
   };
 
-  const themeIndex = THEMES.findIndex((theme) => theme.value === preferences.theme);
-  const themeRadio = useRadioGroup(
-    THEMES.map((theme) => theme.value),
-    themeIndex,
-    (theme) => onChange({ theme }),
-  );
   const fontIndex = FONT_FACES.findIndex((face) => face.value === preferences.fontFamily);
   const fontRadio = useRadioGroup(
     FONT_FACES.map((face) => face.value),
     fontIndex,
     (fontFamily) => onChange({ fontFamily }),
   );
+
+  // A PDF page is a bitmap: text size, page width, and fonts would do nothing.
+  // Theme decides the tint, and page turns use the PDF display modes.
+  if (format === 'pdf') {
+    return (
+      <div className="flex flex-col gap-3.5">
+        <ThemeChoices theme={preferences.theme} onChange={(theme) => onChange({ theme })} />
+        <TextChoices
+          label="Page turn"
+          options={PAGE_TRANSITIONS}
+          checkedIndex={PAGE_TRANSITIONS.findIndex(
+            (transition) => transition.value === preferences.pageTransition,
+          )}
+          onSelect={(pageTransition) => onChange({ pageTransition })}
+        />
+        <Switch
+          label="Tint PDF pages"
+          description="Darkens the page to match the theme. Captures keep the original colors."
+          checked={preferences.tintPdfPages}
+          testId="tint-pdf-switch"
+          onChange={(tintPdfPages) => onChange({ tintPdfPages })}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -288,59 +379,7 @@ function AppearancePanel({
         </button>
       </div>
 
-      <div>
-        <SectionLabel id={ids.theme}>Theme</SectionLabel>
-        <div role="radiogroup" aria-labelledby={ids.theme} className="flex justify-between px-1">
-          {THEMES.map((theme, index) => {
-            const checked = index === themeIndex;
-            return (
-              <button
-                key={theme.value}
-                {...themeRadio(index)}
-                aria-label={theme.label}
-                data-testid={`theme-swatch-${theme.value}`}
-                className="group flex w-14 flex-col items-center gap-1 rounded-md py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    'flex size-8 items-center justify-center rounded-full border border-black/20 shadow-xs',
-                    checked && 'ring-2 ring-primary ring-offset-2 ring-offset-background',
-                  )}
-                  style={{
-                    background: swatchBackground(theme.value),
-                    color:
-                      theme.value === 'auto'
-                        ? PAGE_PALETTES.light.text
-                        : PAGE_PALETTES[theme.value].text,
-                  }}
-                >
-                  {checked && (
-                    <Check
-                      className="size-4"
-                      strokeWidth={3}
-                      style={
-                        theme.value === 'auto'
-                          ? { color: '#fff', mixBlendMode: 'difference' }
-                          : undefined
-                      }
-                    />
-                  )}
-                </span>
-                <span
-                  aria-hidden="true"
-                  className={cn(
-                    'text-[11px] text-muted-foreground',
-                    checked && 'font-semibold text-foreground',
-                  )}
-                >
-                  {theme.label}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <ThemeChoices theme={preferences.theme} onChange={(theme) => onChange({ theme })} />
 
       <TextChoices
         label="Page width"
@@ -480,7 +519,7 @@ export function AppearanceMenu({
   onClose: () => void;
   preferences: ReadingPreferences;
   onChange: (patch: Partial<ReadingPreferences>) => void;
-  format: 'epub' | 'txt';
+  format: 'epub' | 'txt' | 'pdf';
   disabled?: boolean;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);

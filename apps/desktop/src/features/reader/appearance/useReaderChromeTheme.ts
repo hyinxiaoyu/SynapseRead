@@ -6,21 +6,21 @@ import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { ResolvedReadingTheme } from '@/types/domain';
 
 /**
- * The reading theme the reader's chrome takes: the active document's, when it
- * reflows. PDF pages keep their own colors, so their chrome follows the system,
- * as Preview's does. The MindMap and inspector never take it.
+ * The reading theme the reader's chrome takes: the active document's, whatever
+ * its format. A PDF page keeps its own colors unless the reader turns on "Tint
+ * PDF pages", which is off by default because tinting can spoil figure-heavy
+ * documents; its chrome still follows the chosen theme, so the window reads as
+ * one. With no document open the chrome stays the system's. The MindMap and
+ * inspector never take it.
  */
 export function useReaderChromeTheme(): {
   theme: ResolvedReadingTheme | null;
   style: CSSProperties | undefined;
 } {
-  const reflowable = useStudySyncStore((state) => {
-    const active = state.documents.find((document) => document.id === state.activeDocumentId);
-    return active !== undefined && active.format !== 'pdf';
-  });
+  const hasActiveDocument = useStudySyncStore((state) => state.activeDocumentId !== null);
   const resolved = useResolvedReadingTheme(
     useStudySyncStore((state) => state.readingPreferences.theme),
   );
-  const theme = reflowable ? resolved : null;
+  const theme = hasActiveDocument ? resolved : null;
   return { theme, style: theme ? readerChromeStyle(theme) : undefined };
 }

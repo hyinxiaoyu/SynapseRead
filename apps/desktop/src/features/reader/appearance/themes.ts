@@ -162,6 +162,24 @@ export function pageSurfaceStyle(theme: ResolvedReadingTheme): CSSProperties {
   };
 }
 
+/**
+ * The CSS filter that tints a rendered PDF page canvas for a theme. Light keeps
+ * the page's own paper, so it has none. The filter sits on the canvas element and
+ * leaves the bitmap alone, so a rectangle capture still saves the original colors.
+ */
+export function pdfCanvasFilter(theme: ResolvedReadingTheme): string | undefined {
+  switch (theme) {
+    case 'dark':
+      // Invert the paper to near-black and the ink to near-white, then put the
+      // hues back so figures and photographs do not read as negatives.
+      return 'invert(0.91) hue-rotate(180deg)';
+    case 'sepia':
+      return 'sepia(0.9) brightness(0.94)';
+    default:
+      return undefined;
+  }
+}
+
 // CJK faces follow each Latin stack, so mixed text keeps a matching style.
 const SERIF_FALLBACK = "Georgia, 'Songti SC', 'PingFang SC', serif";
 const SANS_FALLBACK = "system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', 'PingFang SC', sans-serif";

@@ -294,6 +294,10 @@ export interface ReadingPreferences {
   epubReadingMode: EpubReadingMode;
   /** Also used by PDF single and two-page modes. */
   pageTransition: PageTransition;
+  /** Tints PDF page canvases for Dark and Sepia; a capture still saves the original bitmap. */
+  tintPdfPages: boolean;
+  /** Whether entering focus mode also enters full screen. */
+  focusModeFullScreen: boolean;
 }
 
 export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
@@ -307,6 +311,8 @@ export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
   dimImages: false,
   epubReadingMode: 'spread',
   pageTransition: 'slide',
+  tintPdfPages: false,
+  focusModeFullScreen: false,
 };
 
 /**

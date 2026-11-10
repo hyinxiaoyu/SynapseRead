@@ -317,11 +317,49 @@ export async function epubFlow(page) {
       '[data-testid="unified-toolbar"], [aria-label="Document reader"]',
       `EPUB ${theme} chrome`,
     );
+    // The fixture's heading sets #204080, which is 1.78:1 on the Dark page.
+    // Only colors below AA are replaced; the same blue is legible on Light and Sepia.
+    const expectedInk = theme === 'Dark' ? 'rgb(228, 228, 231)' : 'rgb(32, 64, 128)';
+    const headingInk = await page.waitFor(
+      `(() => {
+        const book = ${frameDocument};
+        const heading = book?.querySelector('h1');
+        const body = book?.body;
+        if (!heading || !body) return null;
+        const color = getComputedStyle(heading).color;
+        if (color !== ${JSON.stringify(expectedInk)}) return null;
+        const channel = (c) => {
+          const v = c / 255;
+          return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+        };
+        const luminance = (value) => {
+          const parts = (value.match(/[\\d.]+/g) || []).slice(0, 3).map(Number);
+          const [r, g, b] = parts.map(channel);
+          return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const ink = luminance(color);
+        const paper = luminance(getComputedStyle(body).backgroundColor);
+        return {
+          color,
+          ratio: (Math.max(ink, paper) + 0.05) / (Math.min(ink, paper) + 0.05),
+        };
+      })()`,
+      `EPUB ${theme} heading at ${expectedInk}`,
+    );
+    assert(
+      headingInk.ratio >= 4.5,
+      `EPUB ${theme} heading meets AA: ${headingInk.color} at ${headingInk.ratio.toFixed(2)}:1`,
+    );
   }
   await page.clickButton('Auto');
   await page.waitFor(
     `${visibleViewer}.dataset.resolvedTheme === 'light'`,
     'Auto follows the system',
+  );
+  // Leaving the tinted theme puts the book's own color back.
+  await page.waitFor(
+    `getComputedStyle(${frameDocument}.querySelector('h1')).color === 'rgb(32, 64, 128)'`,
+    'the author color after leaving Dark',
   );
   await page.press('Escape');
   await page.waitFor(

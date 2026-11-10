@@ -32,6 +32,9 @@ import {
   localHighlights,
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
+import { AppearanceMenu, useAppearancePanel } from '@/features/reader/appearance/AppearancePopover';
+import { PAGE_PALETTES, pdfCanvasFilter } from '@/features/reader/appearance/themes';
+import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
   annotationAtPoint,
   focusInReaderPopover,
@@ -84,16 +87,18 @@ import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
-import type {
-  Annotation,
-  AnnotationStyle,
-  Bookmark,
-  DocumentViewerProps,
-  NormalizedRect,
-  PdfAnchor,
-  PdfPageSpan,
-  ReaderHighlight,
-  ReaderSelection,
+import {
+  DEFAULT_READING_PREFERENCES,
+  type Annotation,
+  type AnnotationStyle,
+  type Bookmark,
+  type DocumentViewerProps,
+  type NormalizedRect,
+  type PdfAnchor,
+  type PdfPageSpan,
+  type ReaderHighlight,
+  type ReaderSelection,
+  type ReadingPreferences,
 } from '@/types/domain';
 
 import {
@@ -130,6 +135,17 @@ const MAX_ZOOM_SCALE = 4;
 const ZOOM_STEP = 0.25;
 const THUMBNAIL_WIDTH_PX = 92;
 const THUMBNAIL_ROW_HEIGHT_PX = 148;
+
+/**
+ * How the pages are tinted for a reading theme. The filter sits on each canvas
+ * and leaves the bitmap alone, so a rectangle capture still saves the page's
+ * original colors.
+ */
+interface PdfTint {
+  filter: string;
+  /** The theme's paper, behind a page whose PDF paints nothing. */
+  background: string;
+}
 
 export type PdfZoomMode = 'fit-width' | 'fit-page' | 'actual-size' | 'custom';
 export type PdfDisplayMode = 'continuous' | 'single' | 'two-page';
@@ -359,6 +375,7 @@ function PdfThumbnailItem({
   pageIndex,
   pageSize,
   rotation,
+  tint,
   isActive,
   onSelect,
 }: {
@@ -366,6 +383,7 @@ function PdfThumbnailItem({
   pageIndex: number;
   pageSize: PageSize;
   rotation: PdfRotation;
+  tint: PdfTint | null;
   isActive: boolean;
   onSelect: (pageIndex: number) => void;
 }) {
@@ -405,10 +423,18 @@ function PdfThumbnailItem({
       )}
     >
       <div
-        className="overflow-hidden rounded border bg-white shadow-xs"
-        style={{ width: displayWidth, height: displayHeight }}
+        className="overflow-hidden rounded border shadow-xs"
+        style={{
+          width: displayWidth,
+          height: displayHeight,
+          backgroundColor: tint?.background ?? '#ffffff',
+        }}
       >
-        <canvas ref={canvasRef} className="block size-full object-contain" />
+        <canvas
+          ref={canvasRef}
+          className="block size-full object-contain"
+          style={tint ? { filter: tint.filter } : undefined}
+        />
       </div>
       <span className="tabular-nums">{pageIndex + 1}</span>
     </button>
@@ -419,6 +445,7 @@ function PdfThumbnailsList({
   engine,
   sizes,
   rotation,
+  tint,
   currentPageIndex,
   filter,
   onSelectPage,
@@ -426,6 +453,7 @@ function PdfThumbnailsList({
   engine: PdfDocumentHandle;
   sizes: readonly PageSize[];
   rotation: PdfRotation;
+  tint: PdfTint | null;
   currentPageIndex: number;
   /** Page numbers containing this text, as Preview's sidebar filter does. */
   filter: string;
@@ -477,6 +505,7 @@ function PdfThumbnailsList({
                 pageIndex={pageIndex}
                 pageSize={sizes[pageIndex] ?? sizes[0] ?? DEFAULT_PAGE_SIZE}
                 rotation={rotation}
+                tint={tint}
                 isActive={pageIndex === currentPageIndex}
                 onSelect={onSelectPage}
               />
@@ -493,6 +522,7 @@ function PdfPage({
   pageIndex,
   scale,
   rotation,
+  tint,
   highlights,
   pulsingAnnotationId,
   captureMode,
@@ -505,6 +535,7 @@ function PdfPage({
   pageIndex: number;
   scale: number;
   rotation: PdfRotation;
+  tint: PdfTint | null;
   highlights: readonly ReaderHighlight[];
   pulsingAnnotationId: string | null;
   captureMode: boolean;
@@ -590,10 +621,22 @@ function PdfPage({
     <div
       data-page-index={pageIndex}
       data-page-rotation={rotation}
-      className="pdf-page relative bg-white shadow"
-      style={{ '--scale-factor': scale, width: '100%', height: '100%' } as CSSProperties}
+      data-page-tint={tint ? 'on' : undefined}
+      className="pdf-page relative shadow"
+      style={
+        {
+          '--scale-factor': scale,
+          width: '100%',
+          height: '100%',
+          backgroundColor: tint?.background ?? '#ffffff',
+        } as CSSProperties
+      }
     >
-      <canvas ref={canvasRef} className="block size-full" />
+      <canvas
+        ref={canvasRef}
+        className="block size-full"
+        style={tint ? { filter: tint.filter } : undefined}
+      />
 
       {pageAnnotations.embeddedAnnotations.map((annot) =>
         annot.rects.map((rawRect, index) => {
@@ -620,7 +663,8 @@ function PdfPage({
                   ? 'border-b-2 border-amber-600/80'
                   : annot.subtype === 'StrikeOut'
                     ? 'border-b-2 border-rose-600/80'
-                    : 'mix-blend-multiply',
+                    : // Multiply goes black on a tinted page; keep the mark's own color there.
+                      tint === null && 'mix-blend-multiply',
               )}
               style={{
                 left: `${rect.x * 100}%`,
@@ -649,7 +693,10 @@ function PdfPage({
               data-annotation-id={annotationId}
               data-annotation-style={style}
               className={cn(
-                'pointer-events-none absolute mix-blend-multiply',
+                'pointer-events-none absolute',
+                // Multiply blends a translucent highlight into white paper. On an
+                // inverted page it would go black, so the tint uses normal blending.
+                tint === null && 'mix-blend-multiply',
                 pulsingAnnotationId === annotationId && 'anchor-pulse',
               )}
               style={
@@ -788,6 +835,7 @@ function PdfPages({
   onJumpHandled,
   onCursorChange,
   preferences,
+  onPreferencesChange,
   bookmarks,
   onAddBookmark,
   onRemoveBookmark,
@@ -806,6 +854,23 @@ function PdfPages({
   const { width, height } = useSettledSize(scrollRef);
   const sizes = usePageSizes(engine);
   const navigator = useNavigator('pdf', ['thumbnails', 'contents', 'notes', 'bookmarks']);
+  const [localPreferences, setLocalPreferences] = useState<ReadingPreferences>(
+    () => preferences ?? DEFAULT_READING_PREFERENCES,
+  );
+  const effectivePreferences = preferences ?? localPreferences;
+  const resolvedTheme = useResolvedReadingTheme(effectivePreferences.theme);
+  const preferencesPanel = useAppearancePanel();
+  // Off by default: a figure-heavy PDF should never invert unexpectedly. Light
+  // keeps the page's own paper even when the switch is on.
+  const tintFilter = effectivePreferences.tintPdfPages ? pdfCanvasFilter(resolvedTheme) : undefined;
+  const tint: PdfTint | null =
+    tintFilter === undefined
+      ? null
+      : { filter: tintFilter, background: PAGE_PALETTES[resolvedTheme].background };
+  const updatePreferences = (patch: Partial<ReadingPreferences>) => {
+    setLocalPreferences((current) => ({ ...(preferences ?? current), ...patch }));
+    onPreferencesChange?.(patch);
+  };
   // Chapters group highlights, name the toolbar subtitle, and tick the scrubber.
   const outline = usePdfOutline(engine, true);
   const outlineNodes = useMemo(() => toPdfOutlineNodes(outline), [outline]);
@@ -1824,6 +1889,7 @@ function PdfPages({
     selectionText: activeSelection?.text ?? null,
     markup,
     popover,
+    appearance: preferencesPanel,
     extra: {
       'view.layoutSingle': { run: () => applyDisplayMode('single') },
       'view.layoutTwoPage': { run: () => applyDisplayMode('two-page') },
@@ -1922,6 +1988,7 @@ function PdfPages({
       data-zoom-mode={zoomMode}
       data-display-mode={displayMode}
       data-rotation={rotation}
+      data-tint-pdf={tint ? resolvedTheme : undefined}
       data-chrome-hidden={chromeHidden || undefined}
     >
       <ReaderToolbar
@@ -2080,6 +2147,14 @@ function PdfPages({
               highlightMode={annotationsController.highlightMode}
               onToggle={markup.toggle}
             />
+            <AppearanceMenu
+              open={preferencesPanel.open}
+              onToggle={preferencesPanel.toggle}
+              onClose={preferencesPanel.close}
+              preferences={effectivePreferences}
+              onChange={updatePreferences}
+              format="pdf"
+            />
             <ToolbarSeparator />
             <BookmarkToggleButton
               bookmarked={bookmarksController.isCurrentBookmarked}
@@ -2136,6 +2211,7 @@ function PdfPages({
                 engine={engine}
                 sizes={sizes}
                 rotation={rotation}
+                tint={tint}
                 currentPageIndex={currentPageIndex}
                 filter={filter}
                 onSelectPage={(pageIndex) => jumpToPage(pageIndex)}
@@ -2244,6 +2320,7 @@ function PdfPages({
                               pageIndex={pageIndex}
                               scale={scaleOf(pageIndex)}
                               rotation={rotation}
+                              tint={tint}
                               highlights={byPage.get(pageIndex) ?? EMPTY_HIGHLIGHTS}
                               pulsingAnnotationId={pulsingAnnotationId}
                               captureMode={captureMode}
