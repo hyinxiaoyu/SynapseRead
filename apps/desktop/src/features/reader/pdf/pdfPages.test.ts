@@ -71,11 +71,28 @@ describe('page labels', () => {
     expect(resolvePageInput('a-1', labels, 6)).toBe(5);
   });
 
-  it('jumps by physical page with # or parentheses, or a number no label claims', () => {
+  it('jumps by physical page with # or parentheses, or by number without labels', () => {
     expect(resolvePageInput('#2', labels, 6)).toBe(1);
     expect(resolvePageInput('(2)', labels, 6)).toBe(1);
-    expect(resolvePageInput('6', labels, 6)).toBe(5);
+    expect(resolvePageInput('#6', labels, 6)).toBe(5);
     expect(resolvePageInput('4', null, 6)).toBe(3);
+  });
+
+  it('rejects a number no label claims, rather than reading it as a physical page', () => {
+    // Physical page 5 is printed 3; reading 5 as that page would put two inputs on it.
+    expect(resolvePageInput('5', labels, 6)).toBeNull();
+    expect(resolvePageInput('6', labels, 6)).toBeNull();
+  });
+
+  it('picks the nearest of duplicate labels, going forward on a tie', () => {
+    // Two sections that each restart at 1.
+    const sections = normalizePageLabels(['1', '2', '3', '1', '2', '3', '4'], 7);
+    expect(resolvePageInput('2', sections, 7, 0)).toBe(1);
+    expect(resolvePageInput('2', sections, 7, 5)).toBe(4);
+    expect(resolvePageInput('1', sections, 7, 6)).toBe(3);
+    expect(resolvePageInput('3', sections, 7, 4)).toBe(5);
+    // Index 1 is equally far from both 1s: forward wins.
+    expect(resolvePageInput('1', ['1', 'x', '1'], 3, 1)).toBe(2);
   });
 
   it('rejects what matches nothing', () => {

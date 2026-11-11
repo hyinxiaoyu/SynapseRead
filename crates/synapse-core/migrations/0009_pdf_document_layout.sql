@@ -8,7 +8,9 @@
 -- partial write leave a document with a layout nobody chose.
 --
 -- A PDF without a row opens with the display and zoom mode of the most recently
--- saved row, so there is no separate "last used" table to keep in step. Saves use
+-- saved row, so there is no separate "last used" table to keep in step. That layout
+-- is written as the PDF's own row the first time it is read, so a PDF reopens in
+-- the layout it was shown even if another PDF's layout changes later. Saves use
 -- `INSERT OR REPLACE`, which gives the newest save the highest rowid: unlike
 -- `updated_at`, that order holds for two saves in the same millisecond.
 --

@@ -693,14 +693,18 @@ export function createMemoryBackend({
       const own = pdfLayouts.get(documentId);
       if (own) return { ...own };
       const latest = [...pdfLayouts.values()].at(-1);
-      if (!latest) return { ...DEFAULT_PDF_LAYOUT };
       // Display and zoom carry over; rotation and the cover page belong to one file.
-      return {
-        ...DEFAULT_PDF_LAYOUT,
-        displayMode: latest.displayMode,
-        zoomMode: latest.zoomMode,
-        scale: latest.scale,
-      };
+      const layout: PdfLayout = latest
+        ? {
+            ...DEFAULT_PDF_LAYOUT,
+            displayMode: latest.displayMode,
+            zoomMode: latest.zoomMode,
+            scale: latest.scale,
+          }
+        : { ...DEFAULT_PDF_LAYOUT };
+      // Core pins the starting layout on first read, so it stops following later saves.
+      pdfLayouts.set(documentId, layout);
+      return { ...layout };
     },
 
     async savePdfLayout(documentId, layout) {

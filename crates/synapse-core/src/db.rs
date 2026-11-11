@@ -785,6 +785,10 @@ impl Database {
     /// The layout `document_id` was last read in. A PDF that has none starts from
     /// the most recently saved layout's display and zoom (see `PdfLayout::inherited`),
     /// or the default when no PDF has saved one yet.
+    ///
+    /// The layout a PDF starts from is stored on this first read. Otherwise an
+    /// inherited layout would keep following whichever PDF changed last, and a PDF
+    /// read without touching the toolbar would reopen in a layout it was never shown.
     pub fn get_pdf_layout(&self, document_id: &str) -> CoreResult<PdfLayout> {
         self.check_pdf_document(document_id)?;
         let own = self
@@ -807,7 +811,11 @@ impl Database {
                 map_pdf_layout,
             )
             .optional()?;
-        Ok(latest.map(|layout| layout.inherited()).unwrap_or_default())
+        let layout = latest.map(|layout| layout.inherited()).unwrap_or_default();
+        // The pinned row becomes the latest, which leaves inheritance unchanged: it
+        // carries the same display and zoom as the row it was inherited from.
+        self.insert_pdf_layout(document_id, &layout)?;
+        Ok(layout)
     }
 
     /// Stores the whole layout for `document_id`, which becomes the one new PDFs
@@ -815,6 +823,11 @@ impl Database {
     pub fn save_pdf_layout(&self, document_id: &str, layout: &PdfLayout) -> CoreResult<PdfLayout> {
         layout.validate()?;
         self.check_pdf_document(document_id)?;
+        self.insert_pdf_layout(document_id, layout)?;
+        self.get_pdf_layout(document_id)
+    }
+
+    fn insert_pdf_layout(&self, document_id: &str, layout: &PdfLayout) -> CoreResult<()> {
         // REPLACE rather than an upsert: the new row's rowid orders it last.
         self.conn.execute(
             "INSERT OR REPLACE INTO pdf_document_layouts
@@ -830,7 +843,7 @@ impl Database {
                 layout.cover_page_alone,
             ],
         )?;
-        self.get_pdf_layout(document_id)
+        Ok(())
     }
 
     fn check_pdf_document(&self, document_id: &str) -> CoreResult<()> {
@@ -2248,9 +2261,11 @@ mod tests {
         assert_eq!(db.get_pdf_layout(&fresh).unwrap(), inherited);
 
         // Saving the first again, within the same millisecond, makes it the latest.
+        // `fresh` has its layout now, so a PDF never read before shows the change.
         db.save_pdf_layout(&first, &two_page_layout()).unwrap();
+        let later = register_pdf(&db, dir.path(), "later.pdf");
         assert_eq!(
-            db.get_pdf_layout(&fresh).unwrap(),
+            db.get_pdf_layout(&later).unwrap(),
             PdfLayout {
                 display_mode: PdfDisplayMode::TwoPage,
                 zoom_mode: PdfZoomMode::FitPage,
@@ -2258,9 +2273,55 @@ mod tests {
                 ..PdfLayout::default()
             }
         );
-        // Documents with their own layout keep it, and reading one writes nothing.
+        // Documents with their own layout keep it.
         assert_eq!(db.get_pdf_layout(&second).unwrap(), single);
+    }
+
+    #[test]
+    fn inherited_layouts_are_pinned_on_first_read() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let first = register_pdf(&db, dir.path(), "first.pdf");
+        let second = register_pdf(&db, dir.path(), "second.pdf");
+        let third = register_pdf(&db, dir.path(), "third.pdf");
+
+        db.save_pdf_layout(&first, &two_page_layout()).unwrap();
+        let inherited = two_page_layout().inherited();
+        assert_eq!(db.get_pdf_layout(&second).unwrap(), inherited);
         assert_eq!(count(&db, "pdf_document_layouts"), 2);
+        // Reading it again writes nothing new.
+        assert_eq!(db.get_pdf_layout(&second).unwrap(), inherited);
+        assert_eq!(count(&db, "pdf_document_layouts"), 2);
+
+        // The first PDF changes; the second was left in Two Pages and stays there.
+        let continuous = PdfLayout {
+            display_mode: PdfDisplayMode::Continuous,
+            ..two_page_layout()
+        };
+        db.save_pdf_layout(&first, &continuous).unwrap();
+        assert_eq!(db.get_pdf_layout(&second).unwrap(), inherited);
+        // A PDF opened after that inherits the change.
+        assert_eq!(db.get_pdf_layout(&third).unwrap(), continuous.inherited());
+    }
+
+    #[test]
+    fn pinning_an_inherited_layout_keeps_what_new_pdfs_inherit() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let first = register_pdf(&db, dir.path(), "first.pdf");
+        let second = register_pdf(&db, dir.path(), "second.pdf");
+        let third = register_pdf(&db, dir.path(), "third.pdf");
+
+        // With nothing saved, the first read pins the default.
+        assert_eq!(db.get_pdf_layout(&first).unwrap(), PdfLayout::default());
+        db.save_pdf_layout(&first, &two_page_layout()).unwrap();
+        // The second's pinned row is now the latest, but it carries the same
+        // display and zoom, so the third still inherits the first's choice.
+        db.get_pdf_layout(&second).unwrap();
+        assert_eq!(
+            db.get_pdf_layout(&third).unwrap(),
+            two_page_layout().inherited()
+        );
     }
 
     #[test]

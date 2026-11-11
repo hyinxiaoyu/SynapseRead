@@ -672,15 +672,31 @@ fn pdf_layout_round_trips_is_inherited_and_persists_across_relaunch() {
     );
     // A PDF with no layout of its own takes the last display and zoom, not the
     // rotation or cover page.
+    let inherited = json!({
+        "displayMode": "two-page",
+        "zoomMode": "custom",
+        "scale": 1.75,
+        "rotation": 0,
+        "coverPageAlone": false,
+    });
     assert_eq!(
         h.ok("get_pdf_layout", json!({ "documentId": fresh["id"] })),
-        json!({
-            "displayMode": "two-page",
-            "zoomMode": "custom",
-            "scale": 1.75,
-            "rotation": 0,
-            "coverPageAlone": false,
-        })
+        inherited
+    );
+    // That first read pins it: a later change to another PDF leaves it alone.
+    let mut continuous = layout.clone();
+    continuous["displayMode"] = json!("continuous");
+    h.ok(
+        "save_pdf_layout",
+        json!({ "documentId": first["id"], "layout": continuous }),
+    );
+    assert_eq!(
+        h.ok("get_pdf_layout", json!({ "documentId": fresh["id"] })),
+        inherited
+    );
+    h.ok(
+        "save_pdf_layout",
+        json!({ "documentId": first["id"], "layout": layout }),
     );
 
     let rejected = |document: &Value, layout: Value| {
@@ -724,6 +740,10 @@ fn pdf_layout_round_trips_is_inherited_and_persists_across_relaunch() {
     assert_eq!(
         next.ok("get_pdf_layout", json!({ "documentId": first["id"] })),
         layout
+    );
+    assert_eq!(
+        next.ok("get_pdf_layout", json!({ "documentId": fresh["id"] })),
+        inherited
     );
 }
 

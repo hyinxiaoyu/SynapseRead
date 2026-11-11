@@ -891,6 +891,39 @@ describe('PDF layouts', () => {
     expect(store.getState().pdfLayouts[firstId]).toEqual(twoPage);
   });
 
+  it('keeps an inherited layout after the PDF it came from changes', async () => {
+    const { backend, store, open } = await setup();
+    const firstId = await open();
+    await store.getState().savePdfLayout(firstId, twoPage);
+    const secondId = await open();
+    await store.getState().loadPdfLayout(secondId);
+    store.getState().closeDocument(secondId);
+    await store.getState().savePdfLayout(firstId, { ...twoPage, displayMode: 'continuous' });
+
+    await store.getState().reopenRecentDocument(secondId);
+    await store.getState().loadPdfLayout(secondId);
+    expect(store.getState().pdfLayouts[secondId]?.displayMode).toBe('two-page');
+    await expect(backend.getPdfLayout(secondId)).resolves.toMatchObject({
+      displayMode: 'two-page',
+    });
+  });
+
+  it('does not cache a layout that finishes loading after its tab closed', async () => {
+    const { backend, store, open } = await setup();
+    const pdfId = await open();
+    let resolve: (layout: PdfLayout) => void = () => {};
+    vi.spyOn(backend, 'getPdfLayout').mockReturnValueOnce(
+      new Promise<PdfLayout>((done) => {
+        resolve = done;
+      }),
+    );
+    const loading = store.getState().loadPdfLayout(pdfId);
+    store.getState().closeDocument(pdfId);
+    resolve(twoPage);
+    await loading;
+    expect(store.getState().pdfLayouts[pdfId]).toBeUndefined();
+  });
+
   it('drops a closed tab’s layout so reopening reads the saved one', async () => {
     const { backend, store, open } = await setup();
     const pdfId = await open();

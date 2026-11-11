@@ -676,20 +676,25 @@ export async function pdfFlow(page) {
   await page.leaveSearch();
   // Clearing the query leaves the sidebar as the reader left it.
   await page.waitFor(sidebarShown, 'the sidebar to stay open after the search is cleared');
-
-  await layoutFlow(page);
 }
 
-/** Each PDF keeps its layout (#51); a new one starts from the last display and zoom. */
-async function layoutFlow(page) {
+/**
+ * Each PDF keeps its layout (#51); a new one starts from the last display and zoom.
+ * A flow of its own, so a fresh browser guarantees the labelled PDF has never been
+ * opened: the picker cycles through the library, and the first read pins a layout.
+ */
+export async function pdfLayoutFlow(page) {
+  await openPdf(page);
   const viewer = `[...document.querySelectorAll('[data-testid="pdf-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
   const control = (testId) =>
     `document.querySelector('[data-testid="unified-toolbar"] [data-testid="${testId}"]')`;
+  // The viewer only reports the cover page in Two Pages, so leave `cover` out otherwise.
   const layoutIs = ({ displayMode, zoomMode, rotation, cover }) =>
     `(() => {
       const data = ${viewer}?.dataset;
       return data?.displayMode === '${displayMode}' && data.zoomMode === '${zoomMode}'
-        && data.rotation === '${rotation}' && data.coverPageAlone === '${cover}';
+        && data.rotation === '${rotation}'
+        && ${cover === undefined ? 'true' : `data.coverPageAlone === '${cover}'`};
     })()`;
   /** Where pages sit on screen: the same top means the same spread. */
   const pageTops = `(() => {
@@ -724,22 +729,10 @@ async function layoutFlow(page) {
   const chosen = { displayMode: 'two-page', zoomMode: 'fit-page', rotation: 90, cover: true };
   await page.waitFor(layoutIs(chosen), 'the chosen layout');
 
-  // Reopen from a clean mount: the store forgets a closed tab, so this reads the backend.
-  await page.evaluate(closeActiveTab);
-  await page.waitFor(`!${visibleScroller}`, 'the PDF tab to close');
-  await openPdf(page);
-  await page.waitFor(layoutIs(chosen), 'reopening in the saved layout');
-  await page.waitFor(
-    `${viewer}.querySelector('[data-page-index] .textLayer span')`,
-    'the reopened layout to render',
-  );
-
   // A PDF never opened before takes that display and zoom, but its own rotation and cover.
   await openLabelledPdf(page);
-  await page.waitFor(
-    layoutIs({ displayMode: 'two-page', zoomMode: 'fit-page', rotation: 0, cover: false }),
-    'the new PDF to inherit display and zoom only',
-  );
+  const inherited = { displayMode: 'two-page', zoomMode: 'fit-page', rotation: 0, cover: false };
+  await page.waitFor(layoutIs(inherited), 'the new PDF to inherit display and zoom only');
 
   // Printed page labels in the page box, and jumps by label or physical page.
   const pageInput = `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')`;
@@ -769,5 +762,38 @@ async function layoutFlow(page) {
   await page.waitFor(
     `${pageInput}?.getAttribute('aria-invalid') === 'true'`,
     'a label the document lacks to be rejected',
+  );
+  // No page is printed 5, so 5 is rejected rather than read as the fifth page.
+  await jumpTo('5');
+  await page.waitFor(
+    `${pageInput}?.getAttribute('aria-invalid') === 'true' && ${pageCount} === '(2 of 6)'`,
+    'a number no label claims to be rejected',
+  );
+
+  // The first PDF changes; the labelled one was shown in Two Pages and stays there.
+  // `openPdf` closes the labelled tab on the way, so it reopens from a clean mount.
+  await openPdf(page);
+  // Every tab is titled "sample"; mark this one to close it later from another tab.
+  await page.evaluate(
+    `document.querySelector('[role="tab"][aria-selected="true"]').dataset.e2e = 'first-pdf'`,
+  );
+  await page.evaluate(`${control('pdf-mode-continuous')}.click()`);
+  const changed = { displayMode: 'continuous', zoomMode: 'fit-page', rotation: 90 };
+  await page.waitFor(layoutIs(changed), 'the first PDF switched to continuous');
+  await openLabelledPdf(page);
+  await page.waitFor(layoutIs(inherited), 'the labelled PDF keeping the layout it was shown');
+
+  // Reopen from a clean mount: the store forgets a closed tab, so this reads the backend.
+  // It is closed from the labelled tab, so the picker's next file is not the tab that
+  // becomes active, which the picker would only re-select.
+  await page.evaluate(
+    `document.querySelector('[data-e2e="first-pdf"]').nextElementSibling.click()`,
+  );
+  await page.waitFor(`!document.querySelector('[data-e2e="first-pdf"]')`, 'the PDF tab to close');
+  await openPdf(page);
+  await page.waitFor(layoutIs(changed), 'reopening in the saved layout');
+  await page.waitFor(
+    `${viewer}.querySelector('[data-page-index] .textLayer span')`,
+    'the reopened layout to render',
   );
 }

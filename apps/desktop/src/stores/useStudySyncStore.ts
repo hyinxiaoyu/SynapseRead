@@ -752,8 +752,10 @@ export function createStudySyncStore(backend: StudyBackend) {
           // The document still opens, in the default layout.
           set({ error: describeError(error) });
         }
-        // A save made while this was loading is newer than what was read.
-        if (get().pdfLayouts[documentId]) return;
+        // A save made while this was loading is newer than what was read, and a tab
+        // closed meanwhile must not get its cache back: reopening reads the backend.
+        const state = get();
+        if (state.pdfLayouts[documentId] || !state.openDocumentIds.includes(documentId)) return;
         set((state) => ({ pdfLayouts: { ...state.pdfLayouts, [documentId]: layout } }));
       },
 

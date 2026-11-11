@@ -939,6 +939,9 @@ function PdfPages({
       return;
     }
     reportedLayout.current = layout;
+    // Each report is one SQLite write. That suits discrete toolbar clicks, but pinch
+    // and ctrl-wheel zoom (#51) change customScale many times a second: coalesce
+    // those (debounce the save, keeping the store update immediate) when adding them.
     onPdfLayoutChange?.(layout);
   }, [displayMode, zoomMode, customScale, rotation, coverPageAlone, onPdfLayoutChange]);
   const pageLabels = usePdfPageLabels(engine);
@@ -1454,7 +1457,7 @@ function PdfPages({
   });
 
   const submitPageInput = () => {
-    const target = resolvePageInput(pageInput, pageLabels, engine.pageCount);
+    const target = resolvePageInput(pageInput, pageLabels, engine.pageCount, currentPageIndex);
     if (target === null) {
       setPageInputInvalid(true);
       return;

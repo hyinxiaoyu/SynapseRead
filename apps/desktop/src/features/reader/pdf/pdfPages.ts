@@ -48,15 +48,21 @@ export function pageLabelOf(labels: readonly string[] | null, pageIndex: number)
 const PHYSICAL_PAGE = /^(?:#\s*(\d+)|\(\s*(\d+)\s*\))$/;
 
 /**
- * The page index typed into the page box, or null when nothing matches. A printed
- * label wins over a physical number, because the label is what the reader sees on
- * the page: in a book numbered i, ii, 1, 2, typing 2 goes to the fourth page.
- * `#2` or `(2)` names the physical page instead.
+ * The page index typed into the page box, or null when nothing matches. When the
+ * document has printed labels, input names a label, because the label is what the
+ * reader sees on the page: in a book numbered i, ii, 1, 2, typing 2 goes to the
+ * fourth page. A number no label claims is rejected rather than read as a physical
+ * page, which would land on a page printed with a different number. `#2` or `(2)`
+ * names the physical page. Without labels, a plain number is the physical page.
+ *
+ * Labels need not be unique (sections that restart at 1), so of several matches
+ * the one nearest `currentPageIndex` wins, and a tie goes forward.
  */
 export function resolvePageInput(
   input: string,
   labels: readonly string[] | null,
   pageCount: number,
+  currentPageIndex = 0,
 ): number | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
@@ -66,11 +72,26 @@ export function resolvePageInput(
   const physical = PHYSICAL_PAGE.exec(trimmed);
   if (physical) return inRange(Number(physical[1] ?? physical[2]));
   if (labels) {
-    const exact = labels.indexOf(trimmed);
-    if (exact !== -1) return exact;
     const folded = trimmed.toLocaleLowerCase();
-    const loose = labels.findIndex((label) => label.toLocaleLowerCase() === folded);
-    if (loose !== -1) return loose;
+    return (
+      nearestMatch(labels, (label) => label === trimmed, currentPageIndex) ??
+      nearestMatch(labels, (label) => label.toLocaleLowerCase() === folded, currentPageIndex)
+    );
   }
   return /^\d+$/.test(trimmed) ? inRange(Number(trimmed)) : null;
+}
+
+function nearestMatch(
+  labels: readonly string[],
+  matches: (label: string) => boolean,
+  from: number,
+): number | null {
+  let best: number | null = null;
+  labels.forEach((label, index) => {
+    if (!matches(label)) return;
+    const distance = Math.abs(index - from);
+    // Indices rise, so on a tie the later (forward) one replaces the earlier.
+    if (best === null || distance <= Math.abs(best - from)) best = index;
+  });
+  return best;
 }

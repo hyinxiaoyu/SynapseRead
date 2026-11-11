@@ -780,6 +780,32 @@ describe('PdfViewer', () => {
     expect(pageInput).toHaveAttribute('aria-invalid', 'true');
     fireEvent.blur(pageInput);
     expect(pageInput).toHaveValue('ii');
+
+    // No page is printed 5, and the fifth page is printed 3: reject, do not jump.
+    fireEvent.change(pageInput, { target: { value: '5' } });
+    fireEvent.submit(form);
+    expect(pageInput).toHaveAttribute('aria-invalid', 'true');
+    expect((await scroller()).scrollTop).toBeCloseTo(PAGE_PX + GAP_PX, 0);
+  });
+
+  it('jumps to the nearest of repeated labels', async () => {
+    // Two sections, each numbered from 1.
+    engineState.pageLabels = ['1', '2', '1', '2', '3'];
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+    const form = pageInput.closest('form') as HTMLFormElement;
+    await waitFor(() => expect(pageInput).toHaveValue('1'));
+
+    fireEvent.change(pageInput, { target: { value: '#5' } });
+    fireEvent.submit(form);
+    expect(screen.getByTestId('pdf-page-count')).toHaveTextContent('(5 of 5)');
+    // From the second section, "1" is that section's first page, not the book's.
+    fireEvent.change(pageInput, { target: { value: '1' } });
+    fireEvent.submit(form);
+    expect((await scroller()).scrollTop).toBeCloseTo(2 * (PAGE_PX + GAP_PX), 0);
+    expect(screen.getByTestId('pdf-page-count')).toHaveTextContent('(3 of 5)');
   });
 
   it('shows plain page numbers when the labels only repeat them', async () => {
