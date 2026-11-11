@@ -11,7 +11,11 @@ import {
   selectDocumentAnnotations,
   selectHighlights,
 } from '@/stores/useStudySyncStore';
-import type { PdfAnchor } from '@/types/domain';
+import {
+  DEFAULT_READING_PREFERENCES,
+  type PdfAnchor,
+  type ReadingPreferences,
+} from '@/types/domain';
 
 import type { PdfOutlineItem, PdfPageAnnotations, PdfPageText } from './pdfEngine';
 import { getBoundedLru, MAX_CACHED_TEXT_PAGES, setBoundedLru } from './pdfGeometry';
@@ -102,10 +106,14 @@ function Harness({
   store,
   documentId,
   isActive = true,
+  chromeHidden = false,
+  preferences,
 }: {
   store: Store;
   documentId: string;
   isActive?: boolean;
+  chromeHidden?: boolean;
+  preferences?: ReadingPreferences;
 }) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
@@ -126,12 +134,14 @@ function Harness({
     <PdfViewer
       document={{ ...document, format: 'pdf' }}
       isActive={isActive}
+      {...(chromeHidden ? { chromeHidden } : {})}
       content={state.content}
       highlights={highlights}
       jumpRequest={state.jumpRequest?.documentId === documentId ? state.jumpRequest : null}
       onSelectionChange={state.setSelection}
       onJumpHandled={state.completeJump}
       onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
+      {...(preferences ? { preferences } : {})}
       bookmarks={bookmarks}
       onAddBookmark={(anchor, label) => void state.addBookmark(documentId, anchor, label)}
       onRemoveBookmark={(id) => void state.removeBookmark(id)}
@@ -267,6 +277,68 @@ describe('PdfViewer', () => {
     render(<Harness store={reopened} documentId={documentId} />);
     const repainted = await pageElement(0);
     expect(repainted.querySelector(`[data-annotation-id="${annotationId}"]`)).not.toBeNull();
+  });
+
+  it('tints page canvases for a Dark theme without changing the bitmap', async () => {
+    const { store, documentId } = await setup();
+    const dark: ReadingPreferences = {
+      ...DEFAULT_READING_PREFERENCES,
+      theme: 'dark',
+      tintPdfPages: true,
+    };
+    const view = render(<Harness store={store} documentId={documentId} preferences={dark} />);
+    const page = await pageElement(0);
+    const canvas = page.querySelector('canvas');
+    expect(canvas).not.toBeNull();
+    expect(getComputedStyle(canvas as HTMLElement).filter).toContain('invert');
+    expect(page.dataset.pageTint).toBe('on');
+    expect(
+      document.querySelector('[data-testid="pdf-viewer"]')?.getAttribute('data-tint-pdf'),
+    ).toBe('dark');
+
+    // A filled highlight turns translucent while tinted, so the inverted page
+    // text stays visible; the untinted page keeps its multiply blending.
+    select([textNode(page, 0), 0], [textNode(page, 0), 10]);
+    await act(() => store.getState().createAnnotationFromSelection());
+    const annotationId = store.getState().annotations[0]?.id as string;
+    await waitFor(() => {
+      expect(
+        page.querySelector<HTMLElement>(`[data-annotation-id="${annotationId}"]`)?.className,
+      ).toContain('opacity-40');
+    });
+
+    // The page keeps its own colors when the switch is off, and in Light.
+    view.rerender(
+      <Harness
+        store={store}
+        documentId={documentId}
+        preferences={{ ...dark, tintPdfPages: false }}
+      />,
+    );
+    await waitFor(() => {
+      expect(getComputedStyle(canvas as HTMLElement).filter).toBe('none');
+      expect(
+        page.querySelector<HTMLElement>(`[data-annotation-id="${annotationId}"]`)?.className,
+      ).toBe('pointer-events-none absolute mix-blend-multiply');
+    });
+    expect(page.dataset.pageTint).toBeUndefined();
+    view.rerender(
+      <Harness store={store} documentId={documentId} preferences={{ ...dark, theme: 'light' }} />,
+    );
+    await waitFor(() => {
+      expect(getComputedStyle(canvas as HTMLElement).filter).toBe('none');
+    });
+  });
+
+  it('closes the appearance popover when focus mode begins', async () => {
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(await screen.findByRole('button', { name: 'Reading appearance' }));
+    expect(await screen.findByTestId('appearance-popover')).toBeInTheDocument();
+
+    view.rerender(<Harness store={store} documentId={documentId} chromeHidden />);
+    await waitFor(() => expect(screen.queryByTestId('appearance-popover')).toBeNull());
   });
 
   it('merges a selection into one rectangle per line, with its line breaks', async () => {

@@ -145,6 +145,88 @@ export async function pdfFlow(page) {
   }
   assert(pixel.size[0] > 50 && pixel.size[1] > 50, `the capture has real size: ${pixel.size}`);
 
+  // Appearance on a PDF tab (#46): the Aa popover offers only what applies, and
+  // the tint is a CSS filter on the canvas, so the bitmap a capture copies stays
+  // the page's own colors.
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'the PDF appearance popover',
+  );
+  const pdfAppearance = await page.evaluate(`(() => {
+    const panel = document.querySelector('[data-testid="appearance-popover"]');
+    return {
+      themes: panel?.querySelectorAll('[data-testid^="theme-swatch-"]').length ?? 0,
+      tint: panel?.querySelector('[data-testid="tint-pdf-switch"]')?.getAttribute('aria-checked') ?? null,
+      textSize: Boolean(panel?.querySelector('[data-testid="reading-font-size"]')),
+      fonts: panel?.querySelectorAll('[data-testid^="font-option-"]').length ?? 0,
+    };
+  })()`);
+  assert(
+    pdfAppearance.themes === 4,
+    `PDF appearance offers every theme: ${JSON.stringify(pdfAppearance)}`,
+  );
+  assert(pdfAppearance.tint === 'false', `the PDF tint starts off: ${pdfAppearance.tint}`);
+  assert(
+    !pdfAppearance.textSize && pdfAppearance.fonts === 0,
+    'PDF appearance omits the text controls a bitmap cannot use',
+  );
+  await page.clickButton('Dark');
+  await page.clickButton('Tint PDF pages');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.tintPdf === 'dark'`,
+    'the Dark tint on PDF pages',
+  );
+  const canvasFilter = await page.waitFor(
+    `(() => {
+      const canvas = document.querySelector('[data-page-index="2"] canvas');
+      const filter = canvas ? getComputedStyle(canvas).filter : '';
+      return filter.includes('invert') ? filter : null;
+    })()`,
+    'the Dark filter on the page canvas',
+  );
+  // The tint is presentation only: read the blue box out of the bitmap itself.
+  const tintedBitmap = await page.evaluate(`(() => {
+    const canvas = document.querySelector('[data-page-index="2"] canvas');
+    const context = canvas.getContext('2d');
+    const pixel = context.getImageData(
+      Math.floor(canvas.width * 0.408),
+      Math.floor(canvas.height * 0.4),
+      1,
+      1,
+    ).data;
+    return [...pixel];
+  })()`);
+  const [tintR, tintG, tintB] = tintedBitmap;
+  assert(
+    Math.abs(tintR - 26) < 12 && Math.abs(tintG - 102) < 12 && Math.abs(tintB - 204) < 12,
+    `the tinted canvas bitmap keeps the fixture's blue, got ${tintedBitmap.slice(0, 3)} (${canvasFilter})`,
+  );
+  // Multiply blending would turn a highlight black on the inverted page, and an
+  // opaque fill would hide it: a tinted page uses a translucent normal fill.
+  const tintedMark = await page.waitFor(
+    `(() => {
+      const mark = document.querySelector('[data-page-index="2"] [data-annotation-id]');
+      if (!mark) return null;
+      const style = getComputedStyle(mark);
+      return { blend: style.mixBlendMode, opacity: Number(style.opacity) };
+    })()`,
+    'a highlight on the tinted page',
+  );
+  assert(
+    tintedMark.blend === 'normal',
+    `a highlight leaves multiply blending when tinted: ${tintedMark.blend}`,
+  );
+  assert(
+    tintedMark.opacity < 1,
+    `a tinted highlight lets the page text through: opacity ${tintedMark.opacity}`,
+  );
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'Esc closes the PDF appearance popover',
+  );
+
   // Jump back to the text excerpt on page 1, from far away.
   await page.clickButton('Jump to source of quick brown fox');
   const inView = await page.waitFor(
@@ -402,6 +484,14 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnail-3"]')?.getAttribute('aria-current') === 'page'`,
     'PDF thumbnails sidebar active page 4',
   );
+  const thumbnailFilter = await page.waitFor(
+    `(() => {
+      const canvas = document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnail-0"] canvas');
+      const filter = canvas ? getComputedStyle(canvas).filter : '';
+      return filter.includes('invert') ? filter : null;
+    })()`,
+    'the Dark filter on PDF thumbnails',
+  );
   await page.evaluate(
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-thumbnail-0"]').click()`,
   );
@@ -412,6 +502,28 @@ export async function pdfFlow(page) {
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-embedded-annotation"]')?.dataset.annotationSubtype === 'Highlight'`,
     'embedded PDF Highlight annotation on page 1',
+  );
+  // Restore the untinted page and the multiply blending it was designed for.
+  await page.clickButton('Reading appearance');
+  await page.clickButton('Tint PDF pages');
+  await page.clickButton('Auto');
+  await page.waitFor(
+    `getComputedStyle(document.querySelector('[data-page-index="0"] canvas')).filter === 'none'`,
+    'the page filter to clear',
+  );
+  await page.waitFor(
+    `(() => {
+      const mark = document.querySelector('[data-page-index="0"] [data-annotation-id]');
+      if (!mark) return false;
+      const style = getComputedStyle(mark);
+      return style.mixBlendMode === 'multiply' && Number(style.opacity) === 1;
+    })()`,
+    'highlights back to multiply blending and full opacity',
+  );
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'the PDF appearance popover to close',
   );
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-unsupported-annotations-notice"]')?.textContent.includes('Stamp')`,

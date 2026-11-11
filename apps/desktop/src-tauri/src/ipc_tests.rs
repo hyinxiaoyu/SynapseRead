@@ -537,6 +537,8 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
             "dimImages": false,
             "epubReadingMode": "spread",
             "pageTransition": "slide",
+            "tintPdfPages": false,
+            "focusModeFullScreen": false,
         })
     );
 
@@ -551,6 +553,8 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         "dimImages": true,
         "epubReadingMode": "paged",
         "pageTransition": "fade",
+        "tintPdfPages": true,
+        "focusModeFullScreen": true,
     });
     let saved = h.ok(
         "save_reading_preferences",
@@ -598,8 +602,17 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
 
     let mut legacy = updated.clone();
     legacy.as_object_mut().unwrap().remove("pageWidth");
+    // Preferences saved before the appearance switches existed have no such
+    // keys, and their absence is the off default rather than an error.
+    legacy.as_object_mut().unwrap().remove("tintPdfPages");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("focusModeFullScreen");
     let saved_legacy = h.ok("save_reading_preferences", json!({ "preferences": legacy }));
     assert_eq!(saved_legacy["pageWidth"], "standard");
+    assert_eq!(saved_legacy["tintPdfPages"], false);
+    assert_eq!(saved_legacy["focusModeFullScreen"], false);
 
     let bad = h
         .call(

@@ -1,5 +1,6 @@
 import ePub, { type Contents, EpubCFI, type Location, type NavItem } from 'epubjs';
 
+import { applyReadableAuthorColors } from '@/features/reader/appearance/authorColors';
 import { PAGE_GUTTER_PX } from '@/features/reader/appearance/measure';
 import {
   DEFAULT_SERIF_STACK,
@@ -564,6 +565,9 @@ export async function openEpubDocument(
       },
       { passive: false },
     );
+    // Dark and Sepia color `html` and `body`; a chapter's own colors survive.
+    // The iframe's load event has already run, so its stylesheets are applied.
+    if (!isFixedLayout) applyReadableAuthorColors(contents.document, currentPreferences.theme);
   });
   rendition.on('selected', (cfiRange: string, contents: Contents) => {
     const text = contents.window.getSelection()?.toString().trim() ?? '';
@@ -875,6 +879,11 @@ export async function openEpubDocument(
       currentPreferences = { ...preferences };
       for (const contents of contentsList()) {
         applyUserPreferencesToDocument(contents.document, currentPreferences, isFixedLayout);
+        // Free when the theme has not changed: the chapter remembers which theme
+        // its colors were settled for, and the book's own colors stay untouched.
+        if (!isFixedLayout) {
+          applyReadableAuthorColors(contents.document, currentPreferences.theme);
+        }
       }
       if (
         typographyChanged &&

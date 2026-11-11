@@ -555,6 +555,15 @@ pub struct ReadingPreferences {
     /// know, because only a stored row can have been written by a newer build.
     #[serde(default)]
     pub page_transition: PageTransition,
+    /// Tints PDF page canvases to match the Dark or Sepia theme. Off by default,
+    /// so a figure-heavy PDF is never inverted unexpectedly. The bitmap stays
+    /// untouched: only the CSS filter on the canvas changes.
+    #[serde(default)]
+    pub tint_pdf_pages: bool,
+    /// Whether focus mode also enters full screen. Rows saved before it existed
+    /// take the default, so it needs no migration.
+    #[serde(default)]
+    pub focus_mode_full_screen: bool,
 }
 
 impl Default for ReadingPreferences {
@@ -570,6 +579,8 @@ impl Default for ReadingPreferences {
             dim_images: false,
             epub_reading_mode: EpubReadingMode::Spread,
             page_transition: PageTransition::Slide,
+            tint_pdf_pages: false,
+            focus_mode_full_screen: false,
         }
     }
 }
@@ -680,6 +691,40 @@ mod tests {
         });
         let prefs: ReadingPreferences = serde_json::from_value(stored).unwrap();
         assert_eq!(prefs.page_transition, PageTransition::Slide);
+        // The same row predates the appearance switches, so both stay off.
+        assert!(!prefs.tint_pdf_pages);
+        assert!(!prefs.focus_mode_full_screen);
+    }
+
+    #[test]
+    fn reading_preferences_appearance_switches_round_trip_over_the_wire() {
+        let prefs = ReadingPreferences {
+            theme: ReadingTheme::Dark,
+            tint_pdf_pages: true,
+            focus_mode_full_screen: true,
+            ..ReadingPreferences::default()
+        };
+        let wire = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(wire["tintPdfPages"], true);
+        assert_eq!(wire["focusModeFullScreen"], true);
+
+        let sent = serde_json::json!({
+            "theme": "sepia",
+            "fontFamily": "original",
+            "fontSize": 100,
+            "lineSpacing": 1.75,
+            "margins": "normal",
+            "pageWidth": "standard",
+            "justify": true,
+            "dimImages": false,
+            "epubReadingMode": "spread",
+            "pageTransition": "slide",
+            "tintPdfPages": true,
+            "focusModeFullScreen": false,
+        });
+        let parsed: ReadingPreferences = serde_json::from_value(sent).unwrap();
+        assert!(parsed.tint_pdf_pages);
+        assert!(!parsed.focus_mode_full_screen);
     }
 
     #[test]

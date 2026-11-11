@@ -1845,6 +1845,8 @@ mod tests {
             dim_images: true,
             epub_reading_mode: crate::domain::EpubReadingMode::Scroll,
             page_transition: crate::domain::PageTransition::Fade,
+            tint_pdf_pages: true,
+            focus_mode_full_screen: true,
         };
         let saved = db.save_reading_preferences(&updated).unwrap();
         assert_eq!(saved, updated);
@@ -1895,7 +1897,39 @@ mod tests {
             let prefs = db.get_reading_preferences().unwrap();
             assert_eq!(prefs.page_transition, expected, "stored {row}");
             assert_eq!(prefs.font_size, 110);
+            // The row predates both appearance switches, which default to off.
+            assert!(!prefs.tint_pdf_pages, "stored {row}");
+            assert!(!prefs.focus_mode_full_screen, "stored {row}");
         }
+    }
+
+    #[test]
+    fn stored_preferences_keep_the_appearance_switches() {
+        let db = Database::open_in_memory().unwrap();
+        let stored = serde_json::json!({
+            "theme": "dark",
+            "fontFamily": "original",
+            "fontSize": 100,
+            "lineSpacing": 1.75,
+            "margins": "normal",
+            "pageWidth": "standard",
+            "justify": true,
+            "dimImages": false,
+            "epubReadingMode": "spread",
+            "pageTransition": "slide",
+            "tintPdfPages": true,
+            "focusModeFullScreen": true,
+        });
+        db.conn
+            .execute(
+                "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)",
+                params![stored.to_string()],
+            )
+            .unwrap();
+
+        let prefs = db.get_reading_preferences().unwrap();
+        assert!(prefs.tint_pdf_pages);
+        assert!(prefs.focus_mode_full_screen);
     }
 
     #[test]

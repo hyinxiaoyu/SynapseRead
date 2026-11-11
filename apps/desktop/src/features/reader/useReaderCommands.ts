@@ -63,6 +63,7 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   markup,
   popover,
   reflowable,
+  appearance,
   extra,
 }: {
   isActive: boolean;
@@ -80,6 +81,8 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   popover: SelectionPopoverController;
   /** Text size and the Appearance popover, for formats that reflow. */
   reflowable?: ReflowableOptions;
+  /** The Appearance popover alone, for formats with nothing to reflow (PDF). */
+  appearance?: ReflowableOptions['panel'];
   extra?: CommandHandlers;
 }) {
   useSearchInNavigator(search.active, navigator);
@@ -177,6 +180,9 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
       title: 'Actual Text Size',
     };
     handlers['view.appearance'] = { run: panel.toggle, enabled: ready };
+  } else if (appearance) {
+    // PDF has no text to reflow, but its pages can be tinted from the same popover.
+    handlers['view.appearance'] = { run: appearance.toggle, enabled: ready };
   }
   useCommands({ ...handlers, ...extra }, isActive);
 }

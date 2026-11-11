@@ -12,7 +12,7 @@ function Harness({
   format = 'epub',
 }: {
   initial?: ReadingPreferences;
-  format?: 'epub' | 'txt';
+  format?: 'epub' | 'txt' | 'pdf';
 }) {
   const panel = useAppearancePanel();
   const [preferences, setPreferences] = useState(initial);
@@ -120,6 +120,28 @@ describe('AppearanceMenu', () => {
     // A check mark, not only a ring color.
     expect(dark.querySelector('svg')).not.toBeNull();
     expect(screen.getByRole('radio', { name: 'Light' }).querySelector('svg')).toBeNull();
+  });
+
+  it('offers a PDF only the controls that apply, with the tint switch off by default', () => {
+    render(<Harness format="pdf" />);
+    fireEvent.click(trigger());
+    expect(screen.getByRole('radiogroup', { name: 'Theme' })).toBeInTheDocument();
+    expect(screen.getByRole('radiogroup', { name: 'Page turn' })).toBeInTheDocument();
+    const tint = screen.getByTestId('tint-pdf-switch');
+    expect(tint).toHaveAttribute('aria-checked', 'false');
+    // A bitmap has no text size, page width, or publisher font to change.
+    expect(screen.queryByTestId('reading-font-size')).not.toBeInTheDocument();
+    expect(screen.queryByRole('radiogroup', { name: 'Page width' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radiogroup', { name: 'Font' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Customize' })).not.toBeInTheDocument();
+
+    fireEvent.click(tint);
+    expect(current().tintPdfPages).toBe(true);
+    expect(tint).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('radio', { name: 'Fade' }));
+    expect(current().pageTransition).toBe('fade');
+    fireEvent.click(screen.getByTestId('theme-swatch-dark'));
+    expect(current().theme).toBe('dark');
   });
 
   it('lists each font in its own face, with Original as the EPUB default', () => {

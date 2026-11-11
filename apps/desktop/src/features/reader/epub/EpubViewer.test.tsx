@@ -558,6 +558,8 @@ describe('EpubViewer', () => {
         dimImages: true,
         epubReadingMode: 'paged',
         pageTransition: 'slide',
+        tintPdfPages: false,
+        focusModeFullScreen: false,
       }),
     );
     expect(engine.setPreferences).toHaveBeenLastCalledWith(
