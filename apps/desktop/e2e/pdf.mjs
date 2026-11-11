@@ -202,17 +202,24 @@ export async function pdfFlow(page) {
     Math.abs(tintR - 26) < 12 && Math.abs(tintG - 102) < 12 && Math.abs(tintB - 204) < 12,
     `the tinted canvas bitmap keeps the fixture's blue, got ${tintedBitmap.slice(0, 3)} (${canvasFilter})`,
   );
-  // Multiply blending would turn a highlight black on the inverted page.
-  const tintedBlend = await page.waitFor(
+  // Multiply blending would turn a highlight black on the inverted page, and an
+  // opaque fill would hide it: a tinted page uses a translucent normal fill.
+  const tintedMark = await page.waitFor(
     `(() => {
       const mark = document.querySelector('[data-page-index="2"] [data-annotation-id]');
-      return mark ? getComputedStyle(mark).mixBlendMode : null;
+      if (!mark) return null;
+      const style = getComputedStyle(mark);
+      return { blend: style.mixBlendMode, opacity: Number(style.opacity) };
     })()`,
     'a highlight on the tinted page',
   );
   assert(
-    tintedBlend === 'normal',
-    `a highlight leaves multiply blending when tinted: ${tintedBlend}`,
+    tintedMark.blend === 'normal',
+    `a highlight leaves multiply blending when tinted: ${tintedMark.blend}`,
+  );
+  assert(
+    tintedMark.opacity < 1,
+    `a tinted highlight lets the page text through: opacity ${tintedMark.opacity}`,
   );
   await page.press('Escape');
   await page.waitFor(
@@ -507,9 +514,11 @@ export async function pdfFlow(page) {
   await page.waitFor(
     `(() => {
       const mark = document.querySelector('[data-page-index="0"] [data-annotation-id]');
-      return mark ? getComputedStyle(mark).mixBlendMode === 'multiply' : null;
+      if (!mark) return false;
+      const style = getComputedStyle(mark);
+      return style.mixBlendMode === 'multiply' && Number(style.opacity) === 1;
     })()`,
-    'highlights back to multiply blending',
+    'highlights back to multiply blending and full opacity',
   );
   await page.press('Escape');
   await page.waitFor(

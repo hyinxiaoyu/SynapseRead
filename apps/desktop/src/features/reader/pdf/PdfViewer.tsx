@@ -663,8 +663,11 @@ function PdfPage({
                   ? 'border-b-2 border-amber-600/80'
                   : annot.subtype === 'StrikeOut'
                     ? 'border-b-2 border-rose-600/80'
-                    : // Multiply goes black on a tinted page; keep the mark's own color there.
-                      tint === null && 'mix-blend-multiply',
+                    : // Multiply goes black on a tinted page; a translucent fill keeps
+                      // the inverted text visible instead.
+                      tint === null
+                      ? 'mix-blend-multiply'
+                      : 'opacity-40',
               )}
               style={{
                 left: `${rect.x * 100}%`,
@@ -695,8 +698,9 @@ function PdfPage({
               className={cn(
                 'pointer-events-none absolute',
                 // Multiply blends a translucent highlight into white paper. On an
-                // inverted page it would go black, so the tint uses normal blending.
-                tint === null && 'mix-blend-multiply',
+                // inverted page it would go black, so a tinted page gets a
+                // translucent fill that still shows the inverted text through it.
+                tint === null ? 'mix-blend-multiply' : style !== 'underline' && 'opacity-40',
                 pulsingAnnotationId === annotationId && 'anchor-pulse',
               )}
               style={
@@ -1766,7 +1770,7 @@ function PdfPages({
       animatePageTurn(
         pageContentRef.current,
         direction,
-        preferences?.pageTransition ?? 'slide',
+        effectivePreferences.pageTransition,
         turnShadowRef.current,
       );
     }
@@ -1873,6 +1877,7 @@ function PdfPages({
   const [wasChromeHidden, setWasChromeHidden] = useState(chromeHidden);
   if (wasChromeHidden !== chromeHidden) {
     setWasChromeHidden(chromeHidden);
+    if (chromeHidden) preferencesPanel.close();
   }
 
   const showSidebar = navigator.open && !chromeHidden;
