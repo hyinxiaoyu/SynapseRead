@@ -273,8 +273,13 @@ export class Page {
         if (!button) return null;
         const r = button.getBoundingClientRect();
         const point = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        // Only once it has stopped moving (the toolbar animates as the search field
-        // resizes) and nothing (a widened search field, a popover) covers it.
+        // Only once its own and ancestor transitions/animations have finished (e.g. a
+        // disclosure expanding while placePopover flips from above to below), it has
+        // stopped moving, and nothing covers it.
+        const animating = document
+          .getAnimations()
+          .some((a) => a.playState === 'running' && a.effect?.target?.contains?.(button));
+        if (animating) return null;
         const key = JSON.stringify(point);
         const settled = window.__e2eLastButtonPoint === key;
         window.__e2eLastButtonPoint = key;
