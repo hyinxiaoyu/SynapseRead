@@ -515,72 +515,99 @@ export async function launchPage(url, { width = 1440, height = 900 } = {}) {
   if (!chrome) throw new Error('No Chromium found. Set CHROME_PATH to a Chromium-based browser.');
 
   const profile = mkdtempSync(join(tmpdir(), 'synapseread-e2e-'));
-  const process_ = spawn(
-    chrome,
-    [
-      '--headless=new',
-      '--no-sandbox',
-      '--disable-gpu',
-      '--remote-debugging-port=0',
-      `--user-data-dir=${profile}`,
-      `--window-size=${width},${height}`,
-      'about:blank',
-    ],
-    { stdio: ['ignore', 'ignore', 'pipe'] },
-  );
-  const browserUrl = await new Promise((done, fail) => {
-    let output = '';
-    process_.stderr.on('data', (data) => {
-      output += data;
-      const match = output.match(/DevTools listening on (ws:\/\/\S+)/);
-      if (match) done(match[1]);
-    });
-    process_.once('exit', (code) => fail(new Error(`Chromium exited (${code}): ${output}`)));
-  });
+  let cdp = null;
+  let process_ = null;
 
-  const { port } = new URL(browserUrl);
-  const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
-  const target = targets.find((candidate) => candidate.type === 'page');
-  const cdp = await Cdp.connect(target.webSocketDebuggerUrl);
-  const page = new Page(cdp);
-  await cdp.send('Page.enable');
-  await cdp.send('Runtime.enable');
-  await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
-    source: `window.__cspViolations = [];
-      document.addEventListener('securitypolicyviolation', (event) =>
-        window.__cspViolations.push([event.effectiveDirective, event.blockedURI,
-          (event.sourceFile || location.href) + ':' + event.lineNumber + ':' + event.columnNumber,
-          event.sample].join(' ')));`,
-  });
-  await cdp.send('Page.navigate', { url });
-  // On macOS, `--headless=new` leaves its virtual NSWindow inactive (`document.hasFocus()`
-  // is false), and synthetic CDP input never activates the window; Chromium's fullscreen
-  // controller then denies `requestFullscreen()` with `TypeError: not granted`.
-  await cdp.send('Page.bringToFront');
-  await page.waitFor(
-    `document.hasFocus() && document.querySelector('[aria-label="Document reader"]')`,
-    'the focused workspace',
-  );
-
-  return {
-    page,
-    async close() {
-      cdp.close();
+  const close = async () => {
+    cdp?.close();
+    if (process_) {
       process_.removeAllListeners('exit');
       if (process_.exitCode === null && process_.signalCode === null) {
         const exited = new Promise((done) => process_.once('exit', done));
-        process_.kill();
-        await exited;
+        const killTimer = setTimeout(() => process_.kill('SIGKILL'), 2000);
+        killTimer.unref();
+        try {
+          process_.kill();
+          await exited;
+        } finally {
+          clearTimeout(killTimer);
+        }
       }
-      // Helper processes (Crashpad, GPU) can still write into the profile briefly after
-      // the main browser process exits, which makes an immediate single `rm` hit ENOTEMPTY.
-      try {
-        rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-      } catch {
-        // Best-effort temp cleanup must not fail a passing flow.
-      }
-    },
+    }
+    // Helper processes (Crashpad, GPU) can still write into the profile briefly after
+    // the main browser process exits, which makes an immediate single `rm` hit ENOTEMPTY.
+    try {
+      rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {
+      // Best-effort temp cleanup must not fail a passing flow.
+    }
   };
+
+  try {
+    process_ = spawn(
+      chrome,
+      [
+        '--headless=new',
+        '--no-sandbox',
+        '--disable-gpu',
+        '--remote-debugging-port=0',
+        `--user-data-dir=${profile}`,
+        `--window-size=${width},${height}`,
+        'about:blank',
+      ],
+      { stdio: ['ignore', 'ignore', 'pipe'] },
+    );
+    const browserUrl = await new Promise((done, fail) => {
+      let output = '';
+      const timer = setTimeout(
+        () => fail(new Error(`timed out waiting for Chromium DevTools: ${output}`)),
+        15000,
+      );
+      const settle = (fn, value) => {
+        clearTimeout(timer);
+        fn(value);
+      };
+      process_.stderr.on('data', (data) => {
+        output += data;
+        const match = output.match(/DevTools listening on (ws:\/\/\S+)/);
+        if (match) settle(done, match[1]);
+      });
+      process_.once('error', (error) => settle(fail, error));
+      process_.once('exit', (code) =>
+        settle(fail, new Error(`Chromium exited (${code}): ${output}`)),
+      );
+    });
+
+    const { port } = new URL(browserUrl);
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    const target = targets.find((candidate) => candidate.type === 'page');
+    if (!target) throw new Error('Chromium reported no page target.');
+    cdp = await Cdp.connect(target.webSocketDebuggerUrl);
+    const page = new Page(cdp);
+    await cdp.send('Page.enable');
+    await cdp.send('Runtime.enable');
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `window.__cspViolations = [];
+        document.addEventListener('securitypolicyviolation', (event) =>
+          window.__cspViolations.push([event.effectiveDirective, event.blockedURI,
+            (event.sourceFile || location.href) + ':' + event.lineNumber + ':' + event.columnNumber,
+            event.sample].join(' ')));`,
+    });
+    await cdp.send('Page.navigate', { url });
+    // On macOS, `--headless=new` leaves its virtual NSWindow inactive (`document.hasFocus()`
+    // is false), and synthetic CDP input never activates the window; Chromium's fullscreen
+    // controller then denies `requestFullscreen()` with `TypeError: not granted`.
+    await cdp.send('Page.bringToFront');
+    await page.waitFor(
+      `document.hasFocus() && document.querySelector('[aria-label="Document reader"]')`,
+      'the focused workspace',
+    );
+
+    return { page, close };
+  } catch (error) {
+    await close();
+    throw error;
+  }
 }
 
 export function assert(condition, message) {
