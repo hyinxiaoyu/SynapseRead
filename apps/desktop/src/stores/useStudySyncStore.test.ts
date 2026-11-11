@@ -553,6 +553,29 @@ describe('useStudySyncStore', () => {
       expect(state().documents[0]?.lastCursorAnchor).toEqual(txtAnchor);
       expect((await backend.listDocuments())[0]?.lastCursorAnchor).toEqual(txtAnchor);
     });
+
+    it('keeps how far in the reader is, and forgets it for a position without one', async () => {
+      const documentId = await openDocument();
+      state().reportCursor(documentId, txtAnchor, 0.42);
+      expect(state().documents[0]?.lastProgress).toBe(0.42);
+      await vi.waitFor(async () =>
+        expect((await backend.listDocuments())[0]?.lastProgress).toBe(0.42),
+      );
+
+      state().reportCursor(documentId, txtAnchor);
+      expect(state().documents[0]?.lastProgress).toBeNull();
+      await vi.waitFor(async () =>
+        expect((await backend.listDocuments())[0]?.lastProgress).toBeNull(),
+      );
+
+      // The memory backend refuses what core refuses.
+      await expect(backend.updateDocumentCursor(documentId, txtAnchor, 1.5)).rejects.toMatchObject({
+        code: 'invalid_progress',
+      });
+      await expect(
+        backend.updateDocumentCursor(documentId, txtAnchor, Number.NaN),
+      ).rejects.toMatchObject({ code: 'invalid_progress' });
+    });
   });
 
   describe('reading preferences', () => {

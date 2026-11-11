@@ -50,11 +50,12 @@ pub fn list_documents(state: State<'_, AppState>) -> IpcResult<Vec<Document>> {
 pub fn update_document_cursor(
     document_id: String,
     anchor: AnchorLocation,
+    progress: Option<f64>,
     state: State<'_, AppState>,
 ) -> IpcResult<()> {
     Ok(state
         .database()?
-        .update_document_cursor(&document_id, &anchor)?)
+        .update_document_cursor(&document_id, &anchor, progress)?)
 }
 
 #[tauri::command]

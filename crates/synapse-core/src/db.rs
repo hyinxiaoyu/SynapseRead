@@ -30,6 +30,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0007_reading_appearance.sql"),
     include_str!("../migrations/0008_annotation_style.sql"),
     include_str!("../migrations/0009_pdf_document_layout.sql"),
+    include_str!("../migrations/0010_document_progress.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -151,15 +152,26 @@ impl Database {
         Ok(PathBuf::from(path))
     }
 
+    /// Saves the reading position, and how far through the document it is as a
+    /// fraction `0..1`. `None` clears the fraction: a percentage measured for an
+    /// earlier position would be wrong for this one.
     pub fn update_document_cursor(
         &self,
         document_id: &str,
         anchor: &AnchorLocation,
+        progress: Option<f64>,
     ) -> CoreResult<()> {
         anchor.validate()?;
+        if let Some(progress) = progress
+            && !(0.0..=1.0).contains(&progress)
+        {
+            return Err(CoreError::InvalidProgress(format!(
+                "progress must be a fraction between 0 and 1, got {progress}"
+            )));
+        }
         let changed = self.conn.execute(
-            "UPDATE documents SET last_cursor_anchor = ?2 WHERE id = ?1",
-            params![document_id, serde_json::to_string(anchor)?],
+            "UPDATE documents SET last_cursor_anchor = ?2, last_progress = ?3 WHERE id = ?1",
+            params![document_id, serde_json::to_string(anchor)?, progress],
         )?;
         expect_changed(changed, "document", document_id)
     }
@@ -260,6 +272,7 @@ impl Database {
                      file_path = ?3,
                      file_hash = ?4,
                      last_cursor_anchor = NULL,
+                     last_progress = NULL,
                      last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
                  WHERE id = ?1",
                 params![document_id, title, file_path, new_hash],
@@ -1167,7 +1180,7 @@ fn optional_json_column<T: DeserializeOwned>(
 }
 
 const DOCUMENT_SELECT: &str = "SELECT id, title, file_path, file_hash, format, encoding,
-    last_cursor_anchor, last_opened_at, created_at FROM documents";
+    last_cursor_anchor, last_opened_at, created_at, last_progress FROM documents";
 
 fn map_document(row: &Row<'_>) -> rusqlite::Result<Document> {
     let format: String = row.get(4)?;
@@ -1181,6 +1194,7 @@ fn map_document(row: &Row<'_>) -> rusqlite::Result<Document> {
         last_cursor_anchor: optional_json_column(row, 6)?,
         last_opened_at: row.get(7)?,
         created_at: row.get(8)?,
+        last_progress: row.get(9)?,
     })
 }
 
@@ -1357,6 +1371,7 @@ mod tests {
                     "last_cursor_anchor",
                     "created_at",
                     "last_opened_at",
+                    "last_progress",
                 ],
             ),
             (
@@ -1538,14 +1553,47 @@ mod tests {
     #[test]
     fn cursor_round_trips() {
         let f = fixture();
-        f.db.update_document_cursor(&f.document_id, &txt_anchor())
+        f.db.update_document_cursor(&f.document_id, &txt_anchor(), None)
             .unwrap();
         let document = f.db.list_documents().unwrap().remove(0);
         assert_eq!(document.last_cursor_anchor, Some(txt_anchor()));
+        assert_eq!(document.last_progress, None);
         assert!(matches!(
-            f.db.update_document_cursor("missing", &txt_anchor()),
+            f.db.update_document_cursor("missing", &txt_anchor(), None),
             Err(CoreError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn cursor_progress_is_validated_and_cleared_when_unknown() {
+        let f = fixture();
+        let progress = |db: &Database| db.get_document(&f.document_id).unwrap().last_progress;
+        f.db.update_document_cursor(&f.document_id, &txt_anchor(), Some(0.25))
+            .unwrap();
+        assert_eq!(progress(&f.db), Some(0.25));
+
+        for bad in [-0.01, 1.01, f64::NAN, f64::INFINITY] {
+            let result =
+                f.db.update_document_cursor(&f.document_id, &txt_anchor(), Some(bad));
+            assert!(
+                matches!(result, Err(CoreError::InvalidProgress(_))),
+                "{bad} must be rejected"
+            );
+        }
+        // A rejected write leaves the saved fraction alone.
+        assert_eq!(progress(&f.db), Some(0.25));
+
+        // A position the reader could not measure must not keep the old percentage.
+        f.db.update_document_cursor(&f.document_id, &txt_anchor(), None)
+            .unwrap();
+        assert_eq!(progress(&f.db), None);
+
+        // The schema enforces the same bounds.
+        let result = f.db.conn.execute(
+            "UPDATE documents SET last_progress = 2 WHERE id = ?1",
+            [&f.document_id],
+        );
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2358,7 +2406,16 @@ mod tests {
             conn,
             captures: None,
         };
-        let pdf = register_pdf(&db, dir.path(), "book.pdf");
+        // Registered as the version 8 schema stores it: today's registration
+        // would select columns that schema does not have yet.
+        let pdf = "pdf-at-version-8".to_owned();
+        db.conn
+            .execute(
+                "INSERT INTO documents (id, title, file_path, file_hash, format)
+                 VALUES (?1, 'book', ?2, 'hash-v8', 'pdf')",
+                params![pdf, dir.path().join("book.pdf").to_string_lossy()],
+            )
+            .unwrap();
         let mut conn = db.conn;
         migrate(&mut conn).unwrap();
         let db = Database {
@@ -2366,8 +2423,10 @@ mod tests {
             captures: None,
         };
 
-        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.schema_version().unwrap() as usize, MIGRATIONS.len());
         assert_eq!(db.list_documents().unwrap()[0].id, pdf);
+        // Version 10 adds the reading fraction, unknown for rows that predate it.
+        assert_eq!(db.list_documents().unwrap()[0].last_progress, None);
         assert_eq!(db.get_pdf_layout(&pdf).unwrap(), PdfLayout::default());
         db.save_pdf_layout(&pdf, &two_page_layout()).unwrap();
         assert_eq!(db.get_pdf_layout(&pdf).unwrap(), two_page_layout());
@@ -2674,7 +2733,8 @@ mod tests {
         std::fs::write(&original, "original version content").unwrap();
 
         let doc = db.register_document(&original).unwrap();
-        db.update_document_cursor(&doc.id, &txt_anchor()).unwrap();
+        db.update_document_cursor(&doc.id, &txt_anchor(), Some(0.5))
+            .unwrap();
         let notebook = db.create_notebook("Notes").unwrap();
         let annotation = db
             .create_annotation(&CreateAnnotationInput {
@@ -2710,6 +2770,7 @@ mod tests {
         assert_eq!(moved_relink.document.file_hash, doc.file_hash);
         assert_eq!(moved_relink.document.title, "paper-moved");
         assert_eq!(moved_relink.document.last_cursor_anchor, Some(txt_anchor()));
+        assert_eq!(moved_relink.document.last_progress, Some(0.5));
 
         // 3. In-place modification (`Changed`), then explicit relink to a revised edition.
         std::fs::write(&moved, "revised edition with different bytes").unwrap();
@@ -2725,6 +2786,7 @@ mod tests {
         assert_eq!(revised_relink.previous_file_hash, doc.file_hash);
         // Stale cursor anchor is cleared when content hash changes, while notes/annotations are preserved.
         assert_eq!(revised_relink.document.last_cursor_anchor, None);
+        assert_eq!(revised_relink.document.last_progress, None);
         let graph = db.load_notebook_graph(&notebook.id).unwrap();
         assert_eq!(graph.annotations, vec![annotation]);
 

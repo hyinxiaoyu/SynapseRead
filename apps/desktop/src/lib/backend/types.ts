@@ -70,7 +70,12 @@ export interface StudyBackend extends DocumentContentReader {
   /** Subscribes to native window file-drag and drop events. */
   onFileDrop(listener: (event: FileDropEvent) => void): () => void;
   listDocuments(): Promise<StudyDocument[]>;
-  updateDocumentCursor(documentId: string, anchor: AnchorLocation): Promise<void>;
+  /** `progress` is a fraction `0..1`; leaving it out clears the saved one. */
+  updateDocumentCursor(
+    documentId: string,
+    anchor: AnchorLocation,
+    progress?: number,
+  ): Promise<void>;
   touchDocumentOpened(documentId: string): Promise<StudyDocument>;
   verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus>;
   relinkDocument(

@@ -63,6 +63,11 @@ export interface StudyDocument {
   lastCursorAnchor: AnchorLocation | null;
   lastOpenedAt?: string | null;
   createdAt: string;
+  /**
+   * How far through the document `lastCursorAnchor` is, `0..1`, when the reader
+   * measured it; null or absent when it could not.
+   */
+  lastProgress?: number | null;
 }
 
 export type DocumentSourceState = 'ok' | 'missing' | 'changed';
@@ -449,8 +454,11 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   onSelectionChange: (selection: ReaderSelection | null) => void;
   /** Call once the jump has been scrolled to and pulsed. */
   onJumpHandled: (nonce: number) => void;
-  /** Reports reading position so the document can reopen where it was left. */
-  onCursorChange: (anchor: AnchorOf<F>) => void;
+  /**
+   * Reports reading position so the document can reopen where it was left, with
+   * how far through the document it is (`0..1`) when the reader can measure that.
+   */
+  onCursorChange: (anchor: AnchorOf<F>, progress?: number) => void;
   /** User-configurable appearance and layout preferences (EPUB and TXT). */
   preferences?: ReadingPreferences;
   /** Updates and persists reading preferences. */

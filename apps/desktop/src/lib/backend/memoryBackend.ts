@@ -3,6 +3,7 @@ import type { StudyBackend } from '@/lib/backend/types';
 import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
 import sampleLabelsPdfUrl from '../../../../../fixtures/documents/sample-labels.pdf?url&no-inline';
 import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
+import sampleUnevenEpubUrl from '../../../../../fixtures/documents/sample-uneven.epub?url&no-inline';
 import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
 
 import {
@@ -59,6 +60,8 @@ const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample.md': encodePreview('In-memory preview of a Markdown file\n'),
   // Last, so earlier picks are unchanged: printed page labels, and a second PDF.
   '/preview/sample-labels.pdf': fetchBytes(sampleLabelsPdfUrl),
+  // An EPUB whose ten short front-matter files would skew progress by file (#52).
+  '/preview/sample-uneven.epub': fetchBytes(sampleUnevenEpubUrl),
 };
 
 export interface MemoryBackendOptions {
@@ -266,6 +269,7 @@ export function createMemoryBackend({
       lastCursorAnchor: null,
       lastOpenedAt: timestamp,
       createdAt: timestamp,
+      lastProgress: null,
     };
     documents.set(document.id, document);
     return document;
@@ -303,8 +307,16 @@ export function createMemoryBackend({
 
     listDocuments: async () => [...documents.values()],
 
-    async updateDocumentCursor(documentId, anchor) {
-      require(documents, documentId, 'document').lastCursorAnchor = anchor;
+    async updateDocumentCursor(documentId, anchor, progress) {
+      const document = require(documents, documentId, 'document');
+      if (progress !== undefined && !(progress >= 0 && progress <= 1)) {
+        throw fail(
+          'invalid_progress',
+          `progress must be a fraction between 0 and 1, got ${progress}`,
+        );
+      }
+      document.lastCursorAnchor = anchor;
+      document.lastProgress = progress ?? null;
     },
 
     async touchDocumentOpened(documentId) {
@@ -405,6 +417,7 @@ export function createMemoryBackend({
         filePath: targetPath,
         fileHash: newHash,
         lastCursorAnchor: contentChanged ? null : existing.lastCursorAnchor,
+        lastProgress: contentChanged ? null : (existing.lastProgress ?? null),
         lastOpenedAt: monotonicNow(),
       };
       documents.set(documentId, updated);

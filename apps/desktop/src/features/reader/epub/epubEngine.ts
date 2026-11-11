@@ -33,6 +33,7 @@ import {
 } from '@/types/domain';
 
 import { sanitizeChapter } from './sanitizeChapter';
+import { countSectionText, type SectionTextCount } from './textWeights';
 
 export type { EpubReadingMode } from '@/types/domain';
 
@@ -47,6 +48,8 @@ export interface EpubSearchMatch extends DocumentSearchResultItem {
   cfiRange: string;
   chapterHref: string;
   chapterIndex: number;
+  /** Where the match starts in its chapter's text, `0..1`. */
+  chapterFraction?: number;
 }
 
 export interface EpubSelection {
@@ -67,6 +70,12 @@ export interface EpubLocation {
   bookProgress?: number;
   /** Where this page starts in the book, `0..1`, by spine chapter and page. */
   fraction?: number;
+  /**
+   * Where the page starts and ends within its chapter, `0..1`, by page. With the
+   * chapter's share of the book's text, the viewer turns these into book positions.
+   */
+  chapterStart?: number;
+  chapterEnd?: number;
 }
 
 /** The whole of what the reader needs from epub.js; nothing else imports it. */
@@ -93,6 +102,11 @@ export interface EpubHandle {
   spineIndexOf(href: string): number;
   /** The chapter file at a spine position. */
   spineHref(index: number): string | undefined;
+  /**
+   * Counts a spine chapter's readable text, loading it only for the call. Null
+   * when the chapter cannot be loaded. Nothing it does shows on screen.
+   */
+  measureChapter?(index: number): Promise<SectionTextCount | null>;
   /**
    * Shows the page holding a point part-way through a chapter's text (`0` its
    * start, `1` its end), whether or not the chapter is rendered.
@@ -671,6 +685,8 @@ export async function openEpubDocument(
       totalChapters,
       bookProgress,
       fraction: (chapterIndex + pageStart) / totalChapters,
+      chapterStart: pageStart,
+      chapterEnd: chapterFraction,
       ...(displayed ? { page: displayed.page, totalPages: displayed.total } : {}),
     });
   });
@@ -757,6 +773,13 @@ export async function openEpubDocument(
     }
   };
 
+  /**
+   * Chapters loaded only for `withSection`, by how many calls are using each.
+   * Search and the measuring pass can ask for the same chapter at once; the last
+   * one out unloads it, so neither finds the document gone under it.
+   */
+  const borrowed = new Map<number, { users: number; ready: Promise<unknown> }>();
+
   /** Runs `read` on a spine chapter's document, loading it only for the call. */
   const withSection = async <T>(
     index: number,
@@ -765,12 +788,26 @@ export async function openEpubDocument(
   ): Promise<T> => {
     const section = book.spine.get(index) as unknown as LoadableSection | null;
     if (!section) return fallback;
-    const wasLoaded = Boolean(section.document && section.contents);
-    if (!wasLoaded) await section.load(book.load.bind(book));
+    let loan = borrowed.get(index);
+    // Loaded by the rendition: it is showing, so it stays loaded.
+    if (!loan && section.document && section.contents) {
+      return read(section, section.document);
+    }
+    if (loan) {
+      loan.users += 1;
+    } else {
+      loan = { users: 1, ready: section.load(book.load.bind(book)) };
+      borrowed.set(index, loan);
+    }
     try {
+      await loan.ready;
       return section.document ? read(section, section.document) : fallback;
     } finally {
-      if (!wasLoaded) section.unload();
+      loan.users -= 1;
+      if (loan.users === 0) {
+        borrowed.delete(index);
+        section.unload();
+      }
     }
   };
 
@@ -806,6 +843,7 @@ export async function openEpubDocument(
               cfiRange,
               chapterHref: section.href,
               chapterIndex,
+              chapterFraction: fullText.length > 0 ? match.start / fullText.length : 0,
               locationLabel,
               ...snippet,
             });
@@ -831,6 +869,12 @@ export async function openEpubDocument(
       );
     },
     spineHref: (index) => spineItems[index]?.href,
+    measureChapter: (index) =>
+      withSection(
+        index,
+        (_section, chapterDoc) => countSectionText(collectText(chapterDoc).fullText),
+        null,
+      ),
     async displayChapterFraction(index, fraction) {
       const href = spineItems[index]?.href;
       if (href === undefined) throw new Error(`no chapter ${index}`);

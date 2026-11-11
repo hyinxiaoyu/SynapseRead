@@ -13,6 +13,14 @@ describe('footer readouts', () => {
     expect(nextReadout('percent', { percent: '1%' })).toBe('percent');
   });
 
+  it('offers minutes left only where a reader measured the chapter', () => {
+    const measured = { ...all, minutes: 'About 4 minutes left in chapter' };
+    expect(nextReadout('remaining', measured)).toBe('minutes');
+    expect(nextReadout('minutes', measured)).toBe('position');
+    expect(nextReadout('remaining', all)).toBe('position');
+    expect(availableReadout('minutes', all)).toBe('position');
+  });
+
   it('falls back to the next available readout without forgetting the choice', () => {
     expect(availableReadout('remaining', plain)).toBe('position');
     expect(availableReadout('percent', plain)).toBe('percent');

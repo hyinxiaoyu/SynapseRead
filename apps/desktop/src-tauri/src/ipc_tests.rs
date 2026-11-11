@@ -114,6 +114,23 @@ fn documents_round_trip() {
     );
     let listed = h.ok("list_documents", json!({}));
     assert_eq!(listed[0]["lastCursorAnchor"], anchor);
+    // Without a measured fraction the list shows no percentage.
+    assert_eq!(listed[0]["lastProgress"], Value::Null);
+
+    h.ok(
+        "update_document_cursor",
+        json!({ "documentId": document["id"], "anchor": anchor, "progress": 0.375 }),
+    );
+    let listed = h.ok("list_documents", json!({}));
+    assert_eq!(listed[0]["lastProgress"], 0.375);
+
+    let error = h
+        .call(
+            "update_document_cursor",
+            json!({ "documentId": document["id"], "anchor": anchor, "progress": 1.5 }),
+        )
+        .unwrap_err();
+    assert_eq!(error["code"], "invalid_progress");
 }
 
 #[test]

@@ -18,6 +18,7 @@ import {
 
 const READOUT_NAMES = {
   remaining: 'pages left',
+  minutes: 'time left',
   position: 'page number',
   percent: 'percentage',
 } as const;
@@ -197,7 +198,7 @@ function ProgressScrubber({ model, disabled }: { model: ScrubberModel; disabled:
 
 /**
  * Progress under the page, as in Books: a quiet readout that cycles on click
- * (pages left, page number, percentage), and on hover or focus a scrubber with
+ * (pages left, time left, page number, percentage), and on hover or focus a scrubber with
  * chapter ticks. After a big jump, a chip leads back.
  */
 export function ReaderFooter({

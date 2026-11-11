@@ -36,13 +36,20 @@ import {
   type StudyDocument,
 } from '@/types/domain';
 
-function describeResumeLocation(document: StudyDocument): string {
+export function describeResumeLocation(document: StudyDocument): string {
   const anchor = document.lastCursorAnchor;
   if (!anchor) return 'Start reading';
-  // An EPUB position is a chapter file name, which means nothing to a reader.
-  // It stays bare until the list can show a percentage (#52).
-  if (anchor.format === 'epub') return 'Continue reading';
-  return `Continue reading · ${defaultBookmarkLabel(anchor)}`;
+  const progress = document.lastProgress;
+  const percent =
+    typeof progress === 'number' && Number.isFinite(progress)
+      ? `${Math.round(Math.min(Math.max(progress, 0), 1) * 100)}%`
+      : null;
+  // An EPUB position is a chapter file name, which means nothing to a reader, so
+  // it says only how far in the reader is, once the book's text has been measured.
+  if (anchor.format === 'epub')
+    return percent ? `Continue reading · ${percent}` : 'Continue reading';
+  const place = defaultBookmarkLabel(anchor);
+  return `Continue reading · ${percent ? `${place} · ${percent}` : place}`;
 }
 
 interface TabErrorBoundaryProps {
@@ -569,7 +576,7 @@ function DocumentTab({
     [allBookmarks, document.id],
   );
   const onCursorChange = useCallback(
-    (anchor: AnchorLocation) => reportCursor(document.id, anchor),
+    (anchor: AnchorLocation, progress?: number) => reportCursor(document.id, anchor, progress),
     [reportCursor, document.id],
   );
   const onPreferencesChange = useCallback(

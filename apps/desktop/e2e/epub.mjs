@@ -14,7 +14,9 @@ const MEASURE_SAMPLE =
 const MIN_PER_LINE = 45;
 const MAX_PER_LINE = 78;
 
-const openEpub = (page) => page.openUntil(visibleHost, 'the EPUB');
+/** The picker also offers `sample-uneven.epub`, so this names the book wanted. */
+const sampleTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === 'sample'`;
+const openEpub = (page) => page.openUntil(`${visibleHost} && ${sampleTitle}`, 'the EPUB');
 
 const statusIs = (value) =>
   `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '${value}'`;
@@ -491,8 +493,8 @@ export async function epubFlow(page) {
     'EPUB curly-quote highlight',
   );
 
-  // Two matches in the rendered chapter: the inactive one is tinted and lands on
-  // the scrubber together with the active one.
+  // Two matches in the rendered chapter: the inactive one is tinted, and each has
+  // its own scrubber mark where it sits in the chapter's text (#52).
   await page.setInputValue('[data-testid="search-input"]', 'and');
   await page.waitFor(statusIs('1 of 2'), 'EPUB multiple matches in one chapter');
   await page.waitFor(
@@ -500,7 +502,12 @@ export async function epubFlow(page) {
     'EPUB inactive matches tinted',
   );
   await page.waitFor(
-    `document.querySelectorAll('[data-testid="progress-scrubber-search-mark"]').length === 1`,
+    `(() => {
+      const marks = [...document.querySelectorAll('[data-testid="progress-scrubber-search-mark"]')]
+        .map((mark) => parseFloat(mark.style.left));
+      // Both are in Chapter One, the first half of the book by text.
+      return marks.length === 2 && marks[0] !== marks[1] && marks.every((left) => left < 60);
+    })()`,
     'EPUB search matches marked on the scrubber',
   );
   // The bookmark flow below starts from Chapter Two, so put the reader back there.
