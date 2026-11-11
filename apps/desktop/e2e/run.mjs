@@ -35,7 +35,7 @@ for (const [name, flow] of Object.entries(FLOWS)) {
     console.error(`FAIL ${name}: ${error.message}`);
     if (page.errors.length > 0) console.error(`page errors: ${page.errors.join('\n')}`);
   } finally {
-    close();
+    await close();
   }
 }
 
