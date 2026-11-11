@@ -71,7 +71,13 @@ import {
   scrubberSearchMarks,
 } from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
-import { type PaintedRange, type Segment, segmentRow } from '@/features/reader/txt/rowSegments';
+import {
+  asTxtAnchor,
+  paint,
+  type PaintedRange,
+  type Segment,
+  segmentRow,
+} from '@/features/reader/txt/rowSegments';
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
@@ -81,10 +87,8 @@ import {
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
   type DocumentViewerProps,
-  type ReaderHighlight,
   type ReaderSelection,
   type ReadingPreferences,
-  type TxtAnchor,
 } from '@/types/domain';
 
 import { UNIT_ATTRIBUTE, unitAtBoundary } from './selectionMapping';
@@ -206,19 +210,6 @@ const TxtRow = memo(function TxtRow({
     </>
   );
 });
-
-const asTxtAnchor = (anchor: { format: string } | null | undefined): TxtAnchor | null =>
-  anchor?.format === 'txt' ? (anchor as TxtAnchor) : null;
-
-function paint(model: TxtTextModel, highlights: readonly ReaderHighlight[]): PaintedRange[] {
-  const ranges: PaintedRange[] = [];
-  for (const { annotationId, anchor, color, style = 'highlight', hasNote } of highlights) {
-    const txtAnchor = asTxtAnchor(anchor);
-    const range = txtAnchor && model.rangeFor(txtAnchor);
-    if (range) ranges.push({ annotationId, color, style, hasNote: hasNote === true, ...range });
-  }
-  return ranges;
-}
 
 /**
  * Virtualized TXT reader. Rows come from {@link TxtTextModel}, which also owns
