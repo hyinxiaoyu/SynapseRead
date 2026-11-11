@@ -571,7 +571,13 @@ export async function launchPage(url, { width = 1440, height = 900 } = {}) {
         process_.kill();
         await exited;
       }
-      rmSync(profile, { recursive: true, force: true });
+      // Helper processes (Crashpad, GPU) can still write into the profile briefly after
+      // the main browser process exits, which makes an immediate single `rm` hit ENOTEMPTY.
+      try {
+        rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      } catch {
+        // Best-effort temp cleanup must not fail a passing flow.
+      }
     },
   };
 }
