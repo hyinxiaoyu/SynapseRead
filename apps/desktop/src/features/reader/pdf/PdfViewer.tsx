@@ -45,6 +45,7 @@ import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBa
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
+import { useFocusPageOnActivate } from '@/features/reader/focusPage';
 import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import {
   buildSearchSnippet,
@@ -920,6 +921,9 @@ function PdfPages({
   const { width, height } = useSettledSize(scrollRef);
   const sizes = usePageSizes(engine);
   const navigator = useNavigator('pdf', ['thumbnails', 'contents', 'notes', 'bookmarks']);
+  // Opening the document, or activating its tab, hands the keyboard to the page so
+  // Page Down and the arrows work at once. Text entry and the tablist keep focus (#50).
+  const focusPage = useFocusPageOnActivate(scrollRef, isActive);
   const [localPreferences, setLocalPreferences] = useState<ReadingPreferences>(
     () => preferences ?? DEFAULT_READING_PREFERENCES,
   );
@@ -1989,6 +1993,7 @@ function PdfPages({
   useReaderCommands({
     isActive,
     chromeHidden,
+    focusPage,
     search,
     navigator,
     bookmarks: bookmarksController,
@@ -2001,6 +2006,10 @@ function PdfPages({
       'view.layoutSingle': { run: () => applyDisplayMode('single') },
       'view.layoutTwoPage': { run: () => applyDisplayMode('two-page') },
       'view.layoutScroll': { run: () => applyDisplayMode('continuous') },
+      'edit.captureArea': {
+        run: toggleCaptureMode,
+        title: captureMode ? 'Leave Capture Mode' : 'Capture Area',
+      },
       'view.zoomIn': { run: () => stepZoom(1), enabled: canZoomIn },
       'view.zoomOut': { run: () => stepZoom(-1), enabled: canZoomOut },
       'view.actualSize': { run: () => applyZoom('actual-size') },
@@ -2116,7 +2125,7 @@ function PdfPages({
               pressed={showSidebar}
               testId="sidebar-toggle"
               disabled={chromeHidden}
-              onClick={navigator.toggle}
+              onClick={() => navigator.toggle()}
             />
             <SegmentedControl
               label="Display mode"
@@ -2267,6 +2276,7 @@ function PdfPages({
             <ToolbarButton
               icon={Crop}
               label="Capture area"
+              command="edit.captureArea"
               pressed={captureMode}
               onClick={toggleCaptureMode}
             />
@@ -2338,6 +2348,7 @@ function PdfPages({
             annotations={annotationsController}
             search={search}
             groupSearchResults
+            onReturnFocus={focusPage}
             contents={{
               items: outlineNodes,
               currentId: currentOutlineId(outlineNodes, currentPageIndex),

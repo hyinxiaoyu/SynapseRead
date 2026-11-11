@@ -96,6 +96,32 @@ describe('OutlineTree', () => {
     expect(onSelect).toHaveBeenCalledWith(6);
   });
 
+  it('hands the keyboard back after Return jumps, but not when expanding a branch', () => {
+    const onSelect = vi.fn();
+    const onReturnFocus = vi.fn();
+    const GROUP: OutlineNode<number>[] = [
+      { id: 'part', label: 'Part I', target: null, children: [leaf('ch', 'Chapter', 1)] },
+    ];
+    render(
+      <OutlineTree
+        items={GROUP}
+        currentId={null}
+        emptyMessage="None"
+        onSelect={onSelect}
+        onReturnFocus={onReturnFocus}
+      />,
+    );
+    const part = item('Part I');
+    part.focus();
+    fireEvent.keyDown(part, { key: 'Enter' });
+    expect(item('Chapter')).toBeInTheDocument();
+    expect(onReturnFocus).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(item('Chapter'), { key: 'Enter' });
+    expect(onSelect).toHaveBeenCalledWith(1);
+    expect(onReturnFocus).toHaveBeenCalledTimes(1);
+  });
+
   it('toggles a branch from its disclosure triangle without jumping', () => {
     const onSelect = vi.fn();
     render(<OutlineTree items={BOOK} currentId={null} emptyMessage="None" onSelect={onSelect} />);

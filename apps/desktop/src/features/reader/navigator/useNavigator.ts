@@ -61,10 +61,19 @@ export interface NavigatorController {
   hasTab: (tab: NavigatorTab) => boolean;
   dimReadChapters: boolean;
   setDimReadChapters: (value: boolean) => void;
-  toggle: () => void;
+  /**
+   * A command asked the sidebar to take the keyboard when it opens. A new number
+   * for every request, so two requests in one React batch still reach the sidebar;
+   * the sidebar consumes it once, so a later remount (leaving focus mode) is quiet.
+   */
+  focusRequest: number | null;
+  /** Marks the request as used, after the sidebar has taken focus. */
+  consumeFocusRequest: () => void;
+  /** Toggles the sidebar; a command that opens it also gives it the keyboard. */
+  toggle: (options?: NavigatorFocusOptions) => void;
   hide: () => void;
-  /** Opens the sidebar on `tab`. */
-  show: (tab: NavigatorTab) => void;
+  /** Opens the sidebar on `tab`, optionally taking the keyboard for its current row. */
+  show: (tab: NavigatorTab, options?: NavigatorFocusOptions) => void;
   setWidth: (width: number) => void;
   /** A query started: its results take over the sidebar if it is open. */
   beginSearch: () => void;
@@ -74,6 +83,11 @@ export interface NavigatorController {
   recordDeletion: (kind: DeletedKind) => void;
   /** Takes the most recent recorded deletion, if any. */
   takeDeletion: () => DeletedKind | undefined;
+}
+
+/** Whether the sidebar should take focus, rather than only open. */
+export interface NavigatorFocusOptions {
+  focus?: boolean;
 }
 
 export type DeletedKind = 'bookmark' | 'annotation';
@@ -97,6 +111,9 @@ export function useNavigator(
   );
   const [dimReadChapters, setDimState] = useState(() => readStored().dimReadChapters === true);
   const [deletions, setDeletions] = useState<readonly DeletedKind[]>([]);
+  const [focusRequest, setFocusRequest] = useState<number | null>(null);
+  /** Every request gets a new id, which survives a batched consume-then-request. */
+  const focusRequestId = useRef(0);
   /** The last tab that was not Search, so clearing a query can put it back. */
   const lastTab = useRef<NavigatorTab>(tab);
 
@@ -122,12 +139,39 @@ export function useNavigator(
   );
 
   const show = useCallback(
-    (next: NavigatorTab) => {
+    (next: NavigatorTab, options?: NavigatorFocusOptions) => {
       setOpen(true);
       selectTab(next);
+      if (options?.focus) {
+        focusRequestId.current += 1;
+        setFocusRequest(focusRequestId.current);
+      }
     },
     [selectTab],
   );
+
+  const hide = useCallback(() => {
+    setOpen(false);
+    // Nothing is showing to take the keyboard, so a request made just before goes away.
+    setFocusRequest(null);
+  }, []);
+
+  const toggle = useCallback(
+    (options?: NavigatorFocusOptions) => {
+      if (open) {
+        hide();
+        return;
+      }
+      setOpen(true);
+      if (options?.focus) {
+        focusRequestId.current += 1;
+        setFocusRequest(focusRequestId.current);
+      }
+    },
+    [open, hide],
+  );
+
+  const consumeFocusRequest = useCallback(() => setFocusRequest(null), []);
 
   const setWidth = useCallback(
     (next: number) => {
@@ -173,8 +217,10 @@ export function useNavigator(
       candidate === 'search' || (tabs as readonly NavigatorTab[]).includes(candidate),
     dimReadChapters,
     setDimReadChapters,
-    toggle: () => setOpen((current) => !current),
-    hide: () => setOpen(false),
+    focusRequest,
+    consumeFocusRequest,
+    toggle,
+    hide,
     show,
     setWidth,
     beginSearch,

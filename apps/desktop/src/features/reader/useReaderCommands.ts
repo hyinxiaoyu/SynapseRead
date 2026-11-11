@@ -55,6 +55,7 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   isActive,
   ready = true,
   chromeHidden = false,
+  focusPage,
   search,
   navigator,
   bookmarks,
@@ -71,6 +72,8 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   ready?: boolean;
   /** Focus mode: the sidebar stays put away. */
   chromeHidden?: boolean;
+  /** Gives the keyboard back to the reading page; forcing takes it from a field. */
+  focusPage: (force?: boolean) => boolean;
   search: DocumentSearchController<TMatch>;
   navigator: NavigatorController;
   bookmarks: BookmarksController;
@@ -93,7 +96,8 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   const sidebarShown = navigator.open && !chromeHidden;
 
   const showTab = (tab: NavigatorTab) => ({
-    run: () => navigator.show(tab),
+    // A sidebar shortcut puts the keyboard in the list it opens, on its current row.
+    run: () => navigator.show(tab, { focus: true }),
     enabled: sidebarReady && navigator.hasTab(tab),
   });
 
@@ -135,17 +139,29 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
       title: annotations.highlightMode ? 'Turn Off Highlight Mode' : 'Turn On Highlight Mode',
     },
     'view.toggleSidebar': {
-      run: navigator.toggle,
+      run: () => {
+        // Opening hands the sidebar the keyboard; closing gives it back to the page,
+        // taking it from the filter that is about to be unmounted.
+        navigator.toggle({ focus: !navigator.open });
+        if (navigator.open) focusPage(true);
+      },
       enabled: sidebarReady,
       title: sidebarShown ? 'Hide Sidebar' : 'Show Sidebar',
     },
-    'view.hideSidebar': { run: navigator.hide, enabled: sidebarShown },
+    'view.hideSidebar': {
+      run: () => {
+        navigator.hide();
+        // The same as Toggle Sidebar: the sidebar's filter must not leave focus on <body>.
+        focusPage(true);
+      },
+      enabled: sidebarShown,
+    },
     'view.sidebarThumbnails': showTab('thumbnails'),
     'view.sidebarContents': showTab('contents'),
     'view.sidebarAnnotations': showTab('notes'),
     'view.sidebarBookmarks': showTab('bookmarks'),
     'view.sidebarSearch': {
-      run: () => navigator.show('search'),
+      run: () => navigator.show('search', { focus: true }),
       enabled: sidebarReady && search.active,
     },
     'bookmarks.toggle': {

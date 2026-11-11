@@ -2,7 +2,12 @@ import { X } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 
 import { Button } from '@/components/ui/button';
-import { commandDefinition, formatShortcut, MENUS } from '@/features/commands/commands';
+import {
+  commandDefinition,
+  formatKeyAlias,
+  formatShortcut,
+  MENUS,
+} from '@/features/commands/commands';
 
 /** Help ▸ Keyboard Shortcuts: every command with a key, grouped as in the menu bar. */
 export function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
@@ -61,16 +66,26 @@ export function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
               <section key={menu.id} aria-label={menu.title}>
                 <h3 className="mb-1 font-medium text-muted-foreground">{menu.title}</h3>
                 <dl className="divide-y">
-                  {rows.map((definition) => (
-                    <div key={definition.id} className="flex justify-between gap-4 py-1">
-                      <dt>{definition.title.replace(/…$/, '')}</dt>
-                      <dd>
-                        <kbd className="font-sans tabular-nums text-muted-foreground">
-                          {formatShortcut(definition.shortcut ?? '')}
-                        </kbd>
-                      </dd>
-                    </div>
-                  ))}
+                  {rows.map((definition) => {
+                    // The key equivalent first, then the keyboard-only ways to reach it,
+                    // such as Space and Page Down for a page turn.
+                    const keys = [
+                      formatShortcut(definition.shortcut ?? ''),
+                      ...definition.aliases.map((alias) => formatKeyAlias(alias)),
+                    ].filter((binding, index, all) => all.indexOf(binding) === index);
+                    return (
+                      <div key={definition.id} className="flex justify-between gap-4 py-1">
+                        <dt>{definition.title.replace(/…$/, '')}</dt>
+                        <dd className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                          {keys.map((key) => (
+                            <kbd key={key} className="font-sans tabular-nums text-muted-foreground">
+                              {key}
+                            </kbd>
+                          ))}
+                        </dd>
+                      </div>
+                    );
+                  })}
                 </dl>
               </section>
             );

@@ -270,6 +270,23 @@ describe('PdfViewer', () => {
     window.getSelection()?.removeAllRanges();
   });
 
+  it('gives the page the keyboard on open and on tab activation, unless a field has focus', async () => {
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} isActive={false} />);
+    const surface = await scroller();
+    expect(surface).not.toHaveFocus();
+
+    view.rerender(<Harness store={store} documentId={documentId} isActive />);
+    await waitFor(() => expect(screen.getByTestId('pdf-scroll')).toHaveFocus());
+
+    // Switching tabs while typing must not take the keyboard away from the field.
+    const field = screen.getByTestId('search-input') as HTMLInputElement;
+    field.focus();
+    view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+    view.rerender(<Harness store={store} documentId={documentId} isActive />);
+    expect(field).toHaveFocus();
+  });
+
   it('runs text selection -> normalized anchor -> persist -> reopen', async () => {
     const { backend, store, documentId } = await setup();
     const view = render(<Harness store={store} documentId={documentId} />);

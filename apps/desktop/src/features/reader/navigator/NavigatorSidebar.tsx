@@ -11,12 +11,14 @@ import {
   type KeyboardEvent,
   type PointerEvent,
   type ReactNode,
+  useEffect,
   useId,
   useRef,
   useState,
 } from 'react';
 
 import { type CommandId, commandTooltip } from '@/features/commands/commands';
+import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { AnnotationsList, type AnnotationPlacement } from '@/features/reader/AnnotationsPanel';
 import { BookmarksList, type BookmarksController } from '@/features/reader/BookmarksPanel';
 import {
@@ -73,6 +75,30 @@ const TAB_SPECS: Record<NavigatorTab, TabSpec> = {
 
 const KEYBOARD_RESIZE_STEP = 16;
 
+/**
+ * Where a shortcut-opened sidebar takes the keyboard, in preference order: the
+ * chapter being read or active bookmark or match, then the list's tab stop, then
+ * any row. These are tried one at a time: a selector list would return the first
+ * match in document order, which is the first row rather than the current one.
+ */
+const CURRENT_ROW_SELECTORS = [
+  '[aria-current="location"]',
+  '[aria-current="page"]',
+  '[role="treeitem"][tabindex="0"]',
+  '[data-roving-row][tabindex="0"]',
+  '[data-roving-row]',
+] as const;
+
+/** The row a sidebar should focus, or null when the view has nothing to focus. */
+export function findCurrentRow(root: ParentNode | null): HTMLElement | null {
+  if (root === null) return null;
+  for (const selector of CURRENT_ROW_SELECTORS) {
+    const row = root.querySelector<HTMLElement>(selector);
+    if (row !== null) return row;
+  }
+  return null;
+}
+
 export interface NavigatorContents<T> {
   items: readonly OutlineNode<T>[];
   currentId: string | null;
@@ -87,6 +113,11 @@ export interface ReaderNavigatorProps<TMatch extends DocumentSearchResultItem, T
   search: DocumentSearchController<TMatch>;
   /** Group search results under their location (chapters, pages). */
   groupSearchResults: boolean;
+  /**
+   * Where the keyboard goes when a list is done with it: the reading page. Forcing
+   * it takes the keyboard from a field the reader is leaving, such as the filter.
+   */
+  onReturnFocus: (force?: boolean) => boolean;
   contents?: NavigatorContents<T>;
   /** The PDF page strip, given the tab's filter text. */
   renderThumbnails?: (filter: string) => ReactNode;
@@ -107,6 +138,7 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
   annotations,
   search,
   groupSearchResults,
+  onReturnFocus,
   contents,
   renderThumbnails,
   annotationPlacement,
@@ -114,10 +146,32 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
   linkedAnnotationIds,
 }: ReaderNavigatorProps<TMatch, T>) {
   const baseId = useId();
+  const rootRef = useRef<HTMLElement>(null);
   const [filters, setFilters] = useState<Partial<Record<NavigatorTab, string>>>({});
   const [liveWidth, setLiveWidth] = useState<number | null>(null);
   const drag = useRef<{ startX: number; startWidth: number } | null>(null);
   const tabButtons = useRef(new Map<NavigatorTab, HTMLButtonElement>());
+
+  // A sidebar shortcut puts the reader in the list, so the arrows walk rows at
+  // once instead of turning pages. The request is consumed here: remounting the
+  // sidebar (leaving focus mode) must not pull the keyboard away again.
+  const { focusRequest, consumeFocusRequest } = navigator;
+  useEffect(() => {
+    if (focusRequest === null) return;
+    consumeFocusRequest();
+    findCurrentRow(rootRef.current)?.focus();
+  }, [focusRequest, consumeFocusRequest]);
+
+  // Esc never traps the keyboard in the sidebar: it hands the page back, and the
+  // sidebar stays open where it was, as in Preview. Forcing it matters when focus
+  // is in the filter: the field is being left behind, not typed into.
+  useEscapeLayer(ESCAPE_LAYER.sidebar, () => {
+    const root = rootRef.current;
+    const active = root?.ownerDocument.activeElement ?? null;
+    if (root === null || active === null || !root.contains(active)) return false;
+    // A page that could not take focus must not swallow Esc from focus mode.
+    return onReturnFocus(true);
+  });
 
   const tabs: NavigatorTab[] = search.active ? [...navigator.tabs, 'search'] : [...navigator.tabs];
   const tab = tabs.includes(navigator.tab) ? navigator.tab : (tabs[0] ?? 'bookmarks');
@@ -182,6 +236,7 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
             dimRead={navigator.dimReadChapters}
             emptyMessage={contents.emptyMessage}
             onSelect={contents.onSelect}
+            onReturnFocus={onReturnFocus}
           />
         </div>
       ) : null;
@@ -214,9 +269,11 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
 
   return (
     <aside
+      ref={rootRef}
       aria-label="Sidebar"
       data-testid="navigator-sidebar"
       data-navigator-tab={tab}
+
       className="relative flex h-full shrink-0 flex-col border-r bg-background text-foreground"
       style={{ width }}
     >
