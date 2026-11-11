@@ -45,6 +45,7 @@ import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBa
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
+import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
@@ -64,7 +65,6 @@ import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
 import {
   HistoryButtons,
-  ReaderPopoverLayer,
   ReaderToolbar,
   ToolbarButton,
   ToolbarOverflowMenu,
@@ -123,6 +123,7 @@ import {
   type PdfRotation,
   rotateNormalizedRect,
   unrotateNormalizedRect,
+  noteMarkerPoint,
 } from './pdfGeometry';
 import {
   normalizePageLabels,
@@ -303,13 +304,26 @@ function chapterOfPage(items: readonly OutlineNode<number>[], pageIndex: number)
 }
 
 const DISPLAY_MODES: readonly SegmentedOption<PdfDisplayMode>[] = [
-  { value: 'single', label: 'Single page', icon: FileText, testId: 'pdf-mode-single' },
-  { value: 'two-page', label: 'Two pages', icon: Columns2, testId: 'pdf-mode-two-page' },
+  {
+    value: 'single',
+    label: 'Single page',
+    icon: FileText,
+    testId: 'pdf-mode-single',
+    command: 'view.layoutSingle',
+  },
+  {
+    value: 'two-page',
+    label: 'Two pages',
+    icon: Columns2,
+    testId: 'pdf-mode-two-page',
+    command: 'view.layoutTwoPage',
+  },
   {
     value: 'continuous',
     label: 'Continuous scroll',
     icon: ScrollText,
     testId: 'pdf-mode-continuous',
+    command: 'view.layoutScroll',
   },
 ];
 
@@ -752,6 +766,20 @@ function PdfPage({
         }),
       )}
 
+      {highlights.map(({ annotationId, anchor, color, hasNote }) => {
+        const end = hasNote ? noteMarkerPoint(asPdfAnchor(anchor)?.rects ?? [], rotation) : null;
+        if (!end) return null;
+        return (
+          <span
+            key={`${annotationId}-note`}
+            aria-hidden="true"
+            data-note-marker={annotationId}
+            className="pointer-events-none absolute z-[1] size-2 -translate-x-1/2 -translate-y-1/2 rounded-full shadow-[0_0_0_1px_rgb(0_0_0/0.55)]"
+            style={{ left: `${end.x * 100}%`, top: `${end.y * 100}%`, backgroundColor: color }}
+          />
+        );
+      })}
+
       <div ref={textLayerRef} data-testid="pdf-text-layer" className="textLayer" />
 
       {pageAnnotations.links.map((link) => {
@@ -946,6 +974,10 @@ function PdfPages({
   }, [displayMode, zoomMode, customScale, rotation, coverPageAlone, onPdfLayoutChange]);
   const pageLabels = usePdfPageLabels(engine);
   const [unsupportedSubtypes, setUnsupportedSubtypes] = useState<readonly string[]>([]);
+  // Pages report their annotation types as they load. A closed notice stays closed
+  // until a later page adds a type it did not list.
+  const unsupportedNotice = unsupportedSubtypes.length > 0 ? unsupportedSubtypes.join(', ') : null;
+  const [dismissedUnsupported, setDismissedUnsupported] = useState<string | null>(null);
   const contentWidth = Math.max(width - SIDE_PADDING_PX * 2, 1);
   const availableHeight = Math.max(height - PAGE_GAP_PX * 2, 1);
   const availablePageWidth =
@@ -2007,6 +2039,7 @@ function PdfPages({
       rects: NormalizedRect[],
       color: string,
       style: AnnotationStyle = 'highlight',
+      hasNote = false,
     ) => {
       pages.set(pageIndex, [
         ...(pages.get(pageIndex) ?? []),
@@ -2015,6 +2048,7 @@ function PdfPages({
           anchor: { format: 'pdf', pageIndex, rects },
           color,
           style,
+          hasNote,
         },
       ]);
     };
@@ -2022,12 +2056,16 @@ function PdfPages({
       const anchor = asPdfAnchor(highlight.anchor);
       if (!anchor) continue;
       const { annotationId, color, style } = highlight;
+      const hasNote = highlight.hasNote === true;
       if (anchor.pageSpans && anchor.pageSpans.length > 0) {
-        for (const span of anchor.pageSpans) {
-          addPageHighlight(span.pageIndex, annotationId, span.rects, color, style);
+        const last = anchor.pageSpans.length - 1;
+        for (const [index, span] of anchor.pageSpans.entries()) {
+          // The note marker goes where the highlight ends: on its last page only.
+          const endsHere = hasNote && index === last;
+          addPageHighlight(span.pageIndex, annotationId, span.rects, color, style, endsHere);
         }
       } else {
-        addPageHighlight(anchor.pageIndex, annotationId, anchor.rects, color, style);
+        addPageHighlight(anchor.pageIndex, annotationId, anchor.rects, color, style, hasNote);
       }
     }
     for (const [index, match] of search.results.entries()) {
@@ -2340,21 +2378,23 @@ function PdfPages({
             canExcerpt={canExcerpt}
             onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
           />
-          <ReaderPopoverLayer>
-            {unsupportedSubtypes.length > 0 && !chromeHidden && (
-              <p
-                role="status"
-                data-testid="pdf-unsupported-annotations-notice"
-                className="bg-muted px-4 py-1 text-xs text-muted-foreground"
+          <ReaderPopoverLayer hidden={chromeHidden}>
+            {unsupportedNotice !== null && unsupportedNotice !== dismissedUnsupported && (
+              <ReaderNotice
+                // New types restart its fade, so the type just added gets its full 6 s.
+                key={unsupportedNotice}
+                tone="info"
+                testId="pdf-unsupported-annotations-notice"
+                onDismiss={() => setDismissedUnsupported(unsupportedNotice)}
               >
-                Unsupported PDF annotation types not shown: {unsupportedSubtypes.join(', ')}. Source
-                PDF is never modified.
-              </p>
+                Unsupported PDF annotation types not shown: {unsupportedNotice}. Source PDF is never
+                modified.
+              </ReaderNotice>
             )}
             {missedJump && (
-              <p role="status" className="bg-muted px-4 py-1.5 text-xs">
+              <ReaderNotice tone="warning" onDismiss={() => setMissedJump(false)}>
                 That excerpt is on a page this file does not have. The file may have changed.
-              </p>
+              </ReaderNotice>
             )}
           </ReaderPopoverLayer>
           {/*

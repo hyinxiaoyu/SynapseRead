@@ -1,4 +1,5 @@
 import { assert } from './harness.mjs';
+import { notesInPlaceFlow } from './notes.mjs';
 
 const TEXT = '.textLayer span';
 const visibleScroller = `[...document.querySelectorAll('[data-testid="pdf-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
@@ -71,6 +72,20 @@ export async function pdfFlow(page) {
     'the text layer to render',
   );
   await page.waitFor(`${inkOn(0)} > 100`, 'the canvas to show text');
+
+  // The Stamp disclosure only informs: it has a close button and fades by itself (#45).
+  const stampNotice = `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-unsupported-annotations-notice"]')`;
+  await page.waitFor(
+    `${stampNotice}?.textContent.includes('Stamp')`,
+    'unsupported PDF Stamp annotation disclosure',
+  );
+  assert(
+    await page.evaluate(
+      `${stampNotice}.dataset.tone === 'info' && !!${stampNotice}.querySelector('button[aria-label="Close notice"]')`,
+    ),
+    'the Stamp disclosure is an info notice with a close button',
+  );
+  await page.waitFor(`!${stampNotice}`, 'the Stamp disclosure to fade on its own');
 
   // selection -> anchor -> persist, with a real drag over the real text layer.
   const selected = 'quick brown fox';
@@ -287,6 +302,10 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-page-index] .textLayer span')`,
     'the reopened document to render',
   );
+  // A fresh open discloses the Stamp again, and its close button puts it away.
+  await page.waitFor(stampNotice, 'the Stamp disclosure on reopening');
+  await page.evaluate(`${stampNotice}.querySelector('button[aria-label="Close notice"]').click()`);
+  await page.waitFor(`!${stampNotice}`, 'the close button to put the disclosure away');
 
   // Embedded PDF outline (with nested entry), jump return, and validated page input.
   await page.showSidebarTab('Table of Contents');
@@ -497,6 +516,28 @@ export async function pdfFlow(page) {
     'undoing PDF highlight deletion',
   );
 
+  // Notes in place on the highlight just made: the marker sits where it ends.
+  const pdfViewer = `[...document.querySelectorAll('[data-testid="pdf-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  const page4Mark = `[...document.querySelectorAll('[data-page-index="3"] [data-annotation-id]')].filter((e) => !e.dataset.annotationId.startsWith('__')).at(-1)`;
+  await notesInPlaceFlow(page, {
+    name: 'PDF',
+    viewer: pdfViewer,
+    highlightPoint: `(() => {
+      const mark = ${page4Mark};
+      if (!mark) return null;
+      const r = mark.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`,
+    markerShown: `(() => {
+      const mark = ${page4Mark};
+      const marker = mark && document.querySelector('[data-page-index="3"] [data-note-marker="' + mark.dataset.annotationId + '"]');
+      if (!marker) return false;
+      const m = marker.getBoundingClientRect();
+      const r = mark.getBoundingClientRect();
+      return Math.abs(m.left + m.width / 2 - r.right) < 3 && Math.abs(m.top + m.height / 2 - r.top) < 3;
+    })()`,
+  });
+
   // Lazy thumbnails, embedded PDF annotations, internal links, display modes, and rotation.
   await page.showSidebarTab('Thumbnails');
   await page.waitFor(
@@ -543,10 +584,6 @@ export async function pdfFlow(page) {
   await page.waitFor(
     `!document.querySelector('[data-testid="appearance-popover"]')`,
     'the PDF appearance popover to close',
-  );
-  await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-unsupported-annotations-notice"]')?.textContent.includes('Stamp')`,
-    'unsupported PDF Stamp annotation disclosure banner',
   );
   const linkTarget = await page.evaluate(`(() => {
     const link = document.querySelector('[data-testid="pdf-viewer"] [data-testid="pdf-internal-link"]');
@@ -676,6 +713,17 @@ export async function pdfFlow(page) {
   await page.leaveSearch();
   // Clearing the query leaves the sidebar as the reader left it.
   await page.waitFor(sidebarShown, 'the sidebar to stay open after the search is cleared');
+  await page.hideSidebar();
+
+  // Focus mode (#45): page turns leave the toolbar hidden, and Esc leaves.
+  await page.enterFocusMode(visibleScroller);
+  await page.press('ArrowRight');
+  await page.assertToolbarStaysHidden('ArrowRight in PDF focus mode');
+  await page.press('Escape');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"]').dataset.immersive !== 'true'`,
+    'Esc to leave PDF focus mode',
+  );
 }
 
 /**

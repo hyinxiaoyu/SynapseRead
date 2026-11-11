@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { openEpubDocument } from './epubEngine';
+import {
+  decorateWithNoteMarker,
+  openEpubDocument,
+  type PaneMark,
+  type RenditionAnnotation,
+} from './epubEngine';
 
 /**
  * jsdom cannot host epub.js, so the book and rendition are a fake that reproduces the
@@ -85,6 +90,11 @@ const fake = vi.hoisted(() => {
       }
     },
     annotations: {
+      // Returns an annotation with no mark yet, as epub.js does before a chapter renders.
+      add: vi.fn<(...args: unknown[]) => { mark: undefined; on: () => undefined }>(() => ({
+        mark: undefined,
+        on: () => undefined,
+      })),
       underline: () => undefined,
       highlight: () => undefined,
       remove: () => undefined,
@@ -194,6 +204,19 @@ describe('EPUB navigation', () => {
     expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
   });
 
+  it('tags a mark with its annotation id only, noted or not', async () => {
+    const handle = await open();
+    fake.rendition.annotations.add.mockClear();
+    handle.highlight('a', 'epubcfi(/6/4!/4/2/1:0,/1:0,/1:4)', '#fde047', 'highlight', {
+      hasNote: true,
+    });
+    handle.highlight('b', 'epubcfi(/6/4!/4/2/1:0,/1:4,/1:8)', '#fde047', 'underline');
+    expect(fake.rendition.annotations.add.mock.calls.map((call) => call[2])).toEqual([
+      { annotationId: 'a' },
+      { annotationId: 'b' },
+    ]);
+  });
+
   it('re-issues a jump whose views a resize cleared', async () => {
     const handle = await open();
     const jump = handle.display('epubcfi(/6/2!/4/2/1:0)');
@@ -205,5 +228,74 @@ describe('EPUB navigation', () => {
     fake.settle('epubcfi(/6/2!/4/2/1:0)');
     await jump;
     expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
+  });
+});
+
+describe('decorateWithNoteMarker', () => {
+  const SVG = 'http://www.w3.org/2000/svg';
+
+  /** Stands in for a marks-pane highlight: `render` clears and redraws its rects. */
+  function fakeMark(lines: { x: number; y: number; width: number }[]): PaneMark {
+    const group = document.createElementNS(SVG, 'g');
+    return {
+      element: group,
+      render() {
+        while (group.firstChild) group.removeChild(group.firstChild);
+        for (const line of lines) {
+          const rect = document.createElementNS(SVG, 'rect');
+          rect.setAttribute('x', String(line.x));
+          rect.setAttribute('y', String(line.y));
+          rect.setAttribute('width', String(line.width));
+          rect.setAttribute('height', '18');
+          group.appendChild(rect);
+        }
+      },
+    };
+  }
+
+  function fakeAnnotation(mark: PaneMark | undefined) {
+    let onAttach: ((mark: PaneMark | undefined) => void) | null = null;
+    const annotation: RenditionAnnotation = {
+      mark,
+      on: (_type, listener) => {
+        onAttach = listener;
+      },
+    };
+    return { annotation, attach: (next: PaneMark) => onAttach?.(next) };
+  }
+
+  const dots = (mark: PaneMark) => mark.element?.querySelectorAll('circle[data-note-marker]') ?? [];
+
+  it('draws one dot at the end of the last line, and keeps it through redraws', () => {
+    const mark = fakeMark([
+      { x: 10, y: 100, width: 300 },
+      { x: 10, y: 120, width: 80 },
+    ]);
+    mark.render();
+    decorateWithNoteMarker(fakeAnnotation(mark).annotation, '#86efac');
+    expect(dots(mark)).toHaveLength(1);
+    const dot = dots(mark)[0];
+    expect(Number(dot?.getAttribute('cx'))).toBeGreaterThan(90);
+    expect(Number(dot?.getAttribute('cy'))).toBeGreaterThan(120);
+    expect(dot?.getAttribute('fill')).toBe('#86efac');
+    expect(dot?.getAttribute('fill-opacity')).toBe('1');
+
+    // marks-pane redraws on every resize.
+    mark.render();
+    mark.render();
+    expect(dots(mark)).toHaveLength(1);
+  });
+
+  it('decorates the new mark epub.js makes each time the chapter renders', () => {
+    const { annotation, attach } = fakeAnnotation(undefined);
+    decorateWithNoteMarker(annotation, '#fde047');
+    const next = fakeMark([{ x: 0, y: 0, width: 50 }]);
+    next.render();
+    attach(next);
+    expect(dots(next)).toHaveLength(1);
+    // Attaching the same mark again does not wrap it twice.
+    attach(next);
+    next.render();
+    expect(dots(next)).toHaveLength(1);
   });
 });

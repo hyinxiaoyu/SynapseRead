@@ -116,6 +116,11 @@ export interface Annotation {
   createdAt: string;
 }
 
+/** Whether an annotation has a note worth showing: blank notes do not count. */
+export function annotationHasNote(annotation: Pick<Annotation, 'note'>): boolean {
+  return (annotation.note?.trim() ?? '') !== '';
+}
+
 export interface CreateAnnotationInput {
   documentId: string;
   notebookId: string;
@@ -416,6 +421,11 @@ export interface ReaderHighlight {
   color: string;
   /** Absent for marks that are not annotations, such as search matches. */
   style?: AnnotationStyle;
+  /**
+   * The annotation carries a note, so the reader draws a marker where the
+   * highlight ends. Frontend-only: derived from `Annotation.note`, never sent.
+   */
+  hasNote?: boolean;
 }
 
 /**

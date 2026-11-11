@@ -115,6 +115,23 @@ export function rotateNormalizedRect(rect: NormalizedRect, rotation: PdfRotation
 }
 
 /**
+ * Where a noted highlight's marker sits on the page as shown: the top right of
+ * the last line box it covers, measured on the unrotated page.
+ */
+export function noteMarkerPoint(
+  rects: readonly NormalizedRect[],
+  rotation: PdfRotation,
+): { x: number; y: number } | null {
+  const last = rects.at(-1);
+  if (!last) return null;
+  const corner = rotateNormalizedRect(
+    { x: last.x + last.width, y: last.y, width: 0, height: 0 },
+    rotation,
+  );
+  return { x: corner.x, y: corner.y };
+}
+
+/**
  * Converts a normalized rectangle measured on a rotated page back into canonical (`0°`) page space.
  */
 export function unrotateNormalizedRect(

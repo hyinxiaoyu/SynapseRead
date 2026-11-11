@@ -1,10 +1,11 @@
 import { ArrowLeft, ArrowRight, ChevronsRight, type LucideIcon } from 'lucide-react';
-import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, type ReactNode, useContext, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { Button } from '@/components/ui/button';
 import { type CommandId, commandTooltip } from '@/features/commands/commands';
 import { cn } from '@/lib/utils';
+import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 
 /**
  * Where the active reader's controls render. The workspace's unified toolbar
@@ -87,6 +88,12 @@ export function ToolbarSeparator({ collapse }: { collapse?: ToolbarCollapse }) {
   );
 }
 
+/**
+ * The unified toolbar's height. In focus mode it floats over the page, so a paged
+ * reader keeps this much of the top clear for it.
+ */
+export const TOOLBAR_HEIGHT_PX = 48;
+
 export interface ToolbarButtonProps {
   icon: LucideIcon;
   /** The accessible name, and the tooltip before its shortcut. */
@@ -136,6 +143,7 @@ export function ToolbarButton({
       aria-expanded={ariaExpanded}
       title={command ? commandTooltip(label, command) : label}
       data-testid={testId}
+      data-command={command}
       disabled={disabled}
       onMouseDown={preserveSelection ? (event) => event.preventDefault() : undefined}
       onClick={onClick}
@@ -173,23 +181,7 @@ export function ToolbarOverflowMenu({ items }: { items: readonly OverflowItem[] 
     items.some((item) => item.collapse === collapse),
   );
 
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      setOpen(false);
-    };
-    window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown);
-    };
-  }, [open]);
+  useDismissOnOutside(open, () => setOpen(false), { rootRef });
 
   if (!widest) return null;
   return (
@@ -262,18 +254,6 @@ export function ToolbarTitle({ title, subtitle }: { title: string; subtitle?: Re
           {subtitle}
         </span>
       )}
-    </div>
-  );
-}
-
-/**
- * Notices float over the page as popovers instead of stacking strips above
- * it, so the reading area never jumps.
- */
-export function ReaderPopoverLayer({ children }: { children: ReactNode }) {
-  return (
-    <div className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none">
-      {children}
     </div>
   );
 }

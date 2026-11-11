@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
 import { PULSE_MS } from '@/features/reader/pulse';
+import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import {
   createStudySyncStore,
@@ -31,6 +32,8 @@ const engineState = vi.hoisted(() => ({
   outline: [] as PdfOutlineItem[],
   pageTextGate: null as (() => Promise<void>) | null,
   pageAnnotations: new Map<number, PdfPageAnnotations>(),
+  /** Holds back one page's annotations until the test resolves it. */
+  pageAnnotationsGate: new Map<number, Promise<void>>(),
   pageLabels: null as string[] | null,
 }));
 
@@ -48,12 +51,16 @@ vi.mock('./pdfEngine', () => ({
       },
       getOutline: async () => engineState.outline,
       getPageLabels: async () => engineState.pageLabels,
-      getPageAnnotations: async (pageIndex: number): Promise<PdfPageAnnotations> =>
-        engineState.pageAnnotations.get(pageIndex) ?? {
-          links: [],
-          embeddedAnnotations: [],
-          unsupportedSubtypes: [],
-        },
+      getPageAnnotations: async (pageIndex: number): Promise<PdfPageAnnotations> => {
+        await engineState.pageAnnotationsGate.get(pageIndex);
+        return (
+          engineState.pageAnnotations.get(pageIndex) ?? {
+            links: [],
+            embeddedAnnotations: [],
+            unsupportedSubtypes: [],
+          }
+        );
+      },
       getPageText: async (pageIndex: number): Promise<PdfPageText> => {
         if (engineState.pageTextGate) {
           await engineState.pageTextGate();
@@ -217,6 +224,7 @@ describe('PdfViewer', () => {
     engineState.destroyed = 0;
     engineState.pageTextGate = null;
     engineState.pageAnnotations = new Map();
+    engineState.pageAnnotationsGate = new Map();
     engineState.pageLabels = null;
     engineState.outline = [
       {
@@ -1241,9 +1249,18 @@ describe('PdfViewer', () => {
       if (!element) throw new Error('no highlight yet');
       return element;
     });
+    // The note shows on the page as a marker where the highlight ends.
+    const marker = document.querySelector<HTMLElement>('[data-page-index="0"] [data-note-marker]');
+    expect(marker?.dataset.noteMarker).toBe(store.getState().annotations[0]?.id);
+    expect(marker?.style.backgroundColor).not.toBe('');
     fireEvent.click(mark);
     const editor = await screen.findByTestId('selection-popover');
     expect(editor).toHaveAttribute('data-popover-mode', 'edit');
+    // It opens with the note showing and an Edit button.
+    expect(within(editor).getByTestId('popover-note-text')).toHaveTextContent(
+      'Margin note on page 1',
+    );
+    expect(within(editor).getByTestId('popover-note-edit')).toBeInTheDocument();
     fireEvent.click(within(editor).getByRole('button', { name: 'Underline' }));
     await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('underline'));
     await waitFor(() =>
@@ -1301,6 +1318,49 @@ describe('PdfViewer', () => {
     });
   });
 
+  it('gives a type a later page adds to the unsupported-annotations notice its full time on screen', async () => {
+    const annotations = (subtype: string): PdfPageAnnotations => ({
+      links: [],
+      embeddedAnnotations: [],
+      unsupportedSubtypes: [subtype],
+    });
+    engineState.pageAnnotations.set(0, annotations('Stamp'));
+    engineState.pageAnnotations.set(1, annotations('Sound'));
+    let releasePage1 = () => undefined as void;
+    engineState.pageAnnotationsGate.set(
+      1,
+      new Promise<void>((settle) => {
+        releasePage1 = settle;
+      }),
+    );
+
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      const notice = () => screen.queryByTestId('pdf-unsupported-annotations-notice');
+      await waitFor(() => expect(notice()).toHaveTextContent('Stamp'));
+      expect(notice()).not.toHaveTextContent('Sound');
+
+      await act(async () => void vi.advanceTimersByTime(INFO_NOTICE_MS - 1000));
+      await act(async () => releasePage1());
+      await waitFor(() => expect(notice()).toHaveTextContent('Sound, Stamp'));
+
+      // Past the first type's 6 s, the notice is still up, not fading, for the one
+      // just added. Stepped, so each timer's effects run before the next second.
+      for (let second = 0; second < 2; second += 1) {
+        await act(async () => void vi.advanceTimersByTime(1000));
+      }
+      expect(notice()).not.toBeNull();
+      expect(notice()).not.toHaveAttribute('data-fading');
+
+      await act(async () => void vi.advanceTimersByTime(INFO_NOTICE_MS + NOTICE_FADE_MS));
+      await waitFor(() => expect(notice()).toBeNull());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('supports lazy thumbnails, continuous/single/two-page display modes, view rotation, internal links, and embedded annotations disclosure', async () => {
     engineState.pageAnnotations.set(0, {
       links: [
@@ -1337,6 +1397,17 @@ describe('PdfViewer', () => {
     expect(await screen.findByTestId('pdf-unsupported-annotations-notice')).toHaveTextContent(
       /Stamp/,
     );
+    // It only informs, so it can be closed and fades by itself (ReaderNotice.test.tsx).
+    expect(screen.getByTestId('pdf-unsupported-annotations-notice')).toHaveAttribute(
+      'data-tone',
+      'info',
+    );
+    fireEvent.click(
+      within(screen.getByTestId('pdf-unsupported-annotations-notice')).getByRole('button', {
+        name: 'Close notice',
+      }),
+    );
+    expect(screen.queryByTestId('pdf-unsupported-annotations-notice')).toBeNull();
 
     // Create a user highlight on Page 1 to verify geometry across rotation and display modes.
     const node = textNode(page0, 0);

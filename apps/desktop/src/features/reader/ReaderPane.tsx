@@ -16,6 +16,7 @@ import { useCommands } from '@/features/commands/registry';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn, describeError } from '@/lib/utils';
+import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 import {
   selectBookmarks,
   selectDocumentAnnotations,
@@ -35,8 +36,12 @@ import {
 } from '@/types/domain';
 
 function describeResumeLocation(document: StudyDocument): string {
-  if (!document.lastCursorAnchor) return 'Start reading';
-  return `Continue reading · ${defaultBookmarkLabel(document.lastCursorAnchor)}`;
+  const anchor = document.lastCursorAnchor;
+  if (!anchor) return 'Start reading';
+  // An EPUB position is a chapter file name, which means nothing to a reader.
+  // It stays bare until the list can show a percentage (#52).
+  if (anchor.format === 'epub') return 'Continue reading';
+  return `Continue reading · ${defaultBookmarkLabel(anchor)}`;
 }
 
 interface TabErrorBoundaryProps {
@@ -120,16 +125,7 @@ export function ReaderPane() {
     },
   });
 
-  useEffect(() => {
-    if (!recentMenuOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.key !== 'Escape') return;
-      event.preventDefault();
-      setRecentMenuOpen(false);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [recentMenuOpen]);
+  useDismissOnOutside(recentMenuOpen, () => setRecentMenuOpen(false));
 
   const handleTabKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLButtonElement>, currentIndex: number) => {
