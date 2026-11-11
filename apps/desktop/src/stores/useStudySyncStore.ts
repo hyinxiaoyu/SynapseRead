@@ -21,6 +21,8 @@ import {
   type NoteCard,
   type ReaderHighlight,
   type ReaderSelection,
+  DEFAULT_PDF_LAYOUT,
+  type PdfLayout,
   type ReadingPreferences,
   type RelinkDocumentResult,
   type StudyDocument,
@@ -67,6 +69,11 @@ export interface StudySyncState {
   fullscreenFromFocusMode: boolean;
   chromeStyle: WindowChromeStyle;
   readingPreferences: ReadingPreferences;
+  /**
+   * Layouts of open PDFs, by document id. An entry is loaded before its viewer
+   * mounts and dropped when the tab closes, so reopening reads the saved layout.
+   */
+  pdfLayouts: Record<string, PdfLayout>;
   bookmarks: Bookmark[];
 
   notebook: StudyNotebook | null;
@@ -126,6 +133,10 @@ export interface StudySyncState {
   updateCard(cardId: string, patch: CardPatch): Promise<void>;
   saveViewport(viewport: Viewport): Promise<void>;
   updateReadingPreferences(patch: Partial<ReadingPreferences>): Promise<void>;
+  /** Loads a PDF's layout into `pdfLayouts`, falling back to the default on failure. */
+  loadPdfLayout(documentId: string): Promise<void>;
+  /** Records and persists a PDF's whole layout. */
+  savePdfLayout(documentId: string, layout: PdfLayout): Promise<void>;
 
   addBookmark(documentId: string, anchor: AnchorLocation, label?: string): Promise<Bookmark | null>;
   removeBookmark(bookmarkId: string): Promise<void>;
@@ -337,6 +348,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       fullscreenFromFocusMode: false,
       chromeStyle: backend.chromeStyle,
       readingPreferences: { ...DEFAULT_READING_PREFERENCES },
+      pdfLayouts: {},
       bookmarks: [],
       notebook: null,
       annotations: [],
@@ -487,9 +499,12 @@ export function createStudySyncStore(backend: StudyBackend) {
             state.activeDocumentId === documentId
               ? (openDocumentIds[Math.min(index, openDocumentIds.length - 1)] ?? null)
               : state.activeDocumentId;
+          const pdfLayouts = { ...state.pdfLayouts };
+          delete pdfLayouts[documentId];
           return {
             openDocumentIds,
             activeDocumentId,
+            pdfLayouts,
             selection: state.selection?.documentId === documentId ? null : state.selection,
             jumpRequest: state.jumpRequest?.documentId === documentId ? null : state.jumpRequest,
           };
@@ -796,6 +811,30 @@ export function createStudySyncStore(backend: StudyBackend) {
           },
           () => set({ readingPreferences: previous }),
         );
+      },
+
+      async loadPdfLayout(documentId) {
+        let layout: PdfLayout = DEFAULT_PDF_LAYOUT;
+        try {
+          layout = await backend.getPdfLayout(documentId);
+        } catch (error) {
+          // The document still opens, in the default layout.
+          set({ error: describeError(error) });
+        }
+        // A save made while this was loading is newer than what was read, and a tab
+        // closed meanwhile must not get its cache back: reopening reads the backend.
+        const state = get();
+        if (state.pdfLayouts[documentId] || !state.openDocumentIds.includes(documentId)) return;
+        set((state) => ({ pdfLayouts: { ...state.pdfLayouts, [documentId]: layout } }));
+      },
+
+      async savePdfLayout(documentId, layout) {
+        // The viewer already shows the layout, so a failed save keeps it on screen
+        // and only reports the error; it is retried by the next change.
+        set((state) => ({ pdfLayouts: { ...state.pdfLayouts, [documentId]: layout } }));
+        await guarded(async () => {
+          await backend.savePdfLayout(documentId, layout);
+        });
       },
 
       async addBookmark(documentId, anchor, label) {

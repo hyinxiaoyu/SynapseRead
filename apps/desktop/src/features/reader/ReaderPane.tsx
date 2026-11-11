@@ -5,6 +5,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
+  useEffect,
   useMemo,
   useState,
 } from 'react';
@@ -30,6 +31,7 @@ import {
   defaultBookmarkLabel,
   type DocumentSourceStatus,
   type DocumentViewerProps,
+  type PdfLayout,
   type StudyDocument,
 } from '@/types/domain';
 
@@ -511,6 +513,12 @@ function DocumentTab({
   const allBookmarks = useStudySyncStore((state) => state.bookmarks);
   const readingPreferences = useStudySyncStore((state) => state.readingPreferences);
   const updateReadingPreferences = useStudySyncStore((state) => state.updateReadingPreferences);
+  const isPdf = document.format === 'pdf';
+  const pdfLayout = useStudySyncStore((state) =>
+    isPdf ? state.pdfLayouts[document.id] : undefined,
+  );
+  const loadPdfLayout = useStudySyncStore((state) => state.loadPdfLayout);
+  const savePdfLayout = useStudySyncStore((state) => state.savePdfLayout);
   const addBookmark = useStudySyncStore((state) => state.addBookmark);
   const removeBookmark = useStudySyncStore((state) => state.removeBookmark);
   const createAnnotationFromSelection = useStudySyncStore(
@@ -550,6 +558,16 @@ function DocumentTab({
       void updateReadingPreferences(patch);
     },
     [updateReadingPreferences],
+  );
+  const pdfLayoutLoaded = pdfLayout !== undefined;
+  useEffect(() => {
+    if (isPdf && !pdfLayoutLoaded) void loadPdfLayout(document.id);
+  }, [isPdf, pdfLayoutLoaded, loadPdfLayout, document.id]);
+  const onPdfLayoutChange = useCallback(
+    (layout: PdfLayout) => {
+      void savePdfLayout(document.id, layout);
+    },
+    [savePdfLayout, document.id],
   );
   const onAddBookmark = useCallback(
     (anchor: AnchorLocation, label?: string) => {
@@ -602,6 +620,12 @@ function DocumentTab({
     );
   }
 
+  // The viewer reads its layout once, on mount, so it waits for the saved one
+  // rather than opening in the default and jumping.
+  if (isPdf && !pdfLayout) {
+    return <div className="p-6 text-sm text-muted-foreground">Opening {document.title}…</div>;
+  }
+
   // Safe: the entry is looked up by this document's own format.
   const Viewer = viewerRegistry[document.format] as ComponentType<DocumentViewerProps>;
   return (
@@ -618,6 +642,7 @@ function DocumentTab({
       onCursorChange={onCursorChange}
       preferences={readingPreferences}
       onPreferencesChange={onPreferencesChange}
+      {...(pdfLayout ? { pdfLayout, onPdfLayoutChange } : {})}
       bookmarks={bookmarks}
       onAddBookmark={onAddBookmark}
       onRemoveBookmark={onRemoveBookmark}

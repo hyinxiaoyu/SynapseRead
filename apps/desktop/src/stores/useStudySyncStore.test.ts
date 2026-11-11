@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import type { FileDropEvent, StudyBackend } from '@/lib/backend/types';
-import type { ReaderSelection, TxtAnchor } from '@/types/domain';
+import {
+  DEFAULT_PDF_LAYOUT,
+  type PdfLayout,
+  type ReaderSelection,
+  type TxtAnchor,
+} from '@/types/domain';
 
 import {
   createStudySyncStore,
@@ -1025,5 +1030,144 @@ describe('nextNodePosition', () => {
 
   it('treats an unknown parent as no parent', () => {
     expect(nextNodePosition([], 'missing')).toEqual(nextNodePosition([], null));
+  });
+});
+
+describe('PDF layouts', () => {
+  const twoPage: PdfLayout = {
+    displayMode: 'two-page',
+    zoomMode: 'custom',
+    scale: 1.5,
+    rotation: 270,
+    coverPageAlone: true,
+  };
+
+  const setup = async () => {
+    const backend = createMemoryBackend({
+      library: Object.fromEntries(
+        ['first.pdf', 'second.pdf', 'notes.txt'].map((name) => [
+          `/test/${name}`,
+          new TextEncoder().encode(`content:${name}`),
+        ]),
+      ),
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    const open = async () => {
+      await store.getState().openDocument();
+      return store.getState().activeDocumentId as string;
+    };
+    return { backend, store, open };
+  };
+
+  it('loads, saves, and restores a PDF layout across a restart', async () => {
+    const { backend, store, open } = await setup();
+    const pdfId = await open();
+    await store.getState().loadPdfLayout(pdfId);
+    expect(store.getState().pdfLayouts[pdfId]).toEqual(DEFAULT_PDF_LAYOUT);
+
+    await store.getState().savePdfLayout(pdfId, twoPage);
+    expect(store.getState().pdfLayouts[pdfId]).toEqual(twoPage);
+    await expect(backend.getPdfLayout(pdfId)).resolves.toEqual(twoPage);
+
+    const restarted = createStudySyncStore(backend);
+    await restarted.getState().initialize();
+    expect(restarted.getState().pdfLayouts).toEqual({});
+    await restarted.getState().loadPdfLayout(pdfId);
+    expect(restarted.getState().pdfLayouts[pdfId]).toEqual(twoPage);
+  });
+
+  it('opens a new PDF in the last saved display and zoom, but its own rotation and cover', async () => {
+    const { store, open } = await setup();
+    const firstId = await open();
+    await store.getState().savePdfLayout(firstId, twoPage);
+    const secondId = await open();
+    await store.getState().loadPdfLayout(secondId);
+    expect(store.getState().pdfLayouts[secondId]).toEqual({
+      ...DEFAULT_PDF_LAYOUT,
+      displayMode: 'two-page',
+      zoomMode: 'custom',
+      scale: 1.5,
+    });
+    // The first keeps the whole layout it saved.
+    expect(store.getState().pdfLayouts[firstId]).toEqual(twoPage);
+  });
+
+  it('keeps an inherited layout after the PDF it came from changes', async () => {
+    const { backend, store, open } = await setup();
+    const firstId = await open();
+    await store.getState().savePdfLayout(firstId, twoPage);
+    const secondId = await open();
+    await store.getState().loadPdfLayout(secondId);
+    store.getState().closeDocument(secondId);
+    await store.getState().savePdfLayout(firstId, { ...twoPage, displayMode: 'continuous' });
+
+    await store.getState().reopenRecentDocument(secondId);
+    await store.getState().loadPdfLayout(secondId);
+    expect(store.getState().pdfLayouts[secondId]?.displayMode).toBe('two-page');
+    await expect(backend.getPdfLayout(secondId)).resolves.toMatchObject({
+      displayMode: 'two-page',
+    });
+  });
+
+  it('does not cache a layout that finishes loading after its tab closed', async () => {
+    const { backend, store, open } = await setup();
+    const pdfId = await open();
+    let resolve: (layout: PdfLayout) => void = () => {};
+    vi.spyOn(backend, 'getPdfLayout').mockReturnValueOnce(
+      new Promise<PdfLayout>((done) => {
+        resolve = done;
+      }),
+    );
+    const loading = store.getState().loadPdfLayout(pdfId);
+    store.getState().closeDocument(pdfId);
+    resolve(twoPage);
+    await loading;
+    expect(store.getState().pdfLayouts[pdfId]).toBeUndefined();
+  });
+
+  it('drops a closed tab’s layout so reopening reads the saved one', async () => {
+    const { backend, store, open } = await setup();
+    const pdfId = await open();
+    await store.getState().savePdfLayout(pdfId, twoPage);
+    // Another window or a failed save could leave the backend different.
+    await backend.savePdfLayout(pdfId, { ...twoPage, rotation: 90 });
+
+    store.getState().closeDocument(pdfId);
+    expect(store.getState().pdfLayouts[pdfId]).toBeUndefined();
+    await store.getState().reopenRecentDocument(pdfId);
+    await store.getState().loadPdfLayout(pdfId);
+    expect(store.getState().pdfLayouts[pdfId]?.rotation).toBe(90);
+  });
+
+  it('opens in the default layout and reports the error when loading fails', async () => {
+    const { backend, store, open } = await setup();
+    const pdfId = await open();
+    vi.spyOn(backend, 'getPdfLayout').mockRejectedValueOnce({
+      code: 'database',
+      message: 'disk I/O error',
+    });
+    await store.getState().loadPdfLayout(pdfId);
+    expect(store.getState().pdfLayouts[pdfId]).toEqual(DEFAULT_PDF_LAYOUT);
+    expect(store.getState().error).toContain('disk I/O error');
+  });
+
+  it('rejects what core rejects', async () => {
+    const { backend, store, open } = await setup();
+    const pdfId = await open();
+    await open(); // second.pdf
+    const txtId = await open();
+    await expect(backend.savePdfLayout(pdfId, { ...twoPage, scale: 9 })).rejects.toMatchObject({
+      code: 'invalid_layout',
+    });
+    await expect(
+      backend.savePdfLayout(pdfId, { ...twoPage, rotation: 45 as PdfLayout['rotation'] }),
+    ).rejects.toMatchObject({ code: 'invalid_layout' });
+    await expect(backend.getPdfLayout(txtId)).rejects.toMatchObject({ code: 'invalid_layout' });
+    await expect(backend.getPdfLayout('missing')).rejects.toMatchObject({ code: 'not_found' });
+
+    // A failed save reaches the error banner.
+    await store.getState().savePdfLayout(pdfId, { ...twoPage, scale: 9 });
+    expect(store.getState().error).toContain('scale');
   });
 });

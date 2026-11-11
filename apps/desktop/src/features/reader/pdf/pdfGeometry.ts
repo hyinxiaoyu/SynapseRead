@@ -1,4 +1,4 @@
-import type { NormalizedRect } from '@/types/domain';
+import type { NormalizedRect, PdfRotation } from '@/types/domain';
 
 interface Box {
   left: number;
@@ -73,7 +73,7 @@ export function canvasRegion(
   };
 }
 
-export type PdfRotation = 0 | 90 | 180 | 270;
+export type { PdfRotation };
 
 function clampedNormalizedRect(
   x: number,

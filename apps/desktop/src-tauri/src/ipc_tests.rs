@@ -637,6 +637,117 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
 }
 
 #[test]
+fn pdf_layout_round_trips_is_inherited_and_persists_across_relaunch() {
+    let h = Harness::new();
+    let first = h.register("first.pdf", "first pdf bytes");
+    let fresh = h.register("fresh.pdf", "fresh pdf bytes");
+    let text = h.register("notes.txt", "plain text");
+    let default_layout = json!({
+        "displayMode": "continuous",
+        "zoomMode": "fit-width",
+        "scale": 1.0,
+        "rotation": 0,
+        "coverPageAlone": false,
+    });
+    assert_eq!(
+        h.ok("get_pdf_layout", json!({ "documentId": first["id"] })),
+        default_layout
+    );
+
+    let layout = json!({
+        "displayMode": "two-page",
+        "zoomMode": "custom",
+        "scale": 1.75,
+        "rotation": 90,
+        "coverPageAlone": true,
+    });
+    let saved = h.ok(
+        "save_pdf_layout",
+        json!({ "documentId": first["id"], "layout": layout }),
+    );
+    assert_eq!(saved, layout);
+    assert_eq!(
+        h.ok("get_pdf_layout", json!({ "documentId": first["id"] })),
+        layout
+    );
+    // A PDF with no layout of its own takes the last display and zoom, not the
+    // rotation or cover page.
+    let inherited = json!({
+        "displayMode": "two-page",
+        "zoomMode": "custom",
+        "scale": 1.75,
+        "rotation": 0,
+        "coverPageAlone": false,
+    });
+    assert_eq!(
+        h.ok("get_pdf_layout", json!({ "documentId": fresh["id"] })),
+        inherited
+    );
+    // That first read pins it: a later change to another PDF leaves it alone.
+    let mut continuous = layout.clone();
+    continuous["displayMode"] = json!("continuous");
+    h.ok(
+        "save_pdf_layout",
+        json!({ "documentId": first["id"], "layout": continuous }),
+    );
+    assert_eq!(
+        h.ok("get_pdf_layout", json!({ "documentId": fresh["id"] })),
+        inherited
+    );
+    h.ok(
+        "save_pdf_layout",
+        json!({ "documentId": first["id"], "layout": layout }),
+    );
+
+    let rejected = |document: &Value, layout: Value| {
+        h.call(
+            "save_pdf_layout",
+            json!({ "documentId": document["id"], "layout": layout }),
+        )
+        .unwrap_err()
+    };
+    let mut tilted = layout.clone();
+    tilted["rotation"] = json!(45);
+    assert_eq!(rejected(&first, tilted)["code"], "invalid_layout");
+    let mut huge = layout.clone();
+    huge["scale"] = json!(9);
+    assert_eq!(rejected(&first, huge)["code"], "invalid_layout");
+    assert_eq!(rejected(&text, layout.clone())["code"], "invalid_layout");
+    // The layout travels whole, and the wire enums are strict.
+    let mut partial = layout.clone();
+    partial.as_object_mut().unwrap().remove("coverPageAlone");
+    let mut unknown = layout.clone();
+    unknown["displayMode"] = json!("spread");
+    for malformed in [partial, unknown] {
+        assert!(
+            h.call(
+                "save_pdf_layout",
+                json!({ "documentId": first["id"], "layout": malformed }),
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        h.call("get_pdf_layout", json!({ "documentId": "missing" }))
+            .unwrap_err()["code"],
+        "not_found"
+    );
+
+    // The next launch reads the same layout from the database.
+    let Harness { dir, app, .. } = h;
+    drop(app);
+    let next = Harness::in_dir(dir);
+    assert_eq!(
+        next.ok("get_pdf_layout", json!({ "documentId": first["id"] })),
+        layout
+    );
+    assert_eq!(
+        next.ok("get_pdf_layout", json!({ "documentId": fresh["id"] })),
+        inherited
+    );
+}
+
+#[test]
 fn bookmarks_round_trip_deduplicate_and_persist_across_relaunch() {
     let h = Harness::new();
     let document = h.register("book.pdf", "pdf bytes");

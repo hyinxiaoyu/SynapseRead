@@ -6,7 +6,7 @@ use synapse_core::domain::DocumentFormat;
 use synapse_core::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
     CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentSourceStatus,
-    MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, ReadingPreferences,
+    MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, PdfLayout, ReadingPreferences,
     RelinkDocumentResult, StudyNotebook, Viewport, WorkspaceSession,
 };
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -177,6 +177,20 @@ pub fn save_reading_preferences(
     state: State<'_, AppState>,
 ) -> IpcResult<ReadingPreferences> {
     Ok(state.database()?.save_reading_preferences(&preferences)?)
+}
+
+#[tauri::command]
+pub fn get_pdf_layout(document_id: String, state: State<'_, AppState>) -> IpcResult<PdfLayout> {
+    Ok(state.database()?.get_pdf_layout(&document_id)?)
+}
+
+#[tauri::command]
+pub fn save_pdf_layout(
+    document_id: String,
+    layout: PdfLayout,
+    state: State<'_, AppState>,
+) -> IpcResult<PdfLayout> {
+    Ok(state.database()?.save_pdf_layout(&document_id, &layout)?)
 }
 
 #[tauri::command]

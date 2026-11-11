@@ -1,6 +1,7 @@
 import { DEFAULT_CHUNK_BYTES, streamUtf8Lossy } from '@/lib/backend/memoryTextStream';
 import type { StudyBackend } from '@/lib/backend/types';
 import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
+import sampleLabelsPdfUrl from '../../../../../fixtures/documents/sample-labels.pdf?url&no-inline';
 import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
 import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
 
@@ -17,6 +18,10 @@ import {
   type MindMapEdge,
   type MindMapNode,
   type NoteCard,
+  DEFAULT_PDF_LAYOUT,
+  type PdfDisplayMode,
+  type PdfLayout,
+  type PdfZoomMode,
   type ReadingPreferences,
   type StudyDocument,
   type StudyNotebook,
@@ -52,6 +57,8 @@ const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample.pdf': fetchBytes(samplePdfUrl),
   '/preview/sample.epub': fetchBytes(sampleEpubUrl),
   '/preview/sample.md': encodePreview('In-memory preview of a Markdown file\n'),
+  // Last, so earlier picks are unchanged: printed page labels, and a second PDF.
+  '/preview/sample-labels.pdf': fetchBytes(sampleLabelsPdfUrl),
 };
 
 export interface MemoryBackendOptions {
@@ -76,6 +83,18 @@ const ANNOTATION_STYLES: readonly string[] = ['highlight', 'underline'] satisfie
 function checkAnnotationStyle(style: string): void {
   if (!ANNOTATION_STYLES.includes(style)) throw fail('json', `unknown annotation style: ${style}`);
 }
+const PDF_DISPLAY_MODES: readonly string[] = [
+  'continuous',
+  'single',
+  'two-page',
+] satisfies PdfDisplayMode[];
+const PDF_ZOOM_MODES: readonly string[] = [
+  'fit-width',
+  'fit-page',
+  'actual-size',
+  'custom',
+] satisfies PdfZoomMode[];
+
 const now = () => new Date().toISOString();
 
 /**
@@ -98,6 +117,8 @@ export function createMemoryBackend({
   const captures = new Map<string, string>();
   const bookmarks = new Map<string, Bookmark>();
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
+  /** In save order: a save deletes and re-adds its entry, so the last is the latest. */
+  const pdfLayouts = new Map<string, PdfLayout>();
   let workspaceSession: WorkspaceSession = {
     openDocumentIds: [],
     activeDocumentId: null,
@@ -181,6 +202,13 @@ export function createMemoryBackend({
     const value = map.get(id);
     if (value === undefined) throw fail('not_found', `${entity} not found: ${id}`);
     return value;
+  };
+
+  const requirePdf = (documentId: string): void => {
+    const document = require(documents, documentId, 'document');
+    if (document.format !== 'pdf') {
+      throw fail('invalid_layout', `${documentId} is a ${document.format} document, not a PDF`);
+    }
   };
 
   const inNotebook = <T extends { notebookId: string }>(map: Map<string, T>, notebookId: string) =>
@@ -658,6 +686,52 @@ export function createMemoryBackend({
       }
       readingPreferences = { ...preferences };
       return { ...readingPreferences };
+    },
+
+    async getPdfLayout(documentId) {
+      requirePdf(documentId);
+      const own = pdfLayouts.get(documentId);
+      if (own) return { ...own };
+      const latest = [...pdfLayouts.values()].at(-1);
+      // Display and zoom carry over; rotation and the cover page belong to one file.
+      const layout: PdfLayout = latest
+        ? {
+            ...DEFAULT_PDF_LAYOUT,
+            displayMode: latest.displayMode,
+            zoomMode: latest.zoomMode,
+            scale: latest.scale,
+          }
+        : { ...DEFAULT_PDF_LAYOUT };
+      // Core pins the starting layout on first read, so it stops following later saves.
+      pdfLayouts.set(documentId, layout);
+      return { ...layout };
+    },
+
+    async savePdfLayout(documentId, layout) {
+      // Core rejects an unknown mode while deserializing the request.
+      if (!PDF_DISPLAY_MODES.includes(layout.displayMode)) {
+        throw fail('json', `unknown display mode: ${layout.displayMode}`);
+      }
+      if (!PDF_ZOOM_MODES.includes(layout.zoomMode)) {
+        throw fail('json', `unknown zoom mode: ${layout.zoomMode}`);
+      }
+      if (!Number.isFinite(layout.scale) || layout.scale < 0.25 || layout.scale > 4) {
+        throw fail('invalid_layout', 'scale must be between 0.25 and 4');
+      }
+      if (![0, 90, 180, 270].includes(layout.rotation)) {
+        throw fail('invalid_layout', 'rotation must be 0, 90, 180, or 270');
+      }
+      requirePdf(documentId);
+      const saved: PdfLayout = {
+        displayMode: layout.displayMode,
+        zoomMode: layout.zoomMode,
+        scale: layout.scale,
+        rotation: layout.rotation,
+        coverPageAlone: layout.coverPageAlone,
+      };
+      pdfLayouts.delete(documentId);
+      pdfLayouts.set(documentId, saved);
+      return { ...saved };
     },
 
     listBookmarks: async () => [...bookmarks.values()],
