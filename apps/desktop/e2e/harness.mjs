@@ -258,6 +258,21 @@ export class Page {
     await this.mouse('mouseReleased', to.x, to.y);
   }
 
+  /**
+   * A real wheel event. `modifiers` is the DevTools bit field (Ctrl 2), and Chromium
+   * reports a trackpad pinch as exactly this: a wheel with Ctrl held.
+   */
+  async wheel({ x, y }, deltaY, modifiers = 0) {
+    await this.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseWheel',
+      x,
+      y,
+      deltaX: 0,
+      deltaY,
+      modifiers,
+    });
+  }
+
   async click({ x, y }) {
     await this.mouse('mouseMoved', x, y);
     await this.mouse('mousePressed', x, y);

@@ -4,7 +4,7 @@ import { epubFlow } from './epub.mjs';
 import { epubProgressFlow } from './epubProgress.mjs';
 import { launchPage, serveDist } from './harness.mjs';
 import { keyboardFlow } from './keyboard.mjs';
-import { pdfFlow, pdfLayoutFlow } from './pdf.mjs';
+import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
 import { txtFlow } from './txt.mjs';
 
 // The one CSP report that does not fail a flow, and only on a browser shown to send it
@@ -15,6 +15,7 @@ const FLOWS = {
   txt: txtFlow,
   pdf: pdfFlow,
   'pdf-layout': pdfLayoutFlow,
+  'pdf-zoom': pdfZoomFlow,
   epub: epubFlow,
   'epub-progress': epubProgressFlow,
   keyboard: keyboardFlow,

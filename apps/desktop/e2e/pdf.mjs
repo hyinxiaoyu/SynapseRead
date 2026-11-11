@@ -845,3 +845,221 @@ export async function pdfLayoutFlow(page) {
     'the reopened layout to render',
   );
 }
+
+/**
+ * Pinch and ctrl-wheel zoom (#51), as Chromium reports a trackpad pinch: a wheel with
+ * Ctrl held. In every layout and rotation the page point under the pointer stays
+ * there, the pages redraw sharp, and the highlight, a selection, and an area capture
+ * stay on the text. WebKit's gesture events are covered by the unit tests only.
+ */
+export async function pdfZoomFlow(page) {
+  await page.clickButton('Show MindMap');
+  await openPdf(page);
+  await page.hideSidebar();
+  const viewer = `[...document.querySelectorAll('[data-testid="pdf-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  const control = (testId) =>
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="${testId}"]')`;
+  const zoomLevel = `${control('pdf-zoom-level')}?.textContent`;
+  const content = `${visibleScroller}.firstElementChild`;
+  await page.waitFor(
+    `[...document.querySelectorAll(${JSON.stringify(TEXT)})].some((e) => e.textContent.includes('quick brown fox'))`,
+    'the text layer to render',
+  );
+
+  const selected = 'quick brown fox';
+  await page.selectText(TEXT, selected);
+  await page.waitFor(excerptEnabled, 'a selection to enable excerpting');
+  await page.clickButton('Excerpt to MindMap');
+  await page.waitFor(
+    `document.querySelector('[data-page-index="0"] [data-annotation-id]')`,
+    'the highlight to paint',
+  );
+
+  /** The page under a client point, and how far across and down it the point is. */
+  const pagePointAt = ({ x, y }) =>
+    page.evaluate(`(() => {
+      const element = document.elementsFromPoint(${x}, ${y}).find((e) => e.matches('[data-page-index]'));
+      if (!element) return null;
+      const r = element.getBoundingClientRect();
+      return {
+        pageIndex: Number(element.dataset.pageIndex),
+        x: (${x} - r.left) / r.width,
+        y: (${y} - r.top) / r.height,
+      };
+    })()`);
+  /** The bounding box of the selected words' text, and of their highlight. */
+  const boxes = `(() => {
+    const union = (rects) => rects.reduce((box, r) => ({
+      left: Math.min(box.left, r.left), top: Math.min(box.top, r.top),
+      right: Math.max(box.right, r.right), bottom: Math.max(box.bottom, r.bottom),
+    }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
+    const marks = [...document.querySelectorAll('[data-page-index="0"] [data-annotation-id]')];
+    let text = null;
+    for (const element of document.querySelectorAll('[data-page-index="0"] .textLayer span')) {
+      const node = element.firstChild;
+      const index = node?.nodeType === Node.TEXT_NODE ? node.data.indexOf(${JSON.stringify(selected)}) : -1;
+      if (index === -1) continue;
+      const range = document.createRange();
+      range.setStart(node, index);
+      range.setEnd(node, index + ${selected.length});
+      text = union([...range.getClientRects()].filter((r) => r.width > 0 && r.height > 0));
+    }
+    if (!text || marks.length === 0) return null;
+    return { text, mark: union(marks.map((m) => m.getBoundingClientRect())) };
+  })()`;
+  /** A page's canvas holds a pixel per device pixel of its box: drawn at this scale. */
+  const sharp = (pageIndex) => `(() => {
+    const canvas = ${viewer}.querySelector('[data-page-index="${pageIndex}"] canvas');
+    if (!canvas) return false;
+    const r = canvas.getBoundingClientRect();
+    return Math.abs(canvas.width - r.width * devicePixelRatio) <= 2
+      && Math.abs(canvas.height - r.height * devicePixelRatio) <= 2;
+  })()`;
+
+  /**
+   * Zooms in with two ctrl-wheel notches over `point`, checking the preview is only a
+   * transform, then that release kept the page point under the pointer.
+   */
+  const pinchAt = async (point, label) => {
+    const before = await pagePointAt(point);
+    assert(before, `${label}: a page under the pointer`);
+    const level = await page.evaluate(zoomLevel);
+    await page.wheel(point, -100, 2);
+    await page.wheel(point, -100, 2);
+    const preview = await page.evaluate(
+      `({ transform: ${content}.style.transform, level: ${zoomLevel} })`,
+    );
+    assert(preview.transform.startsWith('scale('), `${label}: previews with a transform`);
+    assert(preview.level === level, `${label}: does not re-render during the gesture`);
+    await page.waitFor(
+      `${zoomLevel} !== ${JSON.stringify(level)} && ${content}.style.transform === ''`,
+      `${label}: the zoom to apply on release`,
+    );
+    await page.waitFor(sharp(before.pageIndex), `${label}: the page to redraw sharp`);
+    const after = await pagePointAt(point);
+    assert(after?.pageIndex === before.pageIndex, `${label}: the same page under the pointer`);
+    assert(
+      Math.abs(after.x - before.x) < 0.01 && Math.abs(after.y - before.y) < 0.01,
+      `${label}: the same point under the pointer, was ${JSON.stringify(before)}, now ${JSON.stringify(after)}`,
+    );
+    const { text, mark } = await page.waitFor(boxes, `${label}: the highlight and its text`);
+    for (const edge of ['left', 'top', 'right', 'bottom']) {
+      assert(
+        Math.abs(text[edge] - mark[edge]) < 4,
+        `${label}: the highlight's ${edge} edge on the text (${text[edge]} vs ${mark[edge]})`,
+      );
+    }
+  };
+  /** The middle of the highlight, brought into view: the words themselves. */
+  const overHighlight = () =>
+    page.evaluate(`(() => {
+      const mark = document.querySelector('[data-page-index="0"] [data-annotation-id]');
+      mark.scrollIntoView({ block: 'center', inline: 'center' });
+      const r = mark.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`);
+  const reset = async () => {
+    await page.clickButton('Fit width');
+    await page.waitFor(`${viewer}?.dataset.zoomMode === 'fit-width'`, 'fit width again');
+    await scrollToPage(page, 0);
+  };
+
+  // Continuous, then a single page.
+  await scrollToPage(page, 0);
+  await pinchAt(await overHighlight(), 'continuous');
+  // A selection made in the zoomed layout is still the words under the drag.
+  await page.selectText(TEXT, selected);
+  await page.waitFor(
+    `window.getSelection().toString().includes(${JSON.stringify(selected)})`,
+    'a selection at the pinched zoom',
+  );
+  await page.evaluate(`window.getSelection().removeAllRanges()`);
+  await reset();
+  await page.evaluate(`${control('pdf-mode-single')}.click()`);
+  await page.waitFor(`${viewer}?.dataset.displayMode === 'single'`, 'single page');
+  await pinchAt(await overHighlight(), 'single page');
+  await reset();
+
+  // Two pages with the cover alone: over the left page of the 2–3 spread, which is
+  // wider than the pane once zoomed, so it can stay put sideways too.
+  await page.evaluate(`${control('pdf-mode-two-page')}.click()`);
+  await page.waitFor(`${viewer}?.dataset.displayMode === 'two-page'`, 'two pages');
+  await page.evaluate(`${control('pdf-cover-page-alone')}.click()`);
+  await page.waitFor(`${viewer}?.dataset.coverPageAlone === 'true'`, 'the cover page alone');
+  const overSpread = await page.waitFor(
+    `(() => {
+      const second = ${viewer}.querySelector('[data-page-index="1"]');
+      const third = ${viewer}.querySelector('[data-page-index="2"]');
+      if (!second || !third) return null;
+      const a = second.getBoundingClientRect();
+      const b = third.getBoundingClientRect();
+      if (Math.round(a.top) !== Math.round(b.top)) return null;
+      second.scrollIntoView({ block: 'start' });
+      const r = second.getBoundingClientRect();
+      return { x: r.left + r.width * 0.3, y: r.top + Math.min(r.height * 0.3, 200) };
+    })()`,
+    'pages 2 and 3 side by side',
+  );
+  await pinchAt(overSpread, 'two pages, cover alone');
+  await reset();
+  await page.evaluate(`${control('pdf-mode-continuous')}.click()`);
+  await page.waitFor(`${viewer}?.dataset.displayMode === 'continuous'`, 'continuous again');
+
+  // Each rotation, over the highlighted words.
+  for (const rotation of [90, 180, 270]) {
+    await page.evaluate(`${control('pdf-rotate-button')}.click()`);
+    await page.waitFor(`${viewer}?.dataset.rotation === '${rotation}'`, `rotated ${rotation}°`);
+    await scrollToPage(page, 0);
+    await page.waitFor(boxes, `the highlight at ${rotation}°`);
+    await pinchAt(await overHighlight(), `rotated ${rotation}°`);
+    if (rotation !== 270) await reset();
+  }
+
+  // An area capture at the pinched zoom, still rotated: the box sits where it was drawn.
+  await page.clickButton('Capture area');
+  const drawn = await page.waitFor(
+    `(() => {
+      const surface = ${viewer}.querySelector('[data-page-index="0"] [data-testid="pdf-capture-surface"]');
+      if (!surface) return null;
+      // The page is wider and taller than the pane by now: start inside both.
+      const r = surface.getBoundingClientRect();
+      const pane = ${visibleScroller}.getBoundingClientRect();
+      const top = Math.max(r.top, pane.top) + 40;
+      const left = Math.max(r.left, pane.left) + 40;
+      return { from: { x: left, y: top }, to: { x: left + 120, y: top + 80 } };
+    })()`,
+    'capture mode',
+  );
+  await page.drag(drawn.from, drawn.to);
+  const captured = await page.waitFor(
+    `(() => {
+      const box = ${viewer}.querySelector('[data-testid="pdf-capture-box"]');
+      if (!box) return null;
+      const r = box.getBoundingClientRect();
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    })()`,
+    'the capture box',
+  );
+  for (const [edge, expected] of [
+    ['left', drawn.from.x],
+    ['top', drawn.from.y],
+    ['right', drawn.to.x],
+    ['bottom', drawn.to.y],
+  ]) {
+    assert(
+      Math.abs(captured[edge] - expected) < 3,
+      `the capture box's ${edge} edge where it was drawn (${captured[edge]} vs ${expected})`,
+    );
+  }
+  await page.clickButton('Capture area');
+
+  // The pinched scale is the document's own: it comes back from a clean mount.
+  const pinched = await page.evaluate(zoomLevel);
+  await page.evaluate(closeActiveTab);
+  await page.waitFor(`!${viewer}`, 'the PDF tab to close');
+  await openPdf(page);
+  await page.waitFor(
+    `${viewer}?.dataset.zoomMode === 'custom' && ${zoomLevel} === ${JSON.stringify(pinched)}`,
+    'reopening at the pinched zoom',
+  );
+}
