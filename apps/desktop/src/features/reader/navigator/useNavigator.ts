@@ -61,10 +61,17 @@ export interface NavigatorController {
   hasTab: (tab: NavigatorTab) => boolean;
   dimReadChapters: boolean;
   setDimReadChapters: (value: boolean) => void;
-  toggle: () => void;
+  /**
+   * Changes when a command asked the sidebar to take the keyboard, so it can
+   * focus whichever item is current in the view it opened. It is reset when the
+   * sidebar is put away: an open from a click or from search takes no focus.
+   */
+  focusRequest: number;
+  /** Toggles the sidebar; a command that opens it also gives it the keyboard. */
+  toggle: (options?: NavigatorFocusOptions) => void;
   hide: () => void;
-  /** Opens the sidebar on `tab`. */
-  show: (tab: NavigatorTab) => void;
+  /** Opens the sidebar on `tab`, optionally taking the keyboard for its current row. */
+  show: (tab: NavigatorTab, options?: NavigatorFocusOptions) => void;
   setWidth: (width: number) => void;
   /** A query started: its results take over the sidebar if it is open. */
   beginSearch: () => void;
@@ -74,6 +81,11 @@ export interface NavigatorController {
   recordDeletion: (kind: DeletedKind) => void;
   /** Takes the most recent recorded deletion, if any. */
   takeDeletion: () => DeletedKind | undefined;
+}
+
+/** Whether the sidebar should take focus, rather than only open. */
+export interface NavigatorFocusOptions {
+  focus?: boolean;
 }
 
 export type DeletedKind = 'bookmark' | 'annotation';
@@ -97,6 +109,7 @@ export function useNavigator(
   );
   const [dimReadChapters, setDimState] = useState(() => readStored().dimReadChapters === true);
   const [deletions, setDeletions] = useState<readonly DeletedKind[]>([]);
+  const [focusRequest, setFocusRequest] = useState(0);
   /** The last tab that was not Search, so clearing a query can put it back. */
   const lastTab = useRef<NavigatorTab>(tab);
 
@@ -122,11 +135,30 @@ export function useNavigator(
   );
 
   const show = useCallback(
-    (next: NavigatorTab) => {
+    (next: NavigatorTab, options?: NavigatorFocusOptions) => {
       setOpen(true);
       selectTab(next);
+      if (options?.focus) setFocusRequest((current) => current + 1);
     },
     [selectTab],
+  );
+
+  const hide = useCallback(() => {
+    setOpen(false);
+    // A request only means something while the sidebar is showing.
+    setFocusRequest(0);
+  }, []);
+
+  const toggle = useCallback(
+    (options?: NavigatorFocusOptions) => {
+      if (open) {
+        hide();
+        return;
+      }
+      setOpen(true);
+      if (options?.focus) setFocusRequest((current) => current + 1);
+    },
+    [open, hide],
   );
 
   const setWidth = useCallback(
@@ -173,8 +205,9 @@ export function useNavigator(
       candidate === 'search' || (tabs as readonly NavigatorTab[]).includes(candidate),
     dimReadChapters,
     setDimReadChapters,
-    toggle: () => setOpen((current) => !current),
-    hide: () => setOpen(false),
+    focusRequest,
+    toggle,
+    hide,
     show,
     setWidth,
     beginSearch,

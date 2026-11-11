@@ -7,6 +7,7 @@ import {
   commandBindings,
   commandDefinition,
   commandTooltip,
+  formatKeyAlias,
   formatShortcut,
   MENUS,
   parseShortcut,
@@ -88,6 +89,27 @@ describe('command contract', () => {
     expect(mac('view.fullScreen')).toBe('⌃⌘F');
     expect(mac('go.back')).toBe('⌘[');
     expect(mac('go.forward')).toBe('⌘]');
+    // Tab navigation and the tab that was closed (#50).
+    expect(mac('window.previousTab')).toBe('⇧⌘[');
+    expect(mac('window.nextTab')).toBe('⇧⌘]');
+    expect(mac('file.reopenClosedTab')).toBe('⇧⌘T');
+    // The selection and markup keys, and Preview's three layouts.
+    expect(mac('edit.addNote')).toBe('⌃⌘N');
+    expect(mac('edit.captureArea')).toBe('⇧⌘C');
+    expect(mac('view.layoutSingle')).toBe('⌘1');
+    expect(mac('view.layoutTwoPage')).toBe('⌘2');
+    expect(mac('view.layoutScroll')).toBe('⌘3');
+  });
+
+  it('names keyboard-only aliases as a reader would say them', () => {
+    expect(formatKeyAlias('Space', 'mac')).toBe('Space');
+    expect(formatKeyAlias('PageUp', 'mac')).toBe('Page Up');
+    expect(formatKeyAlias('PageDown', 'other')).toBe('Page Down');
+    expect(formatKeyAlias('Home', 'mac')).toBe('Home');
+    expect(formatKeyAlias('ContextMenu', 'mac')).toBe('Menu Key');
+    // A modified alias keeps its platform's symbols.
+    expect(formatKeyAlias('Shift+Space', 'mac')).toBe('⇧Space');
+    expect(formatKeyAlias('CmdOrCtrl+Plus', 'other')).toBe('Ctrl++');
   });
 
   it('swaps ⌘ for Ctrl off macOS, with standard replacements where Ctrl would double up', () => {
@@ -100,7 +122,8 @@ describe('command contract', () => {
     expect(commandTooltip('Add Bookmark', 'bookmarks.toggle', 'other')).toBe(
       'Add Bookmark (Ctrl+D)',
     );
-    expect(commandTooltip('Capture', 'edit.addNote', 'mac')).toBe('Capture');
+    // Add Note has a key equivalent now; Capture was the old unsuffixed tooltip.
+    expect(commandTooltip('Capture', 'edit.addNote', 'mac')).toBe('Capture (⌃⌘N)');
   });
 
   it('keeps bare keys out of the native menu', () => {

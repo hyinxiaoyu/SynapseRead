@@ -4,7 +4,7 @@
     {
       "id": "file",
       "title": "File",
-      "items": ["file.open", "separator", "file.closeTab"]
+      "items": ["file.open", "separator", "file.closeTab", "file.reopenClosedTab"]
     },
     {
       "id": "edit",
@@ -19,6 +19,7 @@
         "separator",
         "edit.highlight",
         "edit.addNote",
+        "edit.captureArea",
         "edit.selectionActions",
         "edit.highlightMode",
         "edit.excerpt"
@@ -82,7 +83,13 @@
     {
       "id": "window",
       "title": "Window",
-      "items": ["window.mindMap", "window.inspector"]
+      "items": [
+        "window.nextTab",
+        "window.previousTab",
+        "separator",
+        "window.mindMap",
+        "window.inspector"
+      ]
     },
     {
       "id": "help",
@@ -93,6 +100,7 @@
   "commands": {
     "file.open": { "title": "Open…", "shortcut": "CmdOrCtrl+O" },
     "file.closeTab": { "title": "Close Tab", "shortcut": "CmdOrCtrl+W" },
+    "file.reopenClosedTab": { "title": "Reopen Closed Tab", "shortcut": "Shift+CmdOrCtrl+T" },
     "edit.find": { "title": "Find…", "shortcut": "CmdOrCtrl+F", "allowInSearch": true },
     "edit.findNext": { "title": "Find Next", "shortcut": "CmdOrCtrl+G", "allowInSearch": true },
     "edit.findPrevious": {
@@ -103,7 +111,12 @@
     "edit.useSelectionForFind": { "title": "Use Selection for Find", "shortcut": "CmdOrCtrl+E" },
     "edit.undoDelete": { "title": "Undo Delete", "shortcut": "CmdOrCtrl+Z", "accelerator": false },
     "edit.highlight": { "title": "Highlight Selection", "shortcut": "Shift+CmdOrCtrl+H" },
-    "edit.addNote": { "title": "Add Note to Selection" },
+    "edit.addNote": {
+      "title": "Add Note to Selection",
+      "shortcut": "Ctrl+Cmd+N",
+      "shortcutOther": "Ctrl+Alt+N"
+    },
+    "edit.captureArea": { "title": "Capture Area", "shortcut": "Shift+CmdOrCtrl+C" },
     "edit.selectionActions": {
       "title": "Show Selection Actions",
       "shortcut": "Shift+F10",
@@ -123,9 +136,9 @@
     "view.sidebarAnnotations": { "title": "Highlights and Notes", "shortcut": "Alt+CmdOrCtrl+4" },
     "view.sidebarBookmarks": { "title": "Bookmarks", "shortcut": "Alt+CmdOrCtrl+5" },
     "view.sidebarSearch": { "title": "Search Results" },
-    "view.layoutSingle": { "title": "Single Page" },
-    "view.layoutTwoPage": { "title": "Two Pages" },
-    "view.layoutScroll": { "title": "Continuous Scroll" },
+    "view.layoutSingle": { "title": "Single Page", "shortcut": "CmdOrCtrl+1" },
+    "view.layoutTwoPage": { "title": "Two Pages", "shortcut": "CmdOrCtrl+2" },
+    "view.layoutScroll": { "title": "Continuous Scroll", "shortcut": "CmdOrCtrl+3" },
     "view.zoomIn": {
       "title": "Zoom In",
       "shortcut": "CmdOrCtrl+=",
@@ -173,6 +186,8 @@
     "go.back": { "title": "Back", "shortcut": "CmdOrCtrl+[" },
     "go.forward": { "title": "Forward", "shortcut": "CmdOrCtrl+]" },
     "bookmarks.toggle": { "title": "Add Bookmark", "shortcut": "CmdOrCtrl+D" },
+    "window.nextTab": { "title": "Next Tab", "shortcut": "Shift+CmdOrCtrl+]" },
+    "window.previousTab": { "title": "Previous Tab", "shortcut": "Shift+CmdOrCtrl+[" },
     "window.mindMap": { "title": "Show MindMap", "shortcut": "Shift+CmdOrCtrl+M" },
     "window.inspector": { "title": "Show Inspector" },
     "help.shortcuts": { "title": "Keyboard Shortcuts", "shortcut": "CmdOrCtrl+/" }

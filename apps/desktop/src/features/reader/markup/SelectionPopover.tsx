@@ -17,6 +17,7 @@ import {
   COLOR_TARGET_CLASS,
   ColorDot,
 } from '@/features/reader/AnnotationsPanel';
+import { useColorShortcut } from '@/features/reader/markup/colorShortcut';
 import { ANNOTATION_COLORS } from '@/features/reader/markup/palette';
 import { NoteEditor } from '@/features/reader/markup/NoteEditor';
 import { placePopover, toViewportRect, type ViewportRect } from '@/features/reader/markup/geometry';
@@ -117,13 +118,26 @@ export function SelectionPopover({
   // A whitespace-only note (imported, or saved before notes were trimmed) counts as none.
   const hasNote = annotation !== null && annotationHasNote(annotation);
 
+  const chooseColor = (color: string) => {
+    // Recoloring a highlight changes that highlight, not the default for new ones.
+    if (annotation) {
+      annotations.updateAnnotation(annotation.id, { note: null, color, style: null });
+      return;
+    }
+    annotations.createHighlight({ color, style: 'highlight' });
+  };
+
+  // 1–5 pick a color while this popover is open, wherever the focus is: the page,
+  // a chapter's iframe, or one of its own controls (#50).
+  const shown = target !== null;
+  useColorShortcut(shown ? chooseColor : null);
+
   const rootRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const [placement, setPlacement] = useState<'above' | 'below'>('above');
 
   // ---- Placement: beside the selection, inside the reader, following scrolls --
 
-  const shown = target !== null;
   const annotationRect = target?.kind === 'annotation' ? target.rect : null;
   const { selectionRect } = popover;
   useLayoutEffect(() => {
@@ -254,15 +268,6 @@ export function SelectionPopover({
           ? controls.length - 1
           : (index + (event.key === 'ArrowRight' ? 1 : -1) + controls.length) % controls.length;
     controls[next]?.focus();
-  };
-
-  const chooseColor = (color: string) => {
-    // Recoloring a highlight changes that highlight, not the default for new ones.
-    if (annotation) {
-      annotations.updateAnnotation(annotation.id, { note: null, color, style: null });
-      return;
-    }
-    annotations.createHighlight({ color, style: 'highlight' });
   };
 
   const toggleUnderline = () => {

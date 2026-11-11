@@ -16,6 +16,7 @@ import { PanelLeft } from 'lucide-react';
 
 import { localHighlights, useAnnotationsController } from '@/features/reader/AnnotationsPanel';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
+import { focusReadingPage } from '@/features/reader/focusPage';
 import {
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
@@ -541,6 +542,14 @@ export function TxtViewer({
 
   // Plain text has no outline or pages: the sidebar holds bookmarks and notes.
   const navigator = useNavigator('txt', ['notes', 'bookmarks']);
+  const focusPage = useCallback(() => {
+    focusReadingPage(scrollRef.current);
+  }, []);
+  // Opening the file, or activating its tab, hands the keyboard to the page so
+  // Page Down and the arrows work at once. A text field keeps focus (#50).
+  useEffect(() => {
+    if (isActive) focusPage();
+  }, [isActive, focusPage]);
   const showSidebar = navigator.open && !chromeHidden;
 
   const search = useDocumentSearch<TxtSearchMatch>({
@@ -846,6 +855,7 @@ export function TxtViewer({
   useReaderCommands({
     isActive,
     chromeHidden,
+    focusPage,
     search,
     navigator,
     bookmarks: bookmarksController,
@@ -1001,6 +1011,7 @@ export function TxtViewer({
             annotations={annotationsController}
             search={search}
             groupSearchResults={false}
+            onReturnFocus={focusPage}
             annotationPlacement={(annotation) => ({
               order: asTxtAnchor(annotation.anchor)?.startByteOffset ?? Number.MAX_SAFE_INTEGER,
             })}

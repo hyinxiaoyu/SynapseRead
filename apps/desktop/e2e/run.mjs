@@ -2,6 +2,7 @@
 
 import { epubFlow } from './epub.mjs';
 import { launchPage, serveDist } from './harness.mjs';
+import { keyboardFlow } from './keyboard.mjs';
 import { pdfFlow, pdfLayoutFlow } from './pdf.mjs';
 import { txtFlow } from './txt.mjs';
 
@@ -9,7 +10,13 @@ import { txtFlow } from './txt.mjs';
 // for an inert document. The EPUB flow separately asserts that the handler never ran.
 const PARSE_TIME_REPORT = 'script-src-attr inline ';
 
-const FLOWS = { txt: txtFlow, pdf: pdfFlow, 'pdf-layout': pdfLayoutFlow, epub: epubFlow };
+const FLOWS = {
+  txt: txtFlow,
+  pdf: pdfFlow,
+  'pdf-layout': pdfLayoutFlow,
+  epub: epubFlow,
+  keyboard: keyboardFlow,
+};
 
 const only = process.argv.slice(2);
 const server = await serveDist();

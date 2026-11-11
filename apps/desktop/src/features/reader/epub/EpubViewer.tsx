@@ -10,6 +10,7 @@ import {
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
+import { focusReadingPage } from '@/features/reader/focusPage';
 import {
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
@@ -20,6 +21,7 @@ import {
   useDocumentSearch,
 } from '@/features/reader/DocumentSearch';
 import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
+import { dispatchColorShortcut } from '@/features/reader/markup/colorShortcut';
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
@@ -285,6 +287,14 @@ export function EpubViewer({
     columnsRef.current = layout.columns;
   });
   const navigator = useNavigator('epub', ['contents', 'notes', 'bookmarks']);
+  const focusPage = useCallback(() => {
+    focusReadingPage(hostRef.current);
+  }, []);
+  // Opening the book, or activating its tab, hands the keyboard to the page so
+  // Page Down and the arrows work at once. A text field keeps focus (#50).
+  useEffect(() => {
+    if (isActive) focusPage();
+  }, [isActive, focusPage]);
 
   const updatePreferences = (patch: Partial<ReadingPreferences>) => {
     setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
@@ -885,6 +895,11 @@ export function EpubViewer({
     // forwards them: Esc takes the app's dismissal order, and every shortcut
     // reaches the registry.
     const onFrameKeyDown = (event: KeyboardEvent) => {
+      // 1–5 pick a color while the selection popover is open, even from in here.
+      if (dispatchColorShortcut(event)) {
+        event.preventDefault();
+        return;
+      }
       if (dispatchEscape(event)) return;
       dispatchCommandKeydown(event);
     };
@@ -1130,6 +1145,7 @@ export function EpubViewer({
     isActive,
     ready,
     chromeHidden,
+    focusPage,
     search,
     navigator,
     bookmarks: bookmarksController,
@@ -1261,6 +1277,7 @@ export function EpubViewer({
             annotations={annotationsController}
             search={search}
             groupSearchResults
+            onReturnFocus={focusPage}
             contents={{
               items: outlineItems,
               currentId: currentTocId(handle?.toc ?? [], currentHref),

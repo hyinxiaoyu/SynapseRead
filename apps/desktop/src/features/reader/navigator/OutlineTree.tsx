@@ -110,6 +110,11 @@ export interface OutlineTreeProps<T> {
   dimRead?: boolean;
   emptyMessage: string;
   onSelect: (target: T) => void;
+  /**
+   * Called after Return opens a section, so the keyboard goes back to the page:
+   * a reader who just jumped wants to read, not to keep walking the tree.
+   */
+  onReturnFocus?: () => void;
 }
 
 /**
@@ -124,6 +129,7 @@ export function OutlineTree<T>({
   dimRead = false,
   emptyMessage,
   onSelect,
+  onReturnFocus,
 }: OutlineTreeProps<T>) {
   const baseId = useId();
   const index = useMemo(() => indexOutline(items), [items]);
@@ -217,6 +223,8 @@ export function OutlineTree<T>({
       case 'Enter':
       case ' ':
         activate(node);
+        // Only a jump leaves the tree: expanding a branch keeps the keyboard here.
+        if (node.target !== null) onReturnFocus?.();
         break;
       case '*': {
         // Expand every sibling of the focused item.

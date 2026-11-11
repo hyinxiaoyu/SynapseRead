@@ -22,6 +22,7 @@ import {
   selectDocumentAnnotations,
   selectHighlights,
   selectRecentDocuments,
+  selectReopenableDocumentId,
   useStudySyncStore,
 } from '@/stores/useStudySyncStore';
 import {
@@ -94,6 +95,8 @@ export function ReaderPane() {
   const isExcerpting = useStudySyncStore((state) => state.isExcerpting);
   const openDocument = useStudySyncStore((state) => state.openDocument);
   const reopenRecentDocument = useStudySyncStore((state) => state.reopenRecentDocument);
+  const reopenClosedDocument = useStudySyncStore((state) => state.reopenClosedDocument);
+  const closedDocumentIds = useStudySyncStore((state) => state.closedDocumentIds);
   const activateDocument = useStudySyncStore((state) => state.activateDocument);
   const closeDocument = useStudySyncStore((state) => state.closeDocument);
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
@@ -110,6 +113,16 @@ export function ReaderPane() {
   );
   const recentDocuments = useMemo(() => selectRecentDocuments(documents), [documents]);
   const activeDocument = openDocuments.find((document) => document.id === activeDocumentId);
+  const canReopenClosedTab =
+    selectReopenableDocumentId(closedDocumentIds, openDocumentIds, documents) !== null;
+
+  /** Next or previous tab, wrapping around at the ends, as Safari's do. */
+  const stepTab = (direction: 1 | -1) => {
+    if (activeDocumentId === null || openDocuments.length < 2) return;
+    const index = openDocuments.findIndex((document) => document.id === activeDocumentId);
+    const next = openDocuments[(index + direction + openDocuments.length) % openDocuments.length];
+    if (next) activateDocument(next.id);
+  };
 
   useCommands({
     'file.open': { run: () => void openDocument() },
@@ -119,6 +132,12 @@ export function ReaderPane() {
       },
       enabled: activeDocumentId !== null,
     },
+    'file.reopenClosedTab': {
+      run: () => void reopenClosedDocument(),
+      enabled: canReopenClosedTab,
+    },
+    'window.nextTab': { run: () => stepTab(1), enabled: openDocuments.length > 1 },
+    'window.previousTab': { run: () => stepTab(-1), enabled: openDocuments.length > 1 },
     'edit.excerpt': {
       run: () => void excerptSelection(),
       enabled: selection !== null && !isExcerpting,

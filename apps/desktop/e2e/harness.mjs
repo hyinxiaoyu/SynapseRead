@@ -287,13 +287,17 @@ export class Page {
     await this.click(point);
   }
 
-  /** A real key press (keydown and keyup) to whatever has focus. */
-  async press(key, code = key) {
+  /**
+   * A real key press (keydown and keyup) to whatever has focus. `modifiers` is the
+   * DevTools bit field: Alt 1, Ctrl 2, Meta 4, Shift 8.
+   */
+  async press(key, code = key, modifiers = 0) {
     for (const type of ['keyDown', 'keyUp']) {
       await this.cdp.send('Input.dispatchKeyEvent', {
         type,
         key,
         code,
+        modifiers,
         windowsVirtualKeyCode: key === 'Escape' ? 27 : 0,
       });
     }

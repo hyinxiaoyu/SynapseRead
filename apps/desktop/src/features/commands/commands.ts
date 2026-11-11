@@ -164,6 +164,27 @@ export function formatShortcut(accelerator: string, platform: Platform = detectP
     .join('+');
 }
 
+/**
+ * Keys a reader says by name rather than symbol: `Space`, `Page Up`. Only bare
+ * aliases are spelled out; a modified one keeps its platform's symbols.
+ */
+const SPELLED_KEYS: Record<string, string> = {
+  Space: 'Space',
+  PageUp: 'Page Up',
+  PageDown: 'Page Down',
+  Home: 'Home',
+  End: 'End',
+  ContextMenu: 'Menu Key',
+};
+
+/** `Space` or `Page Down`: a keyboard-only binding, as a reader would name it. */
+export function formatKeyAlias(accelerator: string, platform: Platform = detectPlatform()): string {
+  const binding = parseShortcut(accelerator);
+  const spelled = SPELLED_KEYS[binding.key];
+  const modified = binding.primary || binding.meta || binding.ctrl || binding.alt || binding.shift;
+  return !modified && spelled !== undefined ? spelled : formatShortcut(accelerator, platform);
+}
+
 /** `Add Bookmark (⌘D)`: a tooltip naming a control and its key equivalent. */
 export function commandTooltip(
   label: string,

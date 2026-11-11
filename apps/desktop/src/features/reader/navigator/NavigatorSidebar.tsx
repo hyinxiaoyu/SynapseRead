@@ -11,12 +11,14 @@ import {
   type KeyboardEvent,
   type PointerEvent,
   type ReactNode,
+  useEffect,
   useId,
   useRef,
   useState,
 } from 'react';
 
 import { type CommandId, commandTooltip } from '@/features/commands/commands';
+import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { AnnotationsList, type AnnotationPlacement } from '@/features/reader/AnnotationsPanel';
 import { BookmarksList, type BookmarksController } from '@/features/reader/BookmarksPanel';
 import {
@@ -73,6 +75,14 @@ const TAB_SPECS: Record<NavigatorTab, TabSpec> = {
 
 const KEYBOARD_RESIZE_STEP = 16;
 
+/**
+ * The row a shortcut-opened sidebar takes the keyboard to: whichever item knows
+ * it is current (the chapter being read, the active bookmark or match), else the
+ * list's tab stop. Thumbnails are plain buttons, so their current one is marked.
+ */
+const CURRENT_ROW_SELECTOR =
+  '[aria-current="location"], [aria-current="page"], [role="treeitem"][tabindex="0"], [data-roving-row][tabindex="0"], [data-roving-row]';
+
 export interface NavigatorContents<T> {
   items: readonly OutlineNode<T>[];
   currentId: string | null;
@@ -87,6 +97,8 @@ export interface ReaderNavigatorProps<TMatch extends DocumentSearchResultItem, T
   search: DocumentSearchController<TMatch>;
   /** Group search results under their location (chapters, pages). */
   groupSearchResults: boolean;
+  /** Where the keyboard goes when a list is done with it: the reading page. */
+  onReturnFocus: () => void;
   contents?: NavigatorContents<T>;
   /** The PDF page strip, given the tab's filter text. */
   renderThumbnails?: (filter: string) => ReactNode;
@@ -107,6 +119,7 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
   annotations,
   search,
   groupSearchResults,
+  onReturnFocus,
   contents,
   renderThumbnails,
   annotationPlacement,
@@ -114,10 +127,30 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
   linkedAnnotationIds,
 }: ReaderNavigatorProps<TMatch, T>) {
   const baseId = useId();
+  const rootRef = useRef<HTMLElement>(null);
   const [filters, setFilters] = useState<Partial<Record<NavigatorTab, string>>>({});
   const [liveWidth, setLiveWidth] = useState<number | null>(null);
   const drag = useRef<{ startX: number; startWidth: number } | null>(null);
   const tabButtons = useRef(new Map<NavigatorTab, HTMLButtonElement>());
+
+  // A sidebar shortcut puts the reader in the list, so the arrows walk rows at
+  // once instead of turning pages. A sidebar opened any other way takes no focus.
+  const handledFocusRequest = useRef(0);
+  useEffect(() => {
+    if (navigator.focusRequest === handledFocusRequest.current) return;
+    handledFocusRequest.current = navigator.focusRequest;
+    rootRef.current?.querySelector<HTMLElement>(CURRENT_ROW_SELECTOR)?.focus();
+  }, [navigator.focusRequest]);
+
+  // Esc never traps the keyboard in the sidebar: it hands the page back, and the
+  // sidebar stays open where it was, as in Preview.
+  useEscapeLayer(ESCAPE_LAYER.sidebar, () => {
+    const root = rootRef.current;
+    const active = root?.ownerDocument.activeElement ?? null;
+    if (root === null || active === null || !root.contains(active)) return false;
+    onReturnFocus();
+    return true;
+  });
 
   const tabs: NavigatorTab[] = search.active ? [...navigator.tabs, 'search'] : [...navigator.tabs];
   const tab = tabs.includes(navigator.tab) ? navigator.tab : (tabs[0] ?? 'bookmarks');
@@ -182,6 +215,7 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
             dimRead={navigator.dimReadChapters}
             emptyMessage={contents.emptyMessage}
             onSelect={contents.onSelect}
+            onReturnFocus={onReturnFocus}
           />
         </div>
       ) : null;
@@ -214,6 +248,7 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
 
   return (
     <aside
+      ref={rootRef}
       aria-label="Sidebar"
       data-testid="navigator-sidebar"
       data-navigator-tab={tab}

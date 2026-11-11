@@ -13,6 +13,8 @@ export const ESCAPE_LAYER = {
   noteField: 40,
   selectionPopover: 30,
   find: 20,
+  /** The sidebar's lists: Esc hands the keyboard back to the page, sidebar open. */
+  sidebar: 15,
   focusMode: 10,
 } as const;
 

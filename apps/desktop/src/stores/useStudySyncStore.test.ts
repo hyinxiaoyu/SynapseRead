@@ -17,6 +17,7 @@ import {
   selectDocumentAnnotations,
   selectHighlights,
   selectRecentDocuments,
+  selectReopenableDocumentId,
 } from './useStudySyncStore';
 
 const pdfAnchor = { format: 'pdf', pageIndex: 2, rects: [{ x: 0, y: 0, width: 0.5, height: 0.1 }] };
@@ -396,6 +397,68 @@ describe('useStudySyncStore', () => {
       expect(nativeStore.getState().isDraggingFile).toBe(false);
       expect(nativeStore.getState().activeDocumentId).toBe('doc-native-1');
       expect(nativeStore.getState().openDocumentIds).toEqual(['doc-native-1']);
+    });
+
+    it('reopens the most recently closed tab first, and only once', async () => {
+      const first = await openDocument();
+      const second = await openDocument();
+      state().closeDocument(first);
+      state().closeDocument(second);
+      expect(state().closedDocumentIds).toEqual([first, second]);
+
+      await state().reopenClosedDocument();
+      expect(state().openDocumentIds).toEqual([second]);
+      expect(state().activeDocumentId).toBe(second);
+      expect(state().closedDocumentIds).toEqual([first]);
+
+      await state().reopenClosedDocument();
+      expect(state().openDocumentIds).toEqual([second, first]);
+      expect(state().closedDocumentIds).toEqual([]);
+
+      // Nothing is closed any more: the command has nothing to do.
+      await state().reopenClosedDocument();
+      expect(state().openDocumentIds).toEqual([second, first]);
+      expect(state().activeDocumentId).toBe(first);
+    });
+
+    it('forgets a closed tab once Open or Recent brings it back', async () => {
+      const first = await openDocument();
+      await openDocument();
+      state().closeDocument(first);
+      expect(state().closedDocumentIds).toEqual([first]);
+
+      await state().reopenRecentDocument(first);
+      expect(state().closedDocumentIds).toEqual([]);
+      expect(state().openDocumentIds).toContain(first);
+    });
+
+    it('names the tab a Reopen Closed Tab command would bring back', async () => {
+      const first = await openDocument();
+      expect(
+        selectReopenableDocumentId(
+          state().closedDocumentIds,
+          state().openDocumentIds,
+          state().documents,
+        ),
+      ).toBeNull();
+
+      state().closeDocument(first);
+      expect(
+        selectReopenableDocumentId(
+          state().closedDocumentIds,
+          state().openDocumentIds,
+          state().documents,
+        ),
+      ).toBe(first);
+
+      await state().reopenClosedDocument();
+      expect(
+        selectReopenableDocumentId(
+          state().closedDocumentIds,
+          state().openDocumentIds,
+          state().documents,
+        ),
+      ).toBeNull();
     });
   });
 

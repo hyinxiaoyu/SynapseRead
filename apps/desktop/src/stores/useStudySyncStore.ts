@@ -57,6 +57,12 @@ export interface StudySyncState {
   relinkedNonceByDocumentId: Record<string, number>;
   openDocumentIds: string[];
   activeDocumentId: string | null;
+  /**
+   * Documents closed this session, most recently closed last. In memory only:
+   * ⇧⌘T brings one back and its tab is gone on the next launch, like the
+   * session's other tab state.
+   */
+  closedDocumentIds: string[];
   isDraggingFile: boolean;
   /** Immersive reading: chrome collapsed. Part of the session, so it survives a restart. */
   immersive: boolean;
@@ -95,6 +101,8 @@ export interface StudySyncState {
 
   openDocument(): Promise<void>;
   reopenRecentDocument(documentId: string): Promise<void>;
+  /** Reopens the most recently closed tab that is not already open again. */
+  reopenClosedDocument(): Promise<void>;
   verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus | null>;
   relinkDocument(
     documentId: string,
@@ -195,6 +203,26 @@ export function selectRecentDocuments(documents: readonly StudyDocument[]): Stud
 }
 
 /**
+ * The document ⇧⌘T would reopen: the newest closed tab that still exists and is
+ * not open again. Undefined when Reopen Closed Tab would do nothing.
+ */
+export function selectReopenableDocumentId(
+  closedDocumentIds: readonly string[],
+  openDocumentIds: readonly string[],
+  documents: readonly StudyDocument[],
+): string | null {
+  for (let index = closedDocumentIds.length - 1; index >= 0; index -= 1) {
+    const id = closedDocumentIds[index];
+    if (id === undefined) continue;
+    // A tab opened again by Open or Recent is no longer a closed tab.
+    if (openDocumentIds.includes(id)) continue;
+    if (!documents.some((document) => document.id === id)) continue;
+    return id;
+  }
+  return null;
+}
+
+/**
  * The bi-directional bus between the Reader and the MindMap. Neither side knows
  * the other exists: readers publish selections and consume jump requests, the
  * canvas publishes jumps and renders the excerpts that selections become.
@@ -262,6 +290,10 @@ export function createStudySyncStore(backend: StudyBackend) {
           documents,
           documentSourceStatuses,
           openDocumentIds,
+          // Opening a file again takes it off the closed-tab stack.
+          closedDocumentIds: state.closedDocumentIds.filter(
+            (id) => !opened.some((document) => document.id === id),
+          ),
           activeDocumentId: lastOpened ? lastOpened.id : state.activeDocumentId,
           selection: opened.length > 0 ? null : state.selection,
           ...(error !== undefined && error !== null ? { error: describeError(error) } : {}),
@@ -342,6 +374,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       relinkedNonceByDocumentId: {},
       openDocumentIds: [],
       activeDocumentId: null,
+      closedDocumentIds: [],
       isDraggingFile: false,
       immersive: false,
       fullscreen: false,
@@ -433,11 +466,23 @@ export function createStudySyncStore(backend: StudyBackend) {
             openDocumentIds: state.openDocumentIds.includes(documentId)
               ? state.openDocumentIds
               : [...state.openDocumentIds, documentId],
+            closedDocumentIds: state.closedDocumentIds.filter((id) => id !== documentId),
             activeDocumentId: documentId,
             selection: state.activeDocumentId === documentId ? state.selection : null,
           }));
           persistSession();
         });
+      },
+
+      async reopenClosedDocument() {
+        const { closedDocumentIds, openDocumentIds, documents } = get();
+        const documentId = selectReopenableDocumentId(
+          closedDocumentIds,
+          openDocumentIds,
+          documents,
+        );
+        if (documentId === null) return;
+        await get().reopenRecentDocument(documentId);
       },
 
       verifyDocumentSource(documentId) {
@@ -505,6 +550,11 @@ export function createStudySyncStore(backend: StudyBackend) {
             openDocumentIds,
             activeDocumentId,
             pdfLayouts,
+            // ⇧⌘T remembers the order tabs were closed in.
+            closedDocumentIds: [
+              ...state.closedDocumentIds.filter((id) => id !== documentId),
+              documentId,
+            ],
             selection: state.selection?.documentId === documentId ? null : state.selection,
             jumpRequest: state.jumpRequest?.documentId === documentId ? null : state.jumpRequest,
           };
@@ -701,6 +751,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           openDocumentIds: state.openDocumentIds.includes(annotation.documentId)
             ? state.openDocumentIds
             : [...state.openDocumentIds, annotation.documentId],
+          closedDocumentIds: state.closedDocumentIds.filter((id) => id !== annotation.documentId),
           activeDocumentId: annotation.documentId,
           selection: state.activeDocumentId === annotation.documentId ? state.selection : null,
           jumpRequest: {
@@ -732,6 +783,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           openDocumentIds: state.openDocumentIds.includes(annotation.documentId)
             ? state.openDocumentIds
             : [...state.openDocumentIds, annotation.documentId],
+          closedDocumentIds: state.closedDocumentIds.filter((id) => id !== annotation.documentId),
           activeDocumentId: annotation.documentId,
           selection: state.activeDocumentId === annotation.documentId ? state.selection : null,
           jumpRequest: {
@@ -900,6 +952,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           openDocumentIds: state.openDocumentIds.includes(bookmark.documentId)
             ? state.openDocumentIds
             : [...state.openDocumentIds, bookmark.documentId],
+          closedDocumentIds: state.closedDocumentIds.filter((id) => id !== bookmark.documentId),
           activeDocumentId: bookmark.documentId,
           selection: state.activeDocumentId === bookmark.documentId ? state.selection : null,
           jumpRequest: {
