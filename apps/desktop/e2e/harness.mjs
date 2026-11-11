@@ -552,16 +552,26 @@ export async function launchPage(url, { width = 1440, height = 900 } = {}) {
           event.sample].join(' ')));`,
   });
   await cdp.send('Page.navigate', { url });
-  await page.waitFor(`document.querySelector('[aria-label="Document reader"]')`, 'the workspace');
+  // On macOS, `--headless=new` leaves its virtual NSWindow inactive (`document.hasFocus()`
+  // is false), and synthetic CDP input never activates the window; Chromium's fullscreen
+  // controller then denies `requestFullscreen()` with `TypeError: not granted`.
+  await cdp.send('Page.bringToFront');
+  await page.waitFor(
+    `document.hasFocus() && document.querySelector('[aria-label="Document reader"]')`,
+    'the focused workspace',
+  );
 
   return {
     page,
-    close() {
+    async close() {
       cdp.close();
       process_.removeAllListeners('exit');
-      process_.kill();
-      // Chromium may still be writing while it exits.
-      setTimeout(() => rmSync(profile, { recursive: true, force: true }), 200);
+      if (process_.exitCode === null && process_.signalCode === null) {
+        const exited = new Promise((done) => process_.once('exit', done));
+        process_.kill();
+        await exited;
+      }
+      rmSync(profile, { recursive: true, force: true });
     },
   };
 }

@@ -44,6 +44,26 @@ jobs:
       - name: Build
         run: pnpm build:web
 
-      # Real engines in real Chromium, under the app's CSP. ubuntu-latest ships Chrome.
+  e2e:
+    # Real engines in real Chromium, under the app's CSP. Both images ship Chrome;
+    # macOS catches platform differences in headless window activation and rendering.
+    name: End-to-end (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
       - name: End-to-end
-        run: pnpm --filter @synapseread/desktop exec node e2e/run.mjs
+        run: pnpm e2e
