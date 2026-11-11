@@ -990,7 +990,9 @@ export async function openEpubDocument(
         );
         markClickListener(annotationId, markViewportRect(Array.from(marks), annotationId));
       };
-      const data = options.hasNote ? { annotationId, hasNote: 'true' } : { annotationId };
+      // The note dot comes from `decorateWithNoteMarker` alone, so the mark's data
+      // says only which annotation it is.
+      const data = { annotationId };
       // `add` is what `highlight` and `underline` call, and the one typed to
       // return the annotation, which the note dot needs.
       const annotation =

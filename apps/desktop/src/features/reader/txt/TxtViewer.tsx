@@ -71,12 +71,12 @@ import {
   scrubberSearchMarks,
 } from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
+import { type PaintedRange, type Segment, segmentRow } from '@/features/reader/txt/rowSegments';
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
-  type AnnotationStyle,
   type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
@@ -156,46 +156,6 @@ function useTextStream(content: DocumentContentReader, documentId: string, encod
   return state;
 }
 
-interface PaintedRange {
-  annotationId: string;
-  color: string;
-  style: AnnotationStyle;
-  startUnit: number;
-  endUnit: number;
-  hasNote?: boolean;
-}
-
-interface Segment {
-  unit: number;
-  text: string;
-  range: PaintedRange | null;
-}
-
-/** Cuts a row at highlight edges. The last highlight painted over a character wins. */
-function segmentRow(rowStart: number, text: string, ranges: readonly PaintedRange[]): Segment[] {
-  const rowEnd = rowStart + text.length;
-  const overlapping = ranges.filter((r) => r.startUnit < rowEnd && r.endUnit > rowStart);
-  if (overlapping.length === 0) return [{ unit: rowStart, text, range: null }];
-
-  const edges = new Set([rowStart, rowEnd]);
-  for (const range of overlapping) {
-    if (range.startUnit > rowStart) edges.add(range.startUnit);
-    if (range.endUnit < rowEnd) edges.add(range.endUnit);
-  }
-  const sorted = [...edges].sort((a, b) => a - b);
-  const segments: Segment[] = [];
-  for (let index = 0; index + 1 < sorted.length; index += 1) {
-    const start = sorted[index] as number;
-    const end = sorted[index + 1] as number;
-    segments.push({
-      unit: start,
-      text: text.slice(start - rowStart, end - rowStart),
-      range: overlapping.findLast((r) => r.startUnit <= start && r.endUnit >= end) ?? null,
-    });
-  }
-  return segments;
-}
-
 const TxtRow = memo(function TxtRow({
   segments,
   pulsingAnnotationId,
@@ -205,7 +165,7 @@ const TxtRow = memo(function TxtRow({
 }) {
   return (
     <>
-      {segments.map(({ unit, text, range }) => {
+      {segments.map(({ unit, text, range, endsNote }) => {
         const unitAttribute = { [UNIT_ATTRIBUTE]: unit };
         if (!range) {
           return (
@@ -229,7 +189,6 @@ const TxtRow = memo(function TxtRow({
                 '--anchor-pulse-color': range.color,
               };
         // The note marker is a `::after` box, so it adds no text and moves no offset.
-        const endsNote = range.hasNote === true && unit + text.length === range.endUnit;
         return (
           <span
             key={unit}
@@ -1124,6 +1083,7 @@ export function TxtViewer({
                     <TxtRow
                       segments={segmentRow(
                         model.rowStart(item.index),
+                        model.rowStart(item.index + 1),
                         model.rowText(item.index),
                         ranges,
                       )}

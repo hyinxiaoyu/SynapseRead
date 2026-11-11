@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 
+import { ANNOTATION_COLORS, isPaletteColor } from '@/features/reader/markup/palette';
 import type { AnnotationStyle } from '@/types/domain';
 
 const STORAGE_KEY = 'synapseread.markup.v1';
@@ -9,14 +10,13 @@ export interface MarkupDefaults {
   style: AnnotationStyle;
 }
 
-export const DEFAULT_MARKUP: MarkupDefaults = { color: '#fde047', style: 'highlight' };
+export const DEFAULT_MARKUP: MarkupDefaults = {
+  color: ANNOTATION_COLORS[0].value,
+  style: 'highlight',
+};
 
 const isStyle = (value: unknown): value is AnnotationStyle =>
   value === 'highlight' || value === 'underline';
-
-/** A hex color, so a corrupted entry can never reach an inline style. */
-const isColor = (value: unknown): value is string =>
-  typeof value === 'string' && /^#[0-9a-f]{3,8}$/i.test(value);
 
 /**
  * The color and style new highlights use, as last chosen in any document. A
@@ -29,7 +29,9 @@ export function readMarkupDefaults(): MarkupDefaults {
     const parsed: unknown = raw ? JSON.parse(raw) : null;
     const stored = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>;
     return {
-      color: isColor(stored.color) ? stored.color : DEFAULT_MARKUP.color,
+      // Only a palette color: a corrupted entry never reaches an inline style, and a
+      // color dropped from the palette would match no swatch or filter.
+      color: isPaletteColor(stored.color) ? stored.color : DEFAULT_MARKUP.color,
       style: isStyle(stored.style) ? stored.style : DEFAULT_MARKUP.style,
     };
   } catch {

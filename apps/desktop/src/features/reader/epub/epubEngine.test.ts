@@ -90,6 +90,11 @@ const fake = vi.hoisted(() => {
       }
     },
     annotations: {
+      // Returns an annotation with no mark yet, as epub.js does before a chapter renders.
+      add: vi.fn<(...args: unknown[]) => { mark: undefined; on: () => undefined }>(() => ({
+        mark: undefined,
+        on: () => undefined,
+      })),
       underline: () => undefined,
       highlight: () => undefined,
       remove: () => undefined,
@@ -197,6 +202,19 @@ describe('EPUB navigation', () => {
     fake.settle('chapter1.xhtml');
     await jump;
     expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
+  });
+
+  it('tags a mark with its annotation id only, noted or not', async () => {
+    const handle = await open();
+    fake.rendition.annotations.add.mockClear();
+    handle.highlight('a', 'epubcfi(/6/4!/4/2/1:0,/1:0,/1:4)', '#fde047', 'highlight', {
+      hasNote: true,
+    });
+    handle.highlight('b', 'epubcfi(/6/4!/4/2/1:0,/1:4,/1:8)', '#fde047', 'underline');
+    expect(fake.rendition.annotations.add.mock.calls.map((call) => call[2])).toEqual([
+      { annotationId: 'a' },
+      { annotationId: 'b' },
+    ]);
   });
 
   it('re-issues a jump whose views a resize cleared', async () => {

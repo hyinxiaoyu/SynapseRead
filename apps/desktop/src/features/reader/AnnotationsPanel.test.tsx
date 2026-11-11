@@ -43,6 +43,7 @@ function controllerFor(
     canUndoDelete: false,
     setActiveColor: vi.fn(),
     setActiveStyle: vi.fn(),
+    setActiveMarkup: vi.fn(),
     toggleHighlightMode: vi.fn(),
     setDraftNote: vi.fn(),
     toggleDraftNote: vi.fn(),
@@ -181,6 +182,81 @@ describe('AnnotationsList', () => {
     }
   });
 
+  it('measures a long note again once the editor that hid it closes', () => {
+    const long = 'A long note. '.repeat(20);
+    const scrollHeight = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        return this.dataset.testid === 'annotation-note-preview' ? 120 : 0;
+      });
+    try {
+      const updateAnnotation = vi.fn();
+      const { rerender } = render(
+        <AnnotationsList
+          controller={controllerFor([annotation('a', { note: long })], { updateAnnotation })}
+          filter=""
+        />,
+      );
+      expect(screen.getByTestId('annotation-expand-button')).toBeInTheDocument();
+
+      // Leaving the field saves and keeps the editor open, so the note changes while
+      // its preview is hidden.
+      fireEvent.click(screen.getByTestId('annotation-edit-button'));
+      const field = screen.getByTestId('annotation-note-input');
+      fireEvent.change(field, { target: { value: `${long} more` } });
+      fireEvent.blur(field);
+      expect(updateAnnotation).toHaveBeenCalledTimes(1);
+      rerender(
+        <AnnotationsList
+          controller={controllerFor([annotation('a', { note: `${long} more` })], {
+            updateAnnotation,
+          })}
+          filter=""
+        />,
+      );
+      fireEvent.keyDown(screen.getByTestId('annotation-note-input'), { key: 'Escape' });
+      expect(screen.getByTestId('annotation-note-preview')).toBeInTheDocument();
+      expect(screen.getByTestId('annotation-expand-button')).toBeInTheDocument();
+    } finally {
+      scrollHeight.mockRestore();
+    }
+  });
+
+  it('saves once when the field blurs as Save or ⌘↩ closes it', () => {
+    const updateAnnotation = vi.fn();
+    const controller = controllerFor([annotation('a', { note: 'old' })], { updateAnnotation });
+    render(<AnnotationsList controller={controller} filter="" />);
+
+    // jsdom fires no blur when a focused field is removed; a WebView can. Blurring
+    // inside the same act, before React removes the field, stands in for that.
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
+    let field = screen.getByTestId('annotation-note-input');
+    fireEvent.change(field, { target: { value: 'new' } });
+    act(() => {
+      fireEvent.click(screen.getByTestId('annotation-note-save'));
+      fireEvent.blur(field);
+    });
+    expect(updateAnnotation).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('annotation-note-input')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
+    field = screen.getByTestId('annotation-note-input');
+    fireEvent.change(field, { target: { value: 'newer' } });
+    act(() => {
+      fireEvent.keyDown(field, { key: 'Enter', metaKey: true });
+      fireEvent.blur(field);
+    });
+    expect(updateAnnotation).toHaveBeenCalledTimes(2);
+    expect(updateAnnotation).toHaveBeenLastCalledWith('a', { note: 'newer', color: null });
+  });
+
+  it('shows no note preview for a note that is only whitespace', () => {
+    render(
+      <AnnotationsList controller={controllerFor([annotation('a', { note: ' \n ' })])} filter="" />,
+    );
+    expect(screen.queryByTestId('annotation-note-preview')).toBeNull();
+  });
+
   it('offers no expand button when nothing is cut off', () => {
     render(<AnnotationsList controller={controllerFor([annotation('a')])} filter="" />);
     expect(screen.queryByTestId('annotation-expand-button')).toBeNull();
@@ -261,5 +337,23 @@ describe('useAnnotationsController', () => {
     const open = renderHook(() => useAnnotationsController(options));
     act(() => next.result.current.setActiveColor('#93c5fd'));
     expect(open.result.current.activeColor).toBe('#93c5fd');
+  });
+
+  it('records the color and style of a new highlight in one write', () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    try {
+      const options = {
+        documentId: 'doc',
+        onSelectAnnotation: vi.fn(),
+        onCreateAnnotation: vi.fn(),
+      };
+      const { result } = renderHook(() => useAnnotationsController(options));
+      setItem.mockClear();
+      act(() => result.current.createHighlight({ color: '#c4b5fd', style: 'highlight' }));
+      expect(setItem).toHaveBeenCalledTimes(1);
+      expect(result.current.activeColor).toBe('#c4b5fd');
+    } finally {
+      setItem.mockRestore();
+    }
   });
 });

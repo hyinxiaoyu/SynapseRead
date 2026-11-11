@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
+import { readMarkupDefaults } from '@/features/reader/markup/markupDefaults';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend, type MemoryFile } from '@/lib/backend/memoryBackend';
 import {
@@ -776,6 +777,45 @@ describe('TxtViewer', () => {
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
   });
 
+  it('recolors a highlight without changing the default, and treats a blank note as none', async () => {
+    localStorage.clear();
+    try {
+      const { store, documentId } = await setup(documentFixture('sample.txt'));
+      render(<Harness store={store} documentId={documentId} />);
+
+      await selectText('quick brown fox');
+      const popover = await screen.findByTestId('selection-popover');
+      fireEvent.click(within(popover).getByTestId('popover-color-green'));
+      await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+      expect(readMarkupDefaults().color).toBe('#86efac');
+      clearSelection();
+
+      fireEvent.click(await segmentWith('quick brown fox'));
+      const editor = await screen.findByTestId('selection-popover');
+      fireEvent.click(within(editor).getByTestId('popover-color-pink'));
+      await waitFor(() => expect(store.getState().annotations[0]?.color).toBe('#f9a8d4'));
+      // A new highlight still takes the color last chosen for one.
+      expect(readMarkupDefaults().color).toBe('#86efac');
+
+      // Older data can hold a note that is only whitespace: it shows as no note.
+      act(() =>
+        store.setState({
+          annotations: store
+            .getState()
+            .annotations.map((annotation) => ({ ...annotation, note: '  \n ' })),
+        }),
+      );
+      const painted = await segmentWith('quick brown fox');
+      expect(painted).not.toHaveAttribute('data-note-end');
+      fireEvent.click(painted);
+      const blank = await screen.findByTestId('selection-popover');
+      expect(within(blank).queryByTestId('popover-note-view')).toBeNull();
+      expect(within(blank).getByRole('button', { name: 'Add Note' })).toBeInTheDocument();
+    } finally {
+      localStorage.clear();
+    }
+  });
+
   it('marks a noted highlight without changing its text, and opens it with the note showing', async () => {
     const { store, documentId } = await setup(documentFixture('sample.txt'));
     render(<Harness store={store} documentId={documentId} />);
@@ -904,12 +944,13 @@ describe('TxtViewer', () => {
     await waitFor(() => expect(store.getState().annotations).toHaveLength(0));
     expect(screen.queryByTestId('selection-popover')).toBeNull();
 
-    // ⇧⌘H highlights with the last color (green, from the edit above).
+    // ⇧⌘H highlights with the last color and style chosen for a new highlight
+    // (yellow underline); recoloring the one above did not change them.
     await selectText('quick brown fox');
     fireEvent.keyDown(window, { key: 'h', code: 'KeyH', shiftKey: true, ctrlKey: true });
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
-    expect(store.getState().annotations[0]?.color).toBe('#86efac');
-    expect(store.getState().annotations[0]?.style).toBe('highlight');
+    expect(store.getState().annotations[0]?.color).toBe('#fde047');
+    expect(store.getState().annotations[0]?.style).toBe('underline');
 
     // Excerpt to MindMap from the popover.
     await selectText('quick brown fox');

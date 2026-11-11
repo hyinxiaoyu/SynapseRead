@@ -581,7 +581,7 @@ export async function epubFlow(page) {
     })()`,
     markerShown: `(() => {
       const points = ${finalPoints};
-      const dot = ${visibleHost}?.querySelector('g[data-has-note="true"] circle[data-note-marker]');
+      const dot = ${visibleHost}?.querySelector('g[data-annotation-id] circle[data-note-marker]');
       if (!points || !dot) return false;
       const box = dot.getBoundingClientRect();
       return box.width > 0 && Math.abs(box.left - points.end.x) < 8;

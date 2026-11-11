@@ -18,6 +18,7 @@ import {
 import { isDeleteKey, useRovingList } from '@/features/reader/navigator/useRovingList';
 import { useMarkupDefaults, writeMarkupDefaults } from '@/features/reader/markup/markupDefaults';
 import { NoteEditor } from '@/features/reader/markup/NoteEditor';
+import { ANNOTATION_COLORS } from '@/features/reader/markup/palette';
 import { cn } from '@/lib/utils';
 import {
   type Annotation,
@@ -28,14 +29,6 @@ import {
   type ReaderHighlight,
   type ReaderSelection,
 } from '@/types/domain';
-
-export const ANNOTATION_COLORS: readonly { label: string; value: string }[] = [
-  { label: 'Yellow', value: '#fde047' },
-  { label: 'Green', value: '#86efac' },
-  { label: 'Blue', value: '#93c5fd' },
-  { label: 'Pink', value: '#f9a8d4' },
-  { label: 'Purple', value: '#c4b5fd' },
-];
 
 /** `Yellow`, or the hex value for a color outside the palette (an imported note). */
 export function annotationColorName(color: string): string {
@@ -75,6 +68,8 @@ export interface AnnotationsController {
   canUndoDelete: boolean;
   setActiveColor: (color: string) => void;
   setActiveStyle: (style: AnnotationStyle) => void;
+  /** Sets both defaults in one write, so readers re-render once. */
+  setActiveMarkup: (markup: { color: string; style: AnnotationStyle }) => void;
   toggleHighlightMode: () => void;
   setDraftNote: (value: string) => void;
   toggleDraftNote: () => void;
@@ -119,6 +114,8 @@ export function useAnnotationsController({
   const { color: activeColor, style: activeStyle } = useMarkupDefaults();
   const setActiveColor = (color: string) => writeMarkupDefaults({ color });
   const setActiveStyle = (style: AnnotationStyle) => writeMarkupDefaults({ style });
+  const setActiveMarkup = (markup: { color: string; style: AnnotationStyle }) =>
+    writeMarkupDefaults(markup);
   const [highlightMode, setHighlightMode] = useState(false);
   const [draftNoteOpen, setDraftNoteOpen] = useState(false);
   const [draftNote, setDraftNote] = useState('');
@@ -161,8 +158,7 @@ export function useAnnotationsController({
   const createHighlight = (options?: { color?: string; style?: AnnotationStyle }) => {
     const color = options?.color ?? activeColor;
     const style = options?.style ?? activeStyle;
-    setActiveColor(color);
-    setActiveStyle(style);
+    setActiveMarkup({ color, style });
     setDraftNoteOpen(false);
     createWithOptions({ color, style });
   };
@@ -224,6 +220,7 @@ export function useAnnotationsController({
     canUndoDelete: effectiveCanUndo,
     setActiveColor,
     setActiveStyle,
+    setActiveMarkup,
     toggleHighlightMode: () => setHighlightMode((current) => !current),
     setDraftNote,
     toggleDraftNote: () => setDraftNoteOpen((current) => !current),
@@ -336,28 +333,34 @@ function AnnotationRow({
   const excerptRef = useRef<HTMLSpanElement>(null);
   const noteRef = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
-    if (expanded) return;
+    // The editor hides the note preview, so a measurement now would miss it. The
+    // effect runs again when the editor closes and the preview is back.
+    if (expanded || editing) return;
     const measure = () => setClamped(isClamped(excerptRef.current) || isClamped(noteRef.current));
     measure();
     if (typeof ResizeObserver === 'undefined' || !excerptRef.current) return;
     const observer = new ResizeObserver(measure);
     observer.observe(excerptRef.current);
+    if (noteRef.current) observer.observe(noteRef.current);
     return () => observer.disconnect();
-  }, [expanded, annotation.excerptText, annotation.note]);
+  }, [expanded, editing, annotation.excerptText, annotation.note]);
 
-  // Set by Esc and Cancel, so a blur as the field goes away cannot save the draft.
-  const discarding = useRef(false);
+  // Set by Save, ⌘↩, Esc, and Cancel. The field still has focus as it goes away, so
+  // a blur can follow; it must neither save a discarded draft nor save a saved one
+  // twice, since `annotation.note` only catches up once the async update lands.
+  const closing = useRef(false);
   const commitNote = () => {
-    if (discarding.current) return;
+    if (closing.current) return;
     const trimmed = noteDraft.trim();
     const current = annotation.note?.trim() ?? '';
     if (trimmed !== current) {
       onUpdate({ note: trimmed, color: null });
     }
   };
-  const cancelEdit = () => {
-    discarding.current = true;
-    setNoteDraft(annotation.note ?? '');
+  const finishEdit = (save: boolean) => {
+    if (save) commitNote();
+    closing.current = true;
+    if (!save) setNoteDraft(annotation.note ?? '');
     setEditing(false);
   };
 
@@ -408,7 +411,7 @@ function AnnotationRow({
                 (annotation.excerptImagePath ? 'Captured image excerpt' : 'Note')}
             </span>
           </span>
-          {annotation.note && !editing && (
+          {annotationHasNote(annotation) && !editing && (
             <span
               ref={noteRef}
               data-testid="annotation-note-preview"
@@ -475,7 +478,7 @@ function AnnotationRow({
             title="Edit note and color"
             data-testid="annotation-edit-button"
             onClick={() => {
-              discarding.current = false;
+              closing.current = false;
               setEditing((current) => !current);
             }}
             className={cn(
@@ -521,18 +524,15 @@ function AnnotationRow({
             saveTestId="annotation-note-save"
             autoFocus
             onChange={setNoteDraft}
-            onSave={() => {
-              commitNote();
-              setEditing(false);
-            }}
-            onCancel={cancelEdit}
+            onSave={() => finishEdit(true)}
+            onCancel={() => finishEdit(false)}
             // Leaving the field keeps what was typed, so a click elsewhere loses nothing.
             onBlur={commitNote}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
                 event.preventDefault();
                 event.stopPropagation();
-                cancelEdit();
+                finishEdit(false);
               }
             }}
           />

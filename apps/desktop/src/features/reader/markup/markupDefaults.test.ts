@@ -7,6 +7,7 @@ import {
   useMarkupDefaults,
   writeMarkupDefaults,
 } from '@/features/reader/markup/markupDefaults';
+import { ANNOTATION_COLORS } from '@/features/reader/markup/palette';
 
 describe('markup defaults', () => {
   afterEach(() => {
@@ -32,6 +33,20 @@ describe('markup defaults', () => {
     expect(readMarkupDefaults()).toEqual(DEFAULT_MARKUP);
     localStorage.setItem('synapseread.markup.v1', '{not json');
     expect(readMarkupDefaults()).toEqual(DEFAULT_MARKUP);
+  });
+
+  it('restores only colors the palette offers', () => {
+    // A five-digit hex is no CSS color; a valid one outside the palette matches no
+    // swatch or filter.
+    for (const color of ['#fde04', '#123456', '#FDE047']) {
+      localStorage.setItem('synapseread.markup.v1', JSON.stringify({ color }));
+      expect(readMarkupDefaults().color).toBe(DEFAULT_MARKUP.color);
+    }
+    for (const { value } of ANNOTATION_COLORS) {
+      localStorage.setItem('synapseread.markup.v1', JSON.stringify({ color: value }));
+      expect(readMarkupDefaults().color).toBe(value);
+    }
+    expect(DEFAULT_MARKUP.color).toBe(ANNOTATION_COLORS[0].value);
   });
 
   it('keeps the choice for the session when storage refuses writes', () => {
