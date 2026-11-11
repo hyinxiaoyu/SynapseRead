@@ -91,6 +91,8 @@ export interface ReaderNavigatorProps<TMatch extends DocumentSearchResultItem, T
   /** The PDF page strip, given the tab's filter text. */
   renderThumbnails?: (filter: string) => ReactNode;
   annotationPlacement?: (annotation: Annotation) => AnnotationPlacement;
+  /** Orders annotations with the same placement order, such as by CFI in one chapter. */
+  compareAnnotations?: (a: Annotation, b: Annotation) => number;
   linkedAnnotationIds?: ReadonlySet<string>;
 }
 
@@ -108,6 +110,7 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
   contents,
   renderThumbnails,
   annotationPlacement,
+  compareAnnotations,
   linkedAnnotationIds,
 }: ReaderNavigatorProps<TMatch, T>) {
   const baseId = useId();
@@ -190,6 +193,7 @@ export function ReaderNavigator<TMatch extends DocumentSearchResultItem, T>({
           filter={filter}
           {...(linkedAnnotationIds ? { linkedAnnotationIds } : {})}
           {...(annotationPlacement ? { placementOf: annotationPlacement } : {})}
+          {...(compareAnnotations ? { compareWithinOrder: compareAnnotations } : {})}
           onDeleted={() => navigator.recordDeletion('annotation')}
         />
       );

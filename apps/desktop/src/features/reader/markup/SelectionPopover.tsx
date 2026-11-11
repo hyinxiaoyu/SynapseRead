@@ -1,4 +1,4 @@
-import { Copy, Quote, StickyNote, Trash2, Underline } from 'lucide-react';
+import { Copy, Pencil, Quote, StickyNote, Trash2, Underline } from 'lucide-react';
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
@@ -13,15 +13,16 @@ import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import {
-  ANNOTATION_COLORS,
   type AnnotationsController,
   COLOR_TARGET_CLASS,
   ColorDot,
 } from '@/features/reader/AnnotationsPanel';
+import { ANNOTATION_COLORS } from '@/features/reader/markup/palette';
+import { NoteEditor } from '@/features/reader/markup/NoteEditor';
 import { placePopover, toViewportRect, type ViewportRect } from '@/features/reader/markup/geometry';
 import type { SelectionPopoverController } from '@/features/reader/markup/useSelectionPopover';
 import { cn } from '@/lib/utils';
-import type { Annotation, ReaderSelection } from '@/types/domain';
+import { type Annotation, annotationHasNote, type ReaderSelection } from '@/types/domain';
 
 /** Copies text, falling back to the editing command where the async API is refused. */
 async function copyText(text: string): Promise<void> {
@@ -113,6 +114,8 @@ export function SelectionPopover({
       ? (annotations.annotations.find((candidate) => candidate.id === target.annotationId) ?? null)
       : null;
   const editing = annotation !== null;
+  // A whitespace-only note (imported, or saved before notes were trimmed) counts as none.
+  const hasNote = annotation !== null && annotationHasNote(annotation);
 
   const rootRef = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
@@ -254,8 +257,8 @@ export function SelectionPopover({
   };
 
   const chooseColor = (color: string) => {
+    // Recoloring a highlight changes that highlight, not the default for new ones.
     if (annotation) {
-      annotations.setActiveColor(color);
       annotations.updateAnnotation(annotation.id, { note: null, color, style: null });
       return;
     }
@@ -265,7 +268,6 @@ export function SelectionPopover({
   const toggleUnderline = () => {
     if (annotation) {
       const style = annotation.style === 'underline' ? 'highlight' : 'underline';
-      annotations.setActiveStyle(style);
       annotations.updateAnnotation(annotation.id, { note: null, color: null, style });
       return;
     }
@@ -363,10 +365,10 @@ export function SelectionPopover({
         />
         <PopoverAction
           icon={StickyNote}
-          label={annotation?.note ? 'Edit Note' : 'Add Note'}
+          label={hasNote ? 'Edit Note' : 'Add Note'}
           title={
             editing
-              ? annotation.note
+              ? hasNote
                 ? 'Edit Note'
                 : 'Add Note'
               : commandTooltip('Add Note', 'edit.addNote')
@@ -405,6 +407,31 @@ export function SelectionPopover({
           />
         )}
       </div>
+      {annotation && hasNote && !popover.noteOpen && (
+        // A clicked highlight opens with its note showing, as written.
+        <div data-testid="popover-note-view" className="flex flex-col gap-1 px-2 pt-1.5 pb-1">
+          <p
+            data-testid="popover-note-text"
+            className="max-h-40 max-w-[24rem] overflow-y-auto text-xs whitespace-pre-wrap break-words"
+          >
+            {annotation.note}
+          </p>
+          <div className="flex justify-end">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              data-testid="popover-note-edit"
+              onMouseDown={keepSelection}
+              onClick={popover.openNote}
+            >
+              <Pencil aria-hidden="true" className="size-3" />
+              Edit
+            </Button>
+          </div>
+        </div>
+      )}
       {/*
         The note stays mounted so `grid-template-rows` can transition between
         `0fr` and `1fr`, the same disclosure the appearance panel uses. `inert`
@@ -420,66 +447,25 @@ export function SelectionPopover({
         )}
       >
         <div className="overflow-hidden">
-          <form
-            aria-label={editing ? 'Edit note' : 'Add note to selection'}
-            data-testid="popover-note-form"
-            className="flex flex-col gap-1.5 px-1 pt-1.5 pb-1"
-            onSubmit={(event) => {
-              event.preventDefault();
-              saveNote();
-            }}
-          >
-            <textarea
-              ref={noteFieldRef}
-              aria-label={editing ? 'Highlight note' : 'Selection note'}
-              data-testid="popover-note-input"
-              placeholder="Write a note…"
-              rows={3}
-              value={noteValue}
-              onChange={(event) =>
-                editing
-                  ? setEditNote(event.target.value)
-                  : annotations.setDraftNote(event.target.value)
-              }
-              onKeyDown={(event) => {
-                // ⌘↩ saves, as in Notes; a bare Return is a new line.
-                if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault();
-                  saveNote();
-                }
-              }}
-              className={cn(
-                'w-full resize-none rounded-md border bg-background px-2 py-1.5 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                // `0fr` collapses height only, so the width floor is claimed
-                // only while the field is open. The mounted form still adds its
-                // own intrinsic width (the textarea's default `cols`), so the
-                // closed popover matches the one that unmounted it only while
-                // the toolbar is the wider of the two — which it is today.
-                popover.noteOpen && 'min-w-64',
-              )}
-            />
-            <div className="flex justify-end gap-1.5">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-6 px-2 text-xs"
-                onMouseDown={keepSelection}
-                onClick={popover.closeNote}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                size="sm"
-                className="h-6 px-2 text-xs"
-                data-testid="popover-note-save"
-                onMouseDown={keepSelection}
-              >
-                Save Note
-              </Button>
-            </div>
-          </form>
+          <NoteEditor
+            value={noteValue}
+            label={editing ? 'Highlight note' : 'Selection note'}
+            formLabel={editing ? 'Edit note' : 'Add note to selection'}
+            testId="popover-note-input"
+            formTestId="popover-note-form"
+            saveTestId="popover-note-save"
+            fieldRef={noteFieldRef}
+            className="px-1 pt-1.5 pb-1"
+            // `0fr` collapses height only, so the width floor is claimed only
+            // while the field is open. The mounted form still adds its own
+            // intrinsic width (the textarea's default `cols`), so the closed
+            // popover matches the one that unmounted it only while the toolbar
+            // is the wider of the two — which it is today.
+            fieldClassName={cn(popover.noteOpen && 'min-w-64')}
+            onChange={(value) => (editing ? setEditNote(value) : annotations.setDraftNote(value))}
+            onSave={saveNote}
+            onCancel={popover.closeNote}
+          />
         </div>
       </div>
     </div>

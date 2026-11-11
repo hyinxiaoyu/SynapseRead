@@ -71,20 +71,24 @@ import {
   scrubberSearchMarks,
 } from '@/features/reader/progress/ReaderFooter';
 import { useBackChip } from '@/features/reader/progress/useBackChip';
+import {
+  asTxtAnchor,
+  paint,
+  type PaintedRange,
+  type Segment,
+  segmentRow,
+} from '@/features/reader/txt/rowSegments';
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
-  type AnnotationStyle,
   type Bookmark,
   DEFAULT_READING_PREFERENCES,
   type DocumentContentReader,
   type DocumentViewerProps,
-  type ReaderHighlight,
   type ReaderSelection,
   type ReadingPreferences,
-  type TxtAnchor,
 } from '@/types/domain';
 
 import { UNIT_ATTRIBUTE, unitAtBoundary } from './selectionMapping';
@@ -156,45 +160,6 @@ function useTextStream(content: DocumentContentReader, documentId: string, encod
   return state;
 }
 
-interface PaintedRange {
-  annotationId: string;
-  color: string;
-  style: AnnotationStyle;
-  startUnit: number;
-  endUnit: number;
-}
-
-interface Segment {
-  unit: number;
-  text: string;
-  range: PaintedRange | null;
-}
-
-/** Cuts a row at highlight edges. The last highlight painted over a character wins. */
-function segmentRow(rowStart: number, text: string, ranges: readonly PaintedRange[]): Segment[] {
-  const rowEnd = rowStart + text.length;
-  const overlapping = ranges.filter((r) => r.startUnit < rowEnd && r.endUnit > rowStart);
-  if (overlapping.length === 0) return [{ unit: rowStart, text, range: null }];
-
-  const edges = new Set([rowStart, rowEnd]);
-  for (const range of overlapping) {
-    if (range.startUnit > rowStart) edges.add(range.startUnit);
-    if (range.endUnit < rowEnd) edges.add(range.endUnit);
-  }
-  const sorted = [...edges].sort((a, b) => a - b);
-  const segments: Segment[] = [];
-  for (let index = 0; index + 1 < sorted.length; index += 1) {
-    const start = sorted[index] as number;
-    const end = sorted[index + 1] as number;
-    segments.push({
-      unit: start,
-      text: text.slice(start - rowStart, end - rowStart),
-      range: overlapping.findLast((r) => r.startUnit <= start && r.endUnit >= end) ?? null,
-    });
-  }
-  return segments;
-}
-
 const TxtRow = memo(function TxtRow({
   segments,
   pulsingAnnotationId,
@@ -204,7 +169,7 @@ const TxtRow = memo(function TxtRow({
 }) {
   return (
     <>
-      {segments.map(({ unit, text, range }) => {
+      {segments.map(({ unit, text, range, endsNote }) => {
         const unitAttribute = { [UNIT_ATTRIBUTE]: unit };
         if (!range) {
           return (
@@ -227,12 +192,14 @@ const TxtRow = memo(function TxtRow({
                 color: '#000',
                 '--anchor-pulse-color': range.color,
               };
+        // The note marker is a `::after` box, so it adds no text and moves no offset.
         return (
           <span
             key={unit}
             {...unitAttribute}
             data-annotation-id={range.annotationId}
             data-annotation-style={range.style}
+            data-note-end={endsNote ? '' : undefined}
             style={style}
             className={cn(pulsingAnnotationId === range.annotationId && 'anchor-pulse')}
           >
@@ -243,19 +210,6 @@ const TxtRow = memo(function TxtRow({
     </>
   );
 });
-
-const asTxtAnchor = (anchor: { format: string } | null | undefined): TxtAnchor | null =>
-  anchor?.format === 'txt' ? (anchor as TxtAnchor) : null;
-
-function paint(model: TxtTextModel, highlights: readonly ReaderHighlight[]): PaintedRange[] {
-  const ranges: PaintedRange[] = [];
-  for (const { annotationId, anchor, color, style = 'highlight' } of highlights) {
-    const txtAnchor = asTxtAnchor(anchor);
-    const range = txtAnchor && model.rangeFor(txtAnchor);
-    if (range) ranges.push({ annotationId, color, style, ...range });
-  }
-  return ranges;
-}
 
 /**
  * Virtualized TXT reader. Rows come from {@link TxtTextModel}, which also owns
@@ -1132,6 +1086,7 @@ export function TxtViewer({
                     <TxtRow
                       segments={segmentRow(
                         model.rowStart(item.index),
+                        model.rowStart(item.index + 1),
                         model.rowText(item.index),
                         ranges,
                       )}

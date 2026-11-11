@@ -2,11 +2,11 @@ import { Highlighter, Underline, X } from 'lucide-react';
 
 import { commandTooltip } from '@/features/commands/commands';
 import {
-  ANNOTATION_COLORS,
   type AnnotationsController,
   COLOR_TARGET_CLASS,
   ColorDot,
 } from '@/features/reader/AnnotationsPanel';
+import { ANNOTATION_COLORS } from '@/features/reader/markup/palette';
 import { ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
 import type { AnnotationStyle } from '@/types/domain';

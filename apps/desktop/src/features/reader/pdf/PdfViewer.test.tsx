@@ -1078,9 +1078,18 @@ describe('PdfViewer', () => {
       if (!element) throw new Error('no highlight yet');
       return element;
     });
+    // The note shows on the page as a marker where the highlight ends.
+    const marker = document.querySelector<HTMLElement>('[data-page-index="0"] [data-note-marker]');
+    expect(marker?.dataset.noteMarker).toBe(store.getState().annotations[0]?.id);
+    expect(marker?.style.backgroundColor).not.toBe('');
     fireEvent.click(mark);
     const editor = await screen.findByTestId('selection-popover');
     expect(editor).toHaveAttribute('data-popover-mode', 'edit');
+    // It opens with the note showing and an Edit button.
+    expect(within(editor).getByTestId('popover-note-text')).toHaveTextContent(
+      'Margin note on page 1',
+    );
+    expect(within(editor).getByTestId('popover-note-edit')).toBeInTheDocument();
     fireEvent.click(within(editor).getByRole('button', { name: 'Underline' }));
     await waitFor(() => expect(store.getState().annotations[0]?.style).toBe('underline'));
     await waitFor(() =>

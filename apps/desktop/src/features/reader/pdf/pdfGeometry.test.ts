@@ -4,6 +4,7 @@ import {
   canvasRegion,
   mergeLineRects,
   normalizeBoxes,
+  noteMarkerPoint,
   rotateNormalizedRect,
   unrotateNormalizedRect,
 } from './pdfGeometry';
@@ -101,5 +102,27 @@ describe('rotateNormalizedRect / unrotateNormalizedRect', () => {
       const rotated = rotateNormalizedRect(canonical, rotation);
       expect(unrotateNormalizedRect(rotated, rotation)).toEqual(canonical);
     }
+  });
+});
+
+describe('noteMarkerPoint', () => {
+  const rects = [
+    { x: 0.1, y: 0.2, width: 0.6, height: 0.02 },
+    { x: 0.1, y: 0.25, width: 0.3, height: 0.02 },
+  ];
+
+  it('sits at the top right of the last line', () => {
+    expect(noteMarkerPoint(rects, 0)).toEqual({ x: 0.4, y: 0.25 });
+  });
+
+  it('follows the page as it is turned', () => {
+    // A quarter turn clockwise carries (x, y) to (1 - y, x).
+    expect(noteMarkerPoint(rects, 90)).toEqual({ x: 0.75, y: 0.4 });
+    expect(noteMarkerPoint(rects, 180)).toEqual({ x: 0.6, y: 0.75 });
+    expect(noteMarkerPoint(rects, 270)).toEqual({ x: 0.25, y: 0.6 });
+  });
+
+  it('has nowhere to go without a line', () => {
+    expect(noteMarkerPoint([], 0)).toBeNull();
   });
 });

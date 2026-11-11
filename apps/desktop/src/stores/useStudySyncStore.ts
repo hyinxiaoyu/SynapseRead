@@ -6,6 +6,7 @@ import { describeError } from '@/lib/utils';
 import {
   type AnchorLocation,
   type Annotation,
+  annotationHasNote,
   type AnnotationPatch,
   type Bookmark,
   bookmarkLocationKey,
@@ -152,7 +153,13 @@ export function selectHighlights(
 ): ReaderHighlight[] {
   return annotations
     .filter((annotation) => annotation.documentId === documentId)
-    .map(({ id, anchor, color, style }) => ({ annotationId: id, anchor, color, style }));
+    .map((annotation) => ({
+      annotationId: annotation.id,
+      anchor: annotation.anchor,
+      color: annotation.color,
+      style: annotation.style,
+      hasNote: annotationHasNote(annotation),
+    }));
 }
 
 export function selectDocumentAnnotations(

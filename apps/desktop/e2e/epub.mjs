@@ -1,4 +1,5 @@
 import { assert } from './harness.mjs';
+import { notesInPlaceFlow } from './notes.mjs';
 
 const visibleHost = `[...document.querySelectorAll('[data-testid="epub-host"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
 const frame = `${visibleHost}?.querySelector('iframe')`;
@@ -20,9 +21,11 @@ const statusIs = (value) =>
 const chapterIs = (title) => `${frameDocument}?.querySelector('h1')?.textContent === '${title}'`;
 
 /** Where text in the book's frame sits on screen, for a real mouse drag. */
-const textPoints = (page, text) =>
-  page.waitFor(
-    `(() => {
+const textPoints = (page, text) => page.waitFor(textPointsOf(text), `text in the book: ${text}`);
+
+/** An expression for {@link textPoints}, for steps that take one. */
+function textPointsOf(text) {
+  return `(() => {
       const view = ${frame};
       const book = view?.contentDocument;
       if (!book) return null;
@@ -43,9 +46,8 @@ const textPoints = (page, text) =>
         };
       }
       return null;
-    })()`,
-    `text in the book: ${text}`,
-  );
+    })()`;
+}
 
 const excerpt = async (page, text) => {
   const points = await textPoints(page, text);
@@ -567,6 +569,52 @@ export async function epubFlow(page) {
     'undoing EPUB highlight deletion',
   );
   await page.hideSidebar();
+
+  // Notes in place on that highlight; its dot is drawn in the marks layer at its end.
+  const finalPoints = textPointsOf('final target sentence');
+  await notesInPlaceFlow(page, {
+    name: 'EPUB',
+    viewer: visibleViewer,
+    highlightPoint: `(() => {
+      const points = ${finalPoints};
+      return points && { x: points.start.x + 6, y: points.start.y };
+    })()`,
+    markerShown: `(() => {
+      const points = ${finalPoints};
+      const dot = ${visibleHost}?.querySelector('g[data-annotation-id] circle[data-note-marker]');
+      if (!points || !dot) return false;
+      const box = dot.getBoundingClientRect();
+      return box.width > 0 && Math.abs(box.left - points.end.x) < 8;
+    })()`,
+  });
+
+  // Readers know chapters by title: no row names a chapter file.
+  await page.showSidebarTab('Highlights & Notes');
+  const locations = await page.waitFor(
+    `(() => {
+      const labels = [...${visibleViewer}.querySelectorAll('[data-testid="annotation-location"]')].map((e) => e.textContent);
+      return labels.length === 4 ? labels : null;
+    })()`,
+    'EPUB annotation locations',
+  );
+  assert(
+    locations.every((label) => !/\.x?html/i.test(label)),
+    `EPUB rows name chapters, not files: ${locations.join(', ')}`,
+  );
+  await page.hideSidebar();
+
+  // Recent leaves the chapter file out of an EPUB's resume line (#52 adds a percentage).
+  await page.clickButton('Recent documents');
+  const resume = await page.waitFor(
+    `[...document.querySelectorAll('[data-testid="recent-documents-menu"] [data-testid="recent-document-item"]')].filter((b) => b.dataset.documentFormat === 'epub').map((b) => b.textContent).join(' | ') || null`,
+    'the EPUB in Recent documents',
+  );
+  assert(!/\.x?html/i.test(resume), `Recent names no chapter file: ${resume}`);
+  await page.clickButton('Recent documents');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="recent-documents-menu"]')`,
+    'Recent documents to close',
+  );
 
   // Back-to-back jumps: the newer one wins. epub.js resolves the older display as soon
   // as the newer one replaces it, and the older jump must not be re-issued over it (#41).

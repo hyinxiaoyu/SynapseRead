@@ -112,9 +112,23 @@ describe('useStudySyncStore', () => {
           anchor: pdfAnchor,
           color: state().annotations[0]?.color,
           style: 'highlight',
+          hasNote: false,
         },
       ]);
       expect(selectHighlights(state().annotations, otherId)).toEqual([]);
+    });
+
+    it('marks highlights that carry a note, keeping line breaks and ignoring blank notes', async () => {
+      const documentId = await openDocument();
+      select(documentId, 'noted text');
+      const created = await state().createAnnotationFromSelection({
+        note: 'first line\nsecond line',
+      });
+      expect(created?.note).toBe('first line\nsecond line');
+      expect(selectHighlights(state().annotations, documentId)[0]?.hasNote).toBe(true);
+
+      await state().updateAnnotation(created?.id as string, { note: '   ', color: null });
+      expect(selectHighlights(state().annotations, documentId)[0]?.hasNote).toBe(false);
     });
 
     it('nests under the selected node with a connecting edge', async () => {

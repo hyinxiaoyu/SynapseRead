@@ -1,4 +1,5 @@
 import { assert } from './harness.mjs';
+import { notesInPlaceFlow } from './notes.mjs';
 
 /** The text `measureCharWidth` samples; see `appearance/measure.ts`. */
 const MEASURE_SAMPLE =
@@ -322,6 +323,42 @@ export async function txtFlow(page) {
     'undoing TXT highlight deletion',
   );
   await page.hideSidebar();
+
+  // Notes in place. A second highlight starts right after the one that gets the
+  // note, so a marker that moved offsets would paint it off by some characters.
+  await page.selectText(SEGMENT, 'document content');
+  await page.clickButton('Green highlight');
+  await page.waitFor(
+    `[...${visibleTxtViewer}.querySelectorAll('[data-annotation-id]')].some((e) => e.textContent === 'document content')`,
+    'a second TXT highlight',
+  );
+  await page.evaluate(`window.getSelection().removeAllRanges()`);
+  const noteEnd = `[...${visibleTxtViewer}.querySelectorAll('[data-note-end]')].find((e) => e.textContent === 'Dropped E2E')`;
+  await notesInPlaceFlow(page, {
+    name: 'TXT',
+    viewer: visibleTxtViewer,
+    highlightPoint: `(() => {
+      const mark = [...${visibleTxtViewer}.querySelectorAll('[data-annotation-id]')].find((e) => e.textContent === 'Dropped E2E');
+      if (!mark) return null;
+      const r = mark.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`,
+    markerShown: `(() => {
+      const end = ${noteEnd};
+      if (!end) return false;
+      const after = getComputedStyle(end, '::after');
+      return after.content !== 'none' && parseFloat(after.width) > 0;
+    })()`,
+  });
+  const rowText = await page.evaluate(`${noteEnd}.parentElement.textContent`);
+  assert(
+    rowText === 'Dropped E2E document content',
+    `the TXT note marker adds no text: ${JSON.stringify(rowText)}`,
+  );
+  const neighbour = await page.evaluate(
+    `[...${visibleTxtViewer}.querySelectorAll('[data-annotation-id]')].filter((e) => e.textContent === 'document content').length`,
+  );
+  assert(neighbour === 1, 'the highlight after a TXT note marker still paints exactly its text');
 
   // Last, because resizing reflows the text and moves every scroll offset above.
   // TXT keeps the same reading measure as EPUB at every window width.
