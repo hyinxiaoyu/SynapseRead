@@ -1,10 +1,11 @@
 import { ArrowLeft, ArrowRight, ChevronsRight, type LucideIcon } from 'lucide-react';
-import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, type ReactNode, useContext, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { Button } from '@/components/ui/button';
 import { type CommandId, commandTooltip } from '@/features/commands/commands';
 import { cn } from '@/lib/utils';
+import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 
 /**
  * Where the active reader's controls render. The workspace's unified toolbar
@@ -180,24 +181,7 @@ export function ToolbarOverflowMenu({ items }: { items: readonly OverflowItem[] 
     items.some((item) => item.collapse === collapse),
   );
 
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      setOpen(false);
-    };
-    window.addEventListener('pointerdown', onPointerDown);
-    // Capture: the menu closes before Esc reaches Find or focus mode.
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => {
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown, true);
-    };
-  }, [open]);
+  useDismissOnOutside(open, () => setOpen(false), { rootRef });
 
   if (!widest) return null;
   return (

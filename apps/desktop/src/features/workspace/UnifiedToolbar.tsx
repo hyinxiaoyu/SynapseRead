@@ -39,10 +39,26 @@ function isToolbarPinned(toolbar: HTMLElement | null, hasReaderSelection: boolea
  * Whether running `id` changes something drawn in the toolbar: a button, a
  * segment, or the Find field that declares the command. Page turns and other
  * `go.*` moves show on the page, so they leave a hidden toolbar hidden (#45).
+ * Controls collapsed into `»` stay in the DOM under `display: none`, and do not count.
  */
 export function toolbarShowsCommand(toolbar: HTMLElement | null, id: CommandId): boolean {
   if (!toolbar || id.startsWith('go.')) return false;
-  return toolbar.querySelector(`[data-command~="${id}"]`) !== null;
+  return [...toolbar.querySelectorAll<HTMLElement>(`[data-command~="${id}"]`)].some((control) =>
+    isLaidOutWithin(control, toolbar),
+  );
+}
+
+/**
+ * No `display: none` between `element` and `root`. The auto-hidden toolbar itself
+ * only slides and fades, so this still holds for its controls while it is hidden.
+ * Checked through computed style rather than layout boxes so it does not depend on
+ * `checkVisibility` (WebKit 17.4+).
+ */
+function isLaidOutWithin(element: HTMLElement, root: HTMLElement): boolean {
+  for (let node: HTMLElement | null = element; node && node !== root; node = node.parentElement) {
+    if (getComputedStyle(node).display === 'none') return false;
+  }
+  return true;
 }
 
 /**

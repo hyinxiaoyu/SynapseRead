@@ -314,7 +314,10 @@ export function TxtViewer({
   const [pinnedRows, setPinnedRows] = useState<readonly number[]>([]);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [missedJump, setMissedJump] = useState(false);
-  const [replacementsNoticeClosed, setReplacementsNoticeClosed] = useState(false);
+  // Which load the malformed-bytes notice was closed for: reopening the file with
+  // another encoding is a new decode, and its malformed bytes deserve a new warning.
+  const loadKey = `${document.id}\u0000${document.encoding}`;
+  const [replacementsClosedFor, setReplacementsClosedFor] = useState<string | null>(null);
   const history = useJumpHistory<number>();
   const pushHistory = history.push;
   const searchTrip = useSearchTrip(pushHistory);
@@ -1061,11 +1064,11 @@ export function TxtViewer({
             onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
           />
           <ReaderPopoverLayer hidden={chromeHidden}>
-            {load.hadReplacements && !replacementsNoticeClosed && (
+            {load.hadReplacements && replacementsClosedFor !== loadKey && (
               <ReaderNotice
                 tone="warning"
                 testId="txt-replacements-notice"
-                onDismiss={() => setReplacementsNoticeClosed(true)}
+                onDismiss={() => setReplacementsClosedFor(loadKey)}
               >
                 This file has bytes that are not valid UTF-8. They are shown as �.
               </ReaderNotice>

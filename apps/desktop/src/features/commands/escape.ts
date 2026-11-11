@@ -4,8 +4,10 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
  * The order Esc puts things away in, innermost first. A layer that is open and
  * accepts the key consumes it; the next Esc reaches the layer below.
  *
- * Popovers opened from the toolbar (Aa, the overflow menu, Find's options) are not
- * layers: they close on their own capture-phase listener, before any of these.
+ * Popovers opened from the toolbar (Aa, the overflow menu, Recent, Find's options)
+ * are not layers: `useDismissOnOutside` closes them on a capture-phase listener,
+ * before any of these see a key that reaches the window, and closes them when focus
+ * moves into an EPUB chapter, so a key forwarded from the frame finds none open.
  */
 export const ESCAPE_LAYER = {
   noteField: 40,

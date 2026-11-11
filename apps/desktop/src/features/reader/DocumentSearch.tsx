@@ -12,6 +12,7 @@ import { commandTooltip } from '@/features/commands/commands';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { useRovingList } from '@/features/reader/navigator/useRovingList';
 import { cn } from '@/lib/utils';
+import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 
 export const SEARCH_HIGHLIGHT_ID = '__search_active__';
 export const SEARCH_HIGHLIGHT_COLOR = '#fb923c';
@@ -497,24 +498,10 @@ export function ToolbarSearchField<TMatch extends DocumentSearchResultItem>({
     input.select();
   }, [search.focusNonce]);
 
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      event.stopPropagation();
-      setMenuOpen(false);
-    };
-    window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => {
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown, true);
-    };
-  }, [menuOpen]);
+  useDismissOnOutside(menuOpen, () => setMenuOpen(false), {
+    rootRef: menuRef,
+    stopPropagation: true,
+  });
 
   const hasResults = search.results.length > 0;
   const searching = search.status === 'searching';

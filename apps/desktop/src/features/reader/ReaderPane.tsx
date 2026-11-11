@@ -5,7 +5,6 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
-  useEffect,
   useMemo,
   useState,
 } from 'react';
@@ -16,6 +15,7 @@ import { useCommands } from '@/features/commands/registry';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn, describeError } from '@/lib/utils';
+import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 import {
   selectBookmarks,
   selectDocumentAnnotations,
@@ -119,17 +119,7 @@ export function ReaderPane() {
     },
   });
 
-  useEffect(() => {
-    if (!recentMenuOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.key !== 'Escape') return;
-      event.preventDefault();
-      setRecentMenuOpen(false);
-    };
-    // Capture: the menu closes before Esc reaches Find or focus mode.
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [recentMenuOpen]);
+  useDismissOnOutside(recentMenuOpen, () => setRecentMenuOpen(false));
 
   const handleTabKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLButtonElement>, currentIndex: number) => {

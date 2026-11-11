@@ -132,6 +132,20 @@ describe('UnifiedToolbar', () => {
     expect(toolbarShowsCommand(null, 'view.zoomIn')).toBe(false);
   });
 
+  it('does not count a control collapsed into the overflow menu', () => {
+    const header = document.createElement('header');
+    // As the container queries leave a collapsed button: in the DOM, not laid out.
+    header.innerHTML = `
+      <div style="display: none"><button data-command="view.toggleSidebar"></button></div>
+      <button data-command="view.zoomIn" style="display: none"></button>
+      <button data-command="view.zoomIn"></button>`;
+    document.body.append(header);
+    expect(toolbarShowsCommand(header, 'view.toggleSidebar')).toBe(false);
+    // One visible control for the command is enough.
+    expect(toolbarShowsCommand(header, 'view.zoomIn')).toBe(true);
+    header.remove();
+  });
+
   it('is 48 px tall, the band a paged reader keeps clear in focus mode', () => {
     renderToolbar();
     expect(toolbar().style.height).toBe('48px');

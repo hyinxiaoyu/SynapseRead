@@ -539,6 +539,28 @@ describe('TxtViewer', () => {
       expect(screen.queryByText(/not valid UTF-8/)).toBeNull();
     });
 
+    it('warns again about malformed bytes after the file is reopened with another encoding', async () => {
+      const { store, documentId, backend } = await setup(bytes);
+      // The memory backend decodes only UTF-8; the point is the reload, not the decoder.
+      const originalRead = backend.readTextStream.bind(backend);
+      backend.readTextStream = vi.fn((docId, _encoding, onChunk, signal) =>
+        originalRead(docId, 'utf-8', onChunk, signal),
+      );
+      render(<Harness store={store} documentId={documentId} />);
+      expect(await screen.findByText(/not valid UTF-8/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Close notice' }));
+      expect(screen.queryByText(/not valid UTF-8/)).toBeNull();
+
+      act(() =>
+        store.setState((state) => ({
+          documents: state.documents.map((document) =>
+            document.id === documentId ? { ...document, encoding: 'windows-1252' } : document,
+          ),
+        })),
+      );
+      expect(await screen.findByText(/not valid UTF-8/)).toBeInTheDocument();
+    });
+
     it('searches lossy TXT files while retaining source-byte highlight mapping', async () => {
       const { store, documentId } = await setup(bytes, 7);
       render(<Harness store={store} documentId={documentId} />);

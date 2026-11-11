@@ -575,6 +575,37 @@ describe('StudyWorkspace', () => {
     frame.remove();
   });
 
+  it('closes a toolbar menu when focus moves into a chapter frame, so a forwarded Esc still leaves focus mode', async () => {
+    await renderReady();
+    fireEvent.keyDown(window, { key: 'o', metaKey: true });
+    await screen.findByRole('tab');
+    fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+    expect(useStudySyncStore.getState().immersive).toBe(true);
+    fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+    expect(await screen.findByTestId('recent-documents-menu')).toBeInTheDocument();
+
+    // A click into the chapter moves focus to its iframe and blurs this window,
+    // without any pointerdown reaching it.
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const chapter = frame.contentDocument as Document;
+    chapter.addEventListener('keydown', (event) => dispatchEscape(event));
+    frame.focus();
+    expect(document.activeElement).toBe(frame);
+    act(() => {
+      window.dispatchEvent(new FocusEvent('blur'));
+    });
+    expect(screen.queryByTestId('recent-documents-menu')).not.toBeInTheDocument();
+
+    act(() => {
+      chapter.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      );
+    });
+    expect(useStudySyncStore.getState().immersive).toBe(false);
+    frame.remove();
+  });
+
   it('toggles full screen from its shortcut and retitles the command', async () => {
     const setFullscreen = vi.fn(async (fullscreen: boolean) => {
       useStudySyncStore.setState({ fullscreen });

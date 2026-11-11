@@ -2265,6 +2265,8 @@ function PdfPages({
           <ReaderPopoverLayer hidden={chromeHidden}>
             {unsupportedNotice !== null && unsupportedNotice !== dismissedUnsupported && (
               <ReaderNotice
+                // New types restart its fade, so the type just added gets its full 6 s.
+                key={unsupportedNotice}
                 tone="info"
                 testId="pdf-unsupported-annotations-notice"
                 onDismiss={() => setDismissedUnsupported(unsupportedNotice)}
