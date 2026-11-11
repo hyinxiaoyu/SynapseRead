@@ -33,7 +33,12 @@ import {
 } from '@/types/domain';
 
 import { sanitizeChapter } from './sanitizeChapter';
-import { countSectionText, type SectionTextCount } from './textWeights';
+import {
+  countedOffsets,
+  rawOffsetOfCounted,
+  type SectionTextCount,
+  TextCounter,
+} from './textWeights';
 
 export type { EpubReadingMode } from '@/types/domain';
 
@@ -373,15 +378,10 @@ function findTocLabel(items: readonly EpubTocItem[], href: string): string | nul
   return null;
 }
 
-/** A chapter's readable text, with the text node behind each stretch of it. */
-function collectText(chapterDoc: Document): {
-  fullText: string;
-  nodes: { node: Text; start: number; end: number }[];
-} {
+/** Visits each text node a reader sees, in document order. */
+function forEachReadableText(chapterDoc: Document, visit: (node: Text) => void): void {
   const root = chapterDoc.body ?? chapterDoc.documentElement;
-  const nodes: { node: Text; start: number; end: number }[] = [];
-  let fullText = '';
-  if (!root) return { fullText, nodes };
+  if (!root) return;
   const walker = chapterDoc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   for (let current = walker.nextNode(); current; current = walker.nextNode()) {
     const textNode = current as Text;
@@ -395,13 +395,30 @@ function collectText(chapterDoc: Document): {
     ) {
       continue;
     }
-    const value = textNode.data;
-    if (!value) continue;
-    const start = fullText.length;
-    fullText += value;
-    nodes.push({ node: textNode, start, end: fullText.length });
+    if (textNode.data) visit(textNode);
   }
+}
+
+/** A chapter's readable text, with the text node behind each stretch of it. */
+function collectText(chapterDoc: Document): {
+  fullText: string;
+  nodes: { node: Text; start: number; end: number }[];
+} {
+  const nodes: { node: Text; start: number; end: number }[] = [];
+  let fullText = '';
+  forEachReadableText(chapterDoc, (node) => {
+    const start = fullText.length;
+    fullText += node.data;
+    nodes.push({ node, start, end: fullText.length });
+  });
   return { fullText, nodes };
+}
+
+/** Counts a chapter's text as `collectText` would, without building it. */
+function countText(chapterDoc: Document): SectionTextCount {
+  const counter = new TextCounter();
+  forEachReadableText(chapterDoc, (node) => counter.add(node.data));
+  return counter.result();
 }
 
 interface LoadableSection {
@@ -822,6 +839,12 @@ export async function openEpubDocument(
         (section, chapterDoc) => {
           const { fullText, nodes } = collectText(chapterDoc);
           const rawMatches = findSearchMatches(fullText, query, options);
+          // Counted like the measuring pass, so a mark sits where the weights put it.
+          const counted = countedOffsets(fullText, [
+            ...rawMatches.map((match) => match.start),
+            fullText.length,
+          ]);
+          const countedLength = counted.at(-1) ?? 0;
           const locationLabel = findTocLabel(toc, section.href) ?? `Ch. ${chapterIndex + 1}`;
           const matches: EpubSearchMatch[] = [];
 
@@ -843,7 +866,7 @@ export async function openEpubDocument(
               cfiRange,
               chapterHref: section.href,
               chapterIndex,
-              chapterFraction: fullText.length > 0 ? match.start / fullText.length : 0,
+              chapterFraction: countedLength > 0 ? (counted[index] ?? 0) / countedLength : 0,
               locationLabel,
               ...snippet,
             });
@@ -870,11 +893,7 @@ export async function openEpubDocument(
     },
     spineHref: (index) => spineItems[index]?.href,
     measureChapter: (index) =>
-      withSection(
-        index,
-        (_section, chapterDoc) => countSectionText(collectText(chapterDoc).fullText),
-        null,
-      ),
+      withSection(index, (_section, chapterDoc) => countText(chapterDoc), null),
     async displayChapterFraction(index, fraction) {
       const href = spineItems[index]?.href;
       if (href === undefined) throw new Error(`no chapter ${index}`);
@@ -887,7 +906,13 @@ export async function openEpubDocument(
         (section, chapterDoc) => {
           const { fullText, nodes } = collectText(chapterDoc);
           if (nodes.length === 0) return null;
-          const target = Math.min(Math.floor(fraction * fullText.length), fullText.length - 1);
+          // `fraction` is of the counted text the weights measure, not of the raw
+          // text, so indentation in pretty-printed XHTML does not move the target.
+          const countedLength = countedOffsets(fullText, [fullText.length])[0] ?? 0;
+          const target = Math.min(
+            rawOffsetOfCounted(fullText, Math.floor(fraction * countedLength)),
+            fullText.length - 1,
+          );
           const entry = nodes.find((candidate) => candidate.end > target) ?? nodes.at(-1);
           if (!entry) return null;
           const range = chapterDoc.createRange();

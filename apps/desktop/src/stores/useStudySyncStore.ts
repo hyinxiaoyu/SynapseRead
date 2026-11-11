@@ -610,11 +610,7 @@ export function createStudySyncStore(backend: StudyBackend) {
               : document,
           ),
         }));
-        void guarded(() =>
-          progress === undefined
-            ? backend.updateDocumentCursor(documentId, anchor)
-            : backend.updateDocumentCursor(documentId, anchor, progress),
-        );
+        void guarded(() => backend.updateDocumentCursor(documentId, anchor, progress));
       },
 
       captureUrl: (annotationId) => backend.captureUrl(annotationId),

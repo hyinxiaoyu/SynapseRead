@@ -13,7 +13,10 @@
 /** One section's readable text, with whitespace runs counted once. */
 export interface SectionTextCount {
   characters: number;
-  /** Han and kana characters, which are read far fewer per minute. */
+  /**
+   * Han, kana and Hangul characters, which are read far fewer per minute than
+   * alphabetic ones.
+   */
   cjk: number;
 }
 
@@ -24,12 +27,110 @@ export interface TextWeights {
   readonly total: number;
 }
 
-const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+
+/** The UTF-16 units `/\s/` matches; all are single units, so a unit loop suffices. */
+function isSpace(code: number): boolean {
+  return (
+    (code >= 0x09 && code <= 0x0d) ||
+    code === 0x20 ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000 ||
+    code === 0xfeff
+  );
+}
+
+/**
+ * Counts text as a reader reads it, fed one stretch at a time: whitespace runs
+ * count once, and none at either end. Measuring a chapter feeds it each text node
+ * as it walks the tree, so it never builds the chapter's text.
+ *
+ * This is the one place "position in a chapter" is defined. Weights, scrubber
+ * jumps, and Find marks all count this way, so a jump to a fraction lands where
+ * the weights put that fraction (pretty-printed XHTML indentation counts once).
+ */
+export class TextCounter {
+  characters = 0;
+  cjk = 0;
+  private started = false;
+  private pendingSpace = false;
+
+  /** Where the next non-space character would sit, in counted characters. */
+  get position(): number {
+    return this.characters + (this.pendingSpace ? 1 : 0);
+  }
+
+  add(value: string): void {
+    this.cjk += value.match(CJK)?.length ?? 0;
+    for (let index = 0; index < value.length; index += 1) this.step(value.charCodeAt(index));
+  }
+
+  /** Feeds one UTF-16 unit; true when it counts as a character of its own. */
+  step(code: number): boolean {
+    if (isSpace(code)) {
+      if (this.started) this.pendingSpace = true;
+      return false;
+    }
+    if (this.pendingSpace) {
+      this.characters += 1;
+      this.pendingSpace = false;
+    }
+    this.characters += 1;
+    this.started = true;
+    return true;
+  }
+
+  result(): SectionTextCount {
+    return { characters: this.characters, cjk: this.cjk };
+  }
+}
 
 /** Counts what a reader reads: whitespace runs as one, none at either end. */
 export function countSectionText(text: string): SectionTextCount {
-  const collapsed = text.replace(/\s+/g, ' ').trim();
-  return { characters: collapsed.length, cjk: collapsed.match(CJK)?.length ?? 0 };
+  const counter = new TextCounter();
+  counter.add(text);
+  return counter.result();
+}
+
+/**
+ * Where each raw offset into `text` falls in counted characters. `offsets` must
+ * be ascending, as search matches are, so the text is walked once.
+ */
+export function countedOffsets(text: string, offsets: readonly number[]): number[] {
+  const counter = new TextCounter();
+  const result: number[] = [];
+  let raw = 0;
+  for (const offset of offsets) {
+    const end = Math.min(Math.max(offset, raw), text.length);
+    for (; raw < end; raw += 1) counter.step(text.charCodeAt(raw));
+    // Trailing whitespace is not counted, so the end is the count itself.
+    result.push(raw >= text.length ? counter.characters : counter.position);
+  }
+  return result;
+}
+
+/**
+ * The raw offset into `text` of the counted character at `target`, the inverse
+ * of `countedOffsets`: where a jump to a fraction of the chapter should land.
+ * Past the end it is the last character.
+ */
+export function rawOffsetOfCounted(text: string, target: number): number {
+  const counter = new TextCounter();
+  let last = 0;
+  for (let raw = 0; raw < text.length; raw += 1) {
+    const at = counter.position;
+    if (counter.step(text.charCodeAt(raw))) {
+      if (at >= target) return raw;
+      last = raw;
+    }
+  }
+  return last;
 }
 
 /**
@@ -104,8 +205,10 @@ export function locateBookFraction(
 /**
  * Silent reading speeds from Brysbaert (2019) for English, about 238 words or
  * 1,300 characters a minute, and Trauzettel-Klosinski et al. (2012) for Chinese
- * and Japanese, about 260 to 360 characters a minute. A rough guide by design:
- * the readout says "about".
+ * and Japanese, about 260 to 360 characters a minute. Korean Hangul uses the CJK
+ * rate too: a syllable block is read far slower than a Latin letter, and no rate
+ * of its own is sourced yet, so this errs toward more minutes rather than fewer.
+ * A rough guide by design: the readout says "about".
  */
 export const ALPHABETIC_CHARS_PER_MINUTE = 1300;
 export const CJK_CHARS_PER_MINUTE = 300;
@@ -191,4 +294,63 @@ export async function measureBook(
     sections.push(count ?? { characters: 0, cjk: 0 });
   }
   return buildTextWeights(sections);
+}
+
+const CACHE_KEY = 'synapseread.epubTextWeights.v1';
+/** Enough for a reader's current shelf; each entry is a few bytes per chapter. */
+const CACHE_LIMIT = 40;
+
+type CachedBooks = Record<string, { at: number; sections: [number, number][] }>;
+
+function readCache(): CachedBooks {
+  try {
+    const raw = globalThis.localStorage?.getItem(CACHE_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === 'object' ? (parsed as CachedBooks) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * A book's measured text from an earlier open, so reopening it shows the
+ * text-based percentage at once instead of re-measuring every chapter. Keyed by
+ * the file's content hash, so a changed file is measured afresh. Null when there
+ * is none or it does not fit this book.
+ */
+export function readCachedWeights(fileHash: string, sectionCount: number): TextWeights | null {
+  const entry = readCache()[fileHash];
+  const sections = entry?.sections;
+  if (!Array.isArray(sections) || sections.length !== sectionCount) return null;
+  const counts: SectionTextCount[] = [];
+  for (const pair of sections) {
+    const [characters, cjk] = Array.isArray(pair) ? pair : [];
+    if (
+      typeof characters !== 'number' ||
+      typeof cjk !== 'number' ||
+      !(characters >= 0) ||
+      !(cjk >= 0)
+    ) {
+      return null;
+    }
+    counts.push({ characters, cjk });
+  }
+  return buildTextWeights(counts);
+}
+
+/** Remembers a measured book, dropping the least recently measured past the limit. */
+export function writeCachedWeights(fileHash: string, weights: TextWeights, now = Date.now()): void {
+  try {
+    const books = readCache();
+    books[fileHash] = {
+      at: now,
+      sections: weights.sections.map((count) => [count.characters, count.cjk]),
+    };
+    const kept = Object.entries(books)
+      .sort(([, one], [, two]) => (two.at ?? 0) - (one.at ?? 0))
+      .slice(0, CACHE_LIMIT);
+    globalThis.localStorage?.setItem(CACHE_KEY, JSON.stringify(Object.fromEntries(kept)));
+  } catch {
+    // Storage can be full or disabled; the book is simply measured again next time.
+  }
 }

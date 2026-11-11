@@ -95,7 +95,9 @@ import {
   measureBook,
   minutesLeftInSection,
   minutesLeftText,
+  readCachedWeights,
   type TextWeights,
+  writeCachedWeights,
 } from './textWeights';
 
 const CURSOR_DEBOUNCE_MS = 400;
@@ -385,6 +387,12 @@ export function EpubViewer({
   const restored = useRef(false);
   const lastReported = useRef(initialCursor?.cfiRange ?? null);
   const lastReportedProgress = useRef<number | undefined>(undefined);
+  /**
+   * The percentage saved last session, sent with the cursor until this book is
+   * measured. Leaving progress out clears the saved one, and a reader who turns a
+   * page and closes the book before measuring finishes should not lose it.
+   */
+  const savedProgress = useRef<number | undefined>(undefined);
   const flushCursorRef = useRef<() => void>(() => undefined);
   const pendingLocation = useRef<EpubLocation | null>(null);
   const cursorTimer = useRef<number | undefined>(undefined);
@@ -394,12 +402,14 @@ export function EpubViewer({
     if (!host) return;
     let cancelled = false;
     let opened: EpubHandle | null = null;
+    savedProgress.current = document.lastProgress ?? undefined;
+    lastReportedProgress.current = savedProgress.current;
 
     const flushCursor = () => {
       const location = pendingLocation.current;
       pendingLocation.current = null;
       if (!location) return;
-      const progress = measuredProgress(location, textWeightsRef.current);
+      const progress = measuredProgress(location, textWeightsRef.current) ?? savedProgress.current;
       if (location.cfi === lastReported.current && progress === lastReportedProgress.current) {
         return;
       }
@@ -407,7 +417,7 @@ export function EpubViewer({
       lastReportedProgress.current = progress;
       latest.current.onCursorChange(
         { format: 'epub', cfiRange: location.cfi, chapterHref: location.href },
-        ...(progress === undefined ? [] : [progress]),
+        progress,
       );
     };
     flushCursorRef.current = flushCursor;
@@ -525,25 +535,39 @@ export function EpubViewer({
     const count = handle?.chapterCount ?? 0;
     const measure = handle?.measureChapter;
     if (!handle || !measure || handle.isFixedLayout || count <= 1) return;
+    const fileHash = document.fileHash;
+    const accept = (weights: TextWeights) => {
+      textWeightsRef.current = weights;
+      setMeasured({ book: handle, weights });
+      // The saved position gains the percentage the Recent list shows.
+      const here = currentLocationRef.current;
+      if (restored.current && here) {
+        pendingLocation.current = here;
+        flushCursorRef.current();
+      }
+    };
+    // Measured on an earlier open: no pass, and no jump from the by-file
+    // percentage to the by-text one.
+    const cached = readCachedWeights(fileHash, count);
+    if (cached) {
+      accept(cached);
+      return () => {
+        textWeightsRef.current = null;
+      };
+    }
     const controller = new AbortController();
     measureBook(count, (index) => measure.call(handle, index), controller.signal)
       .then((weights) => {
         if (controller.signal.aborted) return;
-        textWeightsRef.current = weights;
-        setMeasured({ book: handle, weights });
-        // The saved position gains the percentage the Recent list shows.
-        const here = currentLocationRef.current;
-        if (restored.current && here) {
-          pendingLocation.current = here;
-          flushCursorRef.current();
-        }
+        writeCachedWeights(fileHash, weights);
+        accept(weights);
       })
       .catch(() => undefined);
     return () => {
       controller.abort();
       textWeightsRef.current = null;
     };
-  }, [handle]);
+  }, [handle, document.fileHash]);
 
   // ---- Highlights ----------------------------------------------------------
 

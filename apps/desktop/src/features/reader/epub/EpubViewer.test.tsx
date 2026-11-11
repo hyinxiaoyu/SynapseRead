@@ -492,6 +492,7 @@ describe('EpubViewer', () => {
     expect(update).toHaveBeenCalledWith(
       documentId,
       expect.objectContaining({ format: 'epub', cfiRange: FAR_CFI }),
+      undefined,
     );
     expect(engine.destroyed).toBe(1);
   });
@@ -1464,6 +1465,73 @@ describe('EpubViewer', () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(engine.measure).not.toHaveBeenCalled();
       expect(screen.getByRole('slider')).toHaveAttribute('aria-valuetext', 'Chapter 3 of 4, 58%');
+    });
+
+    it('reopens a measured book by text at once, without measuring it again', async () => {
+      engine.measure = vi.fn(async (index: number) => COUNTS[index] ?? null);
+      const { store, documentId } = await setup();
+      const first = render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      onFirstPageOfOne();
+      const slider = () => screen.getByRole('slider', { name: 'Reading position' });
+      await waitFor(() =>
+        expect(slider()).toHaveAttribute('aria-valuetext', 'Chapter 3 of 4, 22%'),
+      );
+      expect(engine.measure).toHaveBeenCalledTimes(4);
+      first.unmount();
+
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      onFirstPageOfOne();
+      // No by-file 58% first: the weights come from the last open.
+      expect(slider()).toHaveAttribute('aria-valuetext', 'Chapter 3 of 4, 22%');
+      expect(engine.measure).toHaveBeenCalledTimes(4);
+    });
+
+    it('measures again when the cached weights do not fit the book', async () => {
+      engine.measure = vi.fn(async (index: number) => COUNTS[index] ?? null);
+      const { store, documentId } = await setup();
+      const fileHash = store.getState().documents.find((doc) => doc.id === documentId)?.fileHash;
+      window.localStorage.setItem(
+        'synapseread.epubTextWeights.v1',
+        JSON.stringify({ [fileHash ?? '']: { at: 1, sections: [[5, 0]] } }),
+      );
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      await waitFor(() => expect(engine.measure).toHaveBeenCalledTimes(4));
+    });
+
+    it('keeps the saved percentage when the reader moves before measuring finishes', async () => {
+      engine.measure = vi.fn(() => new Promise<null>(() => undefined));
+      const { backend, store, documentId } = await setup();
+      store
+        .getState()
+        .reportCursor(
+          documentId,
+          { format: 'epub', cfiRange: ONE_CFI, chapterHref: 'OEBPS/one.xhtml' },
+          0.37,
+        );
+      const update = vi.spyOn(backend, 'updateDocumentCursor');
+      const view = render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      act(() =>
+        engine.emitLocation({
+          cfi: 'epubcfi(/6/8!/4/2)',
+          href: 'OEBPS/two.xhtml',
+          chapterIndex: 3,
+          totalChapters: 4,
+        }),
+      );
+      view.unmount();
+
+      expect(update).toHaveBeenLastCalledWith(
+        documentId,
+        expect.objectContaining({ cfiRange: 'epubcfi(/6/8!/4/2)' }),
+        0.37,
+      );
+      expect(store.getState().documents.find((doc) => doc.id === documentId)?.lastProgress).toBe(
+        0.37,
+      );
     });
   });
 

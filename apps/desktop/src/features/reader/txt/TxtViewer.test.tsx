@@ -303,6 +303,7 @@ describe('TxtViewer', () => {
       expect(update).toHaveBeenCalledWith(
         documentId,
         expect.objectContaining({ format: 'txt', lineIndex: 30 }),
+        undefined,
       );
     });
 

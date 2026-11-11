@@ -3,12 +3,17 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   bookFraction,
   buildTextWeights,
+  countedOffsets,
   countSectionText,
   locateBookFraction,
   measureBook,
   minutesLeftInSection,
   minutesLeftText,
+  rawOffsetOfCounted,
+  readCachedWeights,
   type SectionTextCount,
+  TextCounter,
+  writeCachedWeights,
 } from './textWeights';
 
 const text = (characters: number, cjk = 0): SectionTextCount => ({ characters, cjk });
@@ -27,6 +32,77 @@ describe('countSectionText', () => {
 
   it('counts Han and kana separately, since they are read more slowly', () => {
     expect(countSectionText('第十二章 ひらがな カタカナ abc')).toEqual({ characters: 18, cjk: 12 });
+  });
+});
+
+describe('TextCounter', () => {
+  /** What the counter must agree with: the text collapsed in one go. */
+  const collapsed = (value: string) => value.replace(/\s+/g, ' ').trim();
+
+  it('counts like collapsing the joined text, however it is split into nodes', () => {
+    const pieces = ['\n    ', '<p>', ' Chapter\u00a0', '\t One', '', '  \n', 'It\u3000was', ' '];
+    const counter = new TextCounter();
+    for (const piece of pieces) counter.add(piece);
+    expect(counter.characters).toBe(collapsed(pieces.join('')).length);
+    for (const sample of ['', '   ', 'a', ' a ', 'a  b', '\ufeffa\u2028b\u205f']) {
+      expect(countSectionText(sample).characters).toBe(collapsed(sample).length);
+    }
+  });
+
+  it('counts Hangul at the slower CJK rate too', () => {
+    expect(countSectionText('제1장 한국어')).toEqual({ characters: 7, cjk: 5 });
+  });
+});
+
+describe('positions in a chapter', () => {
+  // Pretty-printed XHTML: most raw characters are indentation.
+  const raw = '\n        Alpha\n        beta\n        gamma\n      ';
+
+  it('maps raw offsets to counted characters', () => {
+    expect(countedOffsets(raw, [raw.indexOf('Alpha'), raw.indexOf('beta'), raw.length])).toEqual([
+      0, 6, 16,
+    ]);
+  });
+
+  it('lands a counted fraction on the same text the weights measured', () => {
+    const counted = countSectionText(raw).characters;
+    expect(counted).toBe('Alpha beta gamma'.length);
+    // Half the counted text is in "beta", whatever the indentation around it.
+    expect(raw[rawOffsetOfCounted(raw, Math.floor(counted / 2))]).toBe('t');
+    expect(rawOffsetOfCounted(raw, 0)).toBe(raw.indexOf('Alpha'));
+    expect(rawOffsetOfCounted(raw, 999)).toBe(raw.lastIndexOf('a'));
+    for (const word of ['Alpha', 'beta', 'gamma']) {
+      const [at = -1] = countedOffsets(raw, [raw.indexOf(word)]);
+      expect(rawOffsetOfCounted(raw, at)).toBe(raw.indexOf(word));
+    }
+  });
+});
+
+describe('cached weights', () => {
+  it('reads back what was written, for the same file and chapter count only', () => {
+    window.localStorage.clear();
+    const weights = buildTextWeights([text(10), text(20, 5)]);
+    writeCachedWeights('hash-a', weights);
+    expect(readCachedWeights('hash-a', 2)).toEqual(weights);
+    expect(readCachedWeights('hash-a', 3)).toBeNull();
+    expect(readCachedWeights('hash-b', 2)).toBeNull();
+  });
+
+  it('ignores a damaged cache and keeps only the most recent books', () => {
+    window.localStorage.setItem('synapseread.epubTextWeights.v1', '{not json');
+    expect(readCachedWeights('hash-a', 2)).toBeNull();
+    window.localStorage.setItem(
+      'synapseread.epubTextWeights.v1',
+      JSON.stringify({ 'hash-a': { at: 1, sections: [[-1, 0]] } }),
+    );
+    expect(readCachedWeights('hash-a', 1)).toBeNull();
+
+    window.localStorage.clear();
+    const weights = buildTextWeights([text(1)]);
+    for (let book = 0; book < 45; book += 1) writeCachedWeights(`book-${book}`, weights, book);
+    expect(readCachedWeights('book-0', 1)).toBeNull();
+    expect(readCachedWeights('book-5', 1)).not.toBeNull();
+    expect(readCachedWeights('book-44', 1)).not.toBeNull();
   });
 });
 
