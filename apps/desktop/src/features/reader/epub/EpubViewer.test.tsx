@@ -192,10 +192,12 @@ function Harness({
   store,
   documentId,
   isActive = true,
+  chromeHidden = false,
 }: {
   store: Store;
   documentId: string;
   isActive?: boolean;
+  chromeHidden?: boolean;
 }) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
@@ -216,6 +218,7 @@ function Harness({
     <EpubViewer
       document={{ ...document, format: 'epub' }}
       isActive={isActive}
+      chromeHidden={chromeHidden}
       content={state.content}
       highlights={highlights}
       jumpRequest={state.jumpRequest?.documentId === documentId ? state.jumpRequest : null}
@@ -1196,6 +1199,89 @@ describe('EpubViewer', () => {
       'lazy dog',
     ]);
     expect(screen.getAllByTestId('annotation-group')).toHaveLength(1);
+  });
+
+  it('takes Esc from inside a chapter: note, then popover, then Find (#45)', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    const frameEscape = () => {
+      const event = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      act(() => engine.emitKeyDown(event));
+      return event;
+    };
+
+    fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'fox' } });
+    await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 2'));
+    select();
+    fireEvent.click(await screen.findByTestId('popover-note'));
+    expect(screen.getByTestId('popover-note')).toHaveAttribute('aria-pressed', 'true');
+    // A click back into the chapter moves focus into its frame, out of this document.
+    act(() => (document.activeElement as HTMLElement | null)?.blur());
+
+    expect(frameEscape().defaultPrevented).toBe(true);
+    expect(screen.getByTestId('popover-note')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('selection-popover')).toBeInTheDocument();
+
+    frameEscape();
+    expect(screen.queryByTestId('selection-popover')).toBeNull();
+    expect(screen.getByTestId('search-input')).toHaveValue('fox');
+
+    frameEscape();
+    expect(screen.getByTestId('search-input')).toHaveValue('');
+    // Nothing left to close here: the key goes on to the app (focus mode, if on).
+    expect(frameEscape().defaultPrevented).toBe(false);
+  });
+
+  it('keeps the toolbar band as the top margin of a paged book in focus mode (#45)', async () => {
+    const { store, documentId } = await setup();
+    const { rerender } = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    const pageArea = () => screen.getByTestId('epub-page-area');
+    expect(pageArea().style.paddingTop).toBe('');
+
+    rerender(<Harness store={store} documentId={documentId} chromeHidden />);
+    expect(pageArea().style.paddingTop).toBe('48px');
+    expect(pageArea()).toHaveAttribute('data-toolbar-margin', 'true');
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    await waitFor(() =>
+      expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-mode', 'paged'),
+    );
+    expect(pageArea().style.paddingTop).toBe('48px');
+
+    // Scrolled text moves out from under the toolbar by itself.
+    fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+    await waitFor(() =>
+      expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-mode', 'scroll'),
+    );
+    expect(pageArea().style.paddingTop).toBe('');
+  });
+
+  it('lets a missed-jump notice be closed, and keeps it off the page in focus mode', async () => {
+    const { store, documentId } = await setup();
+    const { rerender } = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    engine.failCfi = FAR_CFI;
+    act(() =>
+      store.setState({
+        jumpRequest: {
+          nonce: 6,
+          documentId,
+          annotationId: 'gone',
+          anchor: { format: 'epub', cfiRange: FAR_CFI, chapterHref: 'gone.xhtml' },
+        },
+      }),
+    );
+    expect(await screen.findByText(/could not be found/)).toBeInTheDocument();
+
+    rerender(<Harness store={store} documentId={documentId} chromeHidden />);
+    expect(screen.queryByText(/could not be found/)).toBeNull();
+    rerender(<Harness store={store} documentId={documentId} />);
+    expect(screen.getByText(/could not be found/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close notice' }));
+    expect(screen.queryByText(/could not be found/)).toBeNull();
   });
 
   it('shows why a book could not open', async () => {

@@ -417,4 +417,15 @@ export async function txtFlow(page) {
     'TXT Full width fits a narrow pane',
   );
   await page.cdp.send('Emulation.clearDeviceMetricsOverride');
+
+  // Focus mode (#45): page turns leave the toolbar hidden, and Esc leaves.
+  await page.enterFocusMode(visibleScroller);
+  await page.press('ArrowRight');
+  await page.press(' ', 'Space');
+  await page.assertToolbarStaysHidden('ArrowRight and Space in TXT focus mode');
+  await page.press('Escape');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"]').dataset.immersive !== 'true'`,
+    'Esc to leave TXT focus mode',
+  );
 }

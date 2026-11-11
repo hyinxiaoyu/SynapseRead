@@ -732,6 +732,194 @@ describe('useStudySyncStore', () => {
       );
     });
 
+    describe('focus mode with "Focus mode uses full screen"', () => {
+      /** A window whose full screen the test controls, as the reader or the OS would. */
+      const withWindow = async () => {
+        const appWindow: { fullscreen: boolean; notify: (fullscreen: boolean) => void } = {
+          fullscreen: false,
+          notify: () => undefined,
+        };
+        const windowed = createMemoryBackend();
+        windowed.isFullscreen = async () => appWindow.fullscreen;
+        const setFullscreen = vi.fn(async (fullscreen: boolean) => {
+          if (fullscreen === appWindow.fullscreen) return;
+          appWindow.fullscreen = fullscreen;
+          appWindow.notify(fullscreen);
+        });
+        windowed.setFullscreen = setFullscreen;
+        windowed.onFullscreenChange = (listener) => {
+          appWindow.notify = listener;
+          return () => undefined;
+        };
+        const windowStore = createStudySyncStore(windowed);
+        await windowStore.getState().initialize();
+        return { appWindow, setFullscreen, get: () => windowStore.getState() };
+      };
+
+      it('stays out of full screen while the preference is off', async () => {
+        const { setFullscreen, get } = await withWindow();
+        get().setImmersive(true);
+        get().setImmersive(false);
+        expect(setFullscreen).not.toHaveBeenCalled();
+      });
+
+      it('enters full screen with focus mode and leaves it with focus mode', async () => {
+        const { appWindow, get } = await withWindow();
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        await vi.waitFor(() => expect(get().fullscreen).toBe(true));
+        expect(get().fullscreenFromFocusMode).toBe(true);
+
+        get().setImmersive(false);
+        await vi.waitFor(() => expect(get().fullscreen).toBe(false));
+        expect(appWindow.fullscreen).toBe(false);
+        expect(get().fullscreenFromFocusMode).toBe(false);
+      });
+
+      it('leaves full screen the reader chose alone', async () => {
+        const { appWindow, setFullscreen, get } = await withWindow();
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        await get().setFullscreen(true);
+        setFullscreen.mockClear();
+
+        get().setImmersive(true);
+        get().setImmersive(false);
+        expect(setFullscreen).not.toHaveBeenCalled();
+        expect(appWindow.fullscreen).toBe(true);
+      });
+
+      it('hands full screen back once the reader leaves it some other way', async () => {
+        const { appWindow, setFullscreen, get } = await withWindow();
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        await vi.waitFor(() => expect(get().fullscreen).toBe(true));
+
+        // The window's own button, or View ▸ Exit Full Screen; then back in by hand.
+        await get().setFullscreen(false);
+        expect(get().fullscreenFromFocusMode).toBe(false);
+        await get().setFullscreen(true);
+        setFullscreen.mockClear();
+
+        get().setImmersive(false);
+        expect(setFullscreen).not.toHaveBeenCalled();
+        expect(appWindow.fullscreen).toBe(true);
+      });
+
+      it('does not strand the window in full screen when focus mode ends first', async () => {
+        const { appWindow, setFullscreen, get } = await withWindow();
+        // The window takes a moment to go full screen: until the test lets it.
+        let finishEntering = () => undefined as void;
+        const entered = new Promise<void>((settle) => {
+          finishEntering = settle;
+        });
+        setFullscreen.mockImplementationOnce(async (fullscreen: boolean) => {
+          await entered;
+          appWindow.fullscreen = fullscreen;
+          appWindow.notify(fullscreen);
+        });
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        // After the request to enter is sent, before it has settled.
+        await vi.waitFor(() => expect(setFullscreen).toHaveBeenCalledTimes(1));
+        get().setImmersive(false);
+        finishEntering();
+        // Enter, the exit that found nothing to leave yet, then the exit once it had.
+        await vi.waitFor(() => expect(setFullscreen).toHaveBeenCalledTimes(3));
+        expect(setFullscreen.mock.calls.map(([fullscreen]) => fullscreen)).toEqual([
+          true,
+          false,
+          false,
+        ]);
+        await vi.waitFor(() => expect(appWindow.fullscreen).toBe(false));
+        await vi.waitFor(() => expect(get().fullscreen).toBe(false));
+      });
+
+      it('does not ask for full screen when focus mode ends before the window answers', async () => {
+        const { setFullscreen, get } = await withWindow();
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        get().setImmersive(false);
+        await new Promise((settle) => setTimeout(settle, 10));
+        expect(setFullscreen).not.toHaveBeenCalled();
+        expect(get().fullscreenFromFocusMode).toBe(false);
+      });
+
+      it('keeps ownership through a stale "not full screen" report during the animation', async () => {
+        const { appWindow, setFullscreen, get } = await withWindow();
+        // The first resize of the enter animation reports `false` before the window is full screen.
+        setFullscreen.mockImplementationOnce(async (fullscreen: boolean) => {
+          appWindow.notify(false);
+          appWindow.fullscreen = fullscreen;
+        });
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        await vi.waitFor(() => expect(get().fullscreen).toBe(true));
+        expect(get().fullscreenFromFocusMode).toBe(true);
+
+        get().setImmersive(false);
+        await vi.waitFor(() => expect(appWindow.fullscreen).toBe(false));
+        await vi.waitFor(() => expect(get().fullscreen).toBe(false));
+      });
+
+      it('leaves a window that started full screen to the reader', async () => {
+        const appWindow = { fullscreen: true };
+        const windowed = createMemoryBackend();
+        windowed.isFullscreen = async () => appWindow.fullscreen;
+        const setFullscreen = vi.fn(async (fullscreen: boolean) => {
+          appWindow.fullscreen = fullscreen;
+        });
+        windowed.setFullscreen = setFullscreen;
+        windowed.onFullscreenChange = () => () => undefined;
+        const windowStore = createStudySyncStore(windowed);
+        await windowStore.getState().initialize();
+        const get = () => windowStore.getState();
+        expect(get().fullscreen).toBe(true);
+
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        get().setImmersive(false);
+        await new Promise((settle) => setTimeout(settle, 10));
+        expect(setFullscreen).not.toHaveBeenCalled();
+        expect(appWindow.fullscreen).toBe(true);
+      });
+
+      it('finds a full screen the store has not heard about yet before claiming it', async () => {
+        const { appWindow, setFullscreen, get } = await withWindow();
+        // Full screen with no resize report reaching the store.
+        appWindow.fullscreen = true;
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        await vi.waitFor(() => expect(get().fullscreen).toBe(true));
+        expect(get().fullscreenFromFocusMode).toBe(false);
+        get().setImmersive(false);
+        expect(setFullscreen).not.toHaveBeenCalled();
+        expect(appWindow.fullscreen).toBe(true);
+      });
+
+      it('leaves focus mode without an error when the window will not leave full screen', async () => {
+        const { setFullscreen, get } = await withWindow();
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        await vi.waitFor(() => expect(get().fullscreenFromFocusMode).toBe(true));
+        setFullscreen.mockRejectedValueOnce(new Error('denied'));
+        get().setImmersive(false);
+        await vi.waitFor(() => expect(setFullscreen).toHaveBeenCalledTimes(2));
+        await new Promise((settle) => setTimeout(settle, 0));
+        expect(get().immersive).toBe(false);
+        expect(get().error).toBeNull();
+      });
+
+      it('stays in focus mode, without an error, when full screen is refused', async () => {
+        const { setFullscreen, get } = await withWindow();
+        setFullscreen.mockRejectedValueOnce(new Error('denied'));
+        await get().updateReadingPreferences({ focusModeFullScreen: true });
+        get().setImmersive(true);
+        await vi.waitFor(() => expect(get().fullscreenFromFocusMode).toBe(false));
+        expect(get().immersive).toBe(true);
+        expect(get().error).toBeNull();
+      });
+    });
+
     it('detects missing, moved, and changed sources across PDF, EPUB, and TXT, and relinks while preserving notes', async () => {
       let pdfBytes = new TextEncoder().encode('pdf-v1');
       let epubBytes = new TextEncoder().encode('epub-v1');

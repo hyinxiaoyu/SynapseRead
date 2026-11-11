@@ -10,6 +10,8 @@ export interface SegmentedOption<T extends string> {
   /** Tooltip; defaults to the label. */
   title?: string;
   testId?: string;
+  /** The app command this segment stands for, so chrome can tell what it shows. */
+  command?: string;
 }
 
 /**
@@ -73,6 +75,7 @@ export function SegmentedControl<T extends string>({
             aria-label={option.label}
             title={option.title ?? option.label}
             data-testid={option.testId}
+            data-command={option.command}
             tabIndex={checked ? 0 : -1}
             disabled={disabled}
             onClick={() => onChange(option.value)}

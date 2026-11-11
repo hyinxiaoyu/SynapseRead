@@ -684,4 +684,142 @@ export async function epubFlow(page) {
     'an in-chapter return to survive a resize',
   );
   await page.evaluate(`(${visibleHost}).style.width = ''`);
+
+  await focusModeFlow(page, visibleViewer);
+}
+
+/** Where the first line of text on the current page sits in the window. */
+const firstLineTop = `(() => {
+  const host = ${visibleHost};
+  const view = host?.querySelector('iframe');
+  const book = view?.contentDocument;
+  if (!book?.body) return null;
+  const shown = host.getBoundingClientRect();
+  const outer = view.getBoundingClientRect();
+  let top = Infinity;
+  const walker = book.createTreeWalker(book.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!node.data.trim()) continue;
+    const range = book.createRange();
+    range.selectNodeContents(node);
+    for (const r of range.getClientRects()) {
+      const left = outer.left + r.left;
+      if (r.width === 0 || left < shown.left || left >= shown.right) continue;
+      top = Math.min(top, outer.top + r.top);
+    }
+  }
+  return Number.isFinite(top) ? top : null;
+})()`;
+
+/** A short stretch of the first line on the current page, for a real drag. */
+const firstLineWords = `(() => {
+  const host = ${visibleHost};
+  const view = host?.querySelector('iframe');
+  const book = view?.contentDocument;
+  if (!book?.body) return null;
+  const shown = host.getBoundingClientRect();
+  const outer = view.getBoundingClientRect();
+  const walker = book.createTreeWalker(book.body, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.data.trim().length < 12) continue;
+    const range = book.createRange();
+    range.selectNodeContents(node);
+    for (const r of range.getClientRects()) {
+      const left = outer.left + r.left;
+      if (r.width < 80 || left < shown.left || left + r.width > shown.right) continue;
+      const y = outer.top + r.top + r.height / 2;
+      return { start: { x: left + 2, y }, end: { x: left + Math.min(r.width - 2, 140), y } };
+    }
+  }
+  return null;
+})()`;
+
+/** Flips "Focus mode uses full screen", which sits at the end of the Aa popover. */
+async function toggleFocusFullScreen(page) {
+  await page.clickButton('Reading appearance');
+  const reveal = (name) =>
+    page.evaluate(`[...document.querySelectorAll('[data-testid="appearance-popover"] button')]
+      .find((b) => b.getAttribute('aria-label') === ${JSON.stringify(name)} || b.textContent.trim() === ${JSON.stringify(name)})
+      ?.scrollIntoView({ block: 'center' })`);
+  await reveal('Customize');
+  await page.clickButton('Customize');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="focus-full-screen-switch"]')?.closest('[inert]')`,
+    'Customize to open',
+  );
+  // The disclosure animates open; scroll once it has its height.
+  await new Promise((done) => setTimeout(done, 300));
+  await reveal('Focus mode uses full screen');
+  await page.clickButton('Focus mode uses full screen');
+}
+
+/** Focus mode keeps the chrome off the text (#45). */
+async function focusModeFlow(page, visibleViewer) {
+  const toolbar = `document.querySelector('[data-testid="unified-toolbar"]')`;
+  await page.clickButton('Single page');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'paged'`, 'single-page mode');
+  // A continuation page, where the text starts right at the top margin.
+  await page.evaluate(`${visibleHost}.focus()`);
+  await page.press('End');
+  await page.waitFor(firstLineTop, 'text on the last page of the chapter');
+
+  await page.enterFocusMode(visibleHost);
+  await page.waitFor(
+    `getComputedStyle(${visibleViewer}.querySelector('[data-testid="epub-page-area"]')).paddingTop === '48px'`,
+    'the toolbar band as the top margin',
+  );
+  const toolbarBottom = await page.evaluate(`${toolbar}.getBoundingClientRect().height`);
+  const top = await page.waitFor(
+    `(() => { const top = ${firstLineTop}; return top !== null && top >= ${toolbarBottom} ? top : null; })()`,
+    `the first line below the ${toolbarBottom} px toolbar`,
+  );
+  console.log(`     epub: focus mode, first line at ${top.toFixed(0)} px`);
+
+  // A page turn shows on the page; the toolbar stays away.
+  await page.press('ArrowRight');
+  await page.assertToolbarStaysHidden('ArrowRight in EPUB focus mode');
+
+  // Esc inside the chapter: the selection's popover first, then focus mode.
+  const words = await page.waitFor(firstLineWords, 'a line of text on the page');
+  await page.drag(words.start, words.end);
+  await page.waitFor(
+    `document.querySelector('[data-testid="selection-popover"]')`,
+    'the selection popover in focus mode',
+  );
+  await page.waitFor(
+    `document.activeElement === ${visibleHost}.querySelector('iframe')`,
+    'focus inside the chapter after selecting',
+  );
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="selection-popover"]')`,
+    'Esc in the chapter to close the popover',
+  );
+  assert(await page.inFocusMode(), 'the first Esc only closes the popover');
+  // Click back into the text, so the next Esc also starts inside the chapter.
+  await page.click(words.start);
+  await page.waitFor(
+    `document.activeElement === ${visibleHost}.querySelector('iframe')`,
+    'focus back inside the chapter',
+  );
+  await page.press('Escape');
+  await page.waitFor(`!(${toolbar}.dataset.immersive)`, 'Esc in the chapter to leave focus mode');
+
+  // "Focus mode uses full screen" ties the two together.
+  await toggleFocusFullScreen(page);
+  await page.waitFor(
+    `document.querySelector('[data-testid="focus-full-screen-switch"]')?.getAttribute('aria-checked') === 'true'`,
+    'the full-screen preference on',
+  );
+  await page.press('Escape');
+  await page.waitFor(`!document.querySelector('[data-testid="appearance-popover"]')`, 'Aa closed');
+  await page.clickButton('Enter focus mode');
+  await page.waitFor('document.fullscreenElement !== null', 'focus mode to enter full screen');
+  // The window changed size under the pointer; bring the toolbar back from the top edge.
+  await page.mouse('mouseMoved', 200, 2);
+  await page.clickButton('Exit focus mode');
+  await page.waitFor('document.fullscreenElement === null', 'leaving focus mode to leave it');
+  assert(!(await page.inFocusMode()), 'focus mode off');
+  await toggleFocusFullScreen(page);
+  await page.press('Escape');
 }

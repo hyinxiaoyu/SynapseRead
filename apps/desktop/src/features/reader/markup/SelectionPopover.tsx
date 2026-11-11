@@ -11,6 +11,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
+import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import {
   type AnnotationsController,
   COLOR_TARGET_CLASS,
@@ -193,6 +194,30 @@ export function SelectionPopover({
   }
   if (!popover.noteOpen && editNoteFor !== null) setEditNoteFor(null);
   const noteValue = editing ? editNote : annotations.draftNote;
+
+  // Esc from the page, or forwarded from an EPUB chapter, while focus is not in
+  // the popover: the note closes first, then the popover. Inside the popover its
+  // own key handler does the same.
+  const { closeNote } = popover;
+  useEscapeLayer(
+    ESCAPE_LAYER.noteField,
+    shown && popover.noteOpen
+      ? () => {
+          closeNote();
+          return true;
+        }
+      : null,
+  );
+  useEscapeLayer(
+    ESCAPE_LAYER.selectionPopover,
+    shown
+      ? () => {
+          dismiss();
+          onReturnFocus();
+          return true;
+        }
+      : null,
+  );
 
   if (!shown) return null;
 

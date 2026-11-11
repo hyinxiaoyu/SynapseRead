@@ -5,6 +5,7 @@ import { usePanelRef } from 'react-resizable-panels';
 import { Button } from '@/components/ui/button';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { KeyboardShortcutsDialog } from '@/features/commands/KeyboardShortcutsDialog';
+import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/commands/registry';
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
@@ -112,19 +113,19 @@ export function StudyWorkspace() {
     changeImmersiveRef.current = changeImmersive;
   });
 
-  // Esc leaves focus mode, unless it is closing a popover or Find first.
-  useEffect(() => {
-    if (!immersive) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return;
-      if (document.querySelector('[data-reader-popover]')) return;
-      if (isEditableShortcutTarget(document.activeElement)) return;
-      event.preventDefault();
-      changeImmersiveRef.current(false);
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [immersive]);
+  // Esc leaves focus mode once nothing above it in the Esc order is open.
+  useEscapeLayer(
+    ESCAPE_LAYER.focusMode,
+    immersive
+      ? (event) => {
+          // A popover from the toolbar closes itself; text entry keeps its Esc.
+          if (document.querySelector('[data-reader-popover]')) return false;
+          if (isEditableShortcutTarget(event.target)) return false;
+          changeImmersiveRef.current(false);
+          return true;
+        }
+      : null,
+  );
 
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
   const ready = status === 'ready';

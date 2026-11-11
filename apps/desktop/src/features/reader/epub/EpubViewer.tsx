@@ -2,6 +2,7 @@ import { BookOpen, FileText, PanelLeft, ScrollText } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmented-control';
+import { dispatchEscape } from '@/features/commands/escape';
 import { dispatchCommandKeydown } from '@/features/commands/registry';
 import {
   type AnnotationPlacement,
@@ -26,6 +27,7 @@ import { indexOutline, type OutlineNode } from '@/features/reader/navigator/Outl
 import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { AppearanceMenu, useAppearancePanel } from '@/features/reader/appearance/AppearancePopover';
+import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import {
   computeReadingLayout,
   EPUB_BASE_FONT_REM,
@@ -42,8 +44,8 @@ import {
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
   HistoryButtons,
-  ReaderPopoverLayer,
   ReaderToolbar,
+  TOOLBAR_HEIGHT_PX,
   ToolbarButton,
   ToolbarSeparator,
   ToolbarTitle,
@@ -93,9 +95,9 @@ const MARK_WAIT_MS = 2000;
 const MARK_POLL_MS = 50;
 
 const READING_MODES: readonly SegmentedOption<EpubReadingMode>[] = [
-  { value: 'spread', label: 'Two pages', icon: BookOpen },
-  { value: 'paged', label: 'Single page', icon: FileText },
-  { value: 'scroll', label: 'Scroll', icon: ScrollText },
+  { value: 'spread', label: 'Two pages', icon: BookOpen, command: 'view.layoutTwoPage' },
+  { value: 'paged', label: 'Single page', icon: FileText, command: 'view.layoutSingle' },
+  { value: 'scroll', label: 'Scroll', icon: ScrollText, command: 'view.layoutScroll' },
 ];
 
 /** A mark the viewer has asked epub.js to draw. */
@@ -880,16 +882,17 @@ export function EpubViewer({
   useLayoutEffect(() => {
     if (!handle || !isActive) return;
     // Keys typed inside a chapter's iframe never reach the window, so the frame
-    // forwards them: Escape closes Find, and every shortcut reaches the registry.
+    // forwards them: Esc takes the app's dismissal order, and every shortcut
+    // reaches the registry.
     const onFrameKeyDown = (event: KeyboardEvent) => {
-      if (search.handleKeyDown(event)) return;
+      if (dispatchEscape(event)) return;
       dispatchCommandKeydown(event);
     };
     handle.onKeyDown(onFrameKeyDown);
     return () => {
       handle.onKeyDown(() => undefined);
     };
-  }, [handle, isActive, search]);
+  }, [handle, isActive]);
 
   useEffect(() => {
     // The store drops the selection on a tab switch; keep the frame in step.
@@ -965,6 +968,7 @@ export function EpubViewer({
     (bookProgress ? `Chapter ${bookProgress.chapter}` : null);
   const transition = effectivePreferences.pageTransition;
   const paged = readingMode !== 'scroll';
+  const toolbarMargin = paged && chromeHidden;
 
   /** Where the reader is, for "Back to …". */
   const describeHere = useCallback(() => {
@@ -1279,11 +1283,11 @@ export function EpubViewer({
             canExcerpt={canExcerpt}
             onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
           />
-          <ReaderPopoverLayer>
+          <ReaderPopoverLayer hidden={chromeHidden}>
             {missedJump && (
-              <p role="status" className="bg-muted px-4 py-1.5 text-xs">
+              <ReaderNotice tone="warning" onDismiss={() => setMissedJump(false)}>
                 That excerpt could not be found in this book. The file may have changed.
-              </p>
+              </ReaderNotice>
             )}
           </ReaderPopoverLayer>
           {/*
@@ -1294,8 +1298,16 @@ export function EpubViewer({
             ref={areaRef}
             data-testid="epub-page-area"
             data-turn-zone={zone ?? undefined}
+            data-toolbar-margin={toolbarMargin || undefined}
             className="group/page relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5"
-            style={{ ...pageSurfaceStyle(theme), cursor: zoneCursor(zone) || undefined }}
+            style={{
+              ...pageSurfaceStyle(theme),
+              cursor: zoneCursor(zone) || undefined,
+              // The toolbar floats over the page in focus mode. A page does not
+              // scroll out from under it, so its band is the page's top margin and
+              // showing the toolbar never covers the first line (#45).
+              ...(toolbarMargin ? { paddingTop: TOOLBAR_HEIGHT_PX } : undefined),
+            }}
           >
             <PageTurnShadow
               shadowRef={turnShadowRef}

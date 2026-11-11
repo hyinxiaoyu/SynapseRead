@@ -24,7 +24,15 @@ const VIEWPORT_PX = 400;
 type Store = ReturnType<typeof createStudySyncStore>;
 
 /** Wires a viewer to a real store and memory backend, as `ReaderPane` does. */
-function Harness({ store, documentId }: { store: Store; documentId: string }) {
+function Harness({
+  store,
+  documentId,
+  chromeHidden = false,
+}: {
+  store: Store;
+  documentId: string;
+  chromeHidden?: boolean;
+}) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
   const highlights = useMemo(
@@ -44,6 +52,7 @@ function Harness({ store, documentId }: { store: Store; documentId: string }) {
     <TxtViewer
       document={{ ...document, format: 'txt' }}
       isActive
+      chromeHidden={chromeHidden}
       content={state.content}
       highlights={highlights}
       jumpRequest={state.jumpRequest?.documentId === documentId ? state.jumpRequest : null}
@@ -516,6 +525,41 @@ describe('TxtViewer', () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);
       expect(await screen.findByText(/not valid UTF-8/)).toHaveAttribute('role', 'status');
+    });
+
+    it('keeps the malformed-bytes notice off the page in focus mode, and lets it be closed', async () => {
+      const { store, documentId } = await setup(bytes);
+      const view = render(<Harness store={store} documentId={documentId} />);
+      expect(await screen.findByText(/not valid UTF-8/)).toBeInTheDocument();
+      expect(screen.getByTestId('txt-replacements-notice')).toHaveAttribute('data-tone', 'warning');
+
+      view.rerender(<Harness store={store} documentId={documentId} chromeHidden />);
+      expect(screen.queryByText(/not valid UTF-8/)).toBeNull();
+      view.rerender(<Harness store={store} documentId={documentId} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Close notice' }));
+      expect(screen.queryByText(/not valid UTF-8/)).toBeNull();
+    });
+
+    it('warns again about malformed bytes after the file is reopened with another encoding', async () => {
+      const { store, documentId, backend } = await setup(bytes);
+      // The memory backend decodes only UTF-8; the point is the reload, not the decoder.
+      const originalRead = backend.readTextStream.bind(backend);
+      backend.readTextStream = vi.fn((docId, _encoding, onChunk, signal) =>
+        originalRead(docId, 'utf-8', onChunk, signal),
+      );
+      render(<Harness store={store} documentId={documentId} />);
+      expect(await screen.findByText(/not valid UTF-8/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Close notice' }));
+      expect(screen.queryByText(/not valid UTF-8/)).toBeNull();
+
+      act(() =>
+        store.setState((state) => ({
+          documents: state.documents.map((document) =>
+            document.id === documentId ? { ...document, encoding: 'windows-1252' } : document,
+          ),
+        })),
+      );
+      expect(await screen.findByText(/not valid UTF-8/)).toBeInTheDocument();
     });
 
     it('searches lossy TXT files while retaining source-byte highlight mapping', async () => {

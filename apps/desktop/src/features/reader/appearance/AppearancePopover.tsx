@@ -3,7 +3,6 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   useCallback,
-  useEffect,
   useId,
   useLayoutEffect,
   useRef,
@@ -17,6 +16,7 @@ import {
 } from '@/features/reader/appearance/themes';
 import { ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
+import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 import type {
   PageTransition,
   ReadingMargins,
@@ -322,6 +322,17 @@ function AppearancePanel({
     (fontFamily) => onChange({ fontFamily }),
   );
 
+  // Every format reads in focus mode, so every panel offers this.
+  const focusModeSwitch = (
+    <Switch
+      label="Focus mode uses full screen"
+      description="Full screen starts and ends with focus mode"
+      checked={preferences.focusModeFullScreen}
+      testId="focus-full-screen-switch"
+      onChange={(focusModeFullScreen) => onChange({ focusModeFullScreen })}
+    />
+  );
+
   // A PDF page is a bitmap: text size, page width, and fonts would do nothing.
   // Theme decides the tint, and page turns use the PDF display modes.
   if (format === 'pdf') {
@@ -343,6 +354,7 @@ function AppearancePanel({
           testId="tint-pdf-switch"
           onChange={(tintPdfPages) => onChange({ tintPdfPages })}
         />
+        {focusModeSwitch}
       </div>
     );
   }
@@ -491,6 +503,7 @@ function AppearancePanel({
                     onChange={(dimImages) => onChange({ dimImages })}
                   />
                 )}
+                {focusModeSwitch}
               </div>
             </div>
           </div>
@@ -525,31 +538,7 @@ export function AppearanceMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return;
-      event.preventDefault();
-      onClose();
-    };
-    const onPointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && rootRef.current?.contains(event.target)) return;
-      onClose();
-    };
-    // A click into a chapter's iframe never reaches this window; it blurs it.
-    const onBlur = () => {
-      if (document.activeElement instanceof HTMLIFrameElement) onClose();
-    };
-    // Capture, so Esc closes the popover before focus mode sees it.
-    window.addEventListener('keydown', onKeyDown, true);
-    window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('blur', onBlur);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown, true);
-      window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('blur', onBlur);
-    };
-  }, [open, onClose]);
+  useDismissOnOutside(open, onClose, { rootRef });
 
   // Toolbar compression can place Aa near either edge of the viewport.
   useLayoutEffect(() => {
