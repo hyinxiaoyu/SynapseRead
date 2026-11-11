@@ -1,21 +1,24 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { registerCommands, runCommand } from '@/features/commands/registry';
 import type { WindowChromeStyle } from '@/lib/backend/types';
 
-import { AUTO_HIDE_DELAY_MS, UnifiedToolbar } from './UnifiedToolbar';
+import { AUTO_HIDE_DELAY_MS, UnifiedToolbar, toolbarShowsCommand } from './UnifiedToolbar';
 
 function renderToolbar({
   immersive = true,
   hasReaderSelection = false,
   chromeStyle = 'standard',
   fullscreen = false,
+  workspaceControls = <button type="button">Show MindMap</button>,
 }: {
   immersive?: boolean;
   hasReaderSelection?: boolean;
   chromeStyle?: WindowChromeStyle;
   fullscreen?: boolean;
+  workspaceControls?: ReactNode;
 } = {}) {
   return render(
     <UnifiedToolbar
@@ -25,7 +28,7 @@ function renderToolbar({
       hasReaderSelection={hasReaderSelection}
       fallbackTitle="My Notebook"
       showFallbackTitle
-      workspaceControls={<button type="button">Show MindMap</button>}
+      workspaceControls={workspaceControls}
       onSlotsChange={() => undefined}
     />,
   );
@@ -68,9 +71,15 @@ describe('UnifiedToolbar', () => {
     expect(toolbar()).not.toHaveAttribute('data-hidden');
   });
 
-  it('keeps counting down while there is activity, and a command reveals it', () => {
+  it('keeps counting down while there is activity, and a command it shows reveals it', () => {
     const stop = registerCommands(() => ({ 'bookmarks.toggle': { run: () => undefined } }));
-    renderToolbar();
+    renderToolbar({
+      workspaceControls: (
+        <button type="button" data-command="bookmarks.toggle">
+          Bookmark
+        </button>
+      ),
+    });
     act(() => vi.advanceTimersByTime(AUTO_HIDE_DELAY_MS - 500));
     fireEvent.keyDown(window, { key: 'j' });
     act(() => vi.advanceTimersByTime(AUTO_HIDE_DELAY_MS - 500));
@@ -83,6 +92,63 @@ describe('UnifiedToolbar', () => {
     });
     expect(toolbar()).not.toHaveAttribute('data-hidden');
     stop();
+  });
+
+  it('stays hidden for page turns and commands it does not show (#45)', () => {
+    const stop = registerCommands(() => ({
+      'go.nextPage': { run: () => undefined },
+      'go.back': { run: () => undefined },
+      'edit.highlight': { run: () => undefined },
+    }));
+    renderToolbar({
+      // Back has a toolbar button, but a jump shows on the page.
+      workspaceControls: (
+        <button type="button" data-command="go.back">
+          Back
+        </button>
+      ),
+    });
+    idle();
+    expect(toolbar()).toHaveAttribute('data-hidden', 'true');
+    for (const id of ['go.nextPage', 'go.back', 'edit.highlight'] as const) {
+      act(() => {
+        runCommand(id, 'keyboard');
+      });
+      expect(toolbar(), id).toHaveAttribute('data-hidden', 'true');
+    }
+    stop();
+  });
+
+  it('knows which commands it shows, including several on one control', () => {
+    const header = document.createElement('header');
+    header.innerHTML = `
+      <button data-command="view.zoomIn"></button>
+      <div data-command="edit.find edit.findNext"></div>
+      <button data-command="go.forward"></button>`;
+    expect(toolbarShowsCommand(header, 'view.zoomIn')).toBe(true);
+    expect(toolbarShowsCommand(header, 'edit.findNext')).toBe(true);
+    expect(toolbarShowsCommand(header, 'edit.findPrevious')).toBe(false);
+    expect(toolbarShowsCommand(header, 'go.forward')).toBe(false);
+    expect(toolbarShowsCommand(null, 'view.zoomIn')).toBe(false);
+  });
+
+  it('does not count a control collapsed into the overflow menu', () => {
+    const header = document.createElement('header');
+    // As the container queries leave a collapsed button: in the DOM, not laid out.
+    header.innerHTML = `
+      <div style="display: none"><button data-command="view.toggleSidebar"></button></div>
+      <button data-command="view.zoomIn" style="display: none"></button>
+      <button data-command="view.zoomIn"></button>`;
+    document.body.append(header);
+    expect(toolbarShowsCommand(header, 'view.toggleSidebar')).toBe(false);
+    // One visible control for the command is enough.
+    expect(toolbarShowsCommand(header, 'view.zoomIn')).toBe(true);
+    header.remove();
+  });
+
+  it('is 48 px tall, the band a paged reader keeps clear in focus mode', () => {
+    renderToolbar();
+    expect(toolbar().style.height).toBe('48px');
   });
 
   it('stays while a popover is open or text is selected', () => {

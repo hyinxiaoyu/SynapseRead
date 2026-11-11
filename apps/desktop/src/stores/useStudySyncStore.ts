@@ -59,6 +59,11 @@ export interface StudySyncState {
   immersive: boolean;
   /** Whether the window is full screen, however it got there. */
   fullscreen: boolean;
+  /**
+   * Focus mode entered full screen itself (`focusModeFullScreen`), so leaving focus
+   * mode leaves full screen too. Full screen the reader chose is never touched.
+   */
+  fullscreenFromFocusMode: boolean;
   chromeStyle: WindowChromeStyle;
   readingPreferences: ReadingPreferences;
   bookmarks: Bookmark[];
@@ -247,7 +252,52 @@ export function createStudySyncStore(backend: StudyBackend) {
       if (opened.length > 0) persistSession();
     };
 
-    backend.onFullscreenChange((fullscreen) => set({ fullscreen }));
+    // Leaving full screen by any other route (the window's button, View ▸ Exit Full
+    // Screen) hands it back to the reader: a later exit from focus mode leaves it be.
+    // Only a real true → false transition counts: the first report after a resize can
+    // be a stale `false` while the window is still animating into full screen.
+    backend.onFullscreenChange((fullscreen) =>
+      set((state) =>
+        !fullscreen && state.fullscreen
+          ? { fullscreen, fullscreenFromFocusMode: false }
+          : { fullscreen },
+      ),
+    );
+
+    // Focus mode's full screen is a convenience, so its requests never raise the error
+    // banner, entering or leaving: focus mode works without it, and a window left full
+    // screen still has its own way out.
+    const leaveFocusModeFullscreen = () => {
+      void backend
+        .setFullscreen(false)
+        .then(() => backend.isFullscreen())
+        .then((fullscreen) => set({ fullscreen }))
+        .catch(() => undefined);
+    };
+
+    const enterFocusModeFullscreen = async () => {
+      // The store's flag is only as fresh as the last resize, so ask the window: a
+      // full screen the reader already chose stays theirs.
+      if (await backend.isFullscreen()) {
+        set({ fullscreen: true });
+        return;
+      }
+      if (!get().immersive || get().fullscreenFromFocusMode) return;
+      set({ fullscreenFromFocusMode: true });
+      await backend.setFullscreen(true);
+      if (!(await backend.isFullscreen())) {
+        set({ fullscreenFromFocusMode: false });
+        return;
+      }
+      if (get().immersive) {
+        // Re-asserted in case a report during the animation handed it back.
+        set({ fullscreen: true, fullscreenFromFocusMode: true });
+      } else {
+        // Focus mode ended while the window was still going full screen.
+        set({ fullscreen: true, fullscreenFromFocusMode: false });
+        leaveFocusModeFullscreen();
+      }
+    };
 
     backend.onFileDrop((event) => {
       if (event.type === 'enter') {
@@ -277,6 +327,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       isDraggingFile: false,
       immersive: false,
       fullscreen: false,
+      fullscreenFromFocusMode: false,
       chromeStyle: backend.chromeStyle,
       readingPreferences: { ...DEFAULT_READING_PREFERENCES },
       bookmarks: [],
@@ -295,13 +346,16 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().status === 'loading' || get().status === 'ready') return;
         set({ status: 'loading', error: null });
         try {
-          const [documents, notebooks, readingPreferences, bookmarks, session] = await Promise.all([
-            backend.listDocuments(),
-            backend.listNotebooks(),
-            backend.getReadingPreferences(),
-            backend.listBookmarks(),
-            backend.getWorkspaceSession(),
-          ]);
+          const [documents, notebooks, readingPreferences, bookmarks, session, fullscreen] =
+            await Promise.all([
+              backend.listDocuments(),
+              backend.listNotebooks(),
+              backend.getReadingPreferences(),
+              backend.listBookmarks(),
+              backend.getWorkspaceSession(),
+              // The window may start full screen (restored by the OS) before any resize.
+              backend.isFullscreen().catch(() => false),
+            ]);
           const notebook = notebooks[0] ?? (await backend.createNotebook(DEFAULT_NOTEBOOK_TITLE));
           const graph = await backend.loadNotebookGraph(notebook.id);
           const knownIds = new Set(documents.map((doc) => doc.id));
@@ -324,6 +378,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             openDocumentIds,
             activeDocumentId,
             immersive: session.immersive,
+            fullscreen,
             readingPreferences,
             bookmarks,
             ...graph,
@@ -453,6 +508,13 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().immersive === immersive) return;
         set({ immersive });
         persistSession();
+        const { readingPreferences, fullscreen, fullscreenFromFocusMode } = get();
+        if (immersive && readingPreferences.focusModeFullScreen && !fullscreen) {
+          void enterFocusModeFullscreen().catch(() => set({ fullscreenFromFocusMode: false }));
+        } else if (!immersive && fullscreenFromFocusMode) {
+          set({ fullscreenFromFocusMode: false });
+          leaveFocusModeFullscreen();
+        }
       },
 
       reportCursor(documentId, anchor) {

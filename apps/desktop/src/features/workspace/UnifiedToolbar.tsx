@@ -8,8 +8,9 @@ import {
   useState,
 } from 'react';
 
+import type { CommandId } from '@/features/commands/commands';
 import { onCommandRun } from '@/features/commands/registry';
-import type { ToolbarSlots } from '@/features/reader/ReaderToolbar';
+import { TOOLBAR_HEIGHT_PX, type ToolbarSlots } from '@/features/reader/ReaderToolbar';
 import type { WindowChromeStyle } from '@/lib/backend/types';
 import { cn } from '@/lib/utils';
 import type { ResolvedReadingTheme } from '@/types/domain';
@@ -35,8 +36,35 @@ function isToolbarPinned(toolbar: HTMLElement | null, hasReaderSelection: boolea
 }
 
 /**
+ * Whether running `id` changes something drawn in the toolbar: a button, a
+ * segment, or the Find field that declares the command. Page turns and other
+ * `go.*` moves show on the page, so they leave a hidden toolbar hidden (#45).
+ * Controls collapsed into `»` stay in the DOM under `display: none`, and do not count.
+ */
+export function toolbarShowsCommand(toolbar: HTMLElement | null, id: CommandId): boolean {
+  if (!toolbar || id.startsWith('go.')) return false;
+  return [...toolbar.querySelectorAll<HTMLElement>(`[data-command~="${id}"]`)].some((control) =>
+    isLaidOutWithin(control, toolbar),
+  );
+}
+
+/**
+ * No `display: none` between `element` and `root`. The auto-hidden toolbar itself
+ * only slides and fades, so this still holds for its controls while it is hidden.
+ * Checked through computed style rather than layout boxes so it does not depend on
+ * `checkVisibility` (WebKit 17.4+).
+ */
+function isLaidOutWithin(element: HTMLElement, root: HTMLElement): boolean {
+  for (let node: HTMLElement | null = element; node && node !== root; node = node.parentElement) {
+    if (getComputedStyle(node).display === 'none') return false;
+  }
+  return true;
+}
+
+/**
  * Auto-hide for immersive reading. Any activity restarts the countdown; only the
- * top edge, the toolbar itself, or a command (a toolbar shortcut) reveals it.
+ * top edge, the toolbar itself, or a command whose result the toolbar shows
+ * reveals it.
  */
 export function useAutoHideToolbar(
   enabled: boolean,
@@ -78,7 +106,9 @@ export function useAutoHideToolbar(
     const onFocusIn = (event: FocusEvent) => {
       if (event.target instanceof Node && toolbarRef.current?.contains(event.target)) reveal();
     };
-    const stopObservingCommands = onCommandRun(() => reveal());
+    const stopObservingCommands = onCommandRun((id) => {
+      if (toolbarShowsCommand(toolbarRef.current, id)) reveal();
+    });
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('keydown', schedule);
     window.addEventListener('focusin', onFocusIn);
@@ -159,12 +189,13 @@ export function UnifiedToolbar({
         aria-label="Toolbar"
         {...dragRegion}
         className={cn(
-          '@container/toolbar z-40 flex h-12 shrink-0 items-center gap-3 border-b bg-background px-2 text-foreground select-none',
+          '@container/toolbar z-40 flex shrink-0 items-center gap-3 border-b bg-background px-2 text-foreground select-none',
           immersive && 'absolute inset-x-0 top-0 bg-background/90 shadow-sm backdrop-blur-md',
           hidden && 'pointer-events-none -translate-y-full opacity-0',
           'motion-safe:transition-[opacity,translate] motion-safe:duration-200',
         )}
         style={{
+          height: TOOLBAR_HEIGHT_PX,
           ...themeStyle,
           ...(insetForWindowControls ? { paddingLeft: TRAFFIC_LIGHTS_INSET_PX } : undefined),
         }}
