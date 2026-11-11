@@ -88,7 +88,34 @@ def build_pdf():
         b"/T(Reviewer)/Contents(Embedded PDF review note)>>"
     )
     objects[23] = b"<</Type/Annot/Subtype/Stamp/Rect[420 700 520 740]/Name/Draft>>"
+    return serialize_pdf(objects)
 
+
+def build_labelled_pdf():
+    """Six pages printed i, ii, 1, 2, 3, 4: front matter, then the body from 1."""
+    labels = ["i", "ii", "1", "2", "3", "4"]
+    objects = {}
+    # /PageLabels: lower-case roman from the first page, decimal from the third.
+    objects[1] = b"<</Type/Catalog/Pages 2 0 R/PageLabels<</Nums[0<</S/r>>2<</S/D>>]>>>>"
+    objects[3] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>"
+    kids = []
+    next_id = 4
+    for index, label in enumerate(labels):
+        page_id, content_id = next_id, next_id + 1
+        next_id += 2
+        kids.append(f"{page_id} 0 R")
+        objects[page_id] = (
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]"
+            b"/Resources<</Font<</F1 3 0 R>>>>/Contents %d 0 R>>" % content_id
+        )
+        data = text_page([f"Labelled fixture, printed page {label}",
+                          f"Physical page {index + 1} of {len(labels)}."]).encode("latin-1")
+        objects[content_id] = b"<</Length %d>>\nstream\n%s\nendstream" % (len(data), data)
+    objects[2] = f"<</Type/Pages/Kids[{' '.join(kids)}]/Count {len(labels)}>>".encode()
+    return serialize_pdf(objects)
+
+
+def serialize_pdf(objects):
     out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
     offsets = {}
     for number in sorted(objects):
@@ -179,6 +206,7 @@ ated word wraps in this paragraph.</p>
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "sample.pdf").write_bytes(build_pdf())
+    (OUT / "sample-labels.pdf").write_bytes(build_labelled_pdf())
     build_epub()
 
 

@@ -87,6 +87,8 @@ export interface PdfDocumentHandle {
   readonly usesRealWorker: boolean;
   /** Embedded PDF outline tree, or an empty array when the document has none. */
   getOutline?(): Promise<readonly PdfOutlineItem[]>;
+  /** Printed page labels (`/PageLabels`), one per page, or null when the document has none. */
+  getPageLabels?(): Promise<readonly string[] | null>;
   /** Extracted text runs and normalized rects for a page, whether rendered or not. */
   getPageText?(pageIndex: number): Promise<PdfPageText>;
   /** Internal links, visible embedded annotations, and disclosed unsupported subtypes on a page. */
@@ -292,6 +294,8 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
       const raw = (await pdf.getOutline()) as readonly RawOutlineNode[] | null;
       return raw ? mapPdfOutline(pdf, raw) : [];
     },
+
+    getPageLabels: () => pdf.getPageLabels(),
 
     getPageText(pageIndex) {
       const cached = getBoundedLru(pageTextCache, pageIndex);

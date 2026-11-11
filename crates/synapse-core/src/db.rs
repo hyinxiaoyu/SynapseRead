@@ -12,8 +12,9 @@ use crate::domain::{
     AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, CardPatch,
     CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document,
     DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode,
-    NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, ReadingPreferences,
-    RelinkDocumentResult, StudyNotebook, Viewport, WorkspaceSession,
+    NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout,
+    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, StudyNotebook, Viewport,
+    WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -28,6 +29,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0006_workspace_immersive.sql"),
     include_str!("../migrations/0007_reading_appearance.sql"),
     include_str!("../migrations/0008_annotation_style.sql"),
+    include_str!("../migrations/0009_pdf_document_layout.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -778,6 +780,71 @@ impl Database {
         self.get_reading_preferences()
     }
 
+    // ---- PDF Layout --------------------------------------------------------
+
+    /// The layout `document_id` was last read in. A PDF that has none starts from
+    /// the most recently saved layout's display and zoom (see `PdfLayout::inherited`),
+    /// or the default when no PDF has saved one yet.
+    pub fn get_pdf_layout(&self, document_id: &str) -> CoreResult<PdfLayout> {
+        self.check_pdf_document(document_id)?;
+        let own = self
+            .conn
+            .query_row(
+                &format!("{PDF_LAYOUT_SELECT} WHERE document_id = ?1"),
+                [document_id],
+                map_pdf_layout,
+            )
+            .optional()?;
+        if let Some(own) = own {
+            return Ok(own);
+        }
+        // Saves replace their row, so the highest rowid is the latest save.
+        let latest = self
+            .conn
+            .query_row(
+                &format!("{PDF_LAYOUT_SELECT} ORDER BY rowid DESC LIMIT 1"),
+                [],
+                map_pdf_layout,
+            )
+            .optional()?;
+        Ok(latest.map(|layout| layout.inherited()).unwrap_or_default())
+    }
+
+    /// Stores the whole layout for `document_id`, which becomes the one new PDFs
+    /// inherit.
+    pub fn save_pdf_layout(&self, document_id: &str, layout: &PdfLayout) -> CoreResult<PdfLayout> {
+        layout.validate()?;
+        self.check_pdf_document(document_id)?;
+        // REPLACE rather than an upsert: the new row's rowid orders it last.
+        self.conn.execute(
+            "INSERT OR REPLACE INTO pdf_document_layouts
+                 (document_id, display_mode, zoom_mode, scale, rotation, cover_page_alone,
+                  updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+            params![
+                document_id,
+                layout.display_mode.as_str(),
+                layout.zoom_mode.as_str(),
+                layout.scale,
+                layout.rotation,
+                layout.cover_page_alone,
+            ],
+        )?;
+        self.get_pdf_layout(document_id)
+    }
+
+    fn check_pdf_document(&self, document_id: &str) -> CoreResult<()> {
+        let document = self.get_document(document_id)?;
+        if document.format != DocumentFormat::Pdf {
+            return Err(CoreError::InvalidLayout(format!(
+                "{} is a {} document, not a PDF",
+                document_id,
+                document.format.as_str()
+            )));
+        }
+        Ok(())
+    }
+
     // ---- Bookmarks -------------------------------------------------------
 
     pub fn list_bookmarks(&self) -> CoreResult<Vec<Bookmark>> {
@@ -1133,6 +1200,19 @@ fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
     })
 }
 
+const PDF_LAYOUT_SELECT: &str = "SELECT display_mode, zoom_mode, scale, rotation,
+    cover_page_alone FROM pdf_document_layouts";
+
+fn map_pdf_layout(row: &Row<'_>) -> rusqlite::Result<PdfLayout> {
+    Ok(PdfLayout {
+        display_mode: PdfDisplayMode::from_column(&row.get::<_, String>(0)?),
+        zoom_mode: PdfZoomMode::from_column(&row.get::<_, String>(1)?),
+        scale: row.get(2)?,
+        rotation: row.get(3)?,
+        cover_page_alone: row.get(4)?,
+    })
+}
+
 const CARD_SELECT: &str =
     "SELECT id, notebook_id, title, markdown_notes, tags_json, created_at FROM note_cards";
 
@@ -1345,6 +1425,18 @@ mod tests {
                     "active_document_id",
                     "updated_at",
                     "immersive",
+                ],
+            ),
+            (
+                "pdf_document_layouts",
+                &[
+                    "document_id",
+                    "display_mode",
+                    "zoom_mode",
+                    "scale",
+                    "rotation",
+                    "cover_page_alone",
+                    "updated_at",
                 ],
             ),
         ];
@@ -2045,6 +2137,194 @@ mod tests {
             prefs.font_family,
             crate::domain::ReadingFontFamily::Original
         );
+    }
+
+    fn register_pdf(db: &Database, dir: &Path, name: &str) -> String {
+        let path = dir.join(name);
+        // Registration hashes the bytes; distinct content keeps the documents apart.
+        std::fs::write(&path, format!("%PDF-1.7 {name}")).unwrap();
+        db.register_document(&path).unwrap().id
+    }
+
+    fn two_page_layout() -> PdfLayout {
+        PdfLayout {
+            display_mode: PdfDisplayMode::TwoPage,
+            zoom_mode: PdfZoomMode::FitPage,
+            scale: 1.5,
+            rotation: 90,
+            cover_page_alone: true,
+        }
+    }
+
+    #[test]
+    fn pdf_layout_round_trips_every_field_together() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = register_pdf(&db, dir.path(), "book.pdf");
+        assert_eq!(db.get_pdf_layout(&pdf).unwrap(), PdfLayout::default());
+
+        let saved = db.save_pdf_layout(&pdf, &two_page_layout()).unwrap();
+        assert_eq!(saved, two_page_layout());
+        assert_eq!(db.get_pdf_layout(&pdf).unwrap(), two_page_layout());
+
+        // A second save replaces the row rather than adding one.
+        let custom = PdfLayout {
+            zoom_mode: PdfZoomMode::Custom,
+            scale: 2.25,
+            ..two_page_layout()
+        };
+        db.save_pdf_layout(&pdf, &custom).unwrap();
+        assert_eq!(db.get_pdf_layout(&pdf).unwrap(), custom);
+        assert_eq!(count(&db, "pdf_document_layouts"), 1);
+    }
+
+    #[test]
+    fn pdf_layout_rejects_invalid_values_and_non_pdf_documents() {
+        let f = fixture();
+        let pdf = register_pdf(&f.db, f._dir.path(), "book.pdf");
+        for scale in [0.1, 4.5, f64::NAN, f64::INFINITY] {
+            let layout = PdfLayout {
+                scale,
+                ..PdfLayout::default()
+            };
+            assert!(matches!(
+                f.db.save_pdf_layout(&pdf, &layout),
+                Err(CoreError::InvalidLayout(_))
+            ));
+        }
+        let tilted = PdfLayout {
+            rotation: 45,
+            ..PdfLayout::default()
+        };
+        assert!(matches!(
+            f.db.save_pdf_layout(&pdf, &tilted),
+            Err(CoreError::InvalidLayout(_))
+        ));
+        // The fixture's document is a text file.
+        assert!(matches!(
+            f.db.get_pdf_layout(&f.document_id),
+            Err(CoreError::InvalidLayout(_))
+        ));
+        assert!(matches!(
+            f.db.save_pdf_layout(&f.document_id, &PdfLayout::default()),
+            Err(CoreError::InvalidLayout(_))
+        ));
+        assert!(matches!(
+            f.db.get_pdf_layout("missing"),
+            Err(CoreError::NotFound { .. })
+        ));
+        assert!(matches!(
+            f.db.save_pdf_layout("missing", &PdfLayout::default()),
+            Err(CoreError::NotFound { .. })
+        ));
+        assert_eq!(count(&f.db, "pdf_document_layouts"), 0);
+    }
+
+    #[test]
+    fn new_pdfs_inherit_the_last_saved_display_and_zoom_only() {
+        let db = Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let first = register_pdf(&db, dir.path(), "first.pdf");
+        let second = register_pdf(&db, dir.path(), "second.pdf");
+        let fresh = register_pdf(&db, dir.path(), "fresh.pdf");
+
+        db.save_pdf_layout(&first, &two_page_layout()).unwrap();
+        let single = PdfLayout {
+            display_mode: PdfDisplayMode::Single,
+            zoom_mode: PdfZoomMode::Custom,
+            scale: 0.75,
+            rotation: 180,
+            cover_page_alone: false,
+        };
+        db.save_pdf_layout(&second, &single).unwrap();
+        // Rotation and the cover page describe one file; they do not carry over.
+        let inherited = PdfLayout {
+            display_mode: PdfDisplayMode::Single,
+            zoom_mode: PdfZoomMode::Custom,
+            scale: 0.75,
+            rotation: 0,
+            cover_page_alone: false,
+        };
+        assert_eq!(db.get_pdf_layout(&fresh).unwrap(), inherited);
+
+        // Saving the first again, within the same millisecond, makes it the latest.
+        db.save_pdf_layout(&first, &two_page_layout()).unwrap();
+        assert_eq!(
+            db.get_pdf_layout(&fresh).unwrap(),
+            PdfLayout {
+                display_mode: PdfDisplayMode::TwoPage,
+                zoom_mode: PdfZoomMode::FitPage,
+                scale: 1.5,
+                ..PdfLayout::default()
+            }
+        );
+        // Documents with their own layout keep it, and reading one writes nothing.
+        assert_eq!(db.get_pdf_layout(&second).unwrap(), single);
+        assert_eq!(count(&db, "pdf_document_layouts"), 2);
+    }
+
+    #[test]
+    fn pdf_layout_persists_across_reopen_and_goes_with_its_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("layout.sqlite");
+        let pdf = {
+            let db = Database::open(&db_path).unwrap();
+            let pdf = register_pdf(&db, dir.path(), "book.pdf");
+            db.save_pdf_layout(&pdf, &two_page_layout()).unwrap();
+            pdf
+        };
+        let reopened = Database::open(&db_path).unwrap();
+        assert_eq!(reopened.get_pdf_layout(&pdf).unwrap(), two_page_layout());
+
+        reopened
+            .conn
+            .execute("DELETE FROM documents WHERE id = ?1", [&pdf])
+            .unwrap();
+        assert_eq!(count(&reopened, "pdf_document_layouts"), 0);
+    }
+
+    #[test]
+    fn layout_migration_upgrades_a_version_8_database_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        // Bring the database to version 8, as the previous release left it.
+        for (version, sql) in (1_u32..).zip(&MIGRATIONS[..8]) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        let db = Database {
+            conn,
+            captures: None,
+        };
+        let pdf = register_pdf(&db, dir.path(), "book.pdf");
+        let mut conn = db.conn;
+        migrate(&mut conn).unwrap();
+        let db = Database {
+            conn,
+            captures: None,
+        };
+
+        assert_eq!(db.schema_version().unwrap(), 9);
+        assert_eq!(db.list_documents().unwrap()[0].id, pdf);
+        assert_eq!(db.get_pdf_layout(&pdf).unwrap(), PdfLayout::default());
+        db.save_pdf_layout(&pdf, &two_page_layout()).unwrap();
+        assert_eq!(db.get_pdf_layout(&pdf).unwrap(), two_page_layout());
+
+        // The schema enforces the same bounds as `PdfLayout::validate`.
+        for (column, value) in [
+            ("display_mode", "'spread'"),
+            ("zoom_mode", "'fit-height'"),
+            ("scale", "5"),
+            ("rotation", "45"),
+            ("cover_page_alone", "2"),
+        ] {
+            let result = db.conn.execute(
+                &format!("UPDATE pdf_document_layouts SET {column} = {value}"),
+                [],
+            );
+            assert!(result.is_err(), "{column} = {value} must be rejected");
+        }
     }
 
     #[test]

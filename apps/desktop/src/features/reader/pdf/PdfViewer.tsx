@@ -1,5 +1,6 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import {
+  BookOpen,
   Columns2,
   Crop,
   Expand,
@@ -94,8 +95,12 @@ import {
   type Bookmark,
   type DocumentViewerProps,
   type NormalizedRect,
+  DEFAULT_PDF_LAYOUT,
   type PdfAnchor,
+  type PdfDisplayMode,
+  type PdfLayout,
   type PdfPageSpan,
+  type PdfZoomMode,
   type ReaderHighlight,
   type ReaderSelection,
   type ReadingPreferences,
@@ -119,6 +124,14 @@ import {
   rotateNormalizedRect,
   unrotateNormalizedRect,
 } from './pdfGeometry';
+import {
+  normalizePageLabels,
+  pageLabelOf,
+  pagesInSpread,
+  resolvePageInput,
+  spreadCount,
+  spreadOfPage,
+} from './pdfPages';
 
 const PAGE_GAP_PX = 12;
 const SIDE_PADDING_PX = 12;
@@ -147,9 +160,7 @@ interface PdfTint {
   background: string;
 }
 
-export type PdfZoomMode = 'fit-width' | 'fit-page' | 'actual-size' | 'custom';
-export type PdfDisplayMode = 'continuous' | 'single' | 'two-page';
-export type { PdfRotation };
+export type { PdfDisplayMode, PdfRotation, PdfZoomMode };
 
 const asPdfAnchor = (anchor: { format: string } | null | undefined): PdfAnchor | null =>
   anchor?.format === 'pdf' ? (anchor as PdfAnchor) : null;
@@ -227,6 +238,27 @@ function usePdfOutline(engine: PdfDocumentHandle, enabled: boolean): readonly Pd
     };
   }, [engine, enabled]);
   return outline;
+}
+
+/** Printed page labels, or null while loading or when they match the page numbers. */
+function usePdfPageLabels(engine: PdfDocumentHandle): readonly string[] | null {
+  const [labels, setLabels] = useState<readonly string[] | null>(null);
+  useEffect(() => {
+    if (!engine.getPageLabels) return;
+    let cancelled = false;
+    engine
+      .getPageLabels()
+      .then((raw) => {
+        if (!cancelled) setLabels(normalizePageLabels(raw, engine.pageCount));
+      })
+      .catch(() => {
+        if (!cancelled) setLabels(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engine]);
+  return labels;
 }
 
 function toPdfOutlineNodes(items: readonly PdfOutlineItem[]): OutlineNode<number>[] {
@@ -840,6 +872,8 @@ function PdfPages({
   onCursorChange,
   preferences,
   onPreferencesChange,
+  pdfLayout,
+  onPdfLayoutChange,
   bookmarks,
   onAddBookmark,
   onRemoveBookmark,
@@ -878,10 +912,36 @@ function PdfPages({
   // Chapters group highlights, name the toolbar subtitle, and tick the scrubber.
   const outline = usePdfOutline(engine, true);
   const outlineNodes = useMemo(() => toPdfOutlineNodes(outline), [outline]);
-  const [zoomMode, setZoomMode] = useState<PdfZoomMode>('fit-width');
-  const [customScale, setCustomScale] = useState(1);
-  const [displayMode, setDisplayMode] = useState<PdfDisplayMode>('continuous');
-  const [rotation, setRotation] = useState<PdfRotation>(0);
+  // Read once: from here on the viewer owns its layout and reports each change.
+  const [initialLayout] = useState<PdfLayout>(() => pdfLayout ?? DEFAULT_PDF_LAYOUT);
+  const [zoomMode, setZoomMode] = useState<PdfZoomMode>(initialLayout.zoomMode);
+  const [customScale, setCustomScale] = useState(initialLayout.scale);
+  const [displayMode, setDisplayMode] = useState<PdfDisplayMode>(initialLayout.displayMode);
+  const [rotation, setRotation] = useState<PdfRotation>(initialLayout.rotation);
+  const [coverPageAlone, setCoverPageAlone] = useState(initialLayout.coverPageAlone);
+  const reportedLayout = useRef(initialLayout);
+  useEffect(() => {
+    const layout: PdfLayout = {
+      displayMode,
+      zoomMode,
+      scale: customScale,
+      rotation,
+      coverPageAlone,
+    };
+    const last = reportedLayout.current;
+    if (
+      last.displayMode === layout.displayMode &&
+      last.zoomMode === layout.zoomMode &&
+      last.scale === layout.scale &&
+      last.rotation === layout.rotation &&
+      last.coverPageAlone === layout.coverPageAlone
+    ) {
+      return;
+    }
+    reportedLayout.current = layout;
+    onPdfLayoutChange?.(layout);
+  }, [displayMode, zoomMode, customScale, rotation, coverPageAlone, onPdfLayoutChange]);
+  const pageLabels = usePdfPageLabels(engine);
   const [unsupportedSubtypes, setUnsupportedSubtypes] = useState<readonly string[]>([]);
   const contentWidth = Math.max(width - SIDE_PADDING_PX * 2, 1);
   const availableHeight = Math.max(height - PAGE_GAP_PX * 2, 1);
@@ -945,6 +1005,7 @@ function PdfPages({
     initialCursor && initialCursor.pageIndex < engine.pageCount ? initialCursor.pageIndex : 0,
   );
   const [pageInput, setPageInput] = useState(() => String(currentPageIndex + 1));
+  const currentPageLabel = pageLabelOf(pageLabels, currentPageIndex);
   const [pageInputInvalid, setPageInputInvalid] = useState(false);
   const restored = useRef(initialCursor === null || initialJump !== null);
   const lastReported = useRef(
@@ -952,37 +1013,35 @@ function PdfPages({
   );
 
   useEffect(() => {
-    setPageInput(String(currentPageIndex + 1));
+    setPageInput(currentPageLabel);
     setPageInputInvalid(false);
-  }, [currentPageIndex]);
+  }, [currentPageIndex, currentPageLabel]);
 
   const rowCount =
     displayMode === 'single'
       ? 1
       : displayMode === 'two-page'
-        ? Math.ceil(engine.pageCount / 2)
+        ? spreadCount(engine.pageCount, coverPageAlone)
         : engine.pageCount;
 
   const rowOfPage = useCallback(
     (pageIndex: number): number => {
       if (displayMode === 'single') return 0;
-      if (displayMode === 'two-page') return Math.floor(pageIndex / 2);
+      if (displayMode === 'two-page') return spreadOfPage(pageIndex, coverPageAlone);
       return pageIndex;
     },
-    [displayMode],
+    [coverPageAlone, displayMode],
   );
 
   const pagesInRow = useCallback(
     (rowIndex: number): readonly number[] => {
       if (displayMode === 'single') return [currentPageIndex];
       if (displayMode === 'two-page') {
-        const first = rowIndex * 2;
-        const second = first + 1;
-        return second < engine.pageCount ? [first, second] : [first];
+        return pagesInSpread(rowIndex, engine.pageCount, coverPageAlone);
       }
       return [rowIndex];
     },
-    [currentPageIndex, displayMode, engine.pageCount],
+    [coverPageAlone, currentPageIndex, displayMode, engine.pageCount],
   );
 
   const rowHeight = useCallback(
@@ -1231,6 +1290,11 @@ function PdfPages({
     [currentReturnLocation, displayMode],
   );
 
+  const toggleCoverPageAlone = useCallback(() => {
+    pendingZoomTarget.current = currentReturnLocation();
+    setCoverPageAlone((alone) => !alone);
+  }, [currentReturnLocation]);
+
   const rotateBy = useCallback(
     (degrees: 90 | -90) => {
       pendingZoomTarget.current = currentReturnLocation();
@@ -1276,6 +1340,7 @@ function PdfPages({
     zoomMode,
     customScale,
     displayMode,
+    coverPageAlone,
     rotation,
     offsetWithin,
   ]);
@@ -1389,14 +1454,15 @@ function PdfPages({
   });
 
   const submitPageInput = () => {
-    const trimmed = pageInput.trim();
-    const parsed = Number(trimmed);
-    if (!trimmed || !Number.isInteger(parsed) || parsed < 1 || parsed > engine.pageCount) {
+    const target = resolvePageInput(pageInput, pageLabels, engine.pageCount);
+    if (target === null) {
       setPageInputInvalid(true);
       return;
     }
     setPageInputInvalid(false);
-    navigateToPage(parsed - 1);
+    // The label is what the box shows, even when a physical page was typed.
+    setPageInput(pageLabelOf(pageLabels, target));
+    navigateToPage(target);
   };
 
   const reportCursor = useCallback(() => {
@@ -1751,14 +1817,15 @@ function PdfPages({
   // ---- Commands -----------------------------------------------------------
 
   const stepPage = (direction: 1 | -1) => {
-    const currentPage =
-      displayMode === 'single'
-        ? currentPageIndex
-        : (pagesInRow(virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0)[0] ??
-          currentPageIndex);
-    // Two pages turn a whole spread.
-    const target = currentPage + direction * (displayMode === 'two-page' ? 2 : 1);
-    if (target < 0 || target >= engine.pageCount) return false;
+    let target: number | undefined;
+    if (displayMode === 'single') {
+      target = currentPageIndex + direction;
+    } else {
+      // Two pages turn a whole spread, which may hold one page (the cover) or two.
+      const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
+      target = pagesInRow(row + direction)[0];
+    }
+    if (target === undefined || target < 0 || target >= engine.pageCount) return false;
     scrollToPageOffset(target, offsetWithin(target, 0));
     return true;
   };
@@ -1993,6 +2060,7 @@ function PdfPages({
       data-zoom-mode={zoomMode}
       data-display-mode={displayMode}
       data-rotation={rotation}
+      data-cover-page-alone={displayMode === 'two-page' ? coverPageAlone : undefined}
       data-tint-pdf={tint ? resolvedTheme : undefined}
       data-chrome-hidden={chromeHidden || undefined}
     >
@@ -2015,6 +2083,16 @@ function PdfPages({
               value={displayMode}
               onChange={applyDisplayMode}
             />
+            {displayMode === 'two-page' && (
+              <ToolbarButton
+                icon={BookOpen}
+                label="Cover page alone"
+                pressed={coverPageAlone}
+                testId="pdf-cover-page-alone"
+                collapse="lg"
+                onClick={toggleCoverPageAlone}
+              />
+            )}
             <HistoryButtons
               canGoBack={history.canGoBack}
               canGoForward={history.canGoForward}
@@ -2052,8 +2130,9 @@ function PdfPages({
                 ref={pageInputRef}
                 id={`pdf-page-input-${documentId}`}
                 type="text"
-                inputMode="numeric"
+                inputMode={pageLabels ? 'text' : 'numeric'}
                 aria-label="Page number"
+                title={pageLabels ? 'Printed page, or #n for the nth page' : undefined}
                 aria-invalid={pageInputInvalid}
                 value={pageInput}
                 onChange={(event) => {
@@ -2062,17 +2141,20 @@ function PdfPages({
                 }}
                 onBlur={() => {
                   if (pageInputInvalid) {
-                    setPageInput(String(currentPageIndex + 1));
+                    setPageInput(currentPageLabel);
                     setPageInputInvalid(false);
                   }
                 }}
+                style={{ width: `${Math.max(3, pageInput.length) + 1.5}ch` }}
                 className={cn(
-                  'h-4.5 w-9 rounded border bg-background px-1 text-center text-[11px] text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  'h-4.5 max-w-20 rounded border bg-background px-1 text-center text-[11px] text-foreground tabular-nums outline-none focus-visible:ring-2 focus-visible:ring-ring',
                   pageInputInvalid && 'border-destructive text-destructive',
                 )}
               />
               <span data-testid="pdf-page-count" className="tabular-nums">
-                of {engine.pageCount}
+                {pageLabels
+                  ? `(${currentPageIndex + 1} of ${engine.pageCount})`
+                  : `of ${engine.pageCount}`}
               </span>
             </form>
           </div>
@@ -2185,6 +2267,16 @@ function PdfPages({
                   pressed: zoomMode === 'actual-size',
                   onSelect: () => applyZoom('actual-size'),
                 },
+                ...(displayMode === 'two-page'
+                  ? [
+                      {
+                        label: 'Cover page alone',
+                        collapse: 'lg' as const,
+                        pressed: coverPageAlone,
+                        onSelect: toggleCoverPageAlone,
+                      },
+                    ]
+                  : []),
                 { label: 'Rotate counterclockwise', collapse: 'lg', onSelect: () => rotateBy(-90) },
                 { label: 'Rotate clockwise', collapse: 'lg', onSelect: rotateClockwise },
               ]}

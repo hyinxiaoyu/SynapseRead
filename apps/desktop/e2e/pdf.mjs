@@ -16,7 +16,28 @@ const inkOn = (pageIndex) => `(() => {
   return ink;
 })()`;
 
-const openPdf = (page) => page.openUntil(visibleScroller, 'the PDF');
+/** The active tab's title, as the toolbar shows it. */
+const titleIs = (title) =>
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+const closeTab = (title) =>
+  `[...document.querySelectorAll('[aria-label=${JSON.stringify(`Close ${title}`)}]')].forEach((b) => b.click())`;
+/** Every fixture is titled "sample", so the active tab is closed by its own button. */
+const closeActiveTab = `document.querySelector('[role="tab"][aria-selected="true"]').nextElementSibling.click()`;
+/**
+ * The picker also offers a second PDF, so this names the one wanted. Passing the
+ * other one on the way opens it, so it is closed again: the steps below read the
+ * first `pdf-viewer` in the page and mean this one.
+ */
+const openPdf = async (page) => {
+  await page.openUntil(`${visibleScroller} && ${titleIs('sample')}`, 'the PDF');
+  await page.evaluate(closeTab('sample-labels'));
+  await page.waitFor(
+    `!document.querySelector('[aria-label="Close sample-labels"]')`,
+    'the PDF passed on the way to close',
+  );
+};
+const openLabelledPdf = (page) =>
+  page.openUntil(`${visibleScroller} && ${titleIs('sample-labels')}`, 'the labelled PDF');
 
 const scrollToPage = async (page, pageIndex) => {
   // The virtualizer only renders nearby pages, so aim for it, then align exactly.
@@ -255,9 +276,7 @@ export async function pdfFlow(page) {
   assert(await page.evaluate(`${marker}.dataset.sameInstance === 'yes'`), 'the tab stayed mounted');
 
   // Reopen from a clean mount.
-  await page.evaluate(
-    `[...document.querySelectorAll('[aria-label^="Close sample"]')].at(-1).click()`,
-  );
+  await page.evaluate(closeActiveTab);
   await page.waitFor(`!${visibleScroller}`, 'the tab to close');
   await openPdf(page);
   await page.waitFor(
@@ -657,4 +676,98 @@ export async function pdfFlow(page) {
   await page.leaveSearch();
   // Clearing the query leaves the sidebar as the reader left it.
   await page.waitFor(sidebarShown, 'the sidebar to stay open after the search is cleared');
+
+  await layoutFlow(page);
+}
+
+/** Each PDF keeps its layout (#51); a new one starts from the last display and zoom. */
+async function layoutFlow(page) {
+  const viewer = `[...document.querySelectorAll('[data-testid="pdf-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  const control = (testId) =>
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="${testId}"]')`;
+  const layoutIs = ({ displayMode, zoomMode, rotation, cover }) =>
+    `(() => {
+      const data = ${viewer}?.dataset;
+      return data?.displayMode === '${displayMode}' && data.zoomMode === '${zoomMode}'
+        && data.rotation === '${rotation}' && data.coverPageAlone === '${cover}';
+    })()`;
+  /** Where pages sit on screen: the same top means the same spread. */
+  const pageTops = `(() => {
+    const tops = {};
+    for (const element of ${viewer}.querySelectorAll('[data-page-index]')) {
+      tops[element.dataset.pageIndex] = Math.round(element.getBoundingClientRect().top);
+    }
+    return tops;
+  })()`;
+
+  await page.hideSidebar();
+  await scrollToPage(page, 0);
+  await page.evaluate(`${control('pdf-mode-two-page')}.click()`);
+  await page.waitFor(`${viewer}?.dataset.coverPageAlone === 'false'`, 'two pages, cover paired');
+  await page.waitFor(
+    `(() => { const t = ${pageTops}; return t[0] !== undefined && t[0] === t[1]; })()`,
+    'pages 1 and 2 to face each other',
+  );
+  await page.evaluate(`${control('pdf-cover-page-alone')}.click()`);
+  await page.waitFor(`${viewer}?.dataset.coverPageAlone === 'true'`, 'the cover page alone');
+  const tops = await page.waitFor(
+    `(() => {
+      const t = ${pageTops};
+      return t[0] !== undefined && t[1] !== undefined && t[2] !== undefined && t[1] === t[2]
+        && t[0] < t[1] ? t : null;
+    })()`,
+    'page 1 alone, then pages 2 and 3 side by side',
+  );
+  assert(tops[0] < tops[1], 'the cover sits above the first spread');
+  await page.evaluate(`${control('pdf-rotate-button')}.click()`);
+  await page.clickButton('Fit page');
+  const chosen = { displayMode: 'two-page', zoomMode: 'fit-page', rotation: 90, cover: true };
+  await page.waitFor(layoutIs(chosen), 'the chosen layout');
+
+  // Reopen from a clean mount: the store forgets a closed tab, so this reads the backend.
+  await page.evaluate(closeActiveTab);
+  await page.waitFor(`!${visibleScroller}`, 'the PDF tab to close');
+  await openPdf(page);
+  await page.waitFor(layoutIs(chosen), 'reopening in the saved layout');
+  await page.waitFor(
+    `${viewer}.querySelector('[data-page-index] .textLayer span')`,
+    'the reopened layout to render',
+  );
+
+  // A PDF never opened before takes that display and zoom, but its own rotation and cover.
+  await openLabelledPdf(page);
+  await page.waitFor(
+    layoutIs({ displayMode: 'two-page', zoomMode: 'fit-page', rotation: 0, cover: false }),
+    'the new PDF to inherit display and zoom only',
+  );
+
+  // Printed page labels in the page box, and jumps by label or physical page.
+  const pageInput = `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')`;
+  const pageCount = `${control('pdf-page-count')}?.textContent`;
+  await page.waitFor(
+    `${pageInput}?.value === 'i' && ${pageCount} === '(1 of 6)'`,
+    'the printed label of the first page',
+  );
+  const jumpTo = async (value) => {
+    await page.setInputValue(
+      '[data-testid="unified-toolbar"] input[aria-label="Page number"]',
+      value,
+    );
+    await page.evaluate(`${pageInput}.form.requestSubmit()`);
+  };
+  await jumpTo('2');
+  await page.waitFor(
+    `${pageInput}?.value === '2' && ${pageCount} === '(4 of 6)'`,
+    'printed page 2 to be the fourth page',
+  );
+  await jumpTo('#2');
+  await page.waitFor(
+    `${pageInput}?.value === 'ii' && ${pageCount} === '(2 of 6)'`,
+    '#2 to be the second page, shown by its label',
+  );
+  await jumpTo('vii');
+  await page.waitFor(
+    `${pageInput}?.getAttribute('aria-invalid') === 'true'`,
+    'a label the document lacks to be rejected',
+  );
 }

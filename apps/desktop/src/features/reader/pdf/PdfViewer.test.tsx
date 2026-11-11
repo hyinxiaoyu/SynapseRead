@@ -14,6 +14,7 @@ import {
 import {
   DEFAULT_READING_PREFERENCES,
   type PdfAnchor,
+  type PdfLayout,
   type ReadingPreferences,
 } from '@/types/domain';
 
@@ -30,6 +31,7 @@ const engineState = vi.hoisted(() => ({
   outline: [] as PdfOutlineItem[],
   pageTextGate: null as (() => Promise<void>) | null,
   pageAnnotations: new Map<number, PdfPageAnnotations>(),
+  pageLabels: null as string[] | null,
 }));
 
 const PNG = 'iVBORw0KGgoAAAA';
@@ -45,6 +47,7 @@ vi.mock('./pdfEngine', () => ({
         return engineState.usesRealWorker;
       },
       getOutline: async () => engineState.outline,
+      getPageLabels: async () => engineState.pageLabels,
       getPageAnnotations: async (pageIndex: number): Promise<PdfPageAnnotations> =>
         engineState.pageAnnotations.get(pageIndex) ?? {
           links: [],
@@ -117,6 +120,8 @@ function Harness({
 }) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
+  // As ReaderPane does: the layout comes from the store once loaded.
+  const pdfLayout = state.pdfLayouts[documentId];
   const highlights = useMemo(
     () => selectHighlights(state.annotations, documentId),
     [state.annotations, documentId],
@@ -142,6 +147,12 @@ function Harness({
       onJumpHandled={state.completeJump}
       onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
       {...(preferences ? { preferences } : {})}
+      {...(pdfLayout
+        ? {
+            pdfLayout,
+            onPdfLayoutChange: (layout: PdfLayout) => void state.savePdfLayout(documentId, layout),
+          }
+        : {})}
       bookmarks={bookmarks}
       onAddBookmark={(anchor, label) => void state.addBookmark(documentId, anchor, label)}
       onRemoveBookmark={(id) => void state.removeBookmark(id)}
@@ -206,6 +217,7 @@ describe('PdfViewer', () => {
     engineState.destroyed = 0;
     engineState.pageTextGate = null;
     engineState.pageAnnotations = new Map();
+    engineState.pageLabels = null;
     engineState.outline = [
       {
         id: 'outline-0',
@@ -645,6 +657,139 @@ describe('PdfViewer', () => {
     fireEvent.click(backButton);
     expect((await scroller()).scrollTop).toBeCloseTo(0, 0);
     expect(pageInput).toHaveValue('1');
+  });
+
+  it('opens in its saved layout, reports every change whole, and keeps it across a restart', async () => {
+    const { backend, store, documentId } = await setup();
+    await store.getState().loadPdfLayout(documentId);
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    const viewer = screen.getByTestId('pdf-viewer');
+    expect(viewer).toHaveAttribute('data-display-mode', 'continuous');
+    expect(screen.queryByRole('button', { name: 'Cover page alone' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Cover page alone' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Rotate clockwise' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Fit page' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+    const zoomed = screen.getByTestId('pdf-zoom-level').textContent;
+
+    const chosen = expect.objectContaining({
+      displayMode: 'two-page',
+      zoomMode: 'custom',
+      rotation: 90,
+      coverPageAlone: true,
+    });
+    await waitFor(() => expect(store.getState().pdfLayouts[documentId]).toEqual(chosen));
+    await expect(backend.getPdfLayout(documentId)).resolves.toEqual(chosen);
+    const saved = await backend.getPdfLayout(documentId);
+    view.unmount();
+
+    // A restart: a new store over the same backend, and a clean mount.
+    const restarted = await reopen(backend);
+    expect(restarted.getState().activeDocumentId).toBe(documentId);
+    await restarted.getState().loadPdfLayout(documentId);
+    expect(restarted.getState().pdfLayouts[documentId]).toEqual(saved);
+    const saveSpy = vi.spyOn(backend, 'savePdfLayout');
+    render(<Harness store={restarted} documentId={documentId} />);
+    await pageElement(0);
+    const reopened = screen.getByTestId('pdf-viewer');
+    expect(reopened).toHaveAttribute('data-display-mode', 'two-page');
+    expect(reopened).toHaveAttribute('data-zoom-mode', 'custom');
+    expect(reopened).toHaveAttribute('data-rotation', '90');
+    expect(reopened).toHaveAttribute('data-cover-page-alone', 'true');
+    expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent(zoomed ?? '');
+    expect(screen.getByRole('button', { name: 'Cover page alone' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    // Opening in a layout is not a change to it.
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  it('shows the cover page alone in two pages, then pairs 2-3 and 4-5', async () => {
+    window.localStorage.clear();
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    const pane = await scroller();
+    vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+    const readout = screen.getByTestId('reader-footer-readout');
+    fireEvent.click(readout); // Page N of M
+    /** The pages drawn side by side with `index`. */
+    const rowWith = (index: number) => {
+      const page = document.querySelector(`[data-page-index="${index}"]`);
+      const row = page?.parentElement?.parentElement;
+      return [...(row?.querySelectorAll('[data-page-index]') ?? [])].map((element) =>
+        Number(element.getAttribute('data-page-index')),
+      );
+    };
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+    await pageElement(1);
+    expect(rowWith(0)).toEqual([0, 1]);
+    expect(rowWith(2)).toEqual([2, 3]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cover page alone' }));
+    expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-cover-page-alone', 'true');
+    await waitFor(() => expect(rowWith(0)).toEqual([0]));
+    expect(rowWith(1)).toEqual([1, 2]);
+
+    // A turn moves a whole spread, whether it holds one page or two.
+    const edgeClick = (x: number) =>
+      fireEvent.click(pane, { clientX: x, clientY: 300, button: 0, detail: 1 });
+    edgeClick(PANE_PX - 10);
+    expect(readout).toHaveTextContent('Page 2 of 5');
+    edgeClick(PANE_PX - 10);
+    expect(readout).toHaveTextContent('Page 4 of 5');
+    await waitFor(() => expect(rowWith(3)).toEqual([3, 4]));
+    edgeClick(10);
+    expect(readout).toHaveTextContent('Page 2 of 5');
+    edgeClick(10);
+    expect(readout).toHaveTextContent('Page 1 of 5');
+  });
+
+  it('shows printed page labels and jumps by label or physical page', async () => {
+    engineState.pageLabels = ['i', 'ii', '1', '2', '3'];
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+    const form = pageInput.closest('form') as HTMLFormElement;
+    await waitFor(() => expect(pageInput).toHaveValue('i'));
+    expect(screen.getByTestId('pdf-page-count')).toHaveTextContent('(1 of 5)');
+
+    // A printed label wins: "2" is the fourth page.
+    fireEvent.change(pageInput, { target: { value: '2' } });
+    fireEvent.submit(form);
+    expect(pageInput).toHaveAttribute('aria-invalid', 'false');
+    expect((await scroller()).scrollTop).toBeCloseTo(3 * (PAGE_PX + GAP_PX), 0);
+    expect(pageInput).toHaveValue('2');
+    expect(screen.getByTestId('pdf-page-count')).toHaveTextContent('(4 of 5)');
+
+    // #n is the nth page, shown by its label.
+    fireEvent.change(pageInput, { target: { value: '#2' } });
+    fireEvent.submit(form);
+    expect((await scroller()).scrollTop).toBeCloseTo(PAGE_PX + GAP_PX, 0);
+    expect(pageInput).toHaveValue('ii');
+    expect(screen.getByTestId('pdf-page-count')).toHaveTextContent('(2 of 5)');
+
+    fireEvent.change(pageInput, { target: { value: 'iv' } });
+    fireEvent.submit(form);
+    expect(pageInput).toHaveAttribute('aria-invalid', 'true');
+    fireEvent.blur(pageInput);
+    expect(pageInput).toHaveValue('ii');
+  });
+
+  it('shows plain page numbers when the labels only repeat them', async () => {
+    engineState.pageLabels = ['1', '2', '3', '4', '5'];
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    expect(screen.getByLabelText('Page number')).toHaveValue('1');
+    expect(screen.getByTestId('pdf-page-count')).toHaveTextContent('of 5');
+    expect(screen.getByTestId('pdf-page-count')).not.toHaveTextContent('(');
   });
 
   it('shows page progress in a footer, chapter ticks, and the chapter as the toolbar subtitle', async () => {

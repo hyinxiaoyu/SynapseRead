@@ -12,6 +12,7 @@ import type {
   MindMapEdge,
   NoteCard,
   NotebookGraph,
+  PdfLayout,
   ReadingPreferences,
   RelinkDocumentResult,
   StudyDocument,
@@ -118,6 +119,10 @@ export function createTauriBackend(): StudyBackend {
     getReadingPreferences: () => invoke<ReadingPreferences>('get_reading_preferences'),
     saveReadingPreferences: (preferences) =>
       invoke<ReadingPreferences>('save_reading_preferences', { preferences }),
+
+    getPdfLayout: (documentId) => invoke<PdfLayout>('get_pdf_layout', { documentId }),
+    savePdfLayout: (documentId, layout) =>
+      invoke<PdfLayout>('save_pdf_layout', { documentId, layout }),
 
     listBookmarks: () => invoke<Bookmark[]>('list_bookmarks'),
     createBookmark: (input) => invoke<Bookmark>('create_bookmark', { input }),

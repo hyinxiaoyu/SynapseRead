@@ -612,6 +612,131 @@ impl ReadingPreferences {
     }
 }
 
+/// How a PDF lays out its pages.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PdfDisplayMode {
+    #[default]
+    Continuous,
+    Single,
+    TwoPage,
+}
+
+impl PdfDisplayMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Continuous => "continuous",
+            Self::Single => "single",
+            Self::TwoPage => "two-page",
+        }
+    }
+
+    /// The column's CHECK admits only known modes; anything else reads as the
+    /// default rather than failing the document's load.
+    pub fn from_column(value: &str) -> Self {
+        match value {
+            "single" => Self::Single,
+            "two-page" => Self::TwoPage,
+            _ => Self::Continuous,
+        }
+    }
+}
+
+/// How a PDF page is sized. `Custom` uses `PdfLayout::scale`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PdfZoomMode {
+    #[default]
+    FitWidth,
+    FitPage,
+    ActualSize,
+    Custom,
+}
+
+impl PdfZoomMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FitWidth => "fit-width",
+            Self::FitPage => "fit-page",
+            Self::ActualSize => "actual-size",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// See `PdfDisplayMode::from_column`.
+    pub fn from_column(value: &str) -> Self {
+        match value {
+            "fit-page" => Self::FitPage,
+            "actual-size" => Self::ActualSize,
+            "custom" => Self::Custom,
+            _ => Self::FitWidth,
+        }
+    }
+}
+
+/// One PDF's page layout, stored and sent as a whole: `scale` only applies to the
+/// custom zoom mode and `cover_page_alone` only to two pages, so a partial update
+/// could produce a layout the reader never chose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PdfLayout {
+    pub display_mode: PdfDisplayMode,
+    pub zoom_mode: PdfZoomMode,
+    /// The custom zoom factor (`0.25..=4`), kept while another zoom mode is chosen
+    /// so returning to custom zoom restores it.
+    pub scale: f64,
+    /// Clockwise view rotation in degrees: 0, 90, 180, or 270.
+    pub rotation: u16,
+    /// Two pages show page 1 alone, then 2-3, 4-5, so printed spreads face each other.
+    pub cover_page_alone: bool,
+}
+
+impl Default for PdfLayout {
+    fn default() -> Self {
+        Self {
+            display_mode: PdfDisplayMode::Continuous,
+            zoom_mode: PdfZoomMode::FitWidth,
+            scale: 1.0,
+            rotation: 0,
+            cover_page_alone: false,
+        }
+    }
+}
+
+impl PdfLayout {
+    pub const MIN_SCALE: f64 = 0.25;
+    pub const MAX_SCALE: f64 = 4.0;
+    pub const ROTATIONS: [u16; 4] = [0, 90, 180, 270];
+
+    pub fn validate(&self) -> CoreResult<()> {
+        if !self.scale.is_finite() || !(Self::MIN_SCALE..=Self::MAX_SCALE).contains(&self.scale) {
+            return Err(CoreError::InvalidLayout(format!(
+                "scale must be between {} and {}",
+                Self::MIN_SCALE,
+                Self::MAX_SCALE
+            )));
+        }
+        if !Self::ROTATIONS.contains(&self.rotation) {
+            return Err(CoreError::InvalidLayout(
+                "rotation must be 0, 90, 180, or 270".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The layout a PDF without one of its own starts from, after `self` was the
+    /// last one saved. Display and zoom are habits that carry over. Rotation and the
+    /// cover page describe one particular file, so they start fresh.
+    pub fn inherited(&self) -> Self {
+        Self {
+            display_mode: self.display_mode,
+            zoom_mode: self.zoom_mode,
+            scale: self.scale,
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +766,52 @@ mod tests {
             nan_spacing.validate(),
             Err(CoreError::InvalidPreferences(_))
         ));
+    }
+
+    #[test]
+    fn pdf_layout_uses_the_wire_names_the_frontend_sends() {
+        let layout = PdfLayout {
+            display_mode: PdfDisplayMode::TwoPage,
+            zoom_mode: PdfZoomMode::ActualSize,
+            scale: 1.25,
+            rotation: 270,
+            cover_page_alone: true,
+        };
+        let wire = serde_json::json!({
+            "displayMode": "two-page",
+            "zoomMode": "actual-size",
+            "scale": 1.25,
+            "rotation": 270,
+            "coverPageAlone": true,
+        });
+        assert_eq!(serde_json::to_value(&layout).unwrap(), wire);
+        assert_eq!(
+            serde_json::from_value::<PdfLayout>(wire.clone()).unwrap(),
+            layout
+        );
+        for mode in [
+            PdfDisplayMode::Continuous,
+            PdfDisplayMode::Single,
+            PdfDisplayMode::TwoPage,
+        ] {
+            assert_eq!(PdfDisplayMode::from_column(mode.as_str()), mode);
+        }
+        for mode in [
+            PdfZoomMode::FitWidth,
+            PdfZoomMode::FitPage,
+            PdfZoomMode::ActualSize,
+            PdfZoomMode::Custom,
+        ] {
+            assert_eq!(PdfZoomMode::from_column(mode.as_str()), mode);
+        }
+
+        // The layout is sent whole: a missing or extra field is an error.
+        let mut partial = wire.clone();
+        partial.as_object_mut().unwrap().remove("coverPageAlone");
+        assert!(serde_json::from_value::<PdfLayout>(partial).is_err());
+        let mut extra = wire;
+        extra["pageLabels"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<PdfLayout>(extra).is_err());
     }
 
     #[test]

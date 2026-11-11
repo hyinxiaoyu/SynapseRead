@@ -315,6 +315,35 @@ export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
   focusModeFullScreen: false,
 };
 
+/** How a PDF lays out its pages. */
+export type PdfDisplayMode = 'continuous' | 'single' | 'two-page';
+/** How a PDF page is sized; `custom` uses `PdfLayout.scale`. */
+export type PdfZoomMode = 'fit-width' | 'fit-page' | 'actual-size' | 'custom';
+/** Clockwise view rotation in degrees. */
+export type PdfRotation = 0 | 90 | 180 | 270;
+
+/**
+ * One PDF's page layout, saved per document and always sent whole: `scale` only
+ * applies to custom zoom and `coverPageAlone` only to two pages.
+ */
+export interface PdfLayout {
+  displayMode: PdfDisplayMode;
+  zoomMode: PdfZoomMode;
+  /** The custom zoom factor (`0.25..=4`), kept while another zoom mode is chosen. */
+  scale: number;
+  rotation: PdfRotation;
+  /** Two pages show page 1 alone, then 2-3, 4-5, so printed spreads face each other. */
+  coverPageAlone: boolean;
+}
+
+export const DEFAULT_PDF_LAYOUT: PdfLayout = {
+  displayMode: 'continuous',
+  zoomMode: 'fit-width',
+  scale: 1,
+  rotation: 0,
+  coverPageAlone: false,
+};
+
 /**
  * Where decoded text is not byte-identical to the source file. Text outside
  * every span is. See `docs/adr/0002-txt-anchor-drift.md`.
@@ -416,6 +445,13 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   preferences?: ReadingPreferences;
   /** Updates and persists reading preferences. */
   onPreferencesChange?: (patch: Partial<ReadingPreferences>) => void;
+  /**
+   * PDF only: the layout this document opens in, read once when the viewer mounts.
+   * Omitted, the viewer starts from `DEFAULT_PDF_LAYOUT`.
+   */
+  pdfLayout?: PdfLayout;
+  /** PDF only: reports the whole layout each time the reader changes part of it. */
+  onPdfLayoutChange?: (layout: PdfLayout) => void;
   /** Persisted bookmarks for this document. */
   bookmarks?: readonly Bookmark[];
   /** Adds (or updates if at the same location) a bookmark for this document. */

@@ -15,6 +15,7 @@ import type {
   NodeLayoutPatch,
   NoteCard,
   NotebookGraph,
+  PdfLayout,
   ReadingPreferences,
   RelinkDocumentResult,
   StudyDocument,
@@ -103,6 +104,14 @@ export interface StudyBackend extends DocumentContentReader {
 
   getReadingPreferences(): Promise<ReadingPreferences>;
   saveReadingPreferences(preferences: ReadingPreferences): Promise<ReadingPreferences>;
+
+  /**
+   * A PDF's saved layout. One that has none starts from the last saved layout's
+   * display and zoom. The rule lives in core; the memory backend mimics it.
+   */
+  getPdfLayout(documentId: string): Promise<PdfLayout>;
+  /** Saves the whole layout, which new PDFs then inherit. */
+  savePdfLayout(documentId: string, layout: PdfLayout): Promise<PdfLayout>;
 
   listBookmarks(): Promise<Bookmark[]>;
   createBookmark(input: CreateBookmarkInput): Promise<Bookmark>;
