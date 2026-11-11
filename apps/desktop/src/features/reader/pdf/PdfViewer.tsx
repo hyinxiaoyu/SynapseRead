@@ -118,6 +118,7 @@ import {
   type PdfRotation,
   rotateNormalizedRect,
   unrotateNormalizedRect,
+  noteMarkerPoint,
 } from './pdfGeometry';
 
 const PAGE_GAP_PX = 12;
@@ -719,6 +720,20 @@ function PdfPage({
           );
         }),
       )}
+
+      {highlights.map(({ annotationId, anchor, color, hasNote }) => {
+        const end = hasNote ? noteMarkerPoint(asPdfAnchor(anchor)?.rects ?? [], rotation) : null;
+        if (!end) return null;
+        return (
+          <span
+            key={`${annotationId}-note`}
+            aria-hidden="true"
+            data-note-marker={annotationId}
+            className="pointer-events-none absolute z-[1] size-2 -translate-x-1/2 -translate-y-1/2 rounded-full shadow-[0_0_0_1px_rgb(0_0_0/0.55)]"
+            style={{ left: `${end.x * 100}%`, top: `${end.y * 100}%`, backgroundColor: color }}
+          />
+        );
+      })}
 
       <div ref={textLayerRef} data-testid="pdf-text-layer" className="textLayer" />
 
@@ -1937,6 +1952,7 @@ function PdfPages({
       rects: NormalizedRect[],
       color: string,
       style: AnnotationStyle = 'highlight',
+      hasNote = false,
     ) => {
       pages.set(pageIndex, [
         ...(pages.get(pageIndex) ?? []),
@@ -1945,6 +1961,7 @@ function PdfPages({
           anchor: { format: 'pdf', pageIndex, rects },
           color,
           style,
+          hasNote,
         },
       ]);
     };
@@ -1952,12 +1969,16 @@ function PdfPages({
       const anchor = asPdfAnchor(highlight.anchor);
       if (!anchor) continue;
       const { annotationId, color, style } = highlight;
+      const hasNote = highlight.hasNote === true;
       if (anchor.pageSpans && anchor.pageSpans.length > 0) {
-        for (const span of anchor.pageSpans) {
-          addPageHighlight(span.pageIndex, annotationId, span.rects, color, style);
+        const last = anchor.pageSpans.length - 1;
+        for (const [index, span] of anchor.pageSpans.entries()) {
+          // The note marker goes where the highlight ends: on its last page only.
+          const endsHere = hasNote && index === last;
+          addPageHighlight(span.pageIndex, annotationId, span.rects, color, style, endsHere);
         }
       } else {
-        addPageHighlight(anchor.pageIndex, annotationId, anchor.rects, color, style);
+        addPageHighlight(anchor.pageIndex, annotationId, anchor.rects, color, style, hasNote);
       }
     }
     for (const [index, match] of search.results.entries()) {

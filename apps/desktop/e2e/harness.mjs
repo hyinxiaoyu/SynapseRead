@@ -370,7 +370,8 @@ export class Page {
         const input = [...document.querySelectorAll(${JSON.stringify(selector)})].find(
           (element) => element.checkVisibility({ visibilityProperty: true }));
         if (!input) return false;
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        // Inputs and textareas each have their own value setter, which React listens behind.
+        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value').set;
         setter.call(input, ${JSON.stringify(value)});
         input.dispatchEvent(new Event('input', { bubbles: true }));
         return true;

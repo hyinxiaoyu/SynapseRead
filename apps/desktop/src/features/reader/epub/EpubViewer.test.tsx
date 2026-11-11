@@ -51,6 +51,7 @@ const engine = vi.hoisted(() => ({
   displayed: [] as (string | undefined)[],
   highlighted: new Map<string, string>(),
   highlightStyles: new Map<string, string>(),
+  noted: new Set<string>(),
   removed: [] as string[],
   pulsing: new Set<string>(),
   selectionCleared: 0,
@@ -120,9 +121,17 @@ vi.mock('./epubEngine', () => ({
     setReadingMode: engine.setReadingMode,
     setPreferences: engine.setPreferences,
     setColumns: engine.setColumns,
-    highlight(annotationId: string, cfiRange: string, _color: string, style = 'highlight') {
+    highlight(
+      annotationId: string,
+      cfiRange: string,
+      _color: string,
+      style = 'highlight',
+      options: { hasNote?: boolean } = {},
+    ) {
       engine.highlighted.set(annotationId, cfiRange);
       engine.highlightStyles.set(annotationId, style);
+      if (options.hasNote) engine.noted.add(annotationId);
+      else engine.noted.delete(annotationId);
     },
     removeHighlight: (cfiRange: string) => {
       engine.removed.push(cfiRange);
@@ -273,6 +282,7 @@ describe('EpubViewer', () => {
     engine.displayed = [];
     engine.highlighted = new Map();
     engine.highlightStyles = new Map();
+    engine.noted = new Set();
     engine.removed = [];
     engine.pulsing = new Set();
     engine.selectionCleared = 0;
@@ -1113,6 +1123,7 @@ describe('EpubViewer', () => {
 
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
     expect(store.getState().cards).toEqual([]);
+    expect(engine.noted.size).toBe(0);
     expect(store.getState().nodes).toEqual([]);
     const annotationId = store.getState().annotations[0]?.id as string;
     expect(store.getState().annotations[0]?.color).toBe('#f9a8d4');
@@ -1147,6 +1158,11 @@ describe('EpubViewer', () => {
     fireEvent.change(noteInput, { target: { value: 'EPUB chapter note' } });
     fireEvent.blur(noteInput);
     await waitFor(() => expect(store.getState().annotations[0]?.note).toBe('EPUB chapter note'));
+    // A note repaints the mark with its marker.
+    await waitFor(() => expect(engine.noted.has(annotationId)).toBe(true));
+    // The row names the chapter, never its file.
+    expect(screen.getByTestId('annotation-location')).toHaveTextContent('One');
+    expect(screen.getByTestId('annotation-item')).not.toHaveTextContent('chapter1.xhtml');
 
     fireEvent.click(screen.getByTestId('annotation-jump-button'));
     await waitFor(() => expect(engine.displayed.at(-1)).toBe(CFI));
@@ -1158,6 +1174,28 @@ describe('EpubViewer', () => {
     fireEvent.click(await screen.findByTestId('undo-delete-annotation-button'));
     await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
     expect(store.getState().annotations[0]?.note).toBe('EPUB chapter note');
+  });
+
+  it('lists highlights in one chapter by CFI, not by when they were made', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    const LATER_CFI = 'epubcfi(/6/2!/4/8,/1:0,/1:5)';
+    select(LATER_CFI, 'lazy dog');
+    fireEvent.click(await screen.findByRole('button', { name: 'Yellow highlight' }));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+    select(CFI, 'quick brown fox');
+    fireEvent.click(await screen.findByRole('button', { name: 'Yellow highlight' }));
+    await waitFor(() => expect(store.getState().annotations).toHaveLength(2));
+
+    fireEvent.keyDown(window, { key: '4', code: 'Digit4', altKey: true, metaKey: true });
+    await screen.findAllByTestId('annotation-item');
+    expect(screen.getAllByTestId('annotation-excerpt').map((e) => e.textContent)).toEqual([
+      'quick brown fox',
+      'lazy dog',
+    ]);
+    expect(screen.getAllByTestId('annotation-group')).toHaveLength(1);
   });
 
   it('shows why a book could not open', async () => {

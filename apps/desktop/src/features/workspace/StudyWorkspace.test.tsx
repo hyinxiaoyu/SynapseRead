@@ -260,6 +260,17 @@ describe('StudyWorkspace', () => {
     expect(emptyRecent).toHaveTextContent(firstTitle);
     expect(emptyRecent).toHaveTextContent('Continue reading · Line 15');
 
+    // An EPUB position names a chapter file; Recent leaves it out rather than show it.
+    act(() => {
+      useStudySyncStore.getState().reportCursor(firstDocId, {
+        format: 'epub',
+        cfiRange: 'epubcfi(/6/4!/4/2/1:0)',
+        chapterHref: 'OEBPS/chapter1.xhtml',
+      });
+    });
+    expect(emptyRecent).toHaveTextContent('Continue reading');
+    expect(emptyRecent).not.toHaveTextContent('chapter1.xhtml');
+
     const recentButtons = screen.getAllByTestId('recent-document-item');
     const targetButton = recentButtons.find((btn) => btn.textContent?.includes(firstTitle));
     expect(targetButton).toBeDefined();

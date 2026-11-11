@@ -162,6 +162,7 @@ interface PaintedRange {
   style: AnnotationStyle;
   startUnit: number;
   endUnit: number;
+  hasNote?: boolean;
 }
 
 interface Segment {
@@ -227,12 +228,15 @@ const TxtRow = memo(function TxtRow({
                 color: '#000',
                 '--anchor-pulse-color': range.color,
               };
+        // The note marker is a `::after` box, so it adds no text and moves no offset.
+        const endsNote = range.hasNote === true && unit + text.length === range.endUnit;
         return (
           <span
             key={unit}
             {...unitAttribute}
             data-annotation-id={range.annotationId}
             data-annotation-style={range.style}
+            data-note-end={endsNote ? '' : undefined}
             style={style}
             className={cn(pulsingAnnotationId === range.annotationId && 'anchor-pulse')}
           >
@@ -249,10 +253,10 @@ const asTxtAnchor = (anchor: { format: string } | null | undefined): TxtAnchor |
 
 function paint(model: TxtTextModel, highlights: readonly ReaderHighlight[]): PaintedRange[] {
   const ranges: PaintedRange[] = [];
-  for (const { annotationId, anchor, color, style = 'highlight' } of highlights) {
+  for (const { annotationId, anchor, color, style = 'highlight', hasNote } of highlights) {
     const txtAnchor = asTxtAnchor(anchor);
     const range = txtAnchor && model.rangeFor(txtAnchor);
-    if (range) ranges.push({ annotationId, color, style, ...range });
+    if (range) ranges.push({ annotationId, color, style, hasNote: hasNote === true, ...range });
   }
   return ranges;
 }

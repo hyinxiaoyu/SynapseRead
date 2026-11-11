@@ -108,8 +108,17 @@ export interface EpubHandle {
   setColumns(columns: 1 | 2): void;
   /** `theme` must already be resolved: `auto` renders as Light. */
   setPreferences(preferences: ReadingPreferences): void;
-  /** Marks a range; an underline draws only a line under the text. */
-  highlight(annotationId: string, cfiRange: string, color: string, style?: AnnotationStyle): void;
+  /**
+   * Marks a range; an underline draws only a line under the text. A mark with
+   * `hasNote` also draws a dot where it ends, so a note shows on the page.
+   */
+  highlight(
+    annotationId: string,
+    cfiRange: string,
+    color: string,
+    style?: AnnotationStyle,
+    options?: { hasNote?: boolean },
+  ): void;
   removeHighlight(cfiRange: string, style?: AnnotationStyle): void;
   /** Whether a highlight's marks are on screen; the marks draw after `display` resolves. */
   setPulse(annotationId: string, pulsing: boolean): boolean;
@@ -388,6 +397,66 @@ interface LoadableSection {
   load(request: unknown): Promise<Element>;
   unload(): void;
   cfiFromRange(range: Range): string;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const NOTE_MARKER_RADIUS = 3.5;
+
+/** What epub.js' marks-pane hands back for a drawn mark: an SVG group it redraws. */
+export interface PaneMark {
+  element: SVGGElement | null;
+  render(): void;
+}
+
+/** The epub.js annotation behind a mark; it reattaches each time its chapter renders. */
+export interface RenditionAnnotation {
+  mark?: PaneMark | undefined;
+  on(type: 'attach', listener: (mark: PaneMark | undefined) => void): void;
+}
+
+const decoratedMarks = new WeakSet<PaneMark>();
+
+/** A dot just past the end of the mark's last line box, in the highlight's color. */
+function drawNoteMarker(mark: PaneMark, color: string) {
+  const group = mark.element;
+  const boxes = group?.querySelectorAll('rect');
+  const last = boxes?.[boxes.length - 1];
+  if (!group || !last) return;
+  const right = Number(last.getAttribute('x')) + Number(last.getAttribute('width'));
+  const top = Number(last.getAttribute('y'));
+  if (!Number.isFinite(right) || !Number.isFinite(top)) return;
+  const dot = group.ownerDocument.createElementNS(SVG_NS, 'circle');
+  dot.setAttribute('data-note-marker', '');
+  dot.setAttribute('cx', String(right + NOTE_MARKER_RADIUS));
+  dot.setAttribute('cy', String(top + NOTE_MARKER_RADIUS));
+  dot.setAttribute('r', String(NOTE_MARKER_RADIUS));
+  // The group's translucent fill and stroke are inherited; the dot is solid.
+  dot.setAttribute('fill', color);
+  dot.setAttribute('fill-opacity', '1');
+  dot.setAttribute('stroke', 'rgba(0, 0, 0, 0.55)');
+  dot.setAttribute('stroke-opacity', '1');
+  dot.setAttribute('stroke-width', '1');
+  group.appendChild(dot);
+}
+
+/**
+ * marks-pane clears and redraws a mark's rects on every resize, and epub.js
+ * makes a new mark each time the chapter renders, so the dot is drawn by
+ * wrapping each mark's `render` rather than once.
+ */
+export function decorateWithNoteMarker(annotation: RenditionAnnotation, color: string) {
+  const decorate = (mark: PaneMark | undefined) => {
+    if (!mark || decoratedMarks.has(mark)) return;
+    decoratedMarks.add(mark);
+    const render = mark.render.bind(mark);
+    mark.render = () => {
+      render();
+      drawNoteMarker(mark, color);
+    };
+    mark.render();
+  };
+  decorate(annotation.mark);
+  annotation.on('attach', decorate);
 }
 
 const toBuffer = async (source: DocumentSource): Promise<ArrayBuffer> => {
@@ -905,7 +974,7 @@ export async function openEpubDocument(
       }
     },
 
-    highlight(annotationId, cfiRange, color, style = 'highlight') {
+    highlight(annotationId, cfiRange, color, style = 'highlight', options = {}) {
       // marks-pane forwards clicks in the frame to the mark under them.
       const onClick = () => {
         // Search marks are painted by the reader, not annotations it can open.
@@ -921,19 +990,24 @@ export async function openEpubDocument(
         );
         markClickListener(annotationId, markViewportRect(Array.from(marks), annotationId));
       };
-      if (style === 'underline') {
-        rendition.annotations.underline(cfiRange, { annotationId }, onClick, 'epub-underline', {
-          stroke: color,
-          'stroke-opacity': '1',
-          'stroke-width': '2',
-        });
-        return;
+      const data = options.hasNote ? { annotationId, hasNote: 'true' } : { annotationId };
+      // `add` is what `highlight` and `underline` call, and the one typed to
+      // return the annotation, which the note dot needs.
+      const annotation =
+        style === 'underline'
+          ? rendition.annotations.add('underline', cfiRange, data, onClick, 'epub-underline', {
+              stroke: color,
+              'stroke-opacity': '1',
+              'stroke-width': '2',
+            })
+          : rendition.annotations.add('highlight', cfiRange, data, onClick, 'epub-highlight', {
+              fill: color,
+              'fill-opacity': '0.4',
+              'mix-blend-mode': 'multiply',
+            });
+      if (options.hasNote) {
+        decorateWithNoteMarker(annotation as unknown as RenditionAnnotation, color);
       }
-      rendition.annotations.highlight(cfiRange, { annotationId }, onClick, 'epub-highlight', {
-        fill: color,
-        'fill-opacity': '0.4',
-        'mix-blend-mode': 'multiply',
-      });
     },
     removeHighlight: (cfiRange, style = 'highlight') =>
       rendition.annotations.remove(cfiRange, style),

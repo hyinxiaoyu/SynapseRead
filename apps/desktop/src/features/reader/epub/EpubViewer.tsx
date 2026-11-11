@@ -98,6 +98,14 @@ const READING_MODES: readonly SegmentedOption<EpubReadingMode>[] = [
   { value: 'scroll', label: 'Scroll', icon: ScrollText },
 ];
 
+/** A mark the viewer has asked epub.js to draw. */
+interface PaintedMark {
+  cfiRange: string;
+  color: string;
+  style: AnnotationStyle;
+  hasNote: boolean;
+}
+
 const asEpubAnchor = (anchor: { format: string } | null | undefined): EpubAnchor | null =>
   anchor?.format === 'epub' ? (anchor as EpubAnchor) : null;
 
@@ -432,9 +440,7 @@ export function EpubViewer({
 
   // ---- Highlights ----------------------------------------------------------
 
-  const painted = useRef(
-    new Map<string, { cfiRange: string; color: string; style: AnnotationStyle }>(),
-  );
+  const painted = useRef(new Map<string, PaintedMark>());
   const searchPulseCleanupRef = useRef<(() => void) | null>(null);
   /**
    * `describeHere` is built below, where the chapter title is known, but a search
@@ -713,17 +719,14 @@ export function EpubViewer({
 
   useEffect(() => {
     if (!handle) return;
-    const wanted = new Map<string, { cfiRange: string; color: string; style: AnnotationStyle }>();
+    const wanted = new Map<string, PaintedMark>();
     // epub.js keys marks by `(cfiRange, style)`, not by our annotation id, and
     // overwrites an existing mark at the same range without detaching it. Keep
     // one owner per mark so a search tint can never orphan a user highlight.
     const ownerByMark = new Map<string, string>();
     const markKey = (mark: { cfiRange: string; style: AnnotationStyle }) =>
       `${mark.style}\u0000${mark.cfiRange}`;
-    const setWanted = (
-      annotationId: string,
-      mark: { cfiRange: string; color: string; style: AnnotationStyle },
-    ) => {
+    const setWanted = (annotationId: string, mark: PaintedMark) => {
       const key = markKey(mark);
       const previousOwner = ownerByMark.get(key);
       if (previousOwner !== undefined && previousOwner !== annotationId) {
@@ -733,9 +736,17 @@ export function EpubViewer({
       ownerByMark.set(key, annotationId);
     };
 
-    for (const { annotationId, anchor, color, style = 'highlight' } of effectiveHighlights) {
+    for (const {
+      annotationId,
+      anchor,
+      color,
+      style = 'highlight',
+      hasNote = false,
+    } of effectiveHighlights) {
       const epubAnchor = asEpubAnchor(anchor);
-      if (epubAnchor) setWanted(annotationId, { cfiRange: epubAnchor.cfiRange, color, style });
+      if (epubAnchor) {
+        setWanted(annotationId, { cfiRange: epubAnchor.cfiRange, color, style, hasNote });
+      }
     }
     // A jump can target an annotation from another notebook, with no highlight here.
     const jumpAnchor = asEpubAnchor(jumpRequest?.anchor);
@@ -744,6 +755,7 @@ export function EpubViewer({
         cfiRange: jumpAnchor.cfiRange,
         color: FALLBACK_HIGHLIGHT,
         style: 'highlight',
+        hasNote: false,
       });
     }
     for (const [index, match] of search.results.entries()) {
@@ -753,6 +765,7 @@ export function EpubViewer({
         cfiRange: match.cfiRange,
         color: SEARCH_MATCH_COLOR,
         style: 'highlight',
+        hasNote: false,
       });
     }
     if (activeSearchMatch) {
@@ -760,6 +773,7 @@ export function EpubViewer({
         cfiRange: activeSearchMatch.cfiRange,
         color: SEARCH_HIGHLIGHT_COLOR,
         style: 'highlight',
+        hasNote: false,
       });
     }
 
@@ -769,7 +783,8 @@ export function EpubViewer({
         !next ||
         next.cfiRange !== existing.cfiRange ||
         next.color !== existing.color ||
-        next.style !== existing.style
+        next.style !== existing.style ||
+        next.hasNote !== existing.hasNote
       ) {
         handle.removeHighlight(existing.cfiRange, existing.style);
         painted.current.delete(annotationId);
@@ -777,7 +792,9 @@ export function EpubViewer({
     }
     for (const [annotationId, mark] of wanted) {
       if (!painted.current.has(annotationId)) {
-        handle.highlight(annotationId, mark.cfiRange, mark.color, mark.style);
+        handle.highlight(annotationId, mark.cfiRange, mark.color, mark.style, {
+          hasNote: mark.hasNote,
+        });
         painted.current.set(annotationId, mark);
       }
     }
@@ -903,17 +920,42 @@ export function EpubViewer({
   const outlineItems = useMemo(() => toOutlineNodes(handle?.toc ?? []), [handle]);
 
   const tocIndex = useMemo(() => indexOutline(outlineItems), [outlineItems]);
+  const chapterTitles = useMemo(() => chapterTitlesBySpine(handle), [handle]);
   const annotationPlacement = (annotation: Annotation): AnnotationPlacement => {
     const anchor = asEpubAnchor(annotation.anchor);
-    const item = anchor ? findOutlineItem(handle?.toc ?? [], anchor.chapterHref) : null;
+    if (!anchor) return { group: 'Unknown chapter', order: Number.MAX_SAFE_INTEGER };
+    const item = findOutlineItem(handle?.toc ?? [], anchor.chapterHref);
+    const spineIndex = handle?.spineIndexOf(anchor.chapterHref) ?? -1;
+    // Readers know chapters by title; the file name is an implementation detail.
+    const title =
+      item?.label ??
+      (spineIndex >= 0 ? (chapterTitles[spineIndex] ?? `Chapter ${spineIndex + 1}`) : null) ??
+      'Unknown chapter';
     return {
-      group: item?.label ?? anchor?.chapterHref ?? 'Unknown chapter',
-      // Book order where the TOC knows the chapter; others after, as created.
-      order: item ? (tocIndex.get(item.id)?.order ?? 0) : Number.MAX_SAFE_INTEGER,
+      group: title,
+      label: title,
+      // Book order by spine position, then the TOC for chapters outside the spine;
+      // CFI order within a chapter comes from `compareAnnotationCfis`.
+      order:
+        spineIndex >= 0
+          ? spineIndex
+          : item
+            ? (handle?.chapterCount ?? 0) + (tocIndex.get(item.id)?.order ?? 0)
+            : Number.MAX_SAFE_INTEGER,
     };
   };
+  const compareAnnotationCfis = (a: Annotation, b: Annotation): number => {
+    const one = asEpubAnchor(a.anchor);
+    const two = asEpubAnchor(b.anchor);
+    if (!handle || !one || !two) return 0;
+    try {
+      return handle.compareCfi(one.cfiRange, two.cfiRange);
+    } catch {
+      // A malformed CFI from an old import keeps its creation order.
+      return 0;
+    }
+  };
 
-  const chapterTitles = useMemo(() => chapterTitlesBySpine(handle), [handle]);
   const ticks = useMemo(() => chapterTicks(handle), [handle]);
   const chapterCount = handle?.chapterCount ?? 0;
   const currentChapterIndex = bookProgress ? bookProgress.chapter - 1 : 0;
@@ -1222,6 +1264,7 @@ export function EpubViewer({
               onSelect: handleTocSelect,
             }}
             annotationPlacement={annotationPlacement}
+            compareAnnotations={compareAnnotationCfis}
           />
         )}
         {/* Notices float over the page column only, never over the sidebar. */}

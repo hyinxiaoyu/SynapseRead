@@ -1,4 +1,5 @@
 import { assert } from './harness.mjs';
+import { notesInPlaceFlow } from './notes.mjs';
 
 const TEXT = '.textLayer span';
 const visibleScroller = `[...document.querySelectorAll('[data-testid="pdf-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
@@ -477,6 +478,28 @@ export async function pdfFlow(page) {
     `document.querySelectorAll('[data-testid="pdf-viewer"] [data-testid="annotation-item"]').length === 3`,
     'undoing PDF highlight deletion',
   );
+
+  // Notes in place on the highlight just made: the marker sits where it ends.
+  const pdfViewer = `[...document.querySelectorAll('[data-testid="pdf-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  const page4Mark = `[...document.querySelectorAll('[data-page-index="3"] [data-annotation-id]')].filter((e) => !e.dataset.annotationId.startsWith('__')).at(-1)`;
+  await notesInPlaceFlow(page, {
+    name: 'PDF',
+    viewer: pdfViewer,
+    highlightPoint: `(() => {
+      const mark = ${page4Mark};
+      if (!mark) return null;
+      const r = mark.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`,
+    markerShown: `(() => {
+      const mark = ${page4Mark};
+      const marker = mark && document.querySelector('[data-page-index="3"] [data-note-marker="' + mark.dataset.annotationId + '"]');
+      if (!marker) return false;
+      const m = marker.getBoundingClientRect();
+      const r = mark.getBoundingClientRect();
+      return Math.abs(m.left + m.width / 2 - r.right) < 3 && Math.abs(m.top + m.height / 2 - r.top) < 3;
+    })()`,
+  });
 
   // Lazy thumbnails, embedded PDF annotations, internal links, display modes, and rotation.
   await page.showSidebarTab('Thumbnails');

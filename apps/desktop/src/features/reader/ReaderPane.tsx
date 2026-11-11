@@ -34,8 +34,12 @@ import {
 } from '@/types/domain';
 
 function describeResumeLocation(document: StudyDocument): string {
-  if (!document.lastCursorAnchor) return 'Start reading';
-  return `Continue reading · ${defaultBookmarkLabel(document.lastCursorAnchor)}`;
+  const anchor = document.lastCursorAnchor;
+  if (!anchor) return 'Start reading';
+  // An EPUB position is a chapter file name, which means nothing to a reader.
+  // It stays bare until the list can show a percentage (#52).
+  if (anchor.format === 'epub') return 'Continue reading';
+  return `Continue reading · ${defaultBookmarkLabel(anchor)}`;
 }
 
 interface TabErrorBoundaryProps {

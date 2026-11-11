@@ -1,5 +1,11 @@
-import { Check, Link2, Pencil, Undo2 } from 'lucide-react';
-import { Fragment, type KeyboardEvent as ReactKeyboardEvent, useState } from 'react';
+import { Check, ChevronDown, Link2, Pencil, StickyNote, Undo2 } from 'lucide-react';
+import {
+  Fragment,
+  type KeyboardEvent as ReactKeyboardEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 
 import { Button } from '@/components/ui/button';
 import { commandDefinition, formatShortcut } from '@/features/commands/commands';
@@ -10,13 +16,17 @@ import {
   rowClassName,
 } from '@/features/reader/navigator/parts';
 import { isDeleteKey, useRovingList } from '@/features/reader/navigator/useRovingList';
+import { useMarkupDefaults, writeMarkupDefaults } from '@/features/reader/markup/markupDefaults';
+import { NoteEditor } from '@/features/reader/markup/NoteEditor';
 import { cn } from '@/lib/utils';
-import type {
-  Annotation,
-  AnnotationPatch,
-  AnnotationStyle,
-  CreateAnnotationOptions,
-  ReaderSelection,
+import {
+  type Annotation,
+  annotationHasNote,
+  type AnnotationPatch,
+  type AnnotationStyle,
+  type CreateAnnotationOptions,
+  type ReaderHighlight,
+  type ReaderSelection,
 } from '@/types/domain';
 
 export const ANNOTATION_COLORS: readonly { label: string; value: string }[] = [
@@ -105,8 +115,10 @@ export function useAnnotationsController({
   isStaleAnnotation,
   onSelectAnnotation,
 }: UseAnnotationsOptions): AnnotationsController {
-  const [activeColor, setActiveColor] = useState<string>(ANNOTATION_COLORS[0]?.value ?? '#fde047');
-  const [activeStyle, setActiveStyle] = useState<AnnotationStyle>('highlight');
+  // The last color and style carry over between documents, open tabs, and launches.
+  const { color: activeColor, style: activeStyle } = useMarkupDefaults();
+  const setActiveColor = (color: string) => writeMarkupDefaults({ color });
+  const setActiveStyle = (style: AnnotationStyle) => writeMarkupDefaults({ style });
   const [highlightMode, setHighlightMode] = useState(false);
   const [draftNoteOpen, setDraftNoteOpen] = useState(false);
   const [draftNote, setDraftNote] = useState('');
@@ -228,14 +240,13 @@ export function useAnnotationsController({
 }
 
 /** The highlights an annotation list paints, for a viewer with no store behind it. */
-export function localHighlights(
-  annotations: readonly Annotation[],
-): { annotationId: string; anchor: Annotation['anchor']; color: string; style: AnnotationStyle }[] {
-  return annotations.map(({ id, anchor, color, style }) => ({
-    annotationId: id,
-    anchor,
-    color,
-    style,
+export function localHighlights(annotations: readonly Annotation[]): ReaderHighlight[] {
+  return annotations.map((annotation) => ({
+    annotationId: annotation.id,
+    anchor: annotation.anchor,
+    color: annotation.color,
+    style: annotation.style,
+    hasNote: annotationHasNote(annotation),
   }));
 }
 
@@ -279,10 +290,18 @@ export interface AnnotationPlacement {
   group?: string;
   /** Document order; lower comes first. */
   order: number;
+  /** What the row names its place as, in place of the format's default (a file name). */
+  label?: string;
+}
+
+/** Whether an element's text is cut off by its line clamp. */
+function isClamped(element: HTMLElement | null): boolean {
+  return element !== null && element.scrollHeight > element.clientHeight + 1;
 }
 
 function AnnotationRow({
   annotation,
+  locationLabel,
   linkedToCard,
   stale,
   tabIndex,
@@ -293,6 +312,7 @@ function AnnotationRow({
   onDelete,
 }: {
   annotation: Annotation;
+  locationLabel: string;
   linkedToCard: boolean;
   stale: boolean;
   tabIndex: number;
@@ -303,6 +323,8 @@ function AnnotationRow({
   onDelete: (from: HTMLElement) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [clamped, setClamped] = useState(false);
   const [noteDraft, setNoteDraft] = useState(annotation.note ?? '');
   const [prevPropNote, setPrevPropNote] = useState(annotation.note ?? '');
   if ((annotation.note ?? '') !== prevPropNote) {
@@ -310,28 +332,63 @@ function AnnotationRow({
     setNoteDraft(annotation.note ?? '');
   }
 
+  // Offer More only where the clamp actually hides text, at the sidebar's width.
+  const excerptRef = useRef<HTMLSpanElement>(null);
+  const noteRef = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    if (expanded) return;
+    const measure = () => setClamped(isClamped(excerptRef.current) || isClamped(noteRef.current));
+    measure();
+    if (typeof ResizeObserver === 'undefined' || !excerptRef.current) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(excerptRef.current);
+    return () => observer.disconnect();
+  }, [expanded, annotation.excerptText, annotation.note]);
+
+  // Set by Esc and Cancel, so a blur as the field goes away cannot save the draft.
+  const discarding = useRef(false);
   const commitNote = () => {
+    if (discarding.current) return;
     const trimmed = noteDraft.trim();
     const current = annotation.note?.trim() ?? '';
     if (trimmed !== current) {
       onUpdate({ note: trimmed, color: null });
     }
   };
+  const cancelEdit = () => {
+    discarding.current = true;
+    setNoteDraft(annotation.note ?? '');
+    setEditing(false);
+  };
 
-  const locationLabel = formatAnnotationLocation(annotation);
   const date = formatShortDate(annotation.createdAt);
+  const canExpand = expanded || clamped;
 
   return (
-    <li data-testid="annotation-item" className="group/row flex flex-col">
+    <li
+      data-testid="annotation-item"
+      data-expanded={expanded ? 'true' : undefined}
+      className="group/row flex flex-col"
+    >
       <div className="flex items-start gap-0.5">
         <button
           type="button"
           data-roving-row=""
           data-testid="annotation-jump-button"
           tabIndex={tabIndex}
-          aria-keyshortcuts="Backspace"
+          aria-keyshortcuts={canExpand ? 'Backspace ArrowRight ArrowLeft' : 'Backspace'}
           onFocus={onFocus}
-          onKeyDown={onKeyDown}
+          onKeyDown={(event) => {
+            // → and ← open and close a long row in place, as in a disclosure tree.
+            if (canExpand && !event.metaKey && !event.ctrlKey && !event.altKey) {
+              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                event.preventDefault();
+                setExpanded(event.key === 'ArrowRight');
+                return;
+              }
+            }
+            onKeyDown(event);
+          }}
           onClick={onSelect}
           className={rowClassName(false)}
         >
@@ -342,15 +399,23 @@ function AnnotationRow({
               className="mt-1 inline-block size-2.5 shrink-0 rounded-full border border-black/20"
               style={{ backgroundColor: annotation.color }}
             />
-            <span data-testid="annotation-excerpt" className="line-clamp-3 min-w-0 break-words">
+            <span
+              ref={excerptRef}
+              data-testid="annotation-excerpt"
+              className={cn('min-w-0 break-words', !expanded && 'line-clamp-3')}
+            >
               {annotation.excerptText ??
                 (annotation.excerptImagePath ? 'Captured image excerpt' : 'Note')}
             </span>
           </span>
-          {annotation.note && (
+          {annotation.note && !editing && (
             <span
+              ref={noteRef}
               data-testid="annotation-note-preview"
-              className="ml-4.5 line-clamp-2 border-l-2 pl-2 text-xs break-words text-muted-foreground italic"
+              className={cn(
+                'ml-4.5 border-l-2 pl-2 text-xs break-words whitespace-pre-wrap text-muted-foreground italic',
+                !expanded && 'line-clamp-2',
+              )}
             >
               {annotation.note}
             </span>
@@ -383,6 +448,25 @@ function AnnotationRow({
           </span>
         </button>
         <div className="flex shrink-0 items-center pt-1">
+          {canExpand && (
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label={expanded ? 'Show less' : 'Show more'}
+              aria-expanded={expanded}
+              title={expanded ? 'Show less (←)' : 'Show more (→)'}
+              data-testid="annotation-expand-button"
+              onClick={() => setExpanded((current) => !current)}
+              className="flex size-6 items-center justify-center rounded text-muted-foreground outline-none hover:bg-background hover:text-foreground"
+            >
+              <ChevronDown
+                className={cn(
+                  'size-3.5 transition-transform motion-reduce:transition-none',
+                  expanded && 'rotate-180',
+                )}
+              />
+            </button>
+          )}
           <button
             type="button"
             tabIndex={-1}
@@ -390,7 +474,10 @@ function AnnotationRow({
             aria-expanded={editing}
             title="Edit note and color"
             data-testid="annotation-edit-button"
-            onClick={() => setEditing((current) => !current)}
+            onClick={() => {
+              discarding.current = false;
+              setEditing((current) => !current);
+            }}
             className={cn(
               'flex size-6 items-center justify-center rounded text-muted-foreground transition-opacity outline-none group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-background hover:text-foreground motion-reduce:transition-none',
               editing ? 'opacity-100' : 'opacity-0',
@@ -406,7 +493,7 @@ function AnnotationRow({
         </div>
       </div>
       {editing && (
-        <div className="mb-1 ml-6 flex items-center gap-1.5 pr-1">
+        <div className="mb-1 ml-6 flex flex-col gap-1 pr-1">
           <div role="group" aria-label="Change highlight color" className="flex items-center">
             {ANNOTATION_COLORS.map(({ label, value }) => {
               const active = annotation.color === value;
@@ -425,34 +512,116 @@ function AnnotationRow({
               );
             })}
           </div>
-          <input
-            type="text"
-            aria-label={`Note for annotation at ${locationLabel}`}
-            data-testid="annotation-note-input"
-            placeholder="Add a note…"
+          <NoteEditor
             value={noteDraft}
+            label={`Note for annotation at ${locationLabel}`}
+            formLabel="Edit note"
+            testId="annotation-note-input"
+            formTestId="annotation-note-form"
+            saveTestId="annotation-note-save"
             autoFocus
-            onChange={(event) => setNoteDraft(event.target.value)}
+            onChange={setNoteDraft}
+            onSave={() => {
+              commitNote();
+              setEditing(false);
+            }}
+            onCancel={cancelEdit}
+            // Leaving the field keeps what was typed, so a click elsewhere loses nothing.
             onBlur={commitNote}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                commitNote();
-                setEditing(false);
-              } else if (event.key === 'Escape') {
+              if (event.key === 'Escape') {
                 event.preventDefault();
                 event.stopPropagation();
-                setNoteDraft(annotation.note ?? '');
-                setEditing(false);
+                cancelEdit();
               }
             }}
-            className="h-6 min-w-0 flex-1 rounded border bg-background px-2 text-xs text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </div>
       )}
     </li>
   );
 }
+
+/** Which rows the list shows, beyond the text filter. */
+export interface AnnotationFilters {
+  /** Empty shows every color. */
+  colors: ReadonlySet<string>;
+  noteOnly: boolean;
+}
+
+/** The annotations matching the text filter, the chosen colors, and Has Note. */
+export function filterAnnotations(
+  annotations: readonly Annotation[],
+  text: string,
+  filters: AnnotationFilters,
+): Annotation[] {
+  const needle = text.trim().toLowerCase();
+  return annotations.filter(
+    (annotation) =>
+      (filters.colors.size === 0 || filters.colors.has(annotation.color)) &&
+      (!filters.noteOnly || annotationHasNote(annotation)) &&
+      (!needle ||
+        (annotation.excerptText ?? '').toLowerCase().includes(needle) ||
+        (annotation.note ?? '').toLowerCase().includes(needle)),
+  );
+}
+
+function AnnotationFilterBar({
+  filters,
+  onChange,
+}: {
+  filters: AnnotationFilters;
+  onChange: (filters: AnnotationFilters) => void;
+}) {
+  const toggleColor = (color: string) => {
+    const colors = new Set(filters.colors);
+    if (colors.has(color)) colors.delete(color);
+    else colors.add(color);
+    onChange({ ...filters, colors });
+  };
+  return (
+    <div
+      role="group"
+      aria-label="Show only"
+      data-testid="annotation-filters"
+      className="flex shrink-0 items-center gap-0.5 border-b px-2 py-0.5"
+    >
+      {ANNOTATION_COLORS.map(({ label, value }) => {
+        const pressed = filters.colors.has(value);
+        return (
+          <button
+            key={value}
+            type="button"
+            aria-label={`Show ${label} highlights`}
+            aria-pressed={pressed}
+            title={`Show ${label} highlights`}
+            data-testid={`annotation-filter-color-${label.toLowerCase()}`}
+            onClick={() => toggleColor(value)}
+            className={COLOR_TARGET_CLASS}
+          >
+            <ColorDot color={value} selected={pressed} className="size-4" />
+          </button>
+        );
+      })}
+      <button
+        type="button"
+        aria-pressed={filters.noteOnly}
+        title="Show only highlights with a note"
+        data-testid="annotation-filter-has-note"
+        onClick={() => onChange({ ...filters, noteOnly: !filters.noteOnly })}
+        className={cn(
+          'ml-auto flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring',
+          filters.noteOnly && 'bg-accent text-foreground',
+        )}
+      >
+        <StickyNote aria-hidden="true" className="size-3" />
+        Has Note
+      </button>
+    </div>
+  );
+}
+
+const NO_FILTERS: AnnotationFilters = { colors: new Set(), noteOnly: false };
 
 /**
  * The Navigator's Highlights & Notes tab: grouped by chapter, each row with its
@@ -463,33 +632,39 @@ export function AnnotationsList({
   filter,
   linkedAnnotationIds,
   placementOf,
+  compareWithinOrder,
   onDeleted,
 }: {
   controller: AnnotationsController;
   filter: string;
   linkedAnnotationIds?: ReadonlySet<string>;
   placementOf?: (annotation: Annotation) => AnnotationPlacement;
+  /**
+   * Orders annotations that share a placement order, such as two in one EPUB
+   * chapter. Without it they keep the order they were made in.
+   */
+  compareWithinOrder?: (a: Annotation, b: Annotation) => number;
   /** Told after a row is deleted, so ⌘Z knows what to restore. */
   onDeleted?: () => void;
 }) {
-  const needle = filter.trim().toLowerCase();
-  const placed = controller.annotations
-    .filter(
-      (annotation) =>
-        !needle ||
-        (annotation.excerptText ?? '').toLowerCase().includes(needle) ||
-        (annotation.note ?? '').toLowerCase().includes(needle),
-    )
+  const [filters, setFilters] = useState<AnnotationFilters>(NO_FILTERS);
+  const placed = filterAnnotations(controller.annotations, filter, filters)
     .map((annotation, index) => ({
       annotation,
       placement: placementOf?.(annotation) ?? { order: index },
     }))
-    .sort((a, b) => a.placement.order - b.placement.order);
+    .sort(
+      (a, b) =>
+        a.placement.order - b.placement.order ||
+        (compareWithinOrder?.(a.annotation, b.annotation) ?? 0),
+    );
   const roving = useRovingList(placed.length);
+  const filtering = filters.colors.size > 0 || filters.noteOnly;
 
   const header = (
     <div className="flex h-7 shrink-0 items-center justify-between gap-2 border-b px-3 text-[11px] text-muted-foreground">
-      <span>
+      <span data-testid="annotations-count">
+        {filtering || filter.trim() ? `${placed.length} of ` : ''}
         {controller.annotations.length}{' '}
         {controller.annotations.length === 1 ? 'highlight' : 'highlights'}
       </span>
@@ -519,7 +694,7 @@ export function AnnotationsList({
       </NavigatorEmptyState>
     );
   } else if (placed.length === 0) {
-    body = <NavigatorEmptyState title="No matching highlights" />;
+    body = <NavigatorEmptyState testId="annotations-no-match" title="No matching highlights" />;
   } else {
     body = (
       <ol
@@ -550,6 +725,7 @@ export function AnnotationsList({
               )}
               <AnnotationRow
                 annotation={annotation}
+                locationLabel={placement.label ?? formatAnnotationLocation(annotation)}
                 linkedToCard={linkedAnnotationIds?.has(annotation.id) ?? false}
                 stale={controller.isAnnotationStale(annotation)}
                 tabIndex={roving.tabIndexFor(index)}
@@ -575,6 +751,9 @@ export function AnnotationsList({
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-testid="annotations-panel">
       {header}
+      {controller.annotations.length > 0 && (
+        <AnnotationFilterBar filters={filters} onChange={setFilters} />
+      )}
       {body}
     </div>
   );
