@@ -197,6 +197,21 @@ describe('AppearanceMenu', () => {
     expect(steppedFontSize(75, -1)).toBe(75);
   });
 
+  it.each(['epub', 'txt', 'pdf'] as const)(
+    'offers "Focus mode uses full screen" in %s, off by default',
+    (format) => {
+      render(<Harness format={format} />);
+      fireEvent.click(trigger());
+      // EPUB and TXT keep it behind Customize; the PDF panel has no disclosure.
+      if (format !== 'pdf') fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+      const toggle = screen.getByRole('switch', { name: 'Focus mode uses full screen' });
+      expect(toggle).toHaveAttribute('aria-checked', 'false');
+      fireEvent.click(toggle);
+      expect(current().focusModeFullScreen).toBe(true);
+      expect(toggle).toHaveAttribute('aria-checked', 'true');
+    },
+  );
+
   it('keeps line spacing, margins, and justification behind Customize', () => {
     render(<Harness />);
     fireEvent.click(trigger());

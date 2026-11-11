@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useEffect, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { dispatchEscape } from '@/features/commands/escape';
 import { forgetRecentCommandRuns } from '@/features/commands/registry';
 import type { MenuItemState } from '@/lib/backend/types';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
@@ -543,6 +544,35 @@ describe('StudyWorkspace', () => {
       expect(screen.getByRole('button', { name: 'Hide MindMap' })).toBeInTheDocument(),
     );
     expect(screen.getByRole('tablist').closest('header')).not.toHaveClass('hidden');
+  });
+
+  it('leaves focus mode on Esc forwarded from a chapter frame, but not on Esc in a text field', async () => {
+    await renderReady();
+    fireEvent.keyDown(window, { key: 'o', metaKey: true });
+    await screen.findByRole('tab');
+    fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+    expect(useStudySyncStore.getState().immersive).toBe(true);
+
+    // Text entry keeps its own Esc.
+    const field = document.createElement('input');
+    document.body.append(field);
+    fireEvent.keyDown(field, { key: 'Escape' });
+    expect(useStudySyncStore.getState().immersive).toBe(true);
+    field.remove();
+
+    // An EPUB chapter is another document: its keys reach the app only as the
+    // reader forwards them.
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const chapter = frame.contentDocument as Document;
+    chapter.addEventListener('keydown', (event) => dispatchEscape(event));
+    act(() => {
+      chapter.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      );
+    });
+    expect(useStudySyncStore.getState().immersive).toBe(false);
+    frame.remove();
   });
 
   it('toggles full screen from its shortcut and retitles the command', async () => {

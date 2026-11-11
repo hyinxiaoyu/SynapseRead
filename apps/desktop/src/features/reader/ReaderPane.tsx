@@ -126,8 +126,9 @@ export function ReaderPane() {
       event.preventDefault();
       setRecentMenuOpen(false);
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    // Capture: the menu closes before Esc reaches Find or focus mode.
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [recentMenuOpen]);
 
   const handleTabKeyDown = useCallback(

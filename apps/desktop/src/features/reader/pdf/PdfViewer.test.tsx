@@ -1166,6 +1166,17 @@ describe('PdfViewer', () => {
     expect(await screen.findByTestId('pdf-unsupported-annotations-notice')).toHaveTextContent(
       /Stamp/,
     );
+    // It only informs, so it can be closed and fades by itself (ReaderNotice.test.tsx).
+    expect(screen.getByTestId('pdf-unsupported-annotations-notice')).toHaveAttribute(
+      'data-tone',
+      'info',
+    );
+    fireEvent.click(
+      within(screen.getByTestId('pdf-unsupported-annotations-notice')).getByRole('button', {
+        name: 'Close notice',
+      }),
+    );
+    expect(screen.queryByTestId('pdf-unsupported-annotations-notice')).toBeNull();
 
     // Create a user highlight on Page 1 to verify geometry across rotation and display modes.
     const node = textNode(page0, 0);

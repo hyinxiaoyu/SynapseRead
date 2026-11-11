@@ -44,6 +44,7 @@ import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBa
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
+import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import {
   buildSearchSnippet,
   type DocumentSearchResultItem,
@@ -63,7 +64,6 @@ import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
 import {
   HistoryButtons,
-  ReaderPopoverLayer,
   ReaderToolbar,
   ToolbarButton,
   ToolbarOverflowMenu,
@@ -271,13 +271,26 @@ function chapterOfPage(items: readonly OutlineNode<number>[], pageIndex: number)
 }
 
 const DISPLAY_MODES: readonly SegmentedOption<PdfDisplayMode>[] = [
-  { value: 'single', label: 'Single page', icon: FileText, testId: 'pdf-mode-single' },
-  { value: 'two-page', label: 'Two pages', icon: Columns2, testId: 'pdf-mode-two-page' },
+  {
+    value: 'single',
+    label: 'Single page',
+    icon: FileText,
+    testId: 'pdf-mode-single',
+    command: 'view.layoutSingle',
+  },
+  {
+    value: 'two-page',
+    label: 'Two pages',
+    icon: Columns2,
+    testId: 'pdf-mode-two-page',
+    command: 'view.layoutTwoPage',
+  },
   {
     value: 'continuous',
     label: 'Continuous scroll',
     icon: ScrollText,
     testId: 'pdf-mode-continuous',
+    command: 'view.layoutScroll',
   },
 ];
 
@@ -883,6 +896,10 @@ function PdfPages({
   const [displayMode, setDisplayMode] = useState<PdfDisplayMode>('continuous');
   const [rotation, setRotation] = useState<PdfRotation>(0);
   const [unsupportedSubtypes, setUnsupportedSubtypes] = useState<readonly string[]>([]);
+  // Pages report their annotation types as they load. A closed notice stays closed
+  // until a later page adds a type it did not list.
+  const unsupportedNotice = unsupportedSubtypes.length > 0 ? unsupportedSubtypes.join(', ') : null;
+  const [dismissedUnsupported, setDismissedUnsupported] = useState<string | null>(null);
   const contentWidth = Math.max(width - SIDE_PADDING_PX * 2, 1);
   const availableHeight = Math.max(height - PAGE_GAP_PX * 2, 1);
   const availablePageWidth =
@@ -2245,21 +2262,21 @@ function PdfPages({
             canExcerpt={canExcerpt}
             onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
           />
-          <ReaderPopoverLayer>
-            {unsupportedSubtypes.length > 0 && !chromeHidden && (
-              <p
-                role="status"
-                data-testid="pdf-unsupported-annotations-notice"
-                className="bg-muted px-4 py-1 text-xs text-muted-foreground"
+          <ReaderPopoverLayer hidden={chromeHidden}>
+            {unsupportedNotice !== null && unsupportedNotice !== dismissedUnsupported && (
+              <ReaderNotice
+                tone="info"
+                testId="pdf-unsupported-annotations-notice"
+                onDismiss={() => setDismissedUnsupported(unsupportedNotice)}
               >
-                Unsupported PDF annotation types not shown: {unsupportedSubtypes.join(', ')}. Source
-                PDF is never modified.
-              </p>
+                Unsupported PDF annotation types not shown: {unsupportedNotice}. Source PDF is never
+                modified.
+              </ReaderNotice>
             )}
             {missedJump && (
-              <p role="status" className="bg-muted px-4 py-1.5 text-xs">
+              <ReaderNotice tone="warning" onDismiss={() => setMissedJump(false)}>
                 That excerpt is on a page this file does not have. The file may have changed.
-              </p>
+              </ReaderNotice>
             )}
           </ReaderPopoverLayer>
           {/*

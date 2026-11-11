@@ -322,6 +322,17 @@ function AppearancePanel({
     (fontFamily) => onChange({ fontFamily }),
   );
 
+  // Every format reads in focus mode, so every panel offers this.
+  const focusModeSwitch = (
+    <Switch
+      label="Focus mode uses full screen"
+      description="Full screen starts and ends with focus mode"
+      checked={preferences.focusModeFullScreen}
+      testId="focus-full-screen-switch"
+      onChange={(focusModeFullScreen) => onChange({ focusModeFullScreen })}
+    />
+  );
+
   // A PDF page is a bitmap: text size, page width, and fonts would do nothing.
   // Theme decides the tint, and page turns use the PDF display modes.
   if (format === 'pdf') {
@@ -343,6 +354,7 @@ function AppearancePanel({
           testId="tint-pdf-switch"
           onChange={(tintPdfPages) => onChange({ tintPdfPages })}
         />
+        {focusModeSwitch}
       </div>
     );
   }
@@ -491,6 +503,7 @@ function AppearancePanel({
                     onChange={(dimImages) => onChange({ dimImages })}
                   />
                 )}
+                {focusModeSwitch}
               </div>
             </div>
           </div>

@@ -59,6 +59,11 @@ export interface StudySyncState {
   immersive: boolean;
   /** Whether the window is full screen, however it got there. */
   fullscreen: boolean;
+  /**
+   * Focus mode entered full screen itself (`focusModeFullScreen`), so leaving focus
+   * mode leaves full screen too. Full screen the reader chose is never touched.
+   */
+  fullscreenFromFocusMode: boolean;
   chromeStyle: WindowChromeStyle;
   readingPreferences: ReadingPreferences;
   bookmarks: Bookmark[];
@@ -247,7 +252,11 @@ export function createStudySyncStore(backend: StudyBackend) {
       if (opened.length > 0) persistSession();
     };
 
-    backend.onFullscreenChange((fullscreen) => set({ fullscreen }));
+    // Leaving full screen by any other route (the window's button, View ▸ Exit Full
+    // Screen) hands it back to the reader: a later exit from focus mode leaves it be.
+    backend.onFullscreenChange((fullscreen) =>
+      set(fullscreen ? { fullscreen } : { fullscreen, fullscreenFromFocusMode: false }),
+    );
 
     backend.onFileDrop((event) => {
       if (event.type === 'enter') {
@@ -277,6 +286,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       isDraggingFile: false,
       immersive: false,
       fullscreen: false,
+      fullscreenFromFocusMode: false,
       chromeStyle: backend.chromeStyle,
       readingPreferences: { ...DEFAULT_READING_PREFERENCES },
       bookmarks: [],
@@ -453,6 +463,27 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().immersive === immersive) return;
         set({ immersive });
         persistSession();
+        const { readingPreferences, fullscreen, fullscreenFromFocusMode } = get();
+        if (immersive && readingPreferences.focusModeFullScreen && !fullscreen) {
+          set({ fullscreenFromFocusMode: true });
+          // A refused request leaves focus mode on in the window, without an error.
+          void backend
+            .setFullscreen(true)
+            .then(() => backend.isFullscreen())
+            .then((now) => {
+              if (!now) {
+                set({ fullscreenFromFocusMode: false });
+                return;
+              }
+              set({ fullscreen: true });
+              // Focus mode ended while the window was still going full screen.
+              if (!get().immersive) void get().setFullscreen(false);
+            })
+            .catch(() => set({ fullscreenFromFocusMode: false }));
+        } else if (!immersive && fullscreenFromFocusMode) {
+          set({ fullscreenFromFocusMode: false });
+          void get().setFullscreen(false);
+        }
       },
 
       reportCursor(documentId, anchor) {

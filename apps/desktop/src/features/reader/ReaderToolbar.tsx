@@ -87,6 +87,12 @@ export function ToolbarSeparator({ collapse }: { collapse?: ToolbarCollapse }) {
   );
 }
 
+/**
+ * The unified toolbar's height. In focus mode it floats over the page, so a paged
+ * reader keeps this much of the top clear for it.
+ */
+export const TOOLBAR_HEIGHT_PX = 48;
+
 export interface ToolbarButtonProps {
   icon: LucideIcon;
   /** The accessible name, and the tooltip before its shortcut. */
@@ -136,6 +142,7 @@ export function ToolbarButton({
       aria-expanded={ariaExpanded}
       title={command ? commandTooltip(label, command) : label}
       data-testid={testId}
+      data-command={command}
       disabled={disabled}
       onMouseDown={preserveSelection ? (event) => event.preventDefault() : undefined}
       onClick={onClick}
@@ -184,10 +191,11 @@ export function ToolbarOverflowMenu({ items }: { items: readonly OverflowItem[] 
       setOpen(false);
     };
     window.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('keydown', onKeyDown);
+    // Capture: the menu closes before Esc reaches Find or focus mode.
+    window.addEventListener('keydown', onKeyDown, true);
     return () => {
       window.removeEventListener('pointerdown', onPointerDown);
-      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keydown', onKeyDown, true);
     };
   }, [open]);
 
@@ -262,18 +270,6 @@ export function ToolbarTitle({ title, subtitle }: { title: string; subtitle?: Re
           {subtitle}
         </span>
       )}
-    </div>
-  );
-}
-
-/**
- * Notices float over the page as popovers instead of stacking strips above
- * it, so the reading area never jumps.
- */
-export function ReaderPopoverLayer({ children }: { children: ReactNode }) {
-  return (
-    <div className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none">
-      {children}
     </div>
   );
 }

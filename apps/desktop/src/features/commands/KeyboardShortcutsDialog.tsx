@@ -15,8 +15,9 @@ export function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
       event.preventDefault();
       onClose();
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    // Capture: the dialog closes before anything under it sees the key.
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [onClose]);
 
   return (

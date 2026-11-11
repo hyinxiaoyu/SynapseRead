@@ -35,9 +35,9 @@ import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopove
 import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
 import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
+import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import {
   HistoryButtons,
-  ReaderPopoverLayer,
   ReaderToolbar,
   ToolbarButton,
   ToolbarSeparator,
@@ -314,6 +314,7 @@ export function TxtViewer({
   const [pinnedRows, setPinnedRows] = useState<readonly number[]>([]);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [missedJump, setMissedJump] = useState(false);
+  const [replacementsNoticeClosed, setReplacementsNoticeClosed] = useState(false);
   const history = useJumpHistory<number>();
   const pushHistory = history.push;
   const searchTrip = useSearchTrip(pushHistory);
@@ -1059,13 +1060,21 @@ export function TxtViewer({
             canExcerpt={canExcerpt}
             onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
           />
-          <ReaderPopoverLayer>
-            {(load.hadReplacements || missedJump) && (
-              <p role="status" className="bg-muted px-4 py-1.5 text-xs text-foreground">
-                {missedJump
-                  ? 'That excerpt is past the end of this file, which may have changed since it was saved.'
-                  : 'This file has bytes that are not valid UTF-8. They are shown as �.'}
-              </p>
+          <ReaderPopoverLayer hidden={chromeHidden}>
+            {load.hadReplacements && !replacementsNoticeClosed && (
+              <ReaderNotice
+                tone="warning"
+                testId="txt-replacements-notice"
+                onDismiss={() => setReplacementsNoticeClosed(true)}
+              >
+                This file has bytes that are not valid UTF-8. They are shown as �.
+              </ReaderNotice>
+            )}
+            {missedJump && (
+              <ReaderNotice tone="warning" onDismiss={() => setMissedJump(false)}>
+                That excerpt is past the end of this file, which may have changed since it was
+                saved.
+              </ReaderNotice>
             )}
           </ReaderPopoverLayer>
           <div className="group/page relative flex min-h-0 flex-1 flex-col">

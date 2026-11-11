@@ -298,6 +298,48 @@ export class Page {
     }
   }
 
+  /**
+   * Enters focus mode from its toolbar button, then moves the pointer and focus to
+   * `pageSelector` and waits for the idle toolbar to slide away.
+   */
+  async enterFocusMode(pageSelector) {
+    await this.clickButton('Enter focus mode');
+    await this.waitFor(
+      `document.querySelector('[data-testid="unified-toolbar"]')?.dataset.immersive === 'true'`,
+      'focus mode',
+    );
+    // Hover and focus in the toolbar hold it open, so put both on the page.
+    const center = await this.evaluate(`(() => {
+      const r = (${pageSelector}).getBoundingClientRect();
+      return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+    })()`);
+    await this.mouse('mouseMoved', center.x, center.y);
+    await this.evaluate(`(${pageSelector}).focus({ preventScroll: true })`);
+    await this.waitFor(
+      `document.querySelector('[data-testid="unified-toolbar"]')?.dataset.hidden === 'true'`,
+      'the idle toolbar to hide in focus mode',
+    );
+  }
+
+  /** Fails if the hidden toolbar comes back within `ms`. */
+  async assertToolbarStaysHidden(description, ms = 600) {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      const hidden = await this.evaluate(
+        `document.querySelector('[data-testid="unified-toolbar"]')?.dataset.hidden === 'true'`,
+      );
+      if (!hidden) throw new Error(`the toolbar came back: ${description}`);
+      await new Promise((done) => setTimeout(done, 50));
+    }
+  }
+
+  /** Whether the app is in focus mode. */
+  inFocusMode() {
+    return this.evaluate(
+      `document.querySelector('[data-testid="unified-toolbar"]')?.dataset.immersive === 'true'`,
+    );
+  }
+
   /** Leaves Find as a reader would: Esc in the field clears it and returns focus to the page. */
   async leaveSearch() {
     await this.evaluate(`document.querySelector('[data-testid="search-input"]').focus()`);

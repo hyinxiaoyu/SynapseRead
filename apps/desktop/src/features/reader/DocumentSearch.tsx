@@ -9,6 +9,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
+import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { useRovingList } from '@/features/reader/navigator/useRovingList';
 import { cn } from '@/lib/utils';
 
@@ -379,14 +380,7 @@ export function useDocumentSearch<TMatch extends DocumentSearchResultItem>({
     [cancelSearch, clearSearch],
   );
 
-  useEffect(() => {
-    if (!isActive) return;
-    const onWindowKeyDown = (event: KeyboardEvent) => {
-      handleKeyDown(event);
-    };
-    window.addEventListener('keydown', onWindowKeyDown);
-    return () => window.removeEventListener('keydown', onWindowKeyDown);
-  }, [handleKeyDown, isActive]);
+  useEscapeLayer(ESCAPE_LAYER.find, isActive ? handleKeyDown : null);
 
   // Cancel any in-flight search if the user switches away from this document tab.
   useEffect(() => {
@@ -553,6 +547,8 @@ export function ToolbarSearchField<TMatch extends DocumentSearchResultItem>({
         role="search"
         aria-label="Search document"
         data-testid="document-search-field"
+        // What Find's commands change is shown here, so they wake a hidden toolbar.
+        data-command="edit.find edit.findNext edit.findPrevious edit.useSelectionForFind"
         className={cn(
           'absolute inset-y-0 right-0 flex w-full items-center rounded-md border bg-background text-xs text-foreground transition-[width] duration-150 focus-within:z-20 focus-within:w-72 focus-within:shadow-md focus-within:ring-2 focus-within:ring-ring motion-reduce:transition-none',
           disabled && 'opacity-50',
