@@ -2,11 +2,17 @@ import { useCallback, useState } from 'react';
 
 /**
  * What the footer says about progress. Each format offers the ones it can
- * compute; `remaining` needs pages and chapters, so plain text has none.
+ * compute; `remaining` needs pages and chapters, so plain text has none, and
+ * `minutes` needs the chapter's text measured, so only a measured EPUB has it.
  */
-export type FooterReadout = 'remaining' | 'position' | 'percent';
+export type FooterReadout = 'remaining' | 'minutes' | 'position' | 'percent';
 
-export const FOOTER_READOUTS: readonly FooterReadout[] = ['remaining', 'position', 'percent'];
+export const FOOTER_READOUTS: readonly FooterReadout[] = [
+  'remaining',
+  'minutes',
+  'position',
+  'percent',
+];
 
 export type FooterReadouts = Partial<Record<FooterReadout, string>>;
 

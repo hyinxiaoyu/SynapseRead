@@ -34,6 +34,9 @@ pub enum CoreError {
     #[error("invalid PDF layout: {0}")]
     InvalidLayout(String),
 
+    #[error("invalid reading progress: {0}")]
+    InvalidProgress(String),
+
     #[error("{entity} not found: {id}")]
     NotFound { entity: &'static str, id: String },
 
@@ -56,6 +59,7 @@ impl CoreError {
             Self::InvalidGraph(_) => "invalid_graph",
             Self::InvalidPreferences(_) => "invalid_preferences",
             Self::InvalidLayout(_) => "invalid_layout",
+            Self::InvalidProgress(_) => "invalid_progress",
             Self::NotFound { .. } => "not_found",
             Self::StreamCancelled => "stream_cancelled",
         }

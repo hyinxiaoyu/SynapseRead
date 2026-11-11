@@ -79,8 +79,8 @@ export function createTauriBackend(): StudyBackend {
       };
     },
     listDocuments: () => invoke<StudyDocument[]>('list_documents'),
-    updateDocumentCursor: (documentId, anchor) =>
-      invoke('update_document_cursor', { documentId, anchor }),
+    updateDocumentCursor: (documentId, anchor, progress) =>
+      invoke('update_document_cursor', { documentId, anchor, progress: progress ?? null }),
     touchDocumentOpened: (documentId) =>
       invoke<StudyDocument>('touch_document_opened', { documentId }),
     verifyDocumentSource: (documentId) =>

@@ -224,6 +224,10 @@ pub struct Document {
     #[serde(default)]
     pub last_opened_at: Option<String>,
     pub created_at: String,
+    /// How far through the document `last_cursor_anchor` is, `0..1`, when the
+    /// reader measured it.
+    #[serde(default)]
+    pub last_progress: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

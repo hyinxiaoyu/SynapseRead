@@ -203,11 +203,91 @@ ated word wraps in this paragraph.</p>
         archive.writestr(info, tiny_png(), zipfile.ZIP_STORED)
 
 
+def write_epub(path, files, images=()):
+    with zipfile.ZipFile(path, "w") as archive:
+        # The EPUB spec requires this entry first, stored, with no extra fields.
+        info = zipfile.ZipInfo("mimetype", date_time=(2026, 1, 1, 0, 0, 0))
+        archive.writestr(info, "application/epub+zip", zipfile.ZIP_STORED)
+        for name, content in files.items():
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            archive.writestr(info, content.encode(), zipfile.ZIP_DEFLATED)
+        for name, content in images:
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            archive.writestr(info, content, zipfile.ZIP_STORED)
+
+
+# Ten short front-matter files, then three chapters of very different lengths: by
+# spine file Chapter One opens at 10/13 (77%) of the book, by text at about 2% (#52).
+UNEVEN_FRONT_MATTER = [
+    ("cover", "Cover", '<p><img src="box.png" alt="Cover"/></p>'),
+    ("half-title", "Half Title", "<p>Uneven Lengths</p>"),
+    ("frontispiece", "Frontispiece", "<p>A drawing of a long road.</p>"),
+    ("title", "Title Page", "<h1>Uneven Lengths</h1><p>A SynapseRead fixture</p>"),
+    ("copyright", "Copyright", "<p>Copyright 2026. Made for tests.</p>"),
+    ("dedication", "Dedication", "<p>For every reader at 25%.</p>"),
+    ("epigraph", "Epigraph", "<p>Not all chapters are equal.</p>"),
+    ("contents", "Contents Page", "<p>Chapter One, Two, Three.</p>"),
+    ("foreword", "Foreword", "<p>A very short foreword.</p>"),
+    ("preface", "Preface", "<p>An even shorter preface.</p>"),
+]
+# (id, title, paragraphs): each paragraph is 60 characters of text.
+UNEVEN_CHAPTERS = [
+    ("chapter-one", "Chapter One", 100),
+    ("chapter-two", "Chapter Two", 20),
+    ("chapter-three", "Chapter Three", 240),
+]
+
+
+def build_uneven_epub():
+    files = {
+        "META-INF/container.xml": """<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+</rootfiles></container>
+""",
+    }
+    manifest = ['<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+                '<item id="img" href="box.png" media-type="image/png"/>']
+    spine = []
+    toc = []
+    for ident, title, body in UNEVEN_FRONT_MATTER:
+        files[f"OEBPS/{ident}.xhtml"] = chapter(title, body)
+        manifest.append(f'<item id="{ident}" href="{ident}.xhtml" media-type="application/xhtml+xml"/>')
+        spine.append(f'<itemref idref="{ident}"/>')
+    toc.append('<li><a href="title.xhtml">Title Page</a></li>')
+    for ident, title, paragraphs in UNEVEN_CHAPTERS:
+        # "Paragraph 001 of Chapter One keeps this text long enough." padded to 60.
+        body = f"<h1>{title}</h1>" + "".join(
+            f"<p>{f'Paragraph {n:03d} of {title} adds to its length.'.ljust(60, '.')}</p>"
+            for n in range(1, paragraphs + 1)
+        )
+        files[f"OEBPS/{ident}.xhtml"] = chapter(title, body)
+        manifest.append(f'<item id="{ident}" href="{ident}.xhtml" media-type="application/xhtml+xml"/>')
+        spine.append(f'<itemref idref="{ident}"/>')
+        toc.append(f'<li><a href="{ident}.xhtml">{title}</a></li>')
+    files["OEBPS/content.opf"] = f"""<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="id">synapseread-uneven-fixture</dc:identifier>
+<dc:title>Uneven Lengths</dc:title><dc:language>en</dc:language>
+<meta property="dcterms:modified">2026-01-01T00:00:00Z</meta></metadata>
+<manifest>
+{chr(10).join(manifest)}
+</manifest>
+<spine>{"".join(spine)}</spine>
+</package>
+"""
+    files["OEBPS/nav.xhtml"] = chapter("Contents", f"""<nav xmlns:epub="http://www.idpf.org/2007/ops"
+epub:type="toc"><ol>{"".join(toc)}</ol></nav>""")
+    write_epub(OUT / "sample-uneven.epub", files, [("OEBPS/box.png", tiny_png())])
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "sample.pdf").write_bytes(build_pdf())
     (OUT / "sample-labels.pdf").write_bytes(build_labelled_pdf())
     build_epub()
+    build_uneven_epub()
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 // `pnpm e2e`: builds nothing itself; `pnpm build:web` must have produced `dist`.
 
 import { epubFlow } from './epub.mjs';
+import { epubProgressFlow } from './epubProgress.mjs';
 import { launchPage, serveDist } from './harness.mjs';
 import { keyboardFlow } from './keyboard.mjs';
 import { pdfFlow, pdfLayoutFlow } from './pdf.mjs';
@@ -15,6 +16,7 @@ const FLOWS = {
   pdf: pdfFlow,
   'pdf-layout': pdfLayoutFlow,
   epub: epubFlow,
+  'epub-progress': epubProgressFlow,
   keyboard: keyboardFlow,
 };
 

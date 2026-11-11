@@ -89,6 +89,16 @@ import {
   type EpubTocItem,
   openEpubDocument,
 } from './epubEngine';
+import {
+  bookFraction,
+  locateBookFraction,
+  measureBook,
+  minutesLeftInSection,
+  minutesLeftText,
+  readCachedWeights,
+  type TextWeights,
+  writeCachedWeights,
+} from './textWeights';
 
 const CURSOR_DEBOUNCE_MS = 400;
 const FALLBACK_HIGHLIGHT = '#fde047';
@@ -165,8 +175,14 @@ function chapterTitlesBySpine(handle: EpubHandle | null): readonly (string | nul
   return titles;
 }
 
-/** A tick where each top-level chapter starts, or each spine file without a TOC. */
-function chapterTicks(handle: EpubHandle | null): ScrubberModel['ticks'] {
+/**
+ * A tick where each top-level chapter starts, or each spine file without a TOC,
+ * placed by the text before it once the book has been measured.
+ */
+function chapterTicks(
+  handle: EpubHandle | null,
+  weights: TextWeights | null,
+): ScrubberModel['ticks'] {
   const count = handle?.chapterCount ?? 0;
   if (!handle || count <= 1) return [];
   const starts = new Map<number, string>();
@@ -177,7 +193,23 @@ function chapterTicks(handle: EpubHandle | null): ScrubberModel['ticks'] {
   if (handle.toc.length === 0) {
     for (let index = 1; index < count; index += 1) starts.set(index, `Chapter ${index + 1}`);
   }
-  return [...starts].map(([index, label]) => ({ position: index / count, label }));
+  return [...starts].map(([index, label]) => ({
+    position: bookFraction(weights, count, index, 0),
+    label,
+  }));
+}
+
+/**
+ * How far through the book a location's page ends, `0..1`, once the book's text
+ * has been measured: what "of book" and the Recent list say. Undefined before.
+ */
+function measuredProgress(location: EpubLocation, weights: TextWeights | null): number | undefined {
+  const { chapterIndex, totalChapters } = location;
+  if (!weights || chapterIndex === undefined || totalChapters === undefined) return undefined;
+  if (weights.sections.length !== totalChapters) return undefined;
+  const within = location.chapterEnd ?? location.chapterStart ?? 0;
+  // Four places is finer than any percentage shown and keeps reports from jittering.
+  return Math.round(bookFraction(weights, totalChapters, chapterIndex, within) * 1e4) / 1e4;
 }
 
 const pagesLeftText = (left: number) =>
@@ -297,12 +329,40 @@ export function EpubViewer({
   };
   const [staleBookmarkIds, setStaleBookmarkIds] = useState<ReadonlySet<string>>(() => new Set());
   const [pageInfo, setPageInfo] = useState<{ page: number; totalPages: number } | null>(null);
-  const [bookProgress, setBookProgress] = useState<{
+  const [chapterPosition, setChapterPosition] = useState<{
     chapter: number;
     totalChapters: number;
+    /** The engine's own estimate, used when it reports no in-chapter position. */
     percent: number;
     fraction: number;
+    /** Where the page starts and ends in its chapter, `0..1`. */
+    chapterStart?: number;
+    chapterEnd?: number;
   } | null>(null);
+  /** Each chapter's share of the text, for the book it was measured in. */
+  const [measured, setMeasured] = useState<{ book: EpubHandle; weights: TextWeights } | null>(null);
+  const textWeightsRef = useRef<TextWeights | null>(null);
+  const textWeights = measured !== null && measured.book === handle ? measured.weights : null;
+  /**
+   * The book position shown in the footer and scrubber: by characters once the
+   * book is measured, by spine file until then.
+   */
+  const bookProgress = useMemo(() => {
+    if (!chapterPosition) return null;
+    const { chapter, totalChapters, chapterStart, chapterEnd } = chapterPosition;
+    const weighted =
+      textWeights !== null &&
+      textWeights.sections.length === totalChapters &&
+      chapterStart !== undefined;
+    if (!weighted) return chapterPosition;
+    return {
+      ...chapterPosition,
+      percent: Math.round(
+        bookFraction(textWeights, totalChapters, chapter - 1, chapterEnd ?? chapterStart) * 100,
+      ),
+      fraction: bookFraction(textWeights, totalChapters, chapter - 1, chapterStart),
+    };
+  }, [chapterPosition, textWeights]);
   const history = useJumpHistory<string>();
   const pushHistory = history.push;
   const searchTrip = useSearchTrip(pushHistory);
@@ -326,6 +386,14 @@ export function EpubViewer({
 
   const restored = useRef(false);
   const lastReported = useRef(initialCursor?.cfiRange ?? null);
+  const lastReportedProgress = useRef<number | undefined>(undefined);
+  /**
+   * The percentage saved last session, sent with the cursor until this book is
+   * measured. Leaving progress out clears the saved one, and a reader who turns a
+   * page and closes the book before measuring finishes should not lose it.
+   */
+  const savedProgress = useRef<number | undefined>(undefined);
+  const flushCursorRef = useRef<() => void>(() => undefined);
   const pendingLocation = useRef<EpubLocation | null>(null);
   const cursorTimer = useRef<number | undefined>(undefined);
 
@@ -334,18 +402,25 @@ export function EpubViewer({
     if (!host) return;
     let cancelled = false;
     let opened: EpubHandle | null = null;
+    savedProgress.current = document.lastProgress ?? undefined;
+    lastReportedProgress.current = savedProgress.current;
 
     const flushCursor = () => {
       const location = pendingLocation.current;
       pendingLocation.current = null;
-      if (!location || location.cfi === lastReported.current) return;
+      if (!location) return;
+      const progress = measuredProgress(location, textWeightsRef.current) ?? savedProgress.current;
+      if (location.cfi === lastReported.current && progress === lastReportedProgress.current) {
+        return;
+      }
       lastReported.current = location.cfi;
-      latest.current.onCursorChange({
-        format: 'epub',
-        cfiRange: location.cfi,
-        chapterHref: location.href,
-      });
+      lastReportedProgress.current = progress;
+      latest.current.onCursorChange(
+        { format: 'epub', cfiRange: location.cfi, chapterHref: location.href },
+        progress,
+      );
     };
+    flushCursorRef.current = flushCursor;
 
     void (async () => {
       try {
@@ -410,11 +485,15 @@ export function EpubViewer({
             const percent =
               location.bookProgress ??
               Math.round(((location.chapterIndex + 1) / location.totalChapters) * 100);
-            setBookProgress({
+            setChapterPosition({
               chapter: location.chapterIndex + 1,
               totalChapters: location.totalChapters,
               percent,
               fraction: location.fraction ?? location.chapterIndex / location.totalChapters,
+              ...(location.chapterStart === undefined
+                ? {}
+                : { chapterStart: location.chapterStart }),
+              ...(location.chapterEnd === undefined ? {} : { chapterEnd: location.chapterEnd }),
             });
           }
           // Layout during opening reports positions the reader never chose.
@@ -439,11 +518,56 @@ export function EpubViewer({
       window.clearTimeout(cursorTimer.current);
       flushCursor();
       restored.current = false;
+      flushCursorRef.current = () => undefined;
       opened?.destroy();
     };
     // Only the file matters: `document` changes each time the cursor is reported.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content, documentId]);
+
+  // ---- Measuring the book's text, behind the first page ----------------------
+
+  // Starts once the first page is showing and measures one chapter per idle
+  // moment, so it never holds up opening or a page turn. Closing the book aborts
+  // it before the next chapter loads. A fixed-layout book is a page per file, so
+  // equal shares are already right for it.
+  useEffect(() => {
+    const count = handle?.chapterCount ?? 0;
+    const measure = handle?.measureChapter;
+    if (!handle || !measure || handle.isFixedLayout || count <= 1) return;
+    const fileHash = document.fileHash;
+    const accept = (weights: TextWeights) => {
+      textWeightsRef.current = weights;
+      setMeasured({ book: handle, weights });
+      // The saved position gains the percentage the Recent list shows.
+      const here = currentLocationRef.current;
+      if (restored.current && here) {
+        pendingLocation.current = here;
+        flushCursorRef.current();
+      }
+    };
+    // Measured on an earlier open: no pass, and no jump from the by-file
+    // percentage to the by-text one.
+    const cached = readCachedWeights(fileHash, count);
+    if (cached) {
+      accept(cached);
+      return () => {
+        textWeightsRef.current = null;
+      };
+    }
+    const controller = new AbortController();
+    measureBook(count, (index) => measure.call(handle, index), controller.signal)
+      .then((weights) => {
+        if (controller.signal.aborted) return;
+        writeCachedWeights(fileHash, weights);
+        accept(weights);
+      })
+      .catch(() => undefined);
+    return () => {
+      controller.abort();
+      textWeightsRef.current = null;
+    };
+  }, [handle, document.fileHash]);
 
   // ---- Highlights ----------------------------------------------------------
 
@@ -969,7 +1093,7 @@ export function EpubViewer({
     }
   };
 
-  const ticks = useMemo(() => chapterTicks(handle), [handle]);
+  const ticks = useMemo(() => chapterTicks(handle, textWeights), [handle, textWeights]);
   const chapterCount = handle?.chapterCount ?? 0;
   const currentChapterIndex = bookProgress ? bookProgress.chapter - 1 : 0;
   const chapterTitle =
@@ -1065,19 +1189,23 @@ export function EpubViewer({
           valueText: `Chapter ${bookProgress.chapter} of ${chapterCount}, ${bookProgress.percent}%`,
           ticks,
           searchMarks: scrubberSearchMarks(
-            search.results.map((match) => (match.chapterIndex + 0.5) / Math.max(chapterCount, 1)),
+            search.results.map((match) =>
+              bookFraction(
+                textWeights,
+                chapterCount,
+                match.chapterIndex,
+                match.chapterFraction ?? 0.5,
+              ),
+            ),
           ),
           describe: (fraction) => {
-            const index = Math.min(Math.floor(fraction * chapterCount), chapterCount - 1);
+            const { index } = locateBookFraction(textWeights, chapterCount, fraction);
             const title = chapterTitles[index] ?? `Chapter ${index + 1}`;
             return `${title} · ${Math.round(fraction * 100)}%`;
           },
           onCommit: (fraction) => {
-            const scaled = Math.min(Math.max(fraction, 0), 1) * chapterCount;
-            const index = Math.min(Math.floor(scaled), chapterCount - 1);
-            jumpWithBackChip(() =>
-              handle.displayChapterFraction(index, Math.min(scaled - index, 1)),
-            );
+            const { index, within } = locateBookFraction(textWeights, chapterCount, fraction);
+            jumpWithBackChip(() => handle.displayChapterFraction(index, within));
           },
           onStepPage: turnPage,
           onStepChapter: (direction) => goToChapter(currentChapterIndex + direction),
@@ -1088,6 +1216,15 @@ export function EpubViewer({
   if (paged && pageInfo) {
     readouts.remaining = pagesLeftText(pageInfo.totalPages - pageInfo.page);
     readouts.position = `Page ${pageInfo.page} of ${pageInfo.totalPages} in chapter`;
+  }
+  const chapterText = textWeights?.sections[currentChapterIndex];
+  if (chapterText && chapterText.characters > 0 && chapterPosition) {
+    readouts.minutes = minutesLeftText(
+      minutesLeftInSection(
+        chapterText,
+        chapterPosition.chapterEnd ?? chapterPosition.chapterStart ?? 0,
+      ),
+    );
   }
   if (bookProgress) readouts.percent = `${bookProgress.percent}% of book`;
 

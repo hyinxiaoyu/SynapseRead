@@ -113,7 +113,12 @@ export interface StudySyncState {
   dropFiles(files: readonly File[]): Promise<void>;
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
-  reportCursor(documentId: string, anchor: StudyDocument['lastCursorAnchor']): void;
+  /** `progress` is how far through the document the anchor is, `0..1`, if known. */
+  reportCursor(
+    documentId: string,
+    anchor: StudyDocument['lastCursorAnchor'],
+    progress?: number,
+  ): void;
   setImmersive(immersive: boolean): void;
   setFullscreen(fullscreen: boolean): Promise<void>;
   /** Native menu choices, as command ids. Thin pass-throughs to the backend. */
@@ -596,14 +601,16 @@ export function createStudySyncStore(backend: StudyBackend) {
         }
       },
 
-      reportCursor(documentId, anchor) {
+      reportCursor(documentId, anchor, progress) {
         if (anchor === null) return;
         set((state) => ({
           documents: state.documents.map((document) =>
-            document.id === documentId ? { ...document, lastCursorAnchor: anchor } : document,
+            document.id === documentId
+              ? { ...document, lastCursorAnchor: anchor, lastProgress: progress ?? null }
+              : document,
           ),
         }));
-        void guarded(() => backend.updateDocumentCursor(documentId, anchor));
+        void guarded(() => backend.updateDocumentCursor(documentId, anchor, progress));
       },
 
       captureUrl: (annotationId) => backend.captureUrl(annotationId),

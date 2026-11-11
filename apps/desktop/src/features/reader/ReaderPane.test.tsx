@@ -7,7 +7,7 @@ import { useFocusPageOnActivate } from '@/features/reader/focusPage';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { DocumentViewerProps } from '@/types/domain';
 
-import { ReaderPane } from './ReaderPane';
+import { describeResumeLocation, ReaderPane } from './ReaderPane';
 
 /**
  * These tests are about the tab commands, so a small stand-in fulfils the viewer
@@ -116,5 +116,45 @@ describe('ReaderPane tab commands', () => {
 
     press('t', 'KeyT', { metaKey: true, shiftKey: true });
     await waitFor(() => expect(store().openDocumentIds).toEqual([first, second]));
+  });
+});
+
+describe('describeResumeLocation', () => {
+  const base = {
+    id: 'doc',
+    title: 'Book',
+    filePath: '/books/book.epub',
+    fileHash: 'hash',
+    format: 'epub',
+    encoding: 'utf-8',
+    createdAt: '2026-01-01T00:00:00Z',
+  } as const;
+  const epub = {
+    format: 'epub',
+    cfiRange: 'epubcfi(/6/4!/4/2)',
+    chapterHref: 'OEBPS/one.xhtml',
+  } as const;
+
+  it('says how far into an EPUB the reader is once the book was measured (#52)', () => {
+    expect(describeResumeLocation({ ...base, lastCursorAnchor: null })).toBe('Start reading');
+    expect(describeResumeLocation({ ...base, lastCursorAnchor: epub })).toBe('Continue reading');
+    expect(describeResumeLocation({ ...base, lastCursorAnchor: epub, lastProgress: null })).toBe(
+      'Continue reading',
+    );
+    expect(describeResumeLocation({ ...base, lastCursorAnchor: epub, lastProgress: 0.226 })).toBe(
+      'Continue reading · 23%',
+    );
+  });
+
+  it('adds the percentage after a place a reader can name', () => {
+    const txt = {
+      ...base,
+      format: 'txt',
+      lastCursorAnchor: { format: 'txt', startByteOffset: 0, endByteOffset: 4, lineIndex: 29 },
+    } as const;
+    expect(describeResumeLocation(txt)).toBe('Continue reading · Line 30');
+    expect(describeResumeLocation({ ...txt, lastProgress: 0.5 })).toBe(
+      'Continue reading · Line 30 · 50%',
+    );
   });
 });

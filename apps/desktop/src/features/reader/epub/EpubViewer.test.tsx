@@ -67,6 +67,8 @@ const engine = vi.hoisted(() => ({
   emitPointer: (() => undefined) as (down: boolean) => void,
   cursor: '',
   displayedFractions: [] as [number, number][],
+  /** The engine's text measurement; null leaves it out, as the old seam did. */
+  measure: null as ((index: number) => Promise<{ characters: number; cjk: number } | null>) | null,
   next: vi.fn(async () => undefined),
   previous: vi.fn(async () => undefined),
   setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
@@ -112,6 +114,9 @@ vi.mock('./epubEngine', () => ({
     spineIndexOf: (href: string) =>
       engine.chapters.findIndex((chapter) => chapter.href === href.split('#')[0]),
     spineHref: (index: number) => engine.chapters[index]?.href,
+    get measureChapter() {
+      return engine.measure ?? undefined;
+    },
     async displayChapterFraction(index: number, fraction: number) {
       engine.displayedFractions.push([index, fraction]);
       engine.displayed.push(engine.chapters[index]?.href);
@@ -224,7 +229,7 @@ function Harness({
       jumpRequest={state.jumpRequest?.documentId === documentId ? state.jumpRequest : null}
       onSelectionChange={state.setSelection}
       onJumpHandled={state.completeJump}
-      onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
+      onCursorChange={(anchor, progress) => state.reportCursor(documentId, anchor, progress)}
       preferences={state.readingPreferences}
       onPreferencesChange={(patch) => void state.updateReadingPreferences(patch)}
       bookmarks={bookmarks}
@@ -293,6 +298,7 @@ describe('EpubViewer', () => {
     engine.failCfi = null;
     engine.displayedFractions = [];
     engine.cursor = '';
+    engine.measure = null;
     window.localStorage.clear();
     engine.next.mockClear();
     engine.previous.mockClear();
@@ -486,6 +492,7 @@ describe('EpubViewer', () => {
     expect(update).toHaveBeenCalledWith(
       documentId,
       expect.objectContaining({ format: 'epub', cfiRange: FAR_CFI }),
+      undefined,
     );
     expect(engine.destroyed).toBe(1);
   });
@@ -1299,6 +1306,233 @@ describe('EpubViewer', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Close notice' }));
     expect(screen.queryByText(/could not be found/)).toBeNull();
+  });
+
+  describe('with chapters of uneven length (#52)', () => {
+    const twoChapters = engine.chapters;
+    /** Two short front-matter files, then chapters of 7,800 and 4,940 characters. */
+    const COUNTS = [130, 130, 7800, 4940].map((characters) => ({ characters, cjk: 0 }));
+    const ONE_CFI = 'epubcfi(/6/6!/4/2,/1:0,/1:5)';
+
+    beforeEach(() => {
+      engine.chapters = [
+        { href: 'OEBPS/title.xhtml', label: 'Title', text: 'Uneven', cfi: 'epubcfi(/6/2!/4/2)' },
+        { href: 'OEBPS/copyright.xhtml', label: 'Copyright', text: 'C', cfi: 'epubcfi(/6/4!/4/2)' },
+        { href: 'OEBPS/one.xhtml', label: 'One', text: 'One', cfi: ONE_CFI },
+        { href: 'OEBPS/two.xhtml', label: 'Two', text: 'Two', cfi: 'epubcfi(/6/8!/4/2)' },
+      ];
+      engine.toc = engine.chapters.map((chapter, index) => ({
+        id: `toc-${index}`,
+        label: chapter.label,
+        href: chapter.href,
+        children: [],
+      }));
+    });
+
+    afterEach(() => {
+      engine.chapters = twoChapters;
+      engine.isFixedLayout = false;
+    });
+
+    /** The first page of three in chapter One, by spine file 58% of the way in. */
+    const onFirstPageOfOne = () =>
+      act(() =>
+        engine.emitLocation({
+          cfi: ONE_CFI,
+          href: 'OEBPS/one.xhtml',
+          page: 1,
+          totalPages: 3,
+          chapterIndex: 2,
+          totalChapters: 4,
+          bookProgress: 58,
+          fraction: 0.5,
+          chapterStart: 0,
+          chapterEnd: 1 / 3,
+        }),
+      );
+
+    const tickPositions = () =>
+      screen.getAllByTestId('progress-scrubber-tick').map((tick) => parseFloat(tick.style.left));
+
+    it('weighs the percentage, scrubber, and ticks by text once the book is measured', async () => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const displayedWhenMeasuring: number[] = [];
+      engine.measure = vi.fn(async (index: number) => {
+        displayedWhenMeasuring.push(engine.displayed.length);
+        if (index === 3) await gate;
+        return COUNTS[index] ?? null;
+      });
+      const { backend, store, documentId } = await setup();
+      const update = vi.spyOn(backend, 'updateDocumentCursor');
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      onFirstPageOfOne();
+
+      // Until the pass finishes, every file is an equal share, as before.
+      const slider = screen.getByRole('slider', { name: 'Reading position' });
+      expect(slider).toHaveAttribute('aria-valuetext', 'Chapter 3 of 4, 58%');
+      expect(tickPositions()).toEqual([25, 50, 75]);
+      await waitFor(() => expect(engine.measure).toHaveBeenCalledTimes(4));
+      // Measuring starts behind the first page, never before it.
+      expect(Math.min(...displayedWhenMeasuring)).toBeGreaterThan(0);
+
+      release();
+      // (260 + 7,800 / 3) of 13,000 characters lie behind the end of this page.
+      await waitFor(() => expect(slider).toHaveAttribute('aria-valuetext', 'Chapter 3 of 4, 22%'));
+      expect(slider).toHaveAttribute('aria-valuenow', '2');
+      const ticks = tickPositions();
+      expect(ticks).toHaveLength(3);
+      expect(ticks[0]).toBeCloseTo(1);
+      expect(ticks[1]).toBeCloseTo(2);
+      expect(ticks[2]).toBeCloseTo(62);
+
+      // Halfway along the scrubber is 6,500 characters in: most of the way through One.
+      vi.spyOn(slider, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 200, 20));
+      fireEvent.pointerMove(slider, { clientX: 100 });
+      expect(screen.getByTestId('progress-scrubber-tooltip')).toHaveTextContent('One · 50%');
+      fireEvent.pointerDown(slider, { clientX: 100, button: 0, pointerId: 1 });
+      fireEvent.pointerUp(slider, { clientX: 100, button: 0, pointerId: 1 });
+      await waitFor(() => expect(engine.displayedFractions).toHaveLength(1));
+      const [index, within] = engine.displayedFractions[0] ?? [];
+      expect(index).toBe(2);
+      expect(within).toBeCloseTo(6240 / 7800);
+
+      // The saved position gains the measured percentage, for the Recent list.
+      await waitFor(() =>
+        expect(update).toHaveBeenLastCalledWith(
+          documentId,
+          { format: 'epub', cfiRange: ONE_CFI, chapterHref: 'OEBPS/one.xhtml' },
+          0.22,
+        ),
+      );
+      expect(store.getState().documents.find((doc) => doc.id === documentId)?.lastProgress).toBe(
+        0.22,
+      );
+    });
+
+    it('offers the minutes left in the chapter once the chapter is measured', async () => {
+      engine.measure = vi.fn(async (index: number) => COUNTS[index] ?? null);
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      onFirstPageOfOne();
+
+      const readout = screen.getByTestId('reader-footer-readout');
+      expect(readout).toHaveTextContent('2 pages left in chapter');
+      // Not offered before the text is measured: pages left goes straight to the page number.
+      fireEvent.click(readout);
+      expect(readout).toHaveAttribute('data-readout', 'position');
+      fireEvent.click(readout);
+      fireEvent.click(readout);
+      expect(readout).toHaveAttribute('data-readout', 'remaining');
+
+      await waitFor(() => expect(screen.getByRole('slider')).toHaveAttribute('aria-valuenow', '2'));
+      fireEvent.click(readout);
+      // Two thirds of 7,800 characters at 1,300 a minute.
+      expect(readout).toHaveAttribute('data-readout', 'minutes');
+      expect(readout).toHaveTextContent('About 4 minutes left in chapter');
+    });
+
+    it('stops measuring when the book closes', async () => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      engine.measure = vi.fn(async (index: number) => {
+        await gate;
+        return COUNTS[index] ?? null;
+      });
+      const { store, documentId } = await setup();
+      const view = render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      await waitFor(() => expect(engine.measure).toHaveBeenCalledOnce());
+      view.unmount();
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(engine.measure).toHaveBeenCalledOnce();
+    });
+
+    it('leaves a fixed-layout book in equal shares: a page per file', async () => {
+      engine.isFixedLayout = true;
+      engine.measure = vi.fn(async (index: number) => COUNTS[index] ?? null);
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      onFirstPageOfOne();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(engine.measure).not.toHaveBeenCalled();
+      expect(screen.getByRole('slider')).toHaveAttribute('aria-valuetext', 'Chapter 3 of 4, 58%');
+    });
+
+    it('reopens a measured book by text at once, without measuring it again', async () => {
+      engine.measure = vi.fn(async (index: number) => COUNTS[index] ?? null);
+      const { store, documentId } = await setup();
+      const first = render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      onFirstPageOfOne();
+      const slider = () => screen.getByRole('slider', { name: 'Reading position' });
+      await waitFor(() =>
+        expect(slider()).toHaveAttribute('aria-valuetext', 'Chapter 3 of 4, 22%'),
+      );
+      expect(engine.measure).toHaveBeenCalledTimes(4);
+      first.unmount();
+
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      onFirstPageOfOne();
+      // No by-file 58% first: the weights come from the last open.
+      expect(slider()).toHaveAttribute('aria-valuetext', 'Chapter 3 of 4, 22%');
+      expect(engine.measure).toHaveBeenCalledTimes(4);
+    });
+
+    it('measures again when the cached weights do not fit the book', async () => {
+      engine.measure = vi.fn(async (index: number) => COUNTS[index] ?? null);
+      const { store, documentId } = await setup();
+      const fileHash = store.getState().documents.find((doc) => doc.id === documentId)?.fileHash;
+      window.localStorage.setItem(
+        'synapseread.epubTextWeights.v1',
+        JSON.stringify({ [fileHash ?? '']: { at: 1, sections: [[5, 0]] } }),
+      );
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      await waitFor(() => expect(engine.measure).toHaveBeenCalledTimes(4));
+    });
+
+    it('keeps the saved percentage when the reader moves before measuring finishes', async () => {
+      engine.measure = vi.fn(() => new Promise<null>(() => undefined));
+      const { backend, store, documentId } = await setup();
+      store
+        .getState()
+        .reportCursor(
+          documentId,
+          { format: 'epub', cfiRange: ONE_CFI, chapterHref: 'OEBPS/one.xhtml' },
+          0.37,
+        );
+      const update = vi.spyOn(backend, 'updateDocumentCursor');
+      const view = render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      act(() =>
+        engine.emitLocation({
+          cfi: 'epubcfi(/6/8!/4/2)',
+          href: 'OEBPS/two.xhtml',
+          chapterIndex: 3,
+          totalChapters: 4,
+        }),
+      );
+      view.unmount();
+
+      expect(update).toHaveBeenLastCalledWith(
+        documentId,
+        expect.objectContaining({ cfiRange: 'epubcfi(/6/8!/4/2)' }),
+        0.37,
+      );
+      expect(store.getState().documents.find((doc) => doc.id === documentId)?.lastProgress).toBe(
+        0.37,
+      );
+    });
   });
 
   it('shows why a book could not open', async () => {
