@@ -1,7 +1,9 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useRef } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { commandState } from '@/features/commands/registry';
+import { useFocusPageOnActivate } from '@/features/reader/focusPage';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { DocumentViewerProps } from '@/types/domain';
 
@@ -11,8 +13,10 @@ import { ReaderPane } from './ReaderPane';
  * These tests are about the tab commands, so a small stand-in fulfils the viewer
  * contract; each real engine has its own tests.
  */
-function FakeViewer({ document }: DocumentViewerProps) {
-  return <div data-testid={`fake-viewer-${document.id}`} tabIndex={-1} />;
+function FakeViewer({ document, isActive }: DocumentViewerProps) {
+  const pageRef = useRef<HTMLDivElement>(null);
+  useFocusPageOnActivate(pageRef, isActive);
+  return <div ref={pageRef} data-testid={`fake-viewer-${document.id}`} tabIndex={-1} />;
 }
 
 vi.mock('@/features/reader/viewerRegistry', () => ({
@@ -63,6 +67,34 @@ describe('ReaderPane tab commands', () => {
 
     press('[', 'BracketLeft', { metaKey: true, shiftKey: true });
     expect(store().activeDocumentId).toBe(second);
+  });
+
+  it('gives the page the keyboard when a document opens', async () => {
+    await openDocuments(['a.txt']);
+    const documentId = useStudySyncStore.getState().activeDocumentId;
+    render(<ReaderPane />);
+    await waitFor(() => expect(screen.getByTestId(`fake-viewer-${documentId}`)).toHaveFocus());
+  });
+
+  it('keeps the arrow keys in the tablist while tabs are stepped through', async () => {
+    await openDocuments(['a.txt', 'b.txt', 'c.txt']);
+    const store = useStudySyncStore.getState;
+    const [first, second, third] = store().openDocumentIds;
+    render(<ReaderPane />);
+    expect(store().activeDocumentId).toBe(third);
+
+    const activeTab = screen.getByRole('tab', { name: 'c' });
+    activeTab.focus();
+    fireEvent.keyDown(activeTab, { key: 'ArrowRight' });
+    // Wrapping to the first tab keeps the keyboard in the tablist, not the page.
+    expect(store().activeDocumentId).toBe(first);
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'a' })).toHaveFocus());
+    expect(screen.getByTestId(`fake-viewer-${first}`)).not.toHaveFocus();
+
+    // A second arrow moves to the next tab, as the WAI-ARIA tabs pattern expects.
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'a' }), { key: 'ArrowRight' });
+    expect(store().activeDocumentId).toBe(second);
+    expect(screen.getByRole('tab', { name: 'b' })).toHaveFocus();
   });
 
   it('reopens the closed tab with Reopen Closed Tab, once', async () => {

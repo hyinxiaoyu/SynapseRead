@@ -37,6 +37,8 @@ export interface DeletedAnnotationSnapshot {
   annotation: Annotation;
 }
 
+/** Reopen Closed Tab keeps a bounded history: nobody reopens the 21st-last tab. */
+const MAX_CLOSED_TABS = 20;
 const CHILD_OFFSET_X = 320;
 const SIBLING_OFFSET_Y = 140;
 const ROOT_ORIGIN = { x: 40, y: 40 };
@@ -200,6 +202,11 @@ export function selectRecentDocuments(documents: readonly StudyDocument[]): Stud
     if (aTime !== bTime) return bTime.localeCompare(aTime);
     return b.id.localeCompare(a.id);
   });
+}
+
+/** The closed-tab stack without a tab that is open again. */
+function withoutClosed(closedDocumentIds: readonly string[], documentId: string): string[] {
+  return closedDocumentIds.filter((id) => id !== documentId);
 }
 
 /**
@@ -466,7 +473,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             openDocumentIds: state.openDocumentIds.includes(documentId)
               ? state.openDocumentIds
               : [...state.openDocumentIds, documentId],
-            closedDocumentIds: state.closedDocumentIds.filter((id) => id !== documentId),
+            closedDocumentIds: withoutClosed(state.closedDocumentIds, documentId),
             activeDocumentId: documentId,
             selection: state.activeDocumentId === documentId ? state.selection : null,
           }));
@@ -550,11 +557,11 @@ export function createStudySyncStore(backend: StudyBackend) {
             openDocumentIds,
             activeDocumentId,
             pdfLayouts,
-            // ⇧⌘T remembers the order tabs were closed in.
+            // ⇧⌘T remembers the order tabs were closed in, bounded for the session.
             closedDocumentIds: [
-              ...state.closedDocumentIds.filter((id) => id !== documentId),
+              ...withoutClosed(state.closedDocumentIds, documentId),
               documentId,
-            ],
+            ].slice(-MAX_CLOSED_TABS),
             selection: state.selection?.documentId === documentId ? null : state.selection,
             jumpRequest: state.jumpRequest?.documentId === documentId ? null : state.jumpRequest,
           };
@@ -751,7 +758,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           openDocumentIds: state.openDocumentIds.includes(annotation.documentId)
             ? state.openDocumentIds
             : [...state.openDocumentIds, annotation.documentId],
-          closedDocumentIds: state.closedDocumentIds.filter((id) => id !== annotation.documentId),
+          closedDocumentIds: withoutClosed(state.closedDocumentIds, annotation.documentId),
           activeDocumentId: annotation.documentId,
           selection: state.activeDocumentId === annotation.documentId ? state.selection : null,
           jumpRequest: {
@@ -783,7 +790,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           openDocumentIds: state.openDocumentIds.includes(annotation.documentId)
             ? state.openDocumentIds
             : [...state.openDocumentIds, annotation.documentId],
-          closedDocumentIds: state.closedDocumentIds.filter((id) => id !== annotation.documentId),
+          closedDocumentIds: withoutClosed(state.closedDocumentIds, annotation.documentId),
           activeDocumentId: annotation.documentId,
           selection: state.activeDocumentId === annotation.documentId ? state.selection : null,
           jumpRequest: {
@@ -952,7 +959,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           openDocumentIds: state.openDocumentIds.includes(bookmark.documentId)
             ? state.openDocumentIds
             : [...state.openDocumentIds, bookmark.documentId],
-          closedDocumentIds: state.closedDocumentIds.filter((id) => id !== bookmark.documentId),
+          closedDocumentIds: withoutClosed(state.closedDocumentIds, bookmark.documentId),
           activeDocumentId: bookmark.documentId,
           selection: state.activeDocumentId === bookmark.documentId ? state.selection : null,
           jumpRequest: {

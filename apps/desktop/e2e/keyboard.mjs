@@ -89,14 +89,23 @@ export async function keyboardFlow(page) {
       && document.activeElement.getAttribute('aria-disabled') !== 'true'`,
     'the sidebar to take the keyboard on the current chapter',
   );
-  const chapter = await page.evaluate('document.activeElement.getAttribute("aria-label")');
+  const chapter = await page.evaluate(`(() => {
+    const item = document.activeElement;
+    return {
+      label: item.getAttribute('aria-label'),
+      page: item.querySelector('[data-testid="toc-hint"]')?.textContent,
+    };
+  })()`);
   await page.press('Enter', 'Enter');
   // The current chapter's row always has a target, so Return jumps and returns focus.
   await page.waitFor(
     pageHasKeyboard(visiblePdfScroll),
-    `Return on “${chapter}” to give the keyboard back to the page`,
+    `Return on “${chapter.label}” to give the keyboard back to the page`,
   );
-  await page.waitFor(`${pdfPageField} !== '2'`, `Contents to jump from “${chapter}”`);
+  await page.waitFor(
+    `${pdfPageField} === ${JSON.stringify(chapter.page)}`,
+    `Contents to jump to the page “${chapter.label}” names`,
+  );
 
   // Esc leaves the sidebar with the page focused, and the sidebar stays open.
   await page.press('3', 'Digit3', ALT | META);
@@ -107,6 +116,23 @@ export async function keyboardFlow(page) {
   await page.press('Escape');
   await page.waitFor(pageHasKeyboard(visiblePdfScroll), 'Esc to return to the page');
   await page.waitFor(sidebarShown, 'Esc to leave the sidebar open');
+
+  // Esc out of the sidebar's filter field returns the keyboard to the page as well.
+  await page.press('3', 'Digit3', ALT | META);
+  await page.waitFor(
+    `document.activeElement?.getAttribute('role') === 'treeitem'`,
+    'the sidebar to take the keyboard once more',
+  );
+  await page.evaluate(`document.querySelector('[data-testid="navigator-filter"]')?.focus()`);
+  await page.waitFor(
+    `document.activeElement?.getAttribute('data-testid') === 'navigator-filter'`,
+    'the filter field to take the keyboard',
+  );
+  await page.press('Escape');
+  await page.waitFor(
+    pageHasKeyboard(visiblePdfScroll),
+    'Esc from the filter field to return to the page',
+  );
 
   // A digit picks the selection color while the popover is open (#50).
   await page.hideSidebar();

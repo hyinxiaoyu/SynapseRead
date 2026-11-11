@@ -62,11 +62,13 @@ export interface NavigatorController {
   dimReadChapters: boolean;
   setDimReadChapters: (value: boolean) => void;
   /**
-   * Changes when a command asked the sidebar to take the keyboard, so it can
-   * focus whichever item is current in the view it opened. It is reset when the
-   * sidebar is put away: an open from a click or from search takes no focus.
+   * A command asked the sidebar to take the keyboard when it opens. A new number
+   * for every request, so two requests in one React batch still reach the sidebar;
+   * the sidebar consumes it once, so a later remount (leaving focus mode) is quiet.
    */
-  focusRequest: number;
+  focusRequest: number | null;
+  /** Marks the request as used, after the sidebar has taken focus. */
+  consumeFocusRequest: () => void;
   /** Toggles the sidebar; a command that opens it also gives it the keyboard. */
   toggle: (options?: NavigatorFocusOptions) => void;
   hide: () => void;
@@ -109,7 +111,9 @@ export function useNavigator(
   );
   const [dimReadChapters, setDimState] = useState(() => readStored().dimReadChapters === true);
   const [deletions, setDeletions] = useState<readonly DeletedKind[]>([]);
-  const [focusRequest, setFocusRequest] = useState(0);
+  const [focusRequest, setFocusRequest] = useState<number | null>(null);
+  /** Every request gets a new id, which survives a batched consume-then-request. */
+  const focusRequestId = useRef(0);
   /** The last tab that was not Search, so clearing a query can put it back. */
   const lastTab = useRef<NavigatorTab>(tab);
 
@@ -138,15 +142,18 @@ export function useNavigator(
     (next: NavigatorTab, options?: NavigatorFocusOptions) => {
       setOpen(true);
       selectTab(next);
-      if (options?.focus) setFocusRequest((current) => current + 1);
+      if (options?.focus) {
+        focusRequestId.current += 1;
+        setFocusRequest(focusRequestId.current);
+      }
     },
     [selectTab],
   );
 
   const hide = useCallback(() => {
     setOpen(false);
-    // A request only means something while the sidebar is showing.
-    setFocusRequest(0);
+    // Nothing is showing to take the keyboard, so a request made just before goes away.
+    setFocusRequest(null);
   }, []);
 
   const toggle = useCallback(
@@ -156,10 +163,15 @@ export function useNavigator(
         return;
       }
       setOpen(true);
-      if (options?.focus) setFocusRequest((current) => current + 1);
+      if (options?.focus) {
+        focusRequestId.current += 1;
+        setFocusRequest(focusRequestId.current);
+      }
     },
     [open, hide],
   );
+
+  const consumeFocusRequest = useCallback(() => setFocusRequest(null), []);
 
   const setWidth = useCallback(
     (next: number) => {
@@ -206,6 +218,7 @@ export function useNavigator(
     dimReadChapters,
     setDimReadChapters,
     focusRequest,
+    consumeFocusRequest,
     toggle,
     hide,
     show,

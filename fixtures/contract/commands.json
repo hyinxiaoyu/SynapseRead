@@ -186,8 +186,16 @@
     "go.back": { "title": "Back", "shortcut": "CmdOrCtrl+[" },
     "go.forward": { "title": "Forward", "shortcut": "CmdOrCtrl+]" },
     "bookmarks.toggle": { "title": "Add Bookmark", "shortcut": "CmdOrCtrl+D" },
-    "window.nextTab": { "title": "Next Tab", "shortcut": "Shift+CmdOrCtrl+]" },
-    "window.previousTab": { "title": "Previous Tab", "shortcut": "Shift+CmdOrCtrl+[" },
+    "window.nextTab": {
+      "title": "Next Tab",
+      "shortcut": "Shift+CmdOrCtrl+]",
+      "aliases": ["Ctrl+Tab"]
+    },
+    "window.previousTab": {
+      "title": "Previous Tab",
+      "shortcut": "Shift+CmdOrCtrl+[",
+      "aliases": ["Ctrl+Shift+Tab"]
+    },
     "window.mindMap": { "title": "Show MindMap", "shortcut": "Shift+CmdOrCtrl+M" },
     "window.inspector": { "title": "Show Inspector" },
     "help.shortcuts": { "title": "Keyboard Shortcuts", "shortcut": "CmdOrCtrl+/" }

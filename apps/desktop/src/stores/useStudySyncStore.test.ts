@@ -421,6 +421,22 @@ describe('useStudySyncStore', () => {
       expect(state().activeDocumentId).toBe(first);
     });
 
+    it('keeps the closed-tab history bounded to the last 20 tabs', async () => {
+      const files = Array.from(
+        { length: 21 },
+        (_, index) => new File([`text-${index}`], `tab-${index}.txt`, { type: 'text/plain' }),
+      );
+      await state().dropFiles(files);
+      const ids = state().openDocumentIds;
+      expect(ids).toHaveLength(21);
+
+      for (const id of ids) state().closeDocument(id);
+      expect(state().closedDocumentIds).toHaveLength(20);
+      // The oldest close fell off; the newest is what ⇧⌘T reopens first.
+      expect(state().closedDocumentIds).not.toContain(ids[0]);
+      expect(state().closedDocumentIds.at(-1)).toBe(ids.at(-1));
+    });
+
     it('forgets a closed tab once Open or Recent brings it back', async () => {
       const first = await openDocument();
       await openDocument();

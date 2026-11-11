@@ -164,9 +164,47 @@ describe('ReaderNavigator', () => {
 
 describe('sidebar keyboard flow', () => {
   const CONTENTS = [{ id: 'ch1', label: 'Chapter 1', target: 1, children: [] }];
+  const TXT_ANCHOR = { format: 'txt' as const, startByteOffset: 0, endByteOffset: 4, lineIndex: 0 };
+  const activeSecondBookmark: BookmarksController = {
+    ...bookmarks,
+    bookmarks: [
+      {
+        id: 'b1',
+        documentId: 'doc',
+        anchor: TXT_ANCHOR,
+        label: 'First bookmark',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        id: 'b2',
+        documentId: 'doc',
+        anchor: { ...TXT_ANCHOR, startByteOffset: 40, endByteOffset: 44, lineIndex: 2 },
+        label: 'Second bookmark',
+        createdAt: '2026-01-02T00:00:00Z',
+      },
+    ],
+    isBookmarkActive: (candidate) => candidate.id === 'b2',
+  };
 
-  function KeyboardSidebar({ onReturnFocus }: { onReturnFocus: () => void }) {
-    const navigator = useNavigator('pdf', ['contents']);
+  /** Where the keyboard goes when a list is left: the stand-in page. */
+  const focusPage = (): boolean => {
+    screen.getByTestId('page-surface').focus();
+    return true;
+  };
+
+  function KeyboardSidebar({
+    hidden = false,
+    tabs = ['contents'],
+    bookmarksController = bookmarks,
+    onReturnFocus = focusPage,
+  }: {
+    /** Stands in for focus mode, which unmounts the sidebar without closing it. */
+    hidden?: boolean;
+    tabs?: ('contents' | 'bookmarks')[];
+    bookmarksController?: BookmarksController;
+    onReturnFocus?: (force?: boolean) => boolean;
+  }) {
+    const navigator = useNavigator('pdf', tabs);
     const search = useDocumentSearch({
       isActive: true,
       runSearch: () => [],
@@ -184,10 +222,10 @@ describe('sidebar keyboard flow', () => {
           focus sidebar
         </button>
         <div tabIndex={-1} data-testid="page-surface" />
-        {navigator.open && (
+        {navigator.open && !hidden && (
           <ReaderNavigator
             navigator={navigator}
-            bookmarks={bookmarks}
+            bookmarks={bookmarksController}
             annotations={annotations}
             search={search}
             groupSearchResults
@@ -205,8 +243,7 @@ describe('sidebar keyboard flow', () => {
   }
 
   it('focuses the current row when a shortcut opens it, and gives the keyboard back', () => {
-    const onReturnFocus = () => screen.getByTestId('page-surface').focus();
-    render(<KeyboardSidebar onReturnFocus={onReturnFocus} />);
+    render(<KeyboardSidebar />);
     fireEvent.click(screen.getByText('open sidebar'));
 
     const current = screen.getByRole('treeitem', { name: 'Chapter 1' });
@@ -225,31 +262,73 @@ describe('sidebar keyboard flow', () => {
     expect(screen.getByTestId('navigator-sidebar')).toBeInTheDocument();
   });
 
-  it('keeps focus where it is when the sidebar was not opened by a shortcut', () => {
-    render(<KeyboardSidebar onReturnFocus={vi.fn()} />);
-    fireEvent.click(screen.getByText('toggle'));
+  it('leaves a filter field with Esc, taking the keyboard from the field it abandons', () => {
+    render(<KeyboardSidebar />);
+    fireEvent.click(screen.getByText('open sidebar'));
+
+    const filter = screen.getByTestId('navigator-filter');
+    filter.focus();
+    expect(filter).toHaveFocus();
+
+    // The empty filter does not consume Esc itself, so the sidebar's layer must.
+    fireEvent.keyDown(filter, { key: 'Escape' });
+    expect(screen.getByTestId('page-surface')).toHaveFocus();
     expect(screen.getByTestId('navigator-sidebar')).toBeInTheDocument();
+  });
+
+  it('focuses a current bookmark even when it is not the first row', () => {
+    render(<KeyboardSidebar tabs={['bookmarks']} bookmarksController={activeSecondBookmark} />);
+    fireEvent.click(screen.getByText('open sidebar'));
+
+    const rows = screen.getAllByTestId('bookmark-jump-button');
+    expect(rows[0]).not.toHaveFocus();
+    expect(rows[1]).toHaveFocus();
+  });
+
+  it('does not repeat a focus request after the sidebar remounts', () => {
+    const view = render(<KeyboardSidebar />);
+    fireEvent.click(screen.getByText('open sidebar'));
+    const current = screen.getByRole('treeitem', { name: 'Chapter 1' });
+    expect(current).toHaveFocus();
+
+    // Esc hands the page back, then focus mode unmounts the sidebar unclosed.
+    fireEvent.keyDown(current, { key: 'Escape' });
+    expect(screen.getByTestId('page-surface')).toHaveFocus();
+    view.rerender(<KeyboardSidebar hidden />);
+    // The request was consumed by the first focus, so this remount stays quiet.
+    view.rerender(<KeyboardSidebar />);
+
+    expect(screen.getByTestId('page-surface')).toHaveFocus();
     expect(screen.getByRole('treeitem', { name: 'Chapter 1' })).not.toHaveFocus();
   });
 });
 
 describe('useNavigator focus requests', () => {
-  it('asks for the keyboard only when a shortcut does, and forgets it when hidden', () => {
+  it('asks for the keyboard only when a shortcut does, with a new id each time', () => {
     const { result } = renderHook(() => useNavigator('pdf', ['thumbnails', 'contents']));
-    expect(result.current.focusRequest).toBe(0);
+    expect(result.current.focusRequest).toBeNull();
 
     act(() => result.current.show('contents'));
-    expect(result.current.focusRequest).toBe(0);
+    expect(result.current.focusRequest).toBeNull();
 
     act(() => result.current.show('contents', { focus: true }));
-    expect(result.current.focusRequest).toBe(1);
+    const first = result.current.focusRequest;
+    expect(first).not.toBeNull();
 
-    // Putting the sidebar away retires the request: a later open from a click is quiet.
+    // The sidebar consumes the request when it takes the keyboard.
+    act(() => result.current.consumeFocusRequest());
+    expect(result.current.focusRequest).toBeNull();
+
+    // A request made in the same React batch as the consume still gets a new id.
+    act(() => result.current.show('contents', { focus: true }));
+    expect(result.current.focusRequest).not.toBe(first);
+
+    // Putting the sidebar away drops a request that was never used.
     act(() => result.current.hide());
-    expect(result.current.focusRequest).toBe(0);
+    expect(result.current.focusRequest).toBeNull();
 
     act(() => result.current.toggle({ focus: true }));
     expect(result.current.open).toBe(true);
-    expect(result.current.focusRequest).toBe(1);
+    expect(result.current.focusRequest).not.toBeNull();
   });
 });

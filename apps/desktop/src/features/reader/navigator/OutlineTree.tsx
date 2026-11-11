@@ -327,7 +327,10 @@ export function OutlineTree<T>({
                 </span>
                 <span className="line-clamp-2 min-w-0 flex-1 break-words">{node.label}</span>
                 {node.hint && (
-                  <span className="shrink-0 pl-2 text-[11px] font-normal text-muted-foreground tabular-nums">
+                  <span
+                    data-testid="toc-hint"
+                    className="shrink-0 pl-2 text-[11px] font-normal text-muted-foreground tabular-nums"
+                  >
                     {node.hint}
                   </span>
                 )}

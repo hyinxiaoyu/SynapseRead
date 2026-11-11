@@ -39,6 +39,8 @@ describe('color shortcut', () => {
       { key: '1', ctrlKey: true },
       { key: '1', altKey: true },
       { key: '1', shiftKey: true },
+      // Holding a digit must not create a second highlight.
+      { key: '1', repeat: true },
     ]) {
       const event = new KeyboardEvent('keydown', { ...init, cancelable: true });
       expect(dispatchColorShortcut(event)).toBe(false);

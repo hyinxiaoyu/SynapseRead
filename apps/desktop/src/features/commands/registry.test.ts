@@ -101,6 +101,18 @@ describe('command contract', () => {
     expect(mac('view.layoutScroll')).toBe('⌘3');
   });
 
+  it('offers Ctrl+Tab and Ctrl+Shift+Tab, the conventional tab switches off macOS', () => {
+    expect(commandBindings(commandDefinition('window.nextTab', 'other'))).toContain('Ctrl+Tab');
+    expect(commandBindings(commandDefinition('window.previousTab', 'other'))).toContain(
+      'Ctrl+Shift+Tab',
+    );
+    expect(shortcutMatches(key({ key: 'Tab', code: 'Tab', ctrlKey: true }), 'Ctrl+Tab')).toBe(true);
+    expect(
+      shortcutMatches(key({ key: 'Tab', code: 'Tab', ctrlKey: true, shiftKey: true }), 'Ctrl+Tab'),
+    ).toBe(false);
+    expect(formatKeyAlias('Ctrl+Tab', 'other')).toBe('Ctrl+Tab');
+  });
+
   it('names keyboard-only aliases as a reader would say them', () => {
     expect(formatKeyAlias('Space', 'mac')).toBe('Space');
     expect(formatKeyAlias('PageUp', 'mac')).toBe('Page Up');

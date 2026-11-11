@@ -23,7 +23,8 @@ let listenerInstalled = false;
  * Modified keys belong to commands, and a field being typed in keeps its digits.
  */
 export function dispatchColorShortcut(event: KeyboardEvent): boolean {
-  if (event.defaultPrevented || event.isComposing) return false;
+  // Auto-repeat would make a second highlight before the first popover closes.
+  if (event.defaultPrevented || event.isComposing || event.repeat) return false;
   if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return false;
   if (isEditableShortcutTarget(event.target)) return false;
   const color = colorForDigit(event.key);

@@ -10,7 +10,7 @@ import {
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
-import { focusReadingPage } from '@/features/reader/focusPage';
+import { useFocusPageOnActivate } from '@/features/reader/focusPage';
 import {
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
@@ -287,14 +287,9 @@ export function EpubViewer({
     columnsRef.current = layout.columns;
   });
   const navigator = useNavigator('epub', ['contents', 'notes', 'bookmarks']);
-  const focusPage = useCallback(() => {
-    focusReadingPage(hostRef.current);
-  }, []);
   // Opening the book, or activating its tab, hands the keyboard to the page so
-  // Page Down and the arrows work at once. A text field keeps focus (#50).
-  useEffect(() => {
-    if (isActive) focusPage();
-  }, [isActive, focusPage]);
+  // Page Down and the arrows work at once. Text entry and the tablist keep focus (#50).
+  const focusPage = useFocusPageOnActivate(hostRef, isActive);
 
   const updatePreferences = (patch: Partial<ReadingPreferences>) => {
     setLocalPreferences((prev) => ({ ...(preferences ?? prev), ...patch }));
@@ -1219,7 +1214,7 @@ export function EpubViewer({
               pressed={showSidebar}
               testId="sidebar-toggle"
               disabled={!handle || chromeHidden}
-              onClick={navigator.toggle}
+              onClick={() => navigator.toggle()}
             />
             <SegmentedControl
               label="Reading mode"

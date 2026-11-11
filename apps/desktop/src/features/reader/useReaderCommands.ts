@@ -72,8 +72,8 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   ready?: boolean;
   /** Focus mode: the sidebar stays put away. */
   chromeHidden?: boolean;
-  /** Gives the keyboard back to the reading page. */
-  focusPage: () => void;
+  /** Gives the keyboard back to the reading page; forcing takes it from a field. */
+  focusPage: (force?: boolean) => boolean;
   search: DocumentSearchController<TMatch>;
   navigator: NavigatorController;
   bookmarks: BookmarksController;
@@ -140,9 +140,10 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
     },
     'view.toggleSidebar': {
       run: () => {
-        // Opening hands the sidebar the keyboard; closing gives it back to the page.
+        // Opening hands the sidebar the keyboard; closing gives it back to the page,
+        // taking it from the filter that is about to be unmounted.
         navigator.toggle({ focus: !navigator.open });
-        if (navigator.open) focusPage();
+        if (navigator.open) focusPage(true);
       },
       enabled: sidebarReady,
       title: sidebarShown ? 'Hide Sidebar' : 'Show Sidebar',
@@ -150,7 +151,8 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
     'view.hideSidebar': {
       run: () => {
         navigator.hide();
-        focusPage();
+        // The same as Toggle Sidebar: the sidebar's filter must not leave focus on <body>.
+        focusPage(true);
       },
       enabled: sidebarShown,
     },
