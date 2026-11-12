@@ -104,3 +104,5 @@ for task IDs, acceptance evidence, and measurements.
   registered in `DecoderRegistry`, with no pipeline changes.
 - Markdown reader using the reserved `MarkdownAnchor`.
 - Windows release: `tauri.conf.json` bundle targets, WebView2 checks, signing.
+
+<!-- Temporary branch: checking whether the macOS e2e flakes on main. -->
