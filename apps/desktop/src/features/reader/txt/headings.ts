@@ -115,6 +115,115 @@ const keyOf = (...parts: string[]) =>
     .replace(/[\s-]+/gu, ' ')
     .trim();
 
+/** One name per kind, so a contents' `Chap. 1` and `Vol. 2` match `Chapter 1` and `Volume 2`. */
+const HEADING_KINDS: Record<string, string> = { 'chap.': 'chapter', 'vol.': 'volume', 節: '节' };
+
+const ENGLISH_NUMBER_VALUES = new Map<string, number>([
+  ...'one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'
+    .split(' ')
+    .map((word, index) => [word, index + 1] as const),
+  ...'twenty thirty forty fifty sixty seventy eighty ninety'
+    .split(' ')
+    .map((word, index) => [word, (index + 2) * 10] as const),
+  ...'first second third fourth fifth sixth seventh eighth ninth tenth'
+    .split(' ')
+    .map((word, index) => [word, index + 1] as const),
+]);
+const ROMAN_VALUES: Record<string, number> = { i: 1, v: 5, x: 10, l: 50, c: 100, d: 500, m: 1000 };
+const CHINESE_DIGITS: Record<string, number> = {
+  零: 0,
+  〇: 0,
+  一: 1,
+  壹: 1,
+  二: 2,
+  两: 2,
+  贰: 2,
+  三: 3,
+  叁: 3,
+  四: 4,
+  肆: 4,
+  五: 5,
+  伍: 5,
+  六: 6,
+  陆: 6,
+  七: 7,
+  柒: 7,
+  八: 8,
+  捌: 8,
+  九: 9,
+  玖: 9,
+};
+const CHINESE_UNITS: Record<string, number> = {
+  十: 10,
+  拾: 10,
+  百: 100,
+  佰: 100,
+  千: 1000,
+  仟: 1000,
+};
+
+/** `二十一` is 21, `一百零八` is 108, `十二` is 12. */
+function chineseNumberValue(text: string): number | null {
+  let total = 0;
+  let section = 0;
+  let digit: number | null = null;
+  for (const char of text) {
+    if (char in CHINESE_DIGITS) {
+      digit = CHINESE_DIGITS[char] as number;
+    } else if (char in CHINESE_UNITS) {
+      section += (digit ?? 1) * (CHINESE_UNITS[char] as number);
+      digit = null;
+    } else if (char === '万') {
+      total += (section + (digit ?? 0)) * 10_000;
+      section = 0;
+      digit = null;
+    } else {
+      return null;
+    }
+  }
+  return total + section + (digit ?? 0);
+}
+
+/**
+ * What a heading's number is worth, however it is written: `12`, `XII`, `xii`,
+ * `twelve`, `twenty-one`, `first`, `十二`. Null for one that is not a count (`Last`).
+ */
+export function headingNumberValue(numeral: string): number | null {
+  const text = numeral.normalize('NFKC').trim().toLowerCase();
+  if (/^\d+$/u.test(text)) return Number(text);
+  if (/^[ivxlcdm]+$/u.test(text)) {
+    let value = 0;
+    for (const [index, char] of [...text].entries()) {
+      const current = ROMAN_VALUES[char] as number;
+      const next = ROMAN_VALUES[text[index + 1] ?? ''] ?? 0;
+      value += current < next ? -current : current;
+    }
+    return value;
+  }
+  const words = text.split(/[\s-]+/u);
+  if (words.every((word) => ENGLISH_NUMBER_VALUES.has(word) || word === 'hundred')) {
+    let value = 0;
+    for (const word of words) {
+      value =
+        word === 'hundred'
+          ? Math.max(value, 1) * 100
+          : value + (ENGLISH_NUMBER_VALUES.get(word) as number);
+    }
+    return value;
+  }
+  return chineseNumberValue(text);
+}
+
+/** `chapter 1` for `Chapter 1. Arrival`, `CHAPTER I`, `Chap. One`; `第 1 章` for `第一章`. */
+const numberedKey = (kind: string, numeral: string, chinese = false) => {
+  const word = kind.normalize('NFKC').toLowerCase();
+  const canonical = HEADING_KINDS[word] ?? word;
+  const value = headingNumberValue(numeral);
+  return chinese
+    ? `第 ${value ?? keyOf(numeral)} ${canonical}`
+    : `${canonical} ${value ?? keyOf(numeral)}`;
+};
+
 /** A numbered or named heading, or null. Independent of the lines around it. */
 export function matchNumberedHeading(
   text: string,
@@ -129,7 +238,7 @@ export function matchNumberedHeading(
     return {
       level: CHINESE_PART_MARKERS.has(chinese[2] ?? '') ? 0 : 1,
       label: tidy(line),
-      key: keyOf((chinese[1] as string).replace(/\s+/gu, '')),
+      key: numberedKey(chinese[2] as string, (chinese[1] as string).slice(1, -1), true),
     };
   }
   const chineseNamed = CHINESE_NAMED.exec(line);
@@ -140,7 +249,11 @@ export function matchNumberedHeading(
   const english = ENGLISH_NUMBERED.exec(line);
   if (english) {
     const word = english[1] ?? english[2] ?? '';
-    return { level: english[1] ? 0 : 1, label: tidy(line), key: keyOf(word, english[3] ?? '') };
+    return {
+      level: english[1] ? 0 : 1,
+      label: tidy(line),
+      key: numberedKey(word, english[3] ?? ''),
+    };
   }
   const named = ENGLISH_NAMED.exec(line);
   if (named && AFTER_NAME.test(line.slice(named[0].length))) {

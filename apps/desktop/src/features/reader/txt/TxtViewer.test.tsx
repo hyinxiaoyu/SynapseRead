@@ -1238,7 +1238,8 @@ describe('TxtViewer', () => {
       await waitFor(() => expect(scroller().scrollTop).toBe(0));
     });
 
-    it('steps back from the end even when the last chapters fit on one page', async () => {
+    /** A file whose last two chapters share the last page, laid out with a clamped offset. */
+    const openShortEnding = async () => {
       const short = (chapter: string) =>
         Array.from({ length: 3 }, (_, line) => `${chapter} line ${line + 1}.`);
       const tail = [
@@ -1266,6 +1267,11 @@ describe('TxtViewer', () => {
       await segmentWith('One prose line 1 goes on.');
       await waitFor(() => expect(screen.getAllByTestId('progress-scrubber-tick')).toHaveLength(3));
 
+      return { tail, maxTop };
+    };
+
+    it('steps back from the end even when the last chapters fit on one page', async () => {
+      const { tail, maxTop } = await openShortEnding();
       // At the very end the last chapter is the one being read, though it never reaches the top.
       scrollTo(maxTop);
       await waitFor(() => expect(subtitle()).toBe('Afterword'));
@@ -1289,6 +1295,36 @@ describe('TxtViewer', () => {
       scrollTo(maxTop - 1);
       scrollTo(maxTop);
       await waitFor(() => expect(subtitle()).toBe('Afterword'));
+    });
+
+    it("lets go of a jump's row on Back and Forward, even where the offset cannot move", async () => {
+      const { maxTop } = await openShortEnding();
+      scrollTo(maxTop);
+      const topLine = Math.floor(maxTop / ROW_PX) + 1;
+      await waitFor(() => expect(subtitle()).toBe('Afterword'));
+      const slider = () => screen.getByRole('slider').getAttribute('aria-valuetext') ?? '';
+      expect(slider()).toMatch(new RegExp(`^Line ${topLine} of`));
+
+      // The Epilogue is on this page: the jump pins it, though nothing scrolls.
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Epilogue' }));
+      await waitFor(() => expect(subtitle()).toBe('Epilogue'));
+      expect(screen.getByTestId('reader-back-chip')).toHaveTextContent(`Back to line ${topLine}`);
+
+      // Back (the chip sits outside the page, so no press on the page lets go first).
+      fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+      await waitFor(() => expect(subtitle()).toBe('Afterword'));
+      expect(slider()).toMatch(new RegExp(`^Line ${topLine} of`));
+      expect(scroller().scrollTop).toBe(maxTop);
+
+      // Forward returns to the same offset; it does not leave a row pinned either.
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Epilogue' }));
+      await waitFor(() => expect(subtitle()).toBe('Epilogue'));
+      fireEvent.keyDown(window, { key: '[', code: 'BracketLeft', ctrlKey: true });
+      await waitFor(() => expect(subtitle()).toBe('Afterword'));
+      fireEvent.keyDown(window, { key: ']', code: 'BracketRight', ctrlKey: true });
+      expect(slider()).toMatch(new RegExp(`^Line ${topLine} of`));
+      expect(subtitle()).toBe('Afterword');
     });
 
     it('offers no way back from a jump to where the reader already is', async () => {

@@ -468,8 +468,8 @@ export function TxtViewer({
     reportCursorRef.current = reportCursor;
   }, [reportCursor]);
 
-  const onScroll = (event: UIEvent<HTMLDivElement>) => {
-    const scroller = event.currentTarget;
+  /** Reads where the reader is from the scroller: a jump's row while pinned, else the top row. */
+  const readPosition = (scroller: HTMLElement) => {
     lastScrollTop.current = scroller.scrollTop;
     const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
     const pinned = pinnedRow.current;
@@ -487,6 +487,23 @@ export function TxtViewer({
           scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2,
       );
     }
+  };
+
+  /**
+   * Moves the view somewhere other than a jump's row (Back, Forward, a jump from the
+   * canvas), letting go of any pinned row. A move to where the offset already is (as
+   * at the clamped end of the file) fires no scroll event, so read the position here.
+   */
+  const scrollUnpinned = (move: () => void) => {
+    pinnedRow.current = null;
+    const scroller = scrollRef.current;
+    const before = scroller?.scrollTop;
+    move();
+    if (scroller && scroller.scrollTop === before) readPosition(scroller);
+  };
+
+  const onScroll = (event: UIEvent<HTMLDivElement>) => {
+    readPosition(event.currentTarget);
     if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
     pendingCursor.current = window.setTimeout(() => {
       pendingCursor.current = null;
@@ -777,7 +794,10 @@ export function TxtViewer({
       const previousTop = scrollRef.current?.scrollTop ?? lastScrollTop.current;
       pushHistory(previousTop);
     }
-    virtualizer.scrollToIndex(jumpRow, { align: 'center' });
+    scrollUnpinned(() => virtualizer.scrollToIndex(jumpRow, { align: 'center' }));
+    // `scrollUnpinned` reads only refs and the virtualizer; re-running on its identity
+    // would repeat the jump on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pushHistory, jumpNonce, jumpRow, virtualizer]);
 
   const handleReturnBack = () => {
@@ -786,13 +806,17 @@ export function TxtViewer({
     // Through the virtualizer, not the element: a search jump leaves an unfinished
     // `scrollToIndex` behind, and a raw `scrollTop` write would let its reconcile loop
     // snap the view back to the match the reader is returning from (#41).
-    if (targetTop !== undefined) virtualizer.scrollToOffset(targetTop, { align: 'start' });
+    if (targetTop !== undefined) {
+      scrollUnpinned(() => virtualizer.scrollToOffset(targetTop, { align: 'start' }));
+    }
   };
 
   const handleForward = () => {
     backChip.dismiss();
     const targetTop = history.goForward(scrollRef.current?.scrollTop ?? lastScrollTop.current);
-    if (targetTop !== undefined) virtualizer.scrollToOffset(targetTop, { align: 'start' });
+    if (targetTop !== undefined) {
+      scrollUnpinned(() => virtualizer.scrollToOffset(targetTop, { align: 'start' }));
+    }
   };
 
   // Entering focus mode puts the panels away; leaving it does not reopen them.

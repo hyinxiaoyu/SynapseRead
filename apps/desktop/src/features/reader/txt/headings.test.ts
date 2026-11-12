@@ -3,7 +3,12 @@ import { describe, expect, it } from 'vitest';
 import { streamUtf8Lossy } from '@/lib/backend/memoryTextStream';
 import { documentFixture } from '@/test/fixtures';
 
-import { HeadingScanner, isCapsHeading, matchNumberedHeading } from './headings';
+import {
+  HeadingScanner,
+  headingNumberValue,
+  isCapsHeading,
+  matchNumberedHeading,
+} from './headings';
 import { MAX_ROW_UNITS, TxtTextModel } from './textModel';
 
 const encoder = new TextEncoder();
@@ -39,7 +44,6 @@ describe('matchNumberedHeading', () => {
     ['CHAP. IV.', 1],
     ['Part II', 0],
     ['PART ONE', 0],
-    ['Book the First', null],
     ['Book 2', 0],
     ['Volume III: The Return', 0],
     ['Prologue', 1],
@@ -99,6 +103,52 @@ describe('matchNumberedHeading', () => {
     expect(matchNumberedHeading('Chapter 1. Loomings')?.key).toBe('chapter 1');
     expect(matchNumberedHeading('CHAPTER I')?.key).toBe(matchNumberedHeading('Chapter I: X')?.key);
     expect(matchNumberedHeading('第１２章　归来')?.key).toBe(matchNumberedHeading('第12章')?.key);
+  });
+
+  it.each([
+    ['12', 12],
+    ['１２', 12],
+    ['XII', 12],
+    ['xiv', 14],
+    ['MCMXC', 1990],
+    ['One', 1],
+    ['twenty-one', 21],
+    ['Twenty One', 21],
+    ['one hundred', 100],
+    ['First', 1],
+    ['十', 10],
+    ['十二', 12],
+    ['二十一', 21],
+    ['一百零八', 108],
+    ['两千', 2000],
+    ['一万二千', 12000],
+    ['叁拾', 30],
+    ['Last', null],
+  ])('the numeral %j is %j', (numeral, value) => {
+    expect(headingNumberValue(numeral)).toBe(value);
+  });
+
+  it.each([
+    ['Chapter 1. Arrival', 'CHAPTER I'],
+    ['Chapter One', 'Chapter 1'],
+    ['Chap. 1', 'Chapter 1'],
+    ['CHAP. IV.', 'Chapter Four'],
+    ['Vol. 1', 'Volume I'],
+    ['Part 1', 'PART ONE'],
+    ['第1章 少年', '第一章 少年'],
+    ['第１２回', '第十二回'],
+    ['第3節', '第三节'],
+  ])('%j names the same heading as %j', (contents, body) => {
+    expect(matchNumberedHeading(contents)?.key).toBe(matchNumberedHeading(body)?.key);
+  });
+
+  it('tells apart kinds and numbers that differ', () => {
+    const key = (line: string) => matchNumberedHeading(line)?.key;
+    expect(key('Chapter 1')).not.toBe(key('Chapter 2'));
+    expect(key('Part 1')).not.toBe(key('Chapter 1'));
+    expect(key('Book 1')).not.toBe(key('Volume 1'));
+    expect(key('第一章')).not.toBe(key('第一卷'));
+    expect(key('Chapter Last')).not.toBe(key('Chapter 1'));
   });
 
   it('collapses inner whitespace, including the ideographic space', () => {
@@ -180,6 +230,24 @@ describe('HeadingScanner', () => {
     ]);
     // A contents at the very end of the file, settled by `finish()`, is dropped too.
     expect(scan([prose, '', 'Chapter 1', 'Chapter 2', 'Chapter 3'])).toEqual([]);
+  });
+
+  it('matches contents entries to the text in any numeral or abbreviation', () => {
+    expect(
+      scan(['Chapter 1. Arrival', 'Chapter 2. The Lighthouse', '', 'CHAPTER I', '', prose]),
+    ).toEqual([{ row: 3, label: 'CHAPTER I', level: 1, joined: false }]);
+    expect(
+      scan(['Part 1', 'Chapter 1', 'Chapter 2', '', 'PART ONE', '', 'CHAPTER I', prose]),
+    ).toEqual([
+      { row: 4, label: 'PART ONE', level: 0, joined: false },
+      { row: 6, label: 'CHAPTER I', level: 1, joined: true },
+    ]);
+    expect(scan(['Chap. 1', 'Chap. 2', '', 'Chapter One', prose])).toEqual([
+      { row: 3, label: 'Chapter One', level: 1, joined: false },
+    ]);
+    expect(scan(['第1章 少年', '第2章 远行', '', '第一章 少年', prose])).toEqual([
+      { row: 3, label: '第一章 少年', level: 1, joined: false },
+    ]);
   });
 
   it('keeps a first chapter that a contents of parts did not list, outside any part', () => {
