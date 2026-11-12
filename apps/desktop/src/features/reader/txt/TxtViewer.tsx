@@ -261,8 +261,9 @@ export function TxtViewer({
   const preferencesPanel = useAppearancePanel();
   const theme = useResolvedReadingTheme(effectivePreferences.theme);
   const fontFamily = fontStack(effectivePreferences.fontFamily) ?? DEFAULT_SERIF_STACK;
+  // Measure the base (100%) advance so font size scales glyphs without changing page width.
   const page = singleColumnPage(
-    measureCharWidth(fontFamily, (rootFontSizePx() * effectivePreferences.fontSize) / 100),
+    measureCharWidth(fontFamily, rootFontSizePx()),
     effectivePreferences.margins,
     effectivePreferences.pageWidth,
   );

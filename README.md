@@ -22,11 +22,12 @@ from.
 - In-document search (`Cmd/Ctrl+F`) across unrendered PDF pages, EPUB chapters, and
   TXT rows, with return-to-previous-location history
 - An "Aa" appearance popover for EPUB and TXT: `auto`/`light`/`sepia`/`dark` themes that
-  tint the whole reader window (`auto` follows the system), named reading faces, text
+  tint the whole reader window (`auto` follows the system), named reading faces, font
   size (`Cmd/Ctrl +`/`-`/`0`), line spacing, margins, and justification. Page width
-  offers Standard (75 characters per line), Wide (110), and Full width (available
-  pane width), saved across restarts independently of margins. EPUB supports
-  `spread`/`paged`/`scroll` modes, with two pages only when each fits at least 45 characters
+  offers Standard (75 characters per line at 100%), Wide (110), and Full width
+  (available pane width), saved across restarts independently of font size and margins.
+  EPUB supports `spread`/`paged`/`scroll` modes, with two pages only when each fits at
+  least 45 characters
 - Jump from any card, bookmark, annotation, or search result back to its source, with
   a pulse highlight
 - Draggable nodes, parent-child nesting, and cross-link edges, with layout saved

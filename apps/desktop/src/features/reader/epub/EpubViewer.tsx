@@ -303,9 +303,10 @@ export function EpubViewer({
   const [currentHref, setCurrentHref] = useState<string | null>(null);
   const [currentCfi, setCurrentCfi] = useState<string | null>(null);
   const [chapterFontFamily, setChapterFontFamily] = useState<string | null>(null);
+  // Measure the base (100%) advance so font size scales glyphs without changing page width.
   const charWidth = measureCharWidth(
     fontStack(effectivePreferences.fontFamily) ?? (chapterFontFamily || DEFAULT_SERIF_STACK),
-    (rootFontSizePx() * EPUB_BASE_FONT_REM * effectivePreferences.fontSize) / 100,
+    rootFontSizePx() * EPUB_BASE_FONT_REM,
   );
   const layout = computeReadingLayout({
     availableWidth,

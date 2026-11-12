@@ -388,16 +388,57 @@ export async function txtFlow(page) {
   }
   const documentWidth = `${visibleTxtViewer}.querySelector('[role="document"]').getBoundingClientRect().width`;
   const standardWidth = await page.evaluate(documentWidth);
+  const txtFontPx = `parseFloat(getComputedStyle(${visibleTxtViewer}.querySelector('[role="document"]')).fontSize)`;
+  const baseTxtFontPx = await page.evaluate(txtFontPx);
   await page.clickButton('Reading appearance');
+  for (let step = 0; step < 6; step += 1) {
+    await page.clickButton('Increase font size');
+  }
+  await page.waitFor(
+    `document.querySelector('[data-testid="reading-font-size"]')?.textContent === '160%'`,
+    'TXT font size reaches 160%',
+  );
+  await page.waitFor(
+    `Math.abs(${txtFontPx} - ${baseTxtFontPx * 1.6}) < 0.5`,
+    'TXT rendered font size scales to 160%',
+  );
+  assert(
+    Math.abs((await page.evaluate(documentWidth)) - standardWidth) < 2,
+    'increasing TXT font size keeps Standard page width fixed instead of expanding to full width',
+  );
   await page.clickButton('Wide');
   await page.waitFor(
     `${documentWidth} > ${standardWidth} + 100`,
     'TXT Wide expands the text column',
   );
+  assert(
+    Math.abs((await page.evaluate(txtFontPx)) - baseTxtFontPx * 1.6) < 0.5,
+    'changing TXT page width to Wide preserves rendered font size',
+  );
+  await page.clickButton('Standard');
+  await page.waitFor(
+    `Math.abs(${documentWidth} - ${standardWidth}) < 2`,
+    'TXT Standard returns to the standard column cap at 160% font size',
+  );
+  assert(
+    Math.abs((await page.evaluate(txtFontPx)) - baseTxtFontPx * 1.6) < 0.5,
+    'changing TXT page width back to Standard preserves rendered font size',
+  );
   await page.clickButton('Full width');
   await page.waitFor(
     `${documentWidth} >= ${visibleScroller}.clientWidth - 1`,
     'TXT Full width fills the reader pane',
+  );
+  assert(
+    Math.abs((await page.evaluate(txtFontPx)) - baseTxtFontPx * 1.6) < 0.5,
+    'changing TXT page width to Full width preserves rendered font size',
+  );
+  for (let step = 0; step < 6; step += 1) {
+    await page.clickButton('Decrease font size');
+  }
+  await page.waitFor(
+    `document.querySelector('[data-testid="reading-font-size"]')?.textContent === '100%'`,
+    'TXT font size returns to 100%',
   );
   await page.press('Escape');
   // Reuse the same saved preference after switching documents.

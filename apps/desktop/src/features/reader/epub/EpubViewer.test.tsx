@@ -687,6 +687,46 @@ describe('EpubViewer', () => {
     expect(vi.mocked(openEpubDocument).mock.lastCall?.[4]).toBe(2);
   });
 
+  it('keeps font size and page width independent across adjustments', async () => {
+    pageAreaWidth = 1440;
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    const host = screen.getByTestId('epub-host');
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    expect(host.style.width).toBe(ONE_PAGE_WIDTH);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+    // Increase font size to 160%, then switch page width across Wide, Full width, and Standard.
+    for (let step = 0; step < 6; step += 1) {
+      fireEvent.click(screen.getByRole('button', { name: 'Increase font size' }));
+    }
+    expect(screen.getByTestId('reading-font-size')).toHaveTextContent('160%');
+    expect(host.style.width).toBe(ONE_PAGE_WIDTH);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Wide' }));
+    expect(screen.getByTestId('reading-font-size')).toHaveTextContent('160%');
+    expect(host.style.width).toBe(`${110 * 8.4 + 64}px`);
+
+    fireEvent.click(screen.getByRole('radio', { name: 'Standard' }));
+    expect(screen.getByTestId('reading-font-size')).toHaveTextContent('160%');
+    expect(host.style.width).toBe(ONE_PAGE_WIDTH);
+
+    // Increasing font size all the way to 200% in Standard width never expands to full width.
+    for (let step = 0; step < 4; step += 1) {
+      fireEvent.click(screen.getByRole('button', { name: 'Increase font size' }));
+    }
+    expect(screen.getByTestId('reading-font-size')).toHaveTextContent('200%');
+    expect(host.style.width).toBe(ONE_PAGE_WIDTH);
+    await waitFor(() =>
+      expect(store.getState().readingPreferences).toMatchObject({
+        fontSize: 200,
+        pageWidth: 'standard',
+      }),
+    );
+  });
+
   it('settles the Auto theme against the system appearance', async () => {
     const listeners = new Set<() => void>();
     let dark = true;

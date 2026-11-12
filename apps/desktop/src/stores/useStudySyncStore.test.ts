@@ -631,6 +631,20 @@ describe('useStudySyncStore', () => {
         expect(state().readingPreferences.pageTransition).toBe(pageTransition);
         expect((await backend.getReadingPreferences()).pageTransition).toBe(pageTransition);
       }
+
+      // Rapid consecutive updates (e.g. font size then page width) serialize cleanly
+      // so an earlier in-flight write never resets a later choice.
+      const firstWrite = state().updateReadingPreferences({ fontSize: 170 });
+      const secondWrite = state().updateReadingPreferences({ pageWidth: 'standard' });
+      await Promise.all([firstWrite, secondWrite]);
+      expect(state().readingPreferences).toMatchObject({
+        fontSize: 170,
+        pageWidth: 'standard',
+      });
+      expect(await backend.getReadingPreferences()).toMatchObject({
+        fontSize: 170,
+        pageWidth: 'standard',
+      });
     });
   });
 

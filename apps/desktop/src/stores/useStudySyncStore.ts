@@ -241,6 +241,8 @@ export function selectReopenableDocumentId(
  */
 export function createStudySyncStore(backend: StudyBackend) {
   let jumpNonce = 0;
+  let preferencesSaveSeq = 0;
+  let preferencesWriteChain: Promise<void> = Promise.resolve();
 
   return create<StudySyncState>((set, get) => {
     /** Runs a backend write, routing failures to the error banner. */
@@ -869,14 +871,25 @@ export function createStudySyncStore(backend: StudyBackend) {
       async updateReadingPreferences(patch) {
         const previous = get().readingPreferences;
         const next: ReadingPreferences = { ...previous, ...patch };
+        const seq = ++preferencesSaveSeq;
         set({ readingPreferences: next });
-        await guarded(
-          async () => {
-            const saved = await backend.saveReadingPreferences(next);
-            set({ readingPreferences: saved });
-          },
-          () => set({ readingPreferences: previous }),
+        const run = preferencesWriteChain.then(() =>
+          guarded(
+            async () => {
+              const saved = await backend.saveReadingPreferences(next);
+              if (seq === preferencesSaveSeq) {
+                set({ readingPreferences: saved });
+              }
+            },
+            () => {
+              if (seq === preferencesSaveSeq) {
+                set({ readingPreferences: previous });
+              }
+            },
+          ),
         );
+        preferencesWriteChain = run.catch(() => undefined);
+        await run;
       },
 
       async loadPdfLayout(documentId) {
