@@ -46,6 +46,7 @@ import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import { useFocusPageOnActivate } from '@/features/reader/focusPage';
+import { useGoToField } from '@/features/reader/GoToField';
 import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import {
   buildSearchSnippet,
@@ -1041,7 +1042,8 @@ function PdfPages({
   const markup = useMarkupToolbar();
   const pageContentRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
-  const pageInputRef = useRef<HTMLInputElement>(null);
+  // Focuses after the commit that reveals a hidden toolbar, as the other readers' box.
+  const { inputRef: pageInputRef, focus: goToPage } = useGoToField();
   const pendingZoomTarget = useRef<PdfReturnLocation | null>(null);
   /**
    * A pinch's anchor: the point of a page that was under the pointer, as fractions
@@ -1657,6 +1659,8 @@ function PdfPages({
     // The label is what the box shows, even when a physical page was typed.
     setPageInput(pageLabelOf(pageLabels, target));
     navigateToPage(target);
+    // As the Go To box in the other readers: the page takes the keyboard back.
+    focusPage(true);
   };
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
@@ -2103,13 +2107,6 @@ function PdfPages({
     },
   });
 
-  const goToPage = () => {
-    const input = pageInputRef.current;
-    if (!input) return;
-    input.focus();
-    input.select();
-  };
-
   // Entering focus mode puts the panels away; leaving it does not reopen them.
   const [wasChromeHidden, setWasChromeHidden] = useState(chromeHidden);
   if (wasChromeHidden !== chromeHidden) {
@@ -2313,12 +2310,21 @@ function PdfPages({
                 type="text"
                 inputMode={pageLabels ? 'text' : 'numeric'}
                 aria-label="Page number"
+                data-command="go.page"
                 title={pageLabels ? 'Printed page, or #n for the nth page' : undefined}
                 aria-invalid={pageInputInvalid}
                 value={pageInput}
                 onChange={(event) => {
                   setPageInput(event.target.value);
                   if (pageInputInvalid) setPageInputInvalid(false);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+                  // Cancels here, so the Esc layers below (focus mode) do not also take it.
+                  event.preventDefault();
+                  setPageInput(currentPageLabel);
+                  setPageInputInvalid(false);
+                  focusPage(true);
                 }}
                 onBlur={() => {
                   if (pageInputInvalid) {

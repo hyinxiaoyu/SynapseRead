@@ -1,0 +1,140 @@
+Harbour Lights: a chapter fixture
+
+This file exercises TXT chapter headings (#52). It is generated and redistributable.
+
+Contents
+
+Chapter 1. Arrival
+Chapter 2. The Lighthouse
+第三章 归途
+
+PART ONE
+
+CHAPTER I
+
+ARRIVAL
+
+Arrival line 01: the tide came in and went out again, as tides do.
+Arrival line 02: the tide came in and went out again, as tides do.
+Arrival line 03: the tide came in and went out again, as tides do.
+Arrival line 04: the tide came in and went out again, as tides do.
+Arrival line 05: the tide came in and went out again, as tides do.
+Arrival line 06: the tide came in and went out again, as tides do.
+Arrival line 07: the tide came in and went out again, as tides do.
+Arrival line 08: the tide came in and went out again, as tides do.
+Arrival line 09: the tide came in and went out again, as tides do.
+Arrival line 10: the tide came in and went out again, as tides do.
+Arrival line 11: the tide came in and went out again, as tides do.
+Arrival line 12: the tide came in and went out again, as tides do.
+Arrival line 13: the tide came in and went out again, as tides do.
+Arrival line 14: the tide came in and went out again, as tides do.
+Arrival line 15: the tide came in and went out again, as tides do.
+Arrival line 16: the tide came in and went out again, as tides do.
+Arrival line 17: the tide came in and went out again, as tides do.
+Arrival line 18: the tide came in and went out again, as tides do.
+Arrival line 19: the tide came in and went out again, as tides do.
+Arrival line 20: the tide came in and went out again, as tides do.
+Arrival line 21: the tide came in and went out again, as tides do.
+Arrival line 22: the tide came in and went out again, as tides do.
+Arrival line 23: the tide came in and went out again, as tides do.
+Arrival line 24: the tide came in and went out again, as tides do.
+
+Chapter 2. The Lighthouse
+
+Lighthouse line 01: the tide came in and went out again, as tides do.
+Lighthouse line 02: the tide came in and went out again, as tides do.
+Lighthouse line 03: the tide came in and went out again, as tides do.
+Lighthouse line 04: the tide came in and went out again, as tides do.
+Lighthouse line 05: the tide came in and went out again, as tides do.
+Lighthouse line 06: the tide came in and went out again, as tides do.
+Lighthouse line 07: the tide came in and went out again, as tides do.
+Lighthouse line 08: the tide came in and went out again, as tides do.
+Lighthouse line 09: the tide came in and went out again, as tides do.
+Lighthouse line 10: the tide came in and went out again, as tides do.
+Lighthouse line 11: the tide came in and went out again, as tides do.
+Lighthouse line 12: the tide came in and went out again, as tides do.
+Lighthouse line 13: the tide came in and went out again, as tides do.
+Lighthouse line 14: the tide came in and went out again, as tides do.
+Lighthouse line 15: the tide came in and went out again, as tides do.
+Lighthouse line 16: the tide came in and went out again, as tides do.
+Lighthouse line 17: the tide came in and went out again, as tides do.
+Lighthouse line 18: the tide came in and went out again, as tides do.
+Lighthouse line 19: the tide came in and went out again, as tides do.
+Lighthouse line 20: the tide came in and went out again, as tides do.
+Lighthouse line 21: the tide came in and went out again, as tides do.
+Lighthouse line 22: the tide came in and went out again, as tides do.
+Lighthouse line 23: the tide came in and went out again, as tides do.
+Lighthouse line 24: the tide came in and went out again, as tides do.
+
+Part Two
+
+第三章 归途
+
+　　归途 line 01: the tide came in and went out again, as tides do.
+　　归途 line 02: the tide came in and went out again, as tides do.
+　　归途 line 03: the tide came in and went out again, as tides do.
+　　归途 line 04: the tide came in and went out again, as tides do.
+　　归途 line 05: the tide came in and went out again, as tides do.
+　　归途 line 06: the tide came in and went out again, as tides do.
+　　归途 line 07: the tide came in and went out again, as tides do.
+　　归途 line 08: the tide came in and went out again, as tides do.
+　　归途 line 09: the tide came in and went out again, as tides do.
+　　归途 line 10: the tide came in and went out again, as tides do.
+　　归途 line 11: the tide came in and went out again, as tides do.
+　　归途 line 12: the tide came in and went out again, as tides do.
+　　归途 line 13: the tide came in and went out again, as tides do.
+　　归途 line 14: the tide came in and went out again, as tides do.
+　　归途 line 15: the tide came in and went out again, as tides do.
+　　归途 line 16: the tide came in and went out again, as tides do.
+　　归途 line 17: the tide came in and went out again, as tides do.
+　　归途 line 18: the tide came in and went out again, as tides do.
+　　归途 line 19: the tide came in and went out again, as tides do.
+　　归途 line 20: the tide came in and went out again, as tides do.
+　　归途 line 21: the tide came in and went out again, as tides do.
+　　归途 line 22: the tide came in and went out again, as tides do.
+　　归途 line 23: the tide came in and went out again, as tides do.
+　　归途 line 24: the tide came in and went out again, as tides do.
+
+第四章：灯塔
+
+　　灯塔 line 01: the tide came in and went out again, as tides do.
+　　灯塔 line 02: the tide came in and went out again, as tides do.
+　　灯塔 line 03: the tide came in and went out again, as tides do.
+　　灯塔 line 04: the tide came in and went out again, as tides do.
+　　灯塔 line 05: the tide came in and went out again, as tides do.
+　　灯塔 line 06: the tide came in and went out again, as tides do.
+　　灯塔 line 07: the tide came in and went out again, as tides do.
+　　灯塔 line 08: the tide came in and went out again, as tides do.
+　　灯塔 line 09: the tide came in and went out again, as tides do.
+　　灯塔 line 10: the tide came in and went out again, as tides do.
+　　灯塔 line 11: the tide came in and went out again, as tides do.
+　　灯塔 line 12: the tide came in and went out again, as tides do.
+　　灯塔 line 13: the tide came in and went out again, as tides do.
+　　灯塔 line 14: the tide came in and went out again, as tides do.
+　　灯塔 line 15: the tide came in and went out again, as tides do.
+　　灯塔 line 16: the tide came in and went out again, as tides do.
+　　灯塔 line 17: the tide came in and went out again, as tides do.
+　　灯塔 line 18: the tide came in and went out again, as tides do.
+　　灯塔 line 19: the tide came in and went out again, as tides do.
+　　灯塔 line 20: the tide came in and went out again, as tides do.
+　　灯塔 line 21: the tide came in and went out again, as tides do.
+　　灯塔 line 22: the tide came in and went out again, as tides do.
+　　灯塔 line 23: the tide came in and went out again, as tides do.
+　　灯塔 line 24: the tide came in and went out again, as tides do.
+
+Epilogue
+
+Epilogue line 01: the tide came in and went out again, as tides do.
+Epilogue line 02: the tide came in and went out again, as tides do.
+Epilogue line 03: the tide came in and went out again, as tides do.
+Epilogue line 04: the tide came in and went out again, as tides do.
+Epilogue line 05: the tide came in and went out again, as tides do.
+Epilogue line 06: the tide came in and went out again, as tides do.
+Epilogue line 07: the tide came in and went out again, as tides do.
+Epilogue line 08: the tide came in and went out again, as tides do.
+Epilogue line 09: the tide came in and went out again, as tides do.
+Epilogue line 10: the tide came in and went out again, as tides do.
+Epilogue line 11: the tide came in and went out again, as tides do.
+Epilogue line 12: the tide came in and went out again, as tides do.
+
+The last line of the chapter fixture.

@@ -11,6 +11,7 @@ import {
 } from '@/features/reader/AnnotationsPanel';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import { useFocusPageOnActivate } from '@/features/reader/focusPage';
+import { GoToField, parseGoToInput, useGoToField } from '@/features/reader/GoToField';
 import {
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
@@ -1213,6 +1214,17 @@ export function EpubViewer({
         }
       : null;
 
+  // ---- Go To: a percentage of the book, by text once it has been measured ----
+
+  const goTo = useGoToField();
+  const goToInput = (text: string): boolean => {
+    const target = parseGoToInput(text, 'percent');
+    if (!handle || chapterCount === 0 || target?.kind !== 'percent') return false;
+    const { index, within } = locateBookFraction(textWeights, chapterCount, target.percent / 100);
+    jumpWithBackChip(() => handle.displayChapterFraction(index, within));
+    return true;
+  };
+
   const readouts: FooterReadouts = {};
   if (paged && pageInfo) {
     readouts.remaining = pagesLeftText(pageInfo.totalPages - pageInfo.page);
@@ -1316,6 +1328,7 @@ export function EpubViewer({
       },
       'go.chapterStart': { run: () => goToChapterEdge('start'), enabled: ready },
       'go.chapterEnd': { run: () => goToChapterEdge('end'), enabled: ready },
+      'go.page': { run: goTo.focus, enabled: ready, title: 'Go to Percentage…' },
       'go.back': { run: handleReturnBack, enabled: ready && history.canGoBack },
       'go.forward': { run: handleForward, enabled: ready && history.canGoForward },
     },
@@ -1388,6 +1401,15 @@ export function EpubViewer({
               onToggle={markup.toggle}
             />
             <ToolbarSeparator />
+            <GoToField
+              inputRef={goTo.inputRef}
+              label="Go to percentage of book"
+              tooltipLabel="Go to a percentage of the book, such as 50%"
+              placeholder="Go to %"
+              disabled={!handle}
+              onGo={goToInput}
+              onReturnFocus={() => focusPage(true)}
+            />
             <BookmarkToggleButton
               bookmarked={bookmarksController.isCurrentBookmarked}
               disabled={!handle}

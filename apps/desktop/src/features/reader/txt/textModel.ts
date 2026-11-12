@@ -4,7 +4,23 @@ import {
   type SearchOptions,
   findSearchMatches,
 } from '@/features/reader/DocumentSearch';
+import { HeadingScanner, type HeadingLevel } from '@/features/reader/txt/headings';
 import type { SourceSpan, TextChunk, TxtAnchor } from '@/types/domain';
+
+/** A chapter heading found in the text (#52). */
+export interface TxtHeading {
+  /** The row it is on. Rows only ever append, so this holds for the model's life. */
+  row: number;
+  /**
+   * Where its line starts in the source file. This, not the row, is what identifies
+   * it: it is the same whatever the chunking, encoding, or row splitting (ADR 0002).
+   */
+  startByte: number;
+  label: string;
+  level: HeadingLevel;
+  /** Follows another heading with no prose between; see `ScannedHeading`. */
+  joined: boolean;
+}
 
 export interface TxtSearchMatch extends DocumentSearchResultItem {
   anchor: TxtAnchor;
@@ -67,6 +83,10 @@ export class TxtTextModel {
   private readonly rowStarts: number[] = [0];
   private units = 0;
   private endByte = 0;
+  private readonly headingScanner = new HeadingScanner();
+  /** The next row to offer the heading scanner. */
+  private scannedRows = 0;
+  private readonly headingList: TxtHeading[] = [];
 
   complete = false;
   hadReplacements = false;
@@ -91,6 +111,49 @@ export class TxtTextModel {
     this.endByte = chunk.endByteOffset;
     this.hadReplacements ||= chunk.hadReplacements;
     this.complete = chunk.isLast;
+    this.scanHeadings();
+  }
+
+  /**
+   * Offers every finished row to the heading scanner. The last row may still grow,
+   * so it waits for the next chunk, or for the end of the file.
+   */
+  private scanHeadings(): void {
+    const ready = this.complete ? this.rowCount : this.rowCount - 1;
+    for (; this.scannedRows < ready; this.scannedRows += 1) {
+      const row = this.scannedRows;
+      this.headingScanner.push({
+        row,
+        text: this.rowText(row),
+        wholeLine: this.startsLine(row) && (row + 1 >= this.rowCount || this.startsLine(row + 1)),
+      });
+    }
+    if (this.complete) this.headingScanner.finish();
+    const found = this.headingScanner.headings;
+    // Bytes only for the few rows that are headings: the conversion walks a chunk.
+    for (let index = this.headingList.length; index < found.length; index += 1) {
+      const heading = found[index] as (typeof found)[number];
+      this.headingList.push({
+        ...heading,
+        startByte: this.sourceOffsetAt(this.rowStart(heading.row)),
+      });
+    }
+  }
+
+  /** Whether a row begins a line, rather than continuing one split for length. */
+  private startsLine(row: number): boolean {
+    return row === 0 || this.codeAt(this.rowStart(row) - 1) === 0x0a;
+  }
+
+  /** Chapter headings found so far, in document order. */
+  get headings(): readonly TxtHeading[] {
+    return this.headingList;
+  }
+
+  /** The row a source byte falls on, or `null` until that byte has loaded. */
+  rowAtSourceOffset(byte: number): number | null {
+    const unit = this.unitAtSourceOffset(byte, 'down');
+    return unit === null ? null : this.rowAtUnit(unit);
   }
 
   private scanRows(text: string, startUnit: number): void {

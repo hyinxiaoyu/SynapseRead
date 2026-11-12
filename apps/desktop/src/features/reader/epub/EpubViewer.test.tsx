@@ -344,6 +344,38 @@ describe('EpubViewer', () => {
     expect(field).toHaveFocus();
   });
 
+  it('goes to a percentage of the book from the Go To box (go.page)', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    const host = await screen.findByTestId('epub-host');
+    await waitFor(() => expect(host).toHaveFocus());
+    const input = screen.getByTestId('go-to-input');
+    await waitFor(() => expect(input).toBeEnabled());
+    expect(input).toHaveAccessibleName('Go to percentage of book');
+
+    fireEvent.keyDown(window, { key: 'g', code: 'KeyG', altKey: true, ctrlKey: true });
+    expect(input).toHaveFocus();
+    // A bare number is a percentage: a book has no lines to count.
+    fireEvent.change(input, { target: { value: '75' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(engine.displayedFractions.at(-1)).toEqual([1, 0.5]));
+    expect(host).toHaveFocus();
+    expect(input).toHaveValue('');
+
+    input.focus();
+    fireEvent.change(input, { target: { value: '150%' } });
+    fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    expect(input).toHaveAttribute('aria-invalid', 'true');
+    expect(input).toHaveFocus();
+
+    // Esc gives the page the keyboard back without going anywhere.
+    const jumps = engine.displayedFractions.length;
+    fireEvent.keyDown(input, { key: 'Escape', code: 'Escape' });
+    expect(host).toHaveFocus();
+    expect(input).toHaveValue('');
+    expect(engine.displayedFractions).toHaveLength(jumps);
+  });
+
   it('runs selection -> CFI anchor -> persist -> reopen', async () => {
     const { backend, store, documentId } = await setup();
     const view = render(<Harness store={store} documentId={documentId} />);

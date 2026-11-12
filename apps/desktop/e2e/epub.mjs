@@ -52,6 +52,9 @@ function textPointsOf(text) {
 }
 
 const excerpt = async (page, text) => {
+  // The first excerpt opens the MindMap, which narrows the reader; the chapter re-lays
+  // out 150 ms later, and text measured before then moves under the drag.
+  await page.waitForReaderLayout();
   const points = await textPoints(page, text);
   await page.drag(points.start, points.end);
   await page.waitFor(excerptEnabled, `selecting "${text}" to enable excerpting`);
@@ -453,7 +456,9 @@ export async function epubFlow(page) {
   // Let epub.js finish its 150 ms debounced resize for the Standard host width first.
   await new Promise((done) => setTimeout(done, 250));
   const epubStandardWidth = await page.evaluate(`${visibleHost}.getBoundingClientRect().width`);
-  const epubFontPx = `parseFloat(getComputedStyle(${frameDocument}.body).fontSize)`;
+  // NaN, which `waitFor` polls past, while epub.js re-mounts the chapter frame and it has
+  // no body yet; reading it then would throw and end the wait at once.
+  const epubFontPx = `(() => { const body = ${frameDocument}?.body; return body ? parseFloat(getComputedStyle(body).fontSize) : NaN; })()`;
   const baseEpubFontPx = await page.waitFor(epubFontPx, 'EPUB base body font size');
   for (let step = 0; step < 6; step += 1) {
     await page.clickButton('Increase font size');
@@ -614,6 +619,7 @@ export async function epubFlow(page) {
   await page.hideSidebar();
 
   // Independent highlights & notes in EPUB: highlight without creating a MindMap card, delete, and undo.
+  await page.waitForReaderLayout();
   const epubPoints = await textPoints(page, 'final target sentence');
   await page.drag(epubPoints.start, epubPoints.end);
   await page.clickButton('Yellow highlight');
