@@ -11,6 +11,8 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
  */
 export const ESCAPE_LAYER = {
   noteField: 40,
+  /** A footnote card: above the selection popover, which a link click never opens. */
+  linkPeek: 35,
   selectionPopover: 30,
   find: 20,
   /** The sidebar's lists: Esc hands the keyboard back to the page, sidebar open. */

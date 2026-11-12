@@ -32,6 +32,7 @@ import {
   type ReadingPreferences,
 } from '@/types/domain';
 
+import { isNoteRef, noteTextAt } from './linkPeekText';
 import { sanitizeChapter } from './sanitizeChapter';
 import {
   countedOffsets,
@@ -55,6 +56,11 @@ export interface EpubSearchMatch extends DocumentSearchResultItem {
   chapterIndex: number;
   /** Where the match starts in its chapter's text, `0..1`. */
   chapterFraction?: number;
+}
+
+export interface EpubInternalLink {
+  noteref: boolean;
+  rect: ViewportRect | null;
 }
 
 export interface EpubSelection {
@@ -101,8 +107,16 @@ export interface EpubHandle {
    * positions with it; nothing outside this module parses a CFI.
    */
   compareCfi(one: string, two: string): number;
-  /** A click on an internal book link, as the href epub.js resolved against the book. */
-  onInternalLink(listener: (href: string) => void): void;
+  /**
+   * A click on an internal book link, as the href epub.js resolved against the book,
+   * with whether it calls itself a note reference and its box in the top window.
+   */
+  onInternalLink(listener: (href: string, link: EpubInternalLink) => void): void;
+  /**
+   * The plain text of a short link target, such as a footnote, to show beside the
+   * link; null when the link should jump instead. Never returns markup (ADR 0005).
+   */
+  peekLink?(href: string, link: { noteref: boolean }): Promise<string | null>;
   /** The spine position of a chapter file, or -1. */
   spineIndexOf(href: string): number;
   /** The chapter file at a spine position. */
@@ -496,6 +510,52 @@ const toBuffer = async (source: DocumentSource): Promise<ArrayBuffer> => {
   return source.bytes.slice().buffer as ArrayBuffer;
 };
 
+/**
+ * Links resolve against this, not the frame's base. A chapter is a `srcdoc` frame
+ * whose base is the app's page, and a packaged app is served from `tauri://localhost`,
+ * whose origin is the opaque `"null"`, so neither can anchor a relative URL.
+ */
+const BOOK_ORIGIN = 'https://book.invalid';
+
+function decodePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    // A malformed escape is matched as written.
+    return path;
+  }
+}
+
+/**
+ * Where a relative link in the chapter at `chapterHref` points, as a book path with
+ * its query and fragment (`/OEBPS/notes.xhtml#fn1`), or null when it leaves the book.
+ * The path is decoded so it compares with the manifest's hrefs, which are often not.
+ */
+export function resolveChapterLink(raw: string, chapterHref: string | undefined): string | null {
+  if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//')) return null;
+  try {
+    const chapterBase = new URL(`/${(chapterHref ?? '').replace(/^\/+/, '')}`, BOOK_ORIGIN);
+    const href = new URL(raw, chapterBase);
+    if (href.origin !== BOOK_ORIGIN) return null;
+    return `${decodePath(href.pathname)}${href.search}${href.hash}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `path` names this spine item, written relative or rooted, encoded or not. */
+function isSpinePath(item: { href: string; canonical?: string }, path: string): boolean {
+  const clean = decodePath(path.replace(/^(\.\/|\/)+/, ''));
+  if (!clean) return false;
+  const href = decodePath(item.href);
+  return (
+    href === clean ||
+    (item.canonical !== undefined && decodePath(item.canonical) === clean) ||
+    href.endsWith(`/${clean}`) ||
+    clean.endsWith(`/${href}`)
+  );
+}
+
 export async function openEpubDocument(
   source: DocumentSource,
   element: HTMLElement,
@@ -534,14 +594,7 @@ export async function openEpubDocument(
     if (!target || target.startsWith('epubcfi(')) return target;
     if (book.spine.get(target)) return target;
     const [rawPath = '', fragment] = target.split('#');
-    const cleanPath = rawPath.replace(/^(\.\/|\/)+/, '');
-    const matched = spineItems.find(
-      (item) =>
-        item.href === cleanPath ||
-        item.canonical === cleanPath ||
-        item.href.endsWith(`/${cleanPath}`) ||
-        cleanPath.endsWith(`/${item.href}`),
-    );
+    const matched = spineItems.find((item) => isSpinePath(item, rawPath));
     if (!matched) return target;
     return fragment ? `${matched.href}#${fragment}` : matched.href;
   };
@@ -565,7 +618,7 @@ export async function openEpubDocument(
 
   let selectionListener: (selection: EpubSelection | null) => void = () => undefined;
   let locationListener: (location: EpubLocation) => void = () => undefined;
-  let internalLinkListener: (href: string) => void = () => undefined;
+  let internalLinkListener: (href: string, link: EpubInternalLink) => void = () => undefined;
   let keyDownListener: (event: KeyboardEvent) => void = () => undefined;
   let gestureListener: (sample: PageGestureSample) => void = () => undefined;
   let wheelListener: (wheel: WheelSample) => boolean = () => false;
@@ -588,18 +641,25 @@ export async function openEpubDocument(
         const target = event.target as Element | null;
         const anchor = target?.closest?.('a[href]') ?? null;
         const raw = anchor?.getAttribute('href') ?? '';
-        if (!raw || /^[a-z][a-z0-9+.-]*:/.test(raw) || raw.startsWith('//')) return;
-        let href: URL;
-        try {
-          const base = new URL(contents.document.baseURI);
-          href = new URL(raw, base);
-          if (href.origin !== base.origin) return;
-        } catch {
-          return;
-        }
+        const href = resolveChapterLink(raw, spineItems[contents.sectionIndex]?.href);
+        if (href === null) return;
         event.preventDefault();
         event.stopPropagation();
-        internalLinkListener(`${href.pathname}${href.search}${href.hash}`);
+        const frame = contents.window.frameElement?.getBoundingClientRect();
+        const box = anchor?.getBoundingClientRect?.();
+        const rect =
+          box && (box.width > 0 || box.height > 0)
+            ? {
+                top: box.top + (frame?.top ?? 0),
+                left: box.left + (frame?.left ?? 0),
+                bottom: box.bottom + (frame?.top ?? 0),
+                right: box.right + (frame?.left ?? 0),
+              }
+            : null;
+        internalLinkListener(href, {
+          noteref: anchor ? isNoteRef(anchor) : false,
+          rect,
+        });
       },
       true,
     );
@@ -835,6 +895,12 @@ export async function openEpubDocument(
     }
   };
 
+  const spineIndexOf = (href: string) => {
+    const path = href.split('#')[0] ?? '';
+    if (!path.replace(/^(\.\/|\/)+/, '')) return -1;
+    return spineItems.findIndex((item) => isSpinePath(item, path));
+  };
+
   return {
     toc,
     isFixedLayout,
@@ -887,15 +953,17 @@ export async function openEpubDocument(
     compareCfi(one, two) {
       return new EpubCFI().compare(one, two);
     },
-    spineIndexOf(href) {
-      const clean = (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
-      if (!clean) return -1;
-      return spineItems.findIndex(
-        (item) =>
-          item.href === clean ||
-          item.canonical === clean ||
-          item.href.endsWith(`/${clean}`) ||
-          clean.endsWith(`/${item.href}`),
+    spineIndexOf,
+    async peekLink(href, { noteref }) {
+      const hash = href.indexOf('#');
+      if (hash < 0) return null;
+      const index = spineIndexOf(href);
+      if (index < 0) return null;
+      const fragment = href.slice(hash + 1);
+      return withSection(
+        index,
+        (_section, chapterDoc) => noteTextAt(chapterDoc, fragment, { noteref }),
+        null,
       );
     },
     spineHref: (index) => spineItems[index]?.href,

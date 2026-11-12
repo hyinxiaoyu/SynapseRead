@@ -27,17 +27,19 @@ const closeTab = (title) =>
 /** Every fixture is titled "sample", so the active tab is closed by its own button. */
 const closeActiveTab = `document.querySelector('[role="tab"][aria-selected="true"]').nextElementSibling.click()`;
 /**
- * The picker also offers a second PDF, so this names the one wanted. Passing the
- * other one on the way opens it, so it is closed again: the steps below read the
+ * The picker also offers other PDFs, so this names the one wanted. Passing the
+ * others on the way opens them, so they are closed again: the steps below read the
  * first `pdf-viewer` in the page and mean this one.
  */
 const openPdf = async (page) => {
   await page.openUntil(`${visibleScroller} && ${titleIs('sample')}`, 'the PDF');
-  await page.evaluate(closeTab('sample-labels'));
-  await page.waitFor(
-    `!document.querySelector('[aria-label="Close sample-labels"]')`,
-    'the PDF passed on the way to close',
-  );
+  for (const other of ['sample-labels', 'sample-footnotes']) {
+    await page.evaluate(closeTab(other));
+    await page.waitFor(
+      `!document.querySelector('[aria-label="Close ${other}"]')`,
+      `${other}, passed on the way, to close`,
+    );
+  }
 };
 const openLabelledPdf = (page) =>
   page.openUntil(`${visibleScroller} && ${titleIs('sample-labels')}`, 'the labelled PDF');

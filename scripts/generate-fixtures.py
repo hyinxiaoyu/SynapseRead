@@ -115,6 +115,47 @@ def build_labelled_pdf():
     return serialize_pdf(objects)
 
 
+def build_footnotes_pdf():
+    """Footnote markers linked to their notes (#49), and a link on words that jumps."""
+    def run(x, y, size, text):
+        return f"BT /F1 {size} Tf {x} {y} Td ({escape(text)}) Tj ET"
+
+    page_one = "\n".join([
+        run(72, 720, 14, "A claim that needs a source."), run(300, 726, 9, "1"),
+        run(72, 700, 14, "A second claim, noted below."), run(300, 706, 9, "2"),
+        run(72, 680, 14, "An endnote is kept for later."), run(300, 686, 9, "3"),
+        run(72, 640, 14, "Read the endnotes on page two."),
+        # The foot of the page: two notes, the first over two lines.
+        run(72, 103, 7, "1"), run(80, 100, 10, "The first footnote, at the foot of page one."),
+        run(80, 88, 10, "It wraps onto a second line."),
+        # Markup in a PDF's text is only ever text.
+        run(72, 77, 7, "2"), run(80, 74, 10, "A second note <img src=x onerror=alert(1)> stays apart."),
+    ])
+    page_two = "\n".join([
+        run(72, 720, 14, "Endnotes"),
+        run(72, 703, 7, "3"), run(80, 700, 10, "The endnote on page two sits under a heading."),
+    ])
+    objects = {}
+    objects[1] = b"<</Type/Catalog/Pages 2 0 R>>"
+    objects[3] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>"
+    # Pages are objects 4 and 6, their contents 5 and 7; links 8 to 11.
+    for page_id, content in ((4, page_one), (6, page_two)):
+        annots = "/Annots[8 0 R 9 0 R 10 0 R 11 0 R]" if page_id == 4 else ""
+        objects[page_id] = (
+            f"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]"
+            f"/Resources<</Font<</F1 3 0 R>>>>{annots}/Contents {page_id + 1} 0 R>>"
+        ).encode()
+        data = content.encode("latin-1")
+        objects[page_id + 1] = b"<</Length %d>>\nstream\n%s\nendstream" % (len(data), data)
+    objects[2] = b"<</Type/Pages/Kids[4 0 R 6 0 R]/Count 2>>"
+    link = "<</Type/Annot/Subtype/Link/Rect[{}]/Border[0 0 0]/Dest[{} 0 R /XYZ 0 {} null]>>"
+    objects[8] = link.format("296 722 308 736", 4, 112).encode()
+    objects[9] = link.format("296 702 308 716", 4, 86).encode()
+    objects[10] = link.format("296 682 308 696", 6, 712).encode()
+    objects[11] = link.format("72 636 300 654", 6, 740).encode()
+    return serialize_pdf(objects)
+
+
 def serialize_pdf(objects):
     out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
     offsets = {}
@@ -282,12 +323,68 @@ epub:type="toc"><ol>{"".join(toc)}</ol></nav>""")
     write_epub(OUT / "sample-uneven.epub", files, [("OEBPS/box.png", tiny_png())])
 
 
+def note_chapter(title, body):
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head><title>{title}</title></head>
+<body>{body}</body></html>
+"""
+
+
+def build_footnotes_epub():
+    """Footnote references, a short in-chapter target, and a long one (#49)."""
+    long_part = "".join(f"<p>Long part paragraph {n} is more than a note.</p>" for n in range(1, 40))
+    files = {
+        "META-INF/container.xml": """<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+</rootfiles></container>
+""",
+        "OEBPS/content.opf": """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="id">synapseread-footnotes-fixture</dc:identifier>
+<dc:title>Footnotes</dc:title><dc:language>en</dc:language>
+<meta property="dcterms:modified">2026-01-01T00:00:00Z</meta></metadata>
+<manifest>
+<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+<item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+<item id="ch2" href="chapter2.xhtml" media-type="application/xhtml+xml"/>
+<item id="notes" href="notes.xhtml" media-type="application/xhtml+xml" properties="scripted"/>
+</manifest>
+<spine><itemref idref="ch1"/><itemref idref="ch2"/><itemref idref="notes"/></spine>
+</package>
+""",
+        "OEBPS/nav.xhtml": note_chapter("Contents", """<nav epub:type="toc"><ol>
+<li><a href="chapter1.xhtml">One</a></li><li><a href="chapter2.xhtml">Two</a></li>
+<li><a href="notes.xhtml">Notes</a></li></ol></nav>"""),
+        "OEBPS/chapter1.xhtml": note_chapter("One", """<h1>Chapter One</h1>
+<p>A footnoted claim<a epub:type="noteref" id="ref1" href="notes.xhtml#fn1">1</a> opens the book.</p>
+<p>A hostile note<a epub:type="noteref" id="ref2" href="notes.xhtml#fn2">2</a> follows it.</p>
+<p>An aside<a id="ref3" href="#aside">*</a> is linked without saying it is a note.</p>
+<p>See <a id="ref4" href="chapter2.xhtml#long-part">the long part</a> for more.</p>
+<p id="aside">The aside is a short paragraph in the same chapter.</p>"""),
+        "OEBPS/chapter2.xhtml": note_chapter("Two", """<h1>Chapter Two</h1>
+<section id="long-part"><h2>The Long Part</h2>""" + long_part + "</section>"),
+        # The second note stands in for a hostile book: its markup must stay inert text.
+        "OEBPS/notes.xhtml": note_chapter("Notes", """<h1>Notes</h1>
+<aside epub:type="footnote" id="fn1"><p><a epub:type="backlink" href="chapter1.xhtml#ref1">1.</a>
+The first footnote explains the claim.</p></aside>
+<aside epub:type="footnote" id="fn2"><p><b>Bold</b> words<img src="missing.png" alt=""
+onerror="window.parent.__peekHandlerRan = true"/><script>window.parent.__peekScriptRan = true;</script>
+and &lt;img src=x onerror=alert(1)&gt; stay text.</p></aside>"""),
+    }
+    write_epub(OUT / "sample-footnotes.epub", files)
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "sample.pdf").write_bytes(build_pdf())
     (OUT / "sample-labels.pdf").write_bytes(build_labelled_pdf())
     build_epub()
     build_uneven_epub()
+    (OUT / "sample-footnotes.pdf").write_bytes(build_footnotes_pdf())
+    build_footnotes_epub()
 
 
 if __name__ == "__main__":

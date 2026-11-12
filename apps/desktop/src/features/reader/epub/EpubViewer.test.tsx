@@ -20,6 +20,7 @@ import {
 } from '@/stores/useStudySyncStore';
 
 import {
+  type EpubInternalLink,
   type EpubLocation,
   type EpubReadingMode,
   type EpubSearchMatch,
@@ -59,7 +60,9 @@ const engine = vi.hoisted(() => ({
   failCfi: null as string | null,
   emitSelection: (() => undefined) as (selection: unknown) => void,
   emitLocation: (() => undefined) as (location: unknown) => void,
-  emitInternalLink: (() => undefined) as (href: string) => void,
+  emitInternalLink: (() => undefined) as (href: string, link?: EpubInternalLink) => void,
+  /** The engine's link peek; null leaves it out, so every link jumps. */
+  peek: null as ((href: string, link: { noteref: boolean }) => Promise<string | null>) | null,
   emitKeyDown: (() => undefined) as (event: KeyboardEvent) => void,
   emitGesture: (() => undefined) as (sample: PageGestureSample) => void,
   emitWheel: (() => false) as (wheel: WheelSample) => boolean,
@@ -167,8 +170,12 @@ vi.mock('./epubEngine', () => ({
     onLocation(listener: (location: EpubLocation) => void) {
       engine.emitLocation = listener as (location: unknown) => void;
     },
-    onInternalLink(listener: (href: string) => void) {
-      engine.emitInternalLink = listener;
+    onInternalLink(listener: (href: string, link: EpubInternalLink) => void) {
+      engine.emitInternalLink = (href, link = { noteref: false, rect: null }) =>
+        listener(href, link);
+    },
+    get peekLink() {
+      return engine.peek ?? undefined;
     },
     onKeyDown(listener: (event: KeyboardEvent) => void) {
       engine.emitKeyDown = listener;
@@ -308,6 +315,7 @@ describe('EpubViewer', () => {
     engine.displayedFractions = [];
     engine.cursor = '';
     engine.measure = null;
+    engine.peek = null;
     window.localStorage.clear();
     engine.next.mockClear();
     engine.previous.mockClear();
@@ -888,6 +896,120 @@ describe('EpubViewer', () => {
     act(() => engine.emitInternalLink('/OEBPS/chapter1.xhtml'));
     await waitFor(() => expect(engine.displayed.at(-1)).toBe('/OEBPS/chapter1.xhtml'));
     expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
+  });
+
+  it('shows a footnote beside its reference, goes to it, and jumps for other links (#49)', async () => {
+    const asked: [string, boolean][] = [];
+    engine.peek = async (href, { noteref }) => {
+      asked.push([href, noteref]);
+      // Text that looks like markup must show as written, never as elements.
+      return href.endsWith('#fn1')
+        ? 'The <b>first</b> footnote <img src=x onerror=alert(1)>'
+        : null;
+    };
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 2,
+        totalPages: 4,
+        chapterIndex: 0,
+        totalChapters: 2,
+        bookProgress: 30,
+        fraction: 0.2,
+      }),
+    );
+    const displayedBefore = engine.displayed.length;
+
+    act(() =>
+      engine.emitInternalLink('OEBPS/notes.xhtml#fn1', {
+        noteref: true,
+        rect: { top: 100, left: 100, bottom: 116, right: 108 },
+      }),
+    );
+    const card = await screen.findByTestId('link-peek');
+    expect(asked).toEqual([['OEBPS/notes.xhtml#fn1', true]]);
+    expect(screen.getByTestId('link-peek-text').textContent).toBe(
+      'The <b>first</b> footnote <img src=x onerror=alert(1)>',
+    );
+    expect(card.querySelector('b, img')).toBeNull();
+    // Peeking goes nowhere, and the keyboard is on Go to Note.
+    expect(engine.displayed.length).toBe(displayedBefore);
+    expect(screen.getByTestId('link-peek-go')).toHaveFocus();
+
+    // A press in the chapter puts the card away.
+    act(() => engine.emitPointer(true));
+    act(() => engine.emitPointer(false));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+
+    // Go to Note jumps, with the way back.
+    act(() => engine.emitInternalLink('OEBPS/notes.xhtml#fn1', { noteref: true, rect: null }));
+    fireEvent.click(await screen.findByTestId('link-peek-go'));
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/notes.xhtml#fn1'));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+    expect(await screen.findByTestId('reader-back-chip')).toHaveTextContent('Back to One, page 2');
+
+    // Esc puts a card away without going anywhere.
+    act(() => engine.emitInternalLink('OEBPS/notes.xhtml#fn1', { noteref: true, rect: null }));
+    await screen.findByTestId('link-peek');
+    const jumps = engine.displayed.length;
+    fireEvent.keyDown(screen.getByTestId('link-peek-go'), { key: 'Escape' });
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+    expect(engine.displayed.length).toBe(jumps);
+
+    // A target with nothing to peek at is a plain jump.
+    act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml#long'));
+    await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml#long'));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+  });
+
+  it('puts a footnote card away when the reader moves on without a press (#49)', async () => {
+    engine.peek = async () => 'A note.';
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    const peek = async () => {
+      act(() => engine.emitInternalLink('OEBPS/notes.xhtml#fn1', { noteref: true, rect: null }));
+      await screen.findByTestId('link-peek');
+    };
+
+    // A tab switched from the keyboard keeps its card no more than its Esc.
+    await peek();
+    view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+    view.rerender(<Harness store={store} documentId={documentId} />);
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+
+    // A new font size, as Cmd+= sets it, moves the reference.
+    await peek();
+    await act(async () => store.getState().updateReadingPreferences({ fontSize: 120 }));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+  });
+
+  it('never opens a card, or jumps, once the reader moved on while it was read (#49)', async () => {
+    let release: (text: string) => void = () => undefined;
+    engine.peek = () => new Promise<string>((resolve) => (release = resolve));
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    const jumps = engine.displayed.length;
+
+    // A press in the chapter while the note is read.
+    act(() => engine.emitInternalLink('OEBPS/notes.xhtml#fn1', { noteref: true, rect: null }));
+    act(() => engine.emitPointer(true));
+    await act(async () => release('A note.'));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+
+    // A tab switch while the note is read.
+    act(() => engine.emitInternalLink('OEBPS/notes.xhtml#fn1', { noteref: true, rect: null }));
+    view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+    view.rerender(<Harness store={store} documentId={documentId} />);
+    await act(async () => release('A note.'));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+    expect(engine.displayed.length).toBe(jumps);
   });
 
   it('turns pages from the page edges, swipes, and Space, never over text', async () => {

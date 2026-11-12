@@ -4,6 +4,8 @@ import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-
 import sampleLabelsPdfUrl from '../../../../../fixtures/documents/sample-labels.pdf?url&no-inline';
 import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
 import sampleUnevenEpubUrl from '../../../../../fixtures/documents/sample-uneven.epub?url&no-inline';
+import sampleFootnotesEpubUrl from '../../../../../fixtures/documents/sample-footnotes.epub?url&no-inline';
+import sampleFootnotesPdfUrl from '../../../../../fixtures/documents/sample-footnotes.pdf?url&no-inline';
 import sampleChaptersTxtUrl from '../../../../../fixtures/documents/sample-chapters.txt?url&no-inline';
 import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
 
@@ -65,6 +67,9 @@ const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample-uneven.epub': fetchBytes(sampleUnevenEpubUrl),
   // A text file with English and Chinese chapter headings, and a contents list (#52).
   '/preview/sample-chapters.txt': fetchBytes(sampleChaptersTxtUrl),
+  // Footnote references in both formats, for the note card beside a link (#49).
+  '/preview/sample-footnotes.epub': fetchBytes(sampleFootnotesEpubUrl),
+  '/preview/sample-footnotes.pdf': fetchBytes(sampleFootnotesPdfUrl),
 };
 
 export interface MemoryBackendOptions {

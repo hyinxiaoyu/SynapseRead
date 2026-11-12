@@ -40,7 +40,11 @@ import {
   annotationAtPoint,
   focusInReaderPopover,
   selectionViewportRect,
+  toViewportRect,
+  type ViewportRect,
 } from '@/features/reader/markup/geometry';
+import { LinkPeek, type LinkPeekTarget } from '@/features/reader/markup/LinkPeek';
+import { useLinkPeek } from '@/features/reader/markup/useLinkPeek';
 import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
@@ -127,6 +131,7 @@ import {
   unrotateNormalizedRect,
   noteMarkerPoint,
 } from './pdfGeometry';
+import { isNoteMarker, linkLabel, textNearDestination } from './pdfLinkPeek';
 import {
   normalizePageLabels,
   pageLabelOf,
@@ -598,7 +603,8 @@ function PdfPage({
   captureMode: boolean;
   captureBox: NormalizedRect | null;
   onCapture: (canvas: HTMLCanvasElement, rect: NormalizedRect) => void;
-  onNavigateLink: (link: PdfInternalLink) => void;
+  /** A link was clicked, with its page and its box in the top window. */
+  onNavigateLink: (link: PdfInternalLink, pageIndex: number, rect: ViewportRect) => void;
   onPageAnnotationsLoaded: (pageIndex: number, annotations: PdfPageAnnotations) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -805,7 +811,11 @@ function PdfPage({
             aria-label={`Jump to linked page ${link.targetPageIndex + 1}`}
             onClick={(event) => {
               event.stopPropagation();
-              onNavigateLink(link);
+              onNavigateLink(
+                link,
+                pageIndex,
+                toViewportRect(event.currentTarget.getBoundingClientRect()),
+              );
             }}
             className="absolute z-10 cursor-pointer rounded-xs border border-transparent transition-colors hover:border-primary/50 hover:bg-primary/10 focus-visible:border-primary focus-visible:outline-none"
             style={{
@@ -1582,6 +1592,42 @@ function PdfPages({
       }
     },
     [currentPageIndex, navigateToPage, offerBackChip],
+  );
+
+  /** A footnote shown beside its marker, and the link Go to Note follows (#49). */
+  // Turning the page, zooming, rotating or changing the layout can move the marker
+  // without a scroll event, and a background tab must not keep its card (or its Esc).
+  const {
+    peek: linkPeek,
+    begin: beginLinkPeek,
+    dismiss: dismissLinkPeek,
+  } = useLinkPeek<LinkPeekTarget & { link: PdfInternalLink }>(
+    `${isActive}|${currentPageIndex}|${displayMode}|${zoomMode}|${customScale}|${rotation}`,
+  );
+  // A link whose own text is a note marker, with a point destination, shows the text
+  // there first. Anything else, or a page with no text, jumps as before.
+  const activateInternalLink = useCallback(
+    (link: PdfInternalLink, pageIndex: number, rect: ViewportRect) => {
+      const request = beginLinkPeek();
+      const fraction = link.targetFraction;
+      const getPageText = engine.getPageText?.bind(engine);
+      if (fraction === undefined || !getPageText) {
+        request.finish(null);
+        navigateToInternalLink(link);
+        return;
+      }
+      void (async () => {
+        const label = linkLabel(await getPageText(pageIndex), link.rect);
+        if (!isNoteMarker(label)) return '';
+        return textNearDestination(await getPageText(link.targetPageIndex), fraction);
+      })()
+        .catch(() => '')
+        .then((text) => {
+          if (!request.finish(text ? { text, rect, link } : null)) return;
+          if (!text) navigateToInternalLink(link);
+        });
+    },
+    [beginLinkPeek, engine, navigateToInternalLink],
   );
 
   const handleReturnBack = () => {
@@ -2526,6 +2572,16 @@ function PdfPages({
             canExcerpt={canExcerpt}
             onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
           />
+          <LinkPeek
+            peek={linkPeek}
+            boundsRef={readerAreaRef}
+            onGo={() => {
+              if (linkPeek) navigateToInternalLink(linkPeek.link);
+              scrollRef.current?.focus({ preventScroll: true });
+            }}
+            onDismiss={dismissLinkPeek}
+            onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
+          />
           <ReaderPopoverLayer hidden={chromeHidden}>
             {unsupportedNotice !== null && unsupportedNotice !== dismissedUnsupported && (
               <ReaderNotice
@@ -2616,7 +2672,7 @@ function PdfPages({
                                 visibleCapture?.pageIndex === pageIndex ? visibleCapture.rect : null
                               }
                               onCapture={(canvas, rect) => onCapture(pageIndex, canvas, rect)}
-                              onNavigateLink={navigateToInternalLink}
+                              onNavigateLink={activateInternalLink}
                               onPageAnnotationsLoaded={handlePageAnnotationsLoaded}
                             />
                           </div>

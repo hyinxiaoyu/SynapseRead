@@ -512,8 +512,8 @@ export class Page {
     const viewerSettled = `[...document.querySelectorAll('[aria-label="Document reader"] > div:last-child > div')]
       .some((pane) => pane.checkVisibility({ visibilityProperty: true })
         && !pane.textContent.startsWith('Opening '))`;
-    // One pass through the picker's library, which holds seven files.
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    // One pass through the picker's library, which holds nine files.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
       const before = await this.evaluate(
         `({ tab: ${activeTab}, count: document.querySelectorAll('[role="tab"]').length })`,
       );

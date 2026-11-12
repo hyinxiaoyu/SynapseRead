@@ -6,6 +6,7 @@ import {
   openEpubDocument,
   type PaneMark,
   type RenditionAnnotation,
+  resolveChapterLink,
 } from './epubEngine';
 
 /**
@@ -261,6 +262,87 @@ describe('EPUB navigation', () => {
     expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
   });
 
+  it('resolves a link against its chapter, not the frame, and says if it is a noteref', async () => {
+    const handle = await open();
+    const links: [string, boolean][] = [];
+    handle.onInternalLink((href, link) => links.push([href, link.noteref]));
+    const chapterDoc = document.implementation.createHTMLDocument('');
+    // A `srcdoc` frame inherits its parent page's URL as its base.
+    const base = chapterDoc.createElement('base');
+    base.href = 'http://127.0.0.1:1420/';
+    chapterDoc.head.append(base);
+    chapterDoc.body.innerHTML = `
+      <a id="same" href="#aside">*</a>
+      <a id="note" epub:type="noteref" href="chapter1.xhtml#fn1">1</a>
+      <a id="away" href="https://example.com/">out</a>`;
+    // A `srcdoc` chapter's base is the app's page, so only its spine index places it.
+    for (const hook of fake.state.renditionHooks) {
+      hook({
+        document: chapterDoc,
+        window,
+        expand: vi.fn<() => void>(),
+        sectionIndex: 1,
+      } as unknown as Parameters<(typeof fake.state.renditionHooks)[number]>[0]);
+    }
+    const click = (id: string) => {
+      const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+      chapterDoc.getElementById(id)?.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    expect(click('same')).toBe(true);
+    expect(click('note')).toBe(true);
+    // An absolute link keeps epub.js' own handling.
+    expect(click('away')).toBe(false);
+    expect(links).toEqual([
+      ['/chapter2.xhtml#aside', false],
+      ['/chapter1.xhtml#fn1', true],
+    ]);
+    expect(handle.spineIndexOf(links[0]?.[0] ?? '')).toBe(1);
+  });
+
+  it('resolves links the same way under a packaged app, whose origin is "null"', async () => {
+    // `tauri://localhost` is not a special scheme, so its origin serializes as "null".
+    expect(new URL('tauri://localhost/index.html').origin).toBe('null');
+    const handle = await open();
+    const links: string[] = [];
+    handle.onInternalLink((href) => links.push(href));
+    const chapterDoc = document.implementation.createHTMLDocument('');
+    const base = chapterDoc.createElement('base');
+    base.href = 'tauri://localhost/';
+    chapterDoc.head.append(base);
+    chapterDoc.body.innerHTML = `<a id="same" href="#aside">*</a>`;
+    for (const hook of fake.state.renditionHooks) {
+      hook({
+        document: chapterDoc,
+        window,
+        expand: vi.fn<() => void>(),
+        sectionIndex: 0,
+      } as unknown as Parameters<(typeof fake.state.renditionHooks)[number]>[0]);
+    }
+    const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    chapterDoc.getElementById('same')?.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(links).toEqual(['/chapter1.xhtml#aside']);
+    expect(handle.spineIndexOf(links[0] ?? '')).toBe(0);
+  });
+
+  it('finds a chapter whose manifest href is encoded, or not, from a decoded link', async () => {
+    fake.spineItems.push(
+      { href: 'OEBPS/%E7%AC%AC%E4%B8%80%E7%AB%A0.xhtml' },
+      { href: 'my notes.xhtml' },
+    );
+    try {
+      const handle = await open();
+      expect(handle.spineIndexOf('/OEBPS/第一章.xhtml#fn1')).toBe(2);
+      expect(handle.spineIndexOf('/OEBPS/%E7%AC%AC%E4%B8%80%E7%AB%A0.xhtml')).toBe(2);
+      expect(handle.spineIndexOf(resolveChapterLink('#n', 'my notes.xhtml') ?? '')).toBe(3);
+      expect(handle.spineIndexOf('/my%20notes.xhtml')).toBe(3);
+      expect(handle.spineIndexOf('/missing.xhtml')).toBe(-1);
+    } finally {
+      fake.spineItems.splice(2);
+    }
+  });
+
   it('tags a mark with its annotation id only, noted or not', async () => {
     const handle = await open();
     fake.rendition.annotations.add.mockClear();
@@ -388,5 +470,31 @@ describe('decorateWithNoteMarker', () => {
     attach(next);
     next.render();
     expect(dots(next)).toHaveLength(1);
+  });
+});
+
+describe('resolveChapterLink', () => {
+  it('resolves against the chapter, whatever the frame is served from', () => {
+    expect(resolveChapterLink('#fn1', 'OEBPS/ch1.xhtml')).toBe('/OEBPS/ch1.xhtml#fn1');
+    expect(resolveChapterLink('../notes.xhtml#n?', 'OEBPS/text/ch1.xhtml')).toBe(
+      '/OEBPS/notes.xhtml#n?',
+    );
+    expect(resolveChapterLink('notes.xhtml?x=1#n', 'ch1.xhtml')).toBe('/notes.xhtml?x=1#n');
+    expect(resolveChapterLink('#fn1', undefined)).toBe('/#fn1');
+  });
+
+  it('keeps spaces and non-ASCII in the path as the manifest writes them', () => {
+    expect(resolveChapterLink('#fn1', 'OEBPS/第一章.xhtml')).toBe('/OEBPS/第一章.xhtml#fn1');
+    expect(resolveChapterLink('notes%20and%20refs.xhtml#n', 'OEBPS/my chapter.xhtml')).toBe(
+      '/OEBPS/notes and refs.xhtml#n',
+    );
+    // A malformed escape is kept as written rather than dropping the link.
+    expect(resolveChapterLink('bad%E0.xhtml', 'ch1.xhtml')).toBe('/bad%E0.xhtml');
+  });
+
+  it('leaves links out of the book to epub.js', () => {
+    for (const raw of ['', 'https://example.com/', 'HTTP://x', 'mailto:a@b', '//cdn/x.js']) {
+      expect(resolveChapterLink(raw, 'ch1.xhtml'), raw).toBeNull();
+    }
   });
 });
