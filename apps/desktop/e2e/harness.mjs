@@ -279,27 +279,44 @@ export class Page {
     await this.mouse('mouseReleased', x, y);
   }
 
+  /**
+   * Clicks the button named `name` where it is when the press arrives. The button can
+   * still move between finding it and the press (a popover opening on a slow macOS
+   * runner), and a press that lands beside a popover closes it. So the press is
+   * checked as it is dispatched: one that would land elsewhere is swallowed by
+   * `CLICK_GUARD` before the app sees it, and the click is tried again.
+   */
   async clickButton(name) {
-    const point = await this.waitFor(
-      `(() => {
-        const button = [...document.querySelectorAll('button')].find(
-          (b) => (b.getAttribute('aria-label') ?? b.textContent).trim() === ${JSON.stringify(name)}
-            && !b.disabled && b.checkVisibility({ visibilityProperty: true }));
-        if (!button) return null;
-        const r = button.getBoundingClientRect();
-        const point = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-        // Only once it (and any popover it sits in, whose height grows as its top shifts)
-        // has stopped moving and nothing covers it.
-        const popover = button.closest('[data-reader-popover]')?.getBoundingClientRect();
-        const key = JSON.stringify({ point, ph: popover?.height ?? 0, py: popover?.y ?? 0 });
-        const settled = window.__e2eLastButtonPoint === key;
-        window.__e2eLastButtonPoint = key;
-        if (!settled) return null;
-        return button.contains(document.elementFromPoint(point.x, point.y)) ? point : null;
-      })()`,
-      `an enabled, visible, uncovered button named ${name}`,
-    );
-    await this.click(point);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const point = await this.waitFor(
+        `(() => {
+          const button = [...document.querySelectorAll('button')].find(
+            (b) => (b.getAttribute('aria-label') ?? b.textContent).trim() === ${JSON.stringify(name)}
+              && !b.disabled && b.checkVisibility({ visibilityProperty: true }));
+          if (!button) return null;
+          const r = button.getBoundingClientRect();
+          const point = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+          // Only once it (and any popover it sits in, whose height grows as its top shifts)
+          // has stopped moving, its popover has finished opening, and nothing covers it.
+          const popoverElement = button.closest('[data-reader-popover]');
+          const popover = popoverElement?.getBoundingClientRect();
+          const key = JSON.stringify({ point, ph: popover?.height ?? 0, py: popover?.y ?? 0 });
+          const settled = window.__e2eLastButtonPoint === key;
+          window.__e2eLastButtonPoint = key;
+          if (!settled) return null;
+          if (popoverElement?.getAnimations().some((a) => a.playState === 'running')) return null;
+          if (!button.contains(document.elementFromPoint(point.x, point.y))) return null;
+          window.__e2eClickGuard.arm(button);
+          return point;
+        })()`,
+        `an enabled, visible, uncovered button named ${name}`,
+      );
+      await this.click(point);
+      const { hit, missed } = await this.evaluate('window.__e2eClickGuard.disarm()');
+      if (hit && !missed) return;
+      console.log(`     a click on ${name} landed off the button; trying again`);
+    }
+    throw new Error(`clicks on ${name} kept landing off the button`);
   }
 
   /**
@@ -431,6 +448,42 @@ export class Page {
     if (shown) await this.clickButton('Sidebar');
   }
 
+  /**
+   * Waits until the visible reader has re-laid out for its pane. Opening or closing
+   * the sidebar resizes the pane at once, but each reader re-lays out after a 150 ms
+   * debounce (and PDF re-renders its pages), so text measured before then moves.
+   */
+  async waitForReaderLayout() {
+    const signature = `(() => {
+      const pane = [...document.querySelectorAll('[aria-label="Document reader"] > div:last-child > div')]
+        .find((e) => e.checkVisibility({ visibilityProperty: true }));
+      if (!pane) return '';
+      const box = (e) => {
+        const r = e.getBoundingClientRect();
+        return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)];
+      };
+      const probes = [...pane.querySelectorAll('.textLayer span, [data-unit], iframe')].slice(0, 8);
+      return JSON.stringify(probes.map((e) => {
+        if (!(e instanceof HTMLIFrameElement)) return box(e);
+        const text = e.contentDocument?.querySelector('p, h1, h2, h3, li');
+        return [box(e), text ? box(text) : null];
+      }));
+    })()`;
+    const deadline = Date.now() + 15000;
+    let previous = await this.evaluate(signature);
+    let stableSince = Date.now();
+    while (Date.now() - stableSince < 400) {
+      if (Date.now() > deadline)
+        throw new Error('timed out waiting for: the reader layout to settle');
+      await new Promise((done) => setTimeout(done, 100));
+      const current = await this.evaluate(signature);
+      if (current !== previous) {
+        previous = current;
+        stableSince = Date.now();
+      }
+    }
+  }
+
   async setInputValue(selector, value) {
     await this.waitFor(
       `(() => {
@@ -502,8 +555,9 @@ export class Page {
     );
   }
 
-  /** Selects `text` with the mouse. */
+  /** Selects `text` with the mouse, measured once the reader has finished laying out. */
   async selectText(selector, text) {
+    await this.waitForReaderLayout();
     const rect = await this.textRect(selector, text);
     if (!rect) throw new Error(`text is not rendered: ${text}`);
     await this.drag(rect.start, rect.end);
@@ -566,6 +620,33 @@ export class Page {
     return this.evaluate('window.__cspViolations');
   }
 }
+
+/**
+ * Installed before the app's scripts, so its capture listeners on `window` run before
+ * any the app adds (a popover's press-outside listener among them). While armed with a
+ * target, a real press, release or click that lands off it is stopped and noted.
+ */
+const CLICK_GUARD = `(() => {
+  let target = null;
+  let hit = false;
+  let missed = false;
+  window.__e2eClickGuard = {
+    arm(element) { target = element; hit = false; missed = false; },
+    disarm() { target = null; return { hit, missed }; },
+  };
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    window.addEventListener(type, (event) => {
+      if (target === null || !event.isTrusted) return;
+      if (target.isConnected && target.contains(event.target)) {
+        if (type === 'pointerdown') hit = true;
+        return;
+      }
+      missed = true;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
+})();`;
 
 /** How long a launched Chromium may take to open DevTools before it counts as hung. */
 const DEVTOOLS_TIMEOUT_MS = 15000;
@@ -672,6 +753,7 @@ export async function launchPage(
     const page = new Page(cdp);
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: CLICK_GUARD });
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `window.__cspViolations = [];
         document.addEventListener('securitypolicyviolation', (event) =>
