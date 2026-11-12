@@ -626,7 +626,10 @@ describe('TxtViewer', () => {
     // Empty query resets search state, and the sidebar the reader opened stays as it is.
     fireEvent.change(searchInput, { target: { value: '   ' } });
     expect(screen.getByTestId('search-status').textContent).toBe('');
-    expect(screen.getByTestId('navigator-sidebar')).toHaveAttribute('data-navigator-tab', 'notes');
+    expect(screen.getByTestId('navigator-sidebar')).toHaveAttribute(
+      'data-navigator-tab',
+      'contents',
+    );
 
     // Esc clears the query and gives focus back to the text.
     fireEvent.change(searchInput, { target: { value: 'quick' } });
@@ -1087,5 +1090,144 @@ describe('TxtViewer', () => {
     );
     expect(count).toBe(0);
     expect(chunksDeliveredAfterAbort).toBe(0);
+  });
+  describe('with chapter headings (#52)', () => {
+    const filler = (chapter: string) =>
+      Array.from({ length: 30 }, (_, line) => `${chapter} prose line ${line + 1} goes on.`);
+    const lines = [
+      'A Book of Chapters',
+      '',
+      'Chapter 1. The Start',
+      ...filler('One'),
+      '',
+      'Chapter 2',
+      ...filler('Two'),
+      '',
+      'Part II',
+      '',
+      'Chapter 3',
+      ...filler('Three'),
+      '',
+      '第四章 归来',
+      ...filler('Four'),
+    ];
+    const text = lines.join('\n');
+    const rowOf = (line: string) => lines.indexOf(line);
+    const subtitle = () => screen.queryByTestId('reader-toolbar-subtitle')?.textContent ?? null;
+
+    const open = async () => {
+      const { store, documentId } = await setup(new TextEncoder().encode(text), 97);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('A Book of Chapters');
+      // The last chunk arrives, and with it the last heading.
+      await waitFor(() => expect(screen.getAllByTestId('progress-scrubber-tick')).toHaveLength(5));
+    };
+
+    it('lists the headings in Contents, nested under their part, and jumps to them', async () => {
+      await open();
+      expect(subtitle()).toBeNull();
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      expect(screen.getByTestId('navigator-tab-contents')).toHaveAttribute('aria-selected', 'true');
+      expect(screen.getByRole('treeitem', { name: 'Chapter 1. The Start' })).toHaveAttribute(
+        'aria-level',
+        '1',
+      );
+      const part = screen.getByRole('treeitem', { name: 'Part II' });
+      expect(part).toHaveAttribute('aria-expanded', 'false');
+
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Chapter 2' }));
+      await waitFor(() => expect(scroller().scrollTop).toBe(rowOf('Chapter 2') * ROW_PX));
+      expect(subtitle()).toBe('Chapter 2');
+      expect(screen.getByRole('treeitem', { name: 'Chapter 2' })).toHaveAttribute(
+        'aria-current',
+        'location',
+      );
+      expect(await screen.findByTestId('reader-back-chip')).toHaveTextContent('Back to line 1');
+      fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+      expect(scroller().scrollTop).toBe(0);
+    });
+
+    it('moves by chapter with the chapter commands and the scrubber', async () => {
+      await open();
+      fireEvent.keyDown(scroller(), { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+      await waitFor(() => expect(subtitle()).toBe('Chapter 1. The Start'));
+      expect(scroller().scrollTop).toBe(rowOf('Chapter 1. The Start') * ROW_PX);
+      fireEvent.keyDown(scroller(), { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+      fireEvent.keyDown(scroller(), { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+      await waitFor(() => expect(subtitle()).toBe('Part II'));
+      // Part II and Chapter 3 open one stretch of text: one stop, not two.
+      fireEvent.keyDown(scroller(), { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+      await waitFor(() => expect(subtitle()).toBe('第四章 归来'));
+      expect(scroller().scrollTop).toBe(rowOf('第四章 归来') * ROW_PX);
+      fireEvent.keyDown(scroller(), { key: 'ArrowUp', code: 'ArrowUp', altKey: true });
+      await waitFor(() => expect(subtitle()).toBe('Part II'));
+      expect(scroller().scrollTop).toBe(rowOf('Part II') * ROW_PX);
+
+      // Home goes to the start of the chapter being read, not of the file.
+      scrollTo((rowOf('Chapter 3') + 10) * ROW_PX);
+      expect(subtitle()).toBe('Chapter 3');
+      fireEvent.keyDown(scroller(), { key: 'Home', code: 'Home' });
+      expect(scroller().scrollTop).toBe(rowOf('Part II') * ROW_PX);
+      fireEvent.keyDown(scroller(), { key: 'ArrowUp', code: 'ArrowUp', altKey: true });
+      await waitFor(() => expect(subtitle()).toBe('Chapter 2'));
+
+      // Page Down on the scrubber is the next chapter too.
+      fireEvent.keyDown(screen.getByRole('slider'), { key: 'PageDown', code: 'PageDown' });
+      await waitFor(() => expect(subtitle()).toBe('Part II'));
+      expect(screen.getByRole('slider').getAttribute('aria-valuetext')).toMatch(/^Line \d+ of/);
+    });
+
+    it('goes to a line or a percentage from the Go To box, and gives the page the keyboard', async () => {
+      await open();
+      const input = screen.getByTestId('go-to-input');
+      expect(input).toHaveAccessibleName('Go to line or percentage');
+
+      fireEvent.keyDown(window, { key: 'g', code: 'KeyG', altKey: true, ctrlKey: true });
+      expect(input).toHaveFocus();
+
+      fireEvent.change(input, { target: { value: '40' } });
+      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+      await waitFor(() => expect(scroller().scrollTop).toBe(39 * ROW_PX));
+      expect(scroller()).toHaveFocus();
+      expect(input).toHaveValue('');
+      expect(await screen.findByTestId('reader-back-chip')).toHaveTextContent('Back to line 1');
+
+      // A line past the end is refused, and the box keeps the keyboard to fix it.
+      input.focus();
+      fireEvent.change(input, { target: { value: '9999' } });
+      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+      expect(input).toHaveAttribute('aria-invalid', 'true');
+      expect(input).toHaveFocus();
+      expect(scroller().scrollTop).toBe(39 * ROW_PX);
+
+      // Esc leaves without going anywhere.
+      fireEvent.keyDown(input, { key: 'Escape', code: 'Escape' });
+      expect(scroller()).toHaveFocus();
+      expect(input).toHaveValue('');
+      expect(scroller().scrollTop).toBe(39 * ROW_PX);
+
+      // A percentage is of the file's bytes, as the footer counts it.
+      input.focus();
+      fireEvent.change(input, { target: { value: '100%' } });
+      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+      await waitFor(() => expect(subtitle()).toBe('第四章 归来'));
+      input.focus();
+      fireEvent.change(input, { target: { value: '0 %' } });
+      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+      await waitFor(() => expect(scroller().scrollTop).toBe(0));
+    });
+
+    it('keeps Home and End on the file edges when it has no headings', async () => {
+      const { store, documentId } = await setup(new TextEncoder().encode(filler('x').join('\n')));
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('x prose line 1 goes on.');
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      expect(
+        await screen.findByText('No chapter headings found in this file.'),
+      ).toBeInTheDocument();
+      expect(screen.queryAllByTestId('progress-scrubber-tick')).toHaveLength(0);
+      fireEvent.keyDown(scroller(), { key: 'End', code: 'End' });
+      expect(scroller().scrollTop).toBe(ROW_PX * 10_000);
+    });
   });
 });

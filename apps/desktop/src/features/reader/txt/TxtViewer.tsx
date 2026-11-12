@@ -17,6 +17,7 @@ import { PanelLeft } from 'lucide-react';
 import { localHighlights, useAnnotationsController } from '@/features/reader/AnnotationsPanel';
 import { BookmarkToggleButton, useBookmarksController } from '@/features/reader/BookmarksPanel';
 import { useFocusPageOnActivate } from '@/features/reader/focusPage';
+import { GoToField, parseGoToInput, useGoToField } from '@/features/reader/GoToField';
 import {
   SEARCH_HIGHLIGHT_COLOR,
   SEARCH_HIGHLIGHT_ID,
@@ -79,6 +80,13 @@ import {
   type Segment,
   segmentRow,
 } from '@/features/reader/txt/rowSegments';
+import {
+  chapterAt,
+  chapterStartRows,
+  headingId,
+  headingIndexAt,
+  headingOutline,
+} from '@/features/reader/txt/chapters';
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { cn, describeError } from '@/lib/utils';
@@ -96,7 +104,7 @@ import { UNIT_ATTRIBUTE, unitAtBoundary } from './selectionMapping';
 import { type TxtSearchMatch, TxtTextModel } from './textModel';
 
 export const ROW_ESTIMATE_PX = 26;
-/** Plain text has no chapters: Page Up and Page Down on the scrubber move a tenth. */
+/** Without headings, Page Up and Page Down on the scrubber move a tenth. */
 const SCRUB_STEP = 0.1;
 const OVERSCAN_ROWS = 12;
 const CURSOR_DEBOUNCE_MS = 400;
@@ -280,6 +288,8 @@ export function TxtViewer({
   const offerBackChip = backChip.offer;
   const markup = useMarkupToolbar();
   const [currentRow, setCurrentRow] = useState(0);
+  /** Scrolled to the very end, where the last rows can never reach the top. */
+  const [atEnd, setAtEnd] = useState(false);
   const pageRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
   const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
@@ -449,9 +459,14 @@ export function TxtViewer({
   }, [reportCursor]);
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
-    lastScrollTop.current = event.currentTarget.scrollTop;
+    const scroller = event.currentTarget;
+    lastScrollTop.current = scroller.scrollTop;
     const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
     setCurrentRow(row);
+    setAtEnd(
+      scroller.scrollTop > 0 &&
+        scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2,
+    );
     if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
     pendingCursor.current = window.setTimeout(() => {
       pendingCursor.current = null;
@@ -540,8 +555,8 @@ export function TxtViewer({
     [],
   );
 
-  // Plain text has no outline or pages: the sidebar holds bookmarks and notes.
-  const navigator = useNavigator('txt', ['notes', 'bookmarks']);
+  // Contents lists the headings the text model finds as the file streams in (#52).
+  const navigator = useNavigator('txt', ['contents', 'notes', 'bookmarks']);
   // Opening the file, or activating its tab, hands the keyboard to the page so
   // Page Down and the arrows work at once. Text entry and the tablist keep focus (#50).
   const focusPage = useFocusPageOnActivate(scrollRef, isActive);
@@ -793,6 +808,56 @@ export function TxtViewer({
     scroller.scrollTo({ top: edge === 'start' ? 0 : scroller.scrollHeight });
   };
 
+  // ---- Chapters: headings found in the text ---------------------------------
+
+  // The model's list only grows; its length stands in for its contents.
+  const headingCount = model.headings.length;
+  const headings = useMemo(
+    () => model.headings.slice(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [model, headingCount],
+  );
+  const outline = useMemo(() => headingOutline(headings), [headings]);
+  const chapterStarts = useMemo(() => chapterStartRows(headings), [headings]);
+  const hasChapters = headings.length > 0;
+  // A last chapter shorter than the page never reaches the top; at the end of the
+  // file it is the one being read, so Next Chapter does not offer it again.
+  const chapterRow = atEnd && complete ? rowCount - 1 : currentRow;
+  const currentHeading = headings[headingIndexAt(headings, chapterRow)] ?? null;
+  const chapterIndex = chapterAt(chapterStarts, chapterRow);
+
+  /** A jump the reader may want to undo: remembered, with a chip leading back. */
+  const jumpToRow = (row: number) => {
+    const origin = currentRow + 1;
+    backChip.dismiss();
+    pushHistory(scrollRef.current?.scrollTop ?? lastScrollTop.current);
+    showRow(row);
+    offerBackChip(`Back to line ${origin}`);
+  };
+
+  const handleHeadingSelect = (startByte: number) => {
+    const row = model.rowAtSourceOffset(startByte);
+    if (row !== null) jumpToRow(row);
+  };
+
+  const goToChapter = (index: number) => {
+    const row = chapterStarts[index];
+    if (row === undefined) return;
+    backChip.dismiss();
+    showRow(row);
+  };
+
+  const goToChapterEnd = () => {
+    const next = chapterStarts[chapterIndex + 1];
+    if (next === undefined) {
+      scrollToEdge('end');
+      return;
+    }
+    backChip.dismiss();
+    const last = Math.max(next - 1, chapterStarts[chapterIndex] ?? 0);
+    virtualizer.scrollToIndex(last, { align: 'end' });
+  };
+
   // ---- Progress: by source byte, so it does not depend on row heights ----------
 
   // `rowCount` and `complete` stand in for the mutable model's loaded length.
@@ -808,20 +873,44 @@ export function TxtViewer({
     const byte = Math.floor(Math.min(Math.max(at, 0), 1) * loadedBytes);
     return model.rowAtUnit(model.unitAtSourceOffset(byte, 'down') ?? 0);
   };
-  const showRow = (row: number) => {
+  function showRow(row: number) {
     setCurrentRow(row);
     virtualizer.scrollToIndex(row, { align: 'start' });
+  }
+  const describeRow = (row: number) => {
+    const heading = headings[headingIndexAt(headings, row)];
+    return heading ? `${heading.label} · Line ${row + 1}` : `Line ${row + 1}`;
+  };
+
+  // ---- Go To: a line, or a percentage of the file -------------------------------
+
+  const goTo = useGoToField();
+  const goToInput = (text: string): boolean => {
+    const target = parseGoToInput(text, 'line');
+    if (!target || loadedBytes === 0) return false;
+    if (target.kind === 'line') {
+      if (target.line > rowCount) return false;
+      jumpToRow(target.line - 1);
+    } else {
+      jumpToRow(rowAtFraction(target.percent / 100));
+    }
+    return true;
   };
   const scrubber: ScrubberModel | null =
     loadedBytes > 0
       ? {
           value: fraction,
           valueText: `Line ${currentRow + 1} of ${rowCount}, ${percent}%`,
-          ticks: [],
+          ticks: headings
+            .filter((heading) => heading.startByte > 0)
+            .map((heading) => ({
+              position: Math.min(heading.startByte / loadedBytes, 1),
+              label: heading.label,
+            })),
           searchMarks: scrubberSearchMarks(
             search.results.map((match) => (match.lineNumber - 1) / Math.max(rowCount, 1)),
           ),
-          describe: (at) => `Line ${rowAtFraction(at) + 1} · ${Math.round(at * 100)}%`,
+          describe: (at) => `${describeRow(rowAtFraction(at))} · ${Math.round(at * 100)}%`,
           onCommit: (at) => {
             const origin = currentRow + 1;
             pushHistory(lastScrollTop.current);
@@ -830,6 +919,10 @@ export function TxtViewer({
           },
           onStepPage: turnPage,
           onStepChapter: (direction) => {
+            if (hasChapters) {
+              goToChapter(chapterIndex + direction);
+              return;
+            }
             backChip.dismiss();
             showRow(rowAtFraction(fraction + direction * SCRUB_STEP));
           },
@@ -866,9 +959,22 @@ export function TxtViewer({
     extra: {
       'go.previousPage': { run: () => turnPage(-1) },
       'go.nextPage': { run: () => turnPage(1) },
-      // A text file is one chapter: Home and End go to its start and end.
-      'go.chapterStart': { run: () => scrollToEdge('start'), title: 'Start of Document' },
-      'go.chapterEnd': { run: () => scrollToEdge('end'), title: 'End of Document' },
+      'go.previousChapter': {
+        run: () => goToChapter(chapterIndex - 1),
+        enabled: hasChapters && chapterIndex > 0,
+      },
+      'go.nextChapter': {
+        run: () => goToChapter(chapterIndex + 1),
+        enabled: hasChapters && chapterIndex < chapterStarts.length - 1,
+      },
+      // Without headings a text file is one chapter: Home and End go to its edges.
+      'go.chapterStart': hasChapters
+        ? { run: () => goToChapter(chapterIndex) }
+        : { run: () => scrollToEdge('start'), title: 'Start of Document' },
+      'go.chapterEnd': hasChapters
+        ? { run: goToChapterEnd }
+        : { run: () => scrollToEdge('end'), title: 'End of Document' },
+      'go.page': { run: goTo.focus, title: 'Go to Line or Percentage…' },
       'go.back': { run: handleReturnBack, enabled: history.canGoBack },
       'go.forward': { run: handleForward, enabled: history.canGoForward },
     },
@@ -969,7 +1075,7 @@ export function TxtViewer({
             />
           </>
         }
-        center={<ToolbarTitle title={document.title} />}
+        center={<ToolbarTitle title={document.title} subtitle={currentHeading?.label} />}
         trailing={
           <>
             <AppearanceMenu
@@ -986,6 +1092,14 @@ export function TxtViewer({
               onToggle={markup.toggle}
             />
             <ToolbarSeparator />
+            <GoToField
+              inputRef={goTo.inputRef}
+              label="Go to line or percentage"
+              tooltipLabel="Go to line, or a percentage such as 50%"
+              placeholder="Line or %"
+              onGo={goToInput}
+              onReturnFocus={() => focusPage(true)}
+            />
             <BookmarkToggleButton
               bookmarked={bookmarksController.isCurrentBookmarked}
               onToggle={bookmarksController.toggleCurrentBookmark}
@@ -1007,6 +1121,14 @@ export function TxtViewer({
             search={search}
             groupSearchResults={false}
             onReturnFocus={focusPage}
+            contents={{
+              items: outline,
+              currentId: currentHeading ? headingId(currentHeading) : null,
+              emptyMessage: complete
+                ? 'No chapter headings found in this file.'
+                : 'Looking for chapter headings…',
+              onSelect: handleHeadingSelect,
+            }}
             annotationPlacement={(annotation) => ({
               order: asTxtAnchor(annotation.anchor)?.startByteOffset ?? Number.MAX_SAFE_INTEGER,
             })}

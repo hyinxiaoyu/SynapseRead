@@ -2,10 +2,12 @@
 
 import { epubFlow } from './epub.mjs';
 import { epubProgressFlow } from './epubProgress.mjs';
+import { goToFlow } from './goTo.mjs';
 import { launchPage, serveDist } from './harness.mjs';
 import { keyboardFlow } from './keyboard.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
 import { txtFlow } from './txt.mjs';
+import { txtChaptersFlow } from './txtChapters.mjs';
 
 // The one CSP report that does not fail a flow, and only on a browser shown to send it
 // for an inert document. The EPUB flow separately asserts that the handler never ran.
@@ -19,6 +21,8 @@ const FLOWS = {
   epub: epubFlow,
   'epub-progress': epubProgressFlow,
   keyboard: keyboardFlow,
+  'txt-chapters': txtChaptersFlow,
+  'go-to': goToFlow,
 };
 
 const only = process.argv.slice(2);

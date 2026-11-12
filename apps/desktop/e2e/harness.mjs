@@ -318,6 +318,11 @@ export class Page {
     }
   }
 
+  /** Types `text` into whatever has focus, as the keyboard would. */
+  async typeText(text) {
+    await this.cdp.send('Input.insertText', { text });
+  }
+
   /**
    * Enters focus mode from its toolbar button, then moves the pointer and focus to
    * `pageSelector` and waits for the idle toolbar to slide away.
@@ -454,7 +459,7 @@ export class Page {
     const viewerSettled = `[...document.querySelectorAll('[aria-label="Document reader"] > div:last-child > div')]
       .some((pane) => pane.checkVisibility({ visibilityProperty: true })
         && !pane.textContent.startsWith('Opening '))`;
-    // One pass through the picker's library, which holds six files.
+    // One pass through the picker's library, which holds seven files.
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const before = await this.evaluate(
         `({ tab: ${activeTab}, count: document.querySelectorAll('[role="tab"]').length })`,

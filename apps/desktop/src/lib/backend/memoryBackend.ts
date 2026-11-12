@@ -4,6 +4,7 @@ import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-
 import sampleLabelsPdfUrl from '../../../../../fixtures/documents/sample-labels.pdf?url&no-inline';
 import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
 import sampleUnevenEpubUrl from '../../../../../fixtures/documents/sample-uneven.epub?url&no-inline';
+import sampleChaptersTxtUrl from '../../../../../fixtures/documents/sample-chapters.txt?url&no-inline';
 import sampleTxtUrl from '../../../../../fixtures/documents/sample.txt?url&no-inline';
 
 import {
@@ -62,6 +63,8 @@ const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample-labels.pdf': fetchBytes(sampleLabelsPdfUrl),
   // An EPUB whose ten short front-matter files would skew progress by file (#52).
   '/preview/sample-uneven.epub': fetchBytes(sampleUnevenEpubUrl),
+  // A text file with English and Chinese chapter headings, and a contents list (#52).
+  '/preview/sample-chapters.txt': fetchBytes(sampleChaptersTxtUrl),
 };
 
 export interface MemoryBackendOptions {

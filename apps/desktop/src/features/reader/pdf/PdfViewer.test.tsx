@@ -678,6 +678,17 @@ describe('PdfViewer', () => {
     fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
     expect(pageInput).toHaveAttribute('aria-invalid', 'false');
     expect((await scroller()).scrollTop).toBeCloseTo(2 * (PAGE_PX + GAP_PX), 0);
+    // Return gives the page the keyboard back, as the other readers' Go To box does.
+    expect(await scroller()).toHaveFocus();
+
+    // Go to Page (⌥⌘G) selects the field; Esc puts the current page back and leaves.
+    fireEvent.keyDown(window, { key: 'g', code: 'KeyG', altKey: true, ctrlKey: true });
+    expect(pageInput).toHaveFocus();
+    fireEvent.change(pageInput, { target: { value: '5' } });
+    fireEvent.keyDown(pageInput, { key: 'Escape', code: 'Escape' });
+    expect(pageInput).toHaveValue('3');
+    expect(await scroller()).toHaveFocus();
+    expect((await scroller()).scrollTop).toBeCloseTo(2 * (PAGE_PX + GAP_PX), 0);
 
     const backButton = await screen.findByRole('button', { name: 'Return to previous location' });
     fireEvent.click(backButton);

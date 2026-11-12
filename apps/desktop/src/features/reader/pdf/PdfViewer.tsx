@@ -1657,6 +1657,8 @@ function PdfPages({
     // The label is what the box shows, even when a physical page was typed.
     setPageInput(pageLabelOf(pageLabels, target));
     navigateToPage(target);
+    // As the Go To box in the other readers: the page takes the keyboard back.
+    focusPage(true);
   };
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
@@ -2319,6 +2321,14 @@ function PdfPages({
                 onChange={(event) => {
                   setPageInput(event.target.value);
                   if (pageInputInvalid) setPageInputInvalid(false);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+                  // Cancels here, so the Esc layers below (focus mode) do not also take it.
+                  event.preventDefault();
+                  setPageInput(currentPageLabel);
+                  setPageInputInvalid(false);
+                  focusPage(true);
                 }}
                 onBlur={() => {
                   if (pageInputInvalid) {
