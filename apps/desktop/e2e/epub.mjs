@@ -456,7 +456,9 @@ export async function epubFlow(page) {
   // Let epub.js finish its 150 ms debounced resize for the Standard host width first.
   await new Promise((done) => setTimeout(done, 250));
   const epubStandardWidth = await page.evaluate(`${visibleHost}.getBoundingClientRect().width`);
-  const epubFontPx = `parseFloat(getComputedStyle(${frameDocument}.body).fontSize)`;
+  // NaN, which `waitFor` polls past, while epub.js re-mounts the chapter frame and it has
+  // no body yet; reading it then would throw and end the wait at once.
+  const epubFontPx = `(() => { const body = ${frameDocument}?.body; return body ? parseFloat(getComputedStyle(body).fontSize) : NaN; })()`;
   const baseEpubFontPx = await page.waitFor(epubFontPx, 'EPUB base body font size');
   for (let step = 0; step < 6; step += 1) {
     await page.clickButton('Increase font size');
