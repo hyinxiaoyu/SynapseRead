@@ -83,3 +83,11 @@ jobs:
         run: pnpm e2e
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+
+      - name: Upload screenshots of failed flows
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-failures-${{ matrix.os }}
+          path: apps/desktop/e2e-failures/
+          if-no-files-found: ignore

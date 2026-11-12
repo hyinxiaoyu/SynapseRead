@@ -291,6 +291,15 @@ export function TxtViewer({
   const [currentRow, setCurrentRow] = useState(0);
   /** Scrolled to the very end, where the last rows can never reach the top. */
   const [atEnd, setAtEnd] = useState(false);
+  /**
+   * The row a jump asked for. Near the end of the file the scroll offset clamps, so
+   * the row at the top is not the row that was asked for; until the reader scrolls,
+   * the jump's row is where they are (otherwise ⌥↑ from the last chapter is stuck).
+   */
+  const pinnedRow = useRef<number | null>(null);
+  const unpin = () => {
+    pinnedRow.current = null;
+  };
   const pageRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
   const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
@@ -463,11 +472,21 @@ export function TxtViewer({
     const scroller = event.currentTarget;
     lastScrollTop.current = scroller.scrollTop;
     const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
-    setCurrentRow(row);
-    setAtEnd(
-      scroller.scrollTop > 0 &&
-        scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2,
-    );
+    const pinned = pinnedRow.current;
+    const bottomRow =
+      virtualizer.getVirtualItemForOffset(scroller.scrollTop + scroller.clientHeight - 1)?.index ??
+      row;
+    if (pinned !== null && pinned >= row && pinned <= bottomRow) {
+      setCurrentRow(pinned);
+      setAtEnd(false);
+    } else {
+      pinnedRow.current = null;
+      setCurrentRow(row);
+      setAtEnd(
+        scroller.scrollTop > 0 &&
+          scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2,
+      );
+    }
     if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
     pendingCursor.current = window.setTimeout(() => {
       pendingCursor.current = null;
@@ -792,6 +811,7 @@ export function TxtViewer({
   };
 
   const turnPage = (direction: TurnDirection) => {
+    unpin();
     backChip.dismiss();
     pageBy(direction);
     animatePageTurn(
@@ -805,6 +825,7 @@ export function TxtViewer({
   const scrollToEdge = (edge: 'start' | 'end') => {
     const scroller = scrollRef.current;
     if (!scroller) return;
+    unpin();
     backChip.dismiss();
     scroller.scrollTo({ top: edge === 'start' ? 0 : scroller.scrollHeight });
   };
@@ -829,6 +850,11 @@ export function TxtViewer({
 
   /** A jump the reader may want to undo: remembered, with a chip leading back. */
   const jumpToRow = (row: number) => {
+    // Already there: nothing to go back to, as in the other readers.
+    if (row === currentRow) {
+      showRow(row);
+      return;
+    }
     const origin = currentRow + 1;
     backChip.dismiss();
     pushHistory(scrollRef.current?.scrollTop ?? lastScrollTop.current);
@@ -854,6 +880,7 @@ export function TxtViewer({
       scrollToEdge('end');
       return;
     }
+    unpin();
     backChip.dismiss();
     const last = Math.max(next - 1, chapterStarts[chapterIndex] ?? 0);
     virtualizer.scrollToIndex(last, { align: 'end' });
@@ -875,7 +902,9 @@ export function TxtViewer({
     return model.rowAtUnit(model.unitAtSourceOffset(byte, 'down') ?? 0);
   };
   function showRow(row: number) {
+    pinnedRow.current = row;
     setCurrentRow(row);
+    setAtEnd(false);
     virtualizer.scrollToIndex(row, { align: 'start' });
   }
   const describeRow = (row: number) => {
@@ -903,7 +932,8 @@ export function TxtViewer({
           value: fraction,
           valueText: `Line ${currentRow + 1} of ${rowCount}, ${percent}%`,
           ticks: headings
-            .filter((heading) => heading.startByte > 0)
+            // After the first line: a BOM puts the first heading at byte 3, not 0.
+            .filter((heading) => heading.row > 0)
             .map((heading) => ({
               position: Math.min(heading.startByte / loadedBytes, 1),
               label: heading.label,
@@ -1173,6 +1203,11 @@ export function TxtViewer({
             <div
               ref={scrollRef}
               onScroll={onScroll}
+              // The reader scrolling by hand lets go of a jump's row.
+              onWheel={unpin}
+              onPointerDown={unpin}
+              onTouchStart={unpin}
+              onKeyDown={unpin}
               tabIndex={-1}
               data-testid="txt-scroll"
               data-turn-zone={gestures.zone ?? undefined}

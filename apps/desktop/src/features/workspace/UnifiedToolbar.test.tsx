@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { registerCommands, runCommand } from '@/features/commands/registry';
+import { GoToField, useGoToField } from '@/features/reader/GoToField';
 import type { WindowChromeStyle } from '@/lib/backend/types';
 
 import { AUTO_HIDE_DELAY_MS, UnifiedToolbar, toolbarShowsCommand } from './UnifiedToolbar';
@@ -119,16 +120,57 @@ describe('UnifiedToolbar', () => {
     stop();
   });
 
+  it('comes back for Go To, and the box takes the keyboard once it is no longer inert', () => {
+    // A browser ignores focus() inside an inert subtree; jsdom does not, so do as it does.
+    const focus = HTMLElement.prototype.focus;
+    const spy = vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (
+      this: HTMLElement,
+      options?: FocusOptions,
+    ) {
+      if (!this.closest('[inert]')) focus.call(this, options);
+    });
+    let focusGoTo = () => undefined as void;
+    function GoTo() {
+      const goTo = useGoToField();
+      focusGoTo = goTo.focus;
+      return (
+        <GoToField
+          inputRef={goTo.inputRef}
+          label="Go to"
+          tooltipLabel="Go to"
+          placeholder="%"
+          onGo={() => true}
+          onReturnFocus={() => undefined}
+        />
+      );
+    }
+    const stop = registerCommands(() => ({ 'go.page': { run: () => focusGoTo() } }));
+    renderToolbar({ workspaceControls: <GoTo /> });
+    idle();
+    expect(toolbar()).toHaveAttribute('inert');
+
+    act(() => {
+      runCommand('go.page', 'keyboard');
+    });
+    expect(toolbar()).not.toHaveAttribute('inert');
+    expect(screen.getByTestId('go-to-input')).toHaveFocus();
+    stop();
+    spy.mockRestore();
+  });
+
   it('knows which commands it shows, including several on one control', () => {
     const header = document.createElement('header');
     header.innerHTML = `
       <button data-command="view.zoomIn"></button>
       <div data-command="edit.find edit.findNext"></div>
-      <button data-command="go.forward"></button>`;
+      <button data-command="go.forward"></button>
+      <input data-command="go.page">`;
     expect(toolbarShowsCommand(header, 'view.zoomIn')).toBe(true);
     expect(toolbarShowsCommand(header, 'edit.findNext')).toBe(true);
     expect(toolbarShowsCommand(header, 'edit.findPrevious')).toBe(false);
     expect(toolbarShowsCommand(header, 'go.forward')).toBe(false);
+    // Go To moves the keyboard into the toolbar, so it is the one `go.*` that shows.
+    expect(toolbarShowsCommand(header, 'go.page')).toBe(true);
     expect(toolbarShowsCommand(null, 'view.zoomIn')).toBe(false);
   });
 

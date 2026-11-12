@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type RefObject, useId, useRef, useState } from 'react';
+import { type KeyboardEvent, type RefObject, useEffect, useId, useRef, useState } from 'react';
 
 import { commandTooltip } from '@/features/commands/commands';
 import { cn } from '@/lib/utils';
@@ -6,36 +6,49 @@ import { cn } from '@/lib/utils';
 /** A place a Go To box was asked for, before the reader resolves it. */
 export type GoToTarget = { kind: 'line'; line: number } | { kind: 'percent'; percent: number };
 
+/** A percentage, with a decimal point or comma: `12`, `12.5`, `12,5`. */
+const PERCENT = '\\d{1,3}(?:[.,]\\d+)?';
+const PERCENT_SIGNED = new RegExp(`^(${PERCENT})\\s*[%％]$`, 'u');
+const PERCENT_BARE = new RegExp(`^${PERCENT}$`, 'u');
+
+const toPercent = (text: string): GoToTarget | null => {
+  const value = Number(text.replace(',', '.'));
+  return value <= 100 ? { kind: 'percent', percent: value } : null;
+};
+
 /**
  * Reads what was typed into a Go To box: `45%` is a percentage, and a bare number
  * is a line where the format has lines, else a percentage. Null if it is neither.
  */
 export function parseGoToInput(text: string, bareNumber: 'line' | 'percent'): GoToTarget | null {
   const trimmed = text.trim();
-  const percent = /^(\d{1,3}(?:[.,]\d+)?)\s*[%％]$/u.exec(trimmed);
-  if (percent) {
-    const value = Number((percent[1] as string).replace(',', '.'));
-    return value <= 100 ? { kind: 'percent', percent: value } : null;
-  }
-  const number = /^\d{1,12}$/u.exec(trimmed);
-  if (!number) return null;
-  const value = Number(number[0]);
-  if (bareNumber === 'percent') return value <= 100 ? { kind: 'percent', percent: value } : null;
-  return value >= 1 ? { kind: 'line', line: value } : null;
+  const percent = PERCENT_SIGNED.exec(trimmed);
+  if (percent) return toPercent(percent[1] as string);
+  // Where a bare number is a percentage, it takes decimals as `12.5%` does.
+  if (bareNumber === 'percent') return PERCENT_BARE.test(trimmed) ? toPercent(trimmed) : null;
+  if (!/^\d{1,12}$/u.test(trimmed)) return null;
+  const line = Number(trimmed);
+  return line >= 1 ? { kind: 'line', line } : null;
 }
 
-/** Focuses a Go To box with its text selected: what `go.page` does. */
+/**
+ * Focuses a Go To box with its text selected: what `go.page` does.
+ *
+ * In focus mode the idle toolbar is `inert`, and a browser ignores `focus()` inside
+ * an inert subtree. `go.page` reveals the toolbar (its box declares the command),
+ * but that is a state change, so focusing waits for the commit that clears `inert`.
+ */
 export function useGoToField() {
   const inputRef = useRef<HTMLInputElement>(null);
-  return {
-    inputRef,
-    focus: () => {
-      const input = inputRef.current;
-      if (!input) return;
-      input.focus();
-      input.select();
-    },
-  };
+  const [focusNonce, setFocusNonce] = useState(0);
+  useEffect(() => {
+    if (focusNonce === 0) return;
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, [focusNonce]);
+  return { inputRef, focus: () => setFocusNonce((nonce) => nonce + 1) };
 }
 
 /**
@@ -108,6 +121,7 @@ export function GoToField({
         autoComplete="off"
         spellCheck={false}
         data-testid="go-to-input"
+        data-command="go.page"
         aria-invalid={invalid}
         title={commandTooltip(tooltipLabel, 'go.page')}
         placeholder={placeholder}

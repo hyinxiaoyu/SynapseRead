@@ -15,6 +15,10 @@ describe('parseGoToInput', () => {
     ['30％', 'line', { kind: 'percent', percent: 30 }],
     ['0%', 'line', { kind: 'percent', percent: 0 }],
     ['100%', 'percent', { kind: 'percent', percent: 100 }],
+    // Where a bare number is a percentage, it takes decimals as `12.5%` does.
+    ['12.5', 'percent', { kind: 'percent', percent: 12.5 }],
+    ['12,5', 'percent', { kind: 'percent', percent: 12.5 }],
+    ['100.0', 'percent', { kind: 'percent', percent: 100 }],
   ] as const)('%j as %s is %j', (text, bare, expected) => {
     expect(parseGoToInput(text, bare)).toEqual(expected);
   });
@@ -28,6 +32,11 @@ describe('parseGoToInput', () => {
     ['abc', 'line'],
     ['4 5', 'line'],
     ['1e3', 'line'],
+    // A line number is whole.
+    ['12.5', 'line'],
+    ['100.5', 'percent'],
+    ['1000', 'percent'],
+    ['12.', 'percent'],
   ] as const)('%j as %s is refused', (text, bare) => {
     expect(parseGoToInput(text, bare)).toBeNull();
   });

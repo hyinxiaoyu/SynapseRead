@@ -3,7 +3,7 @@
 // The app runs on the memory backend here, so nothing is saved.
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { extname, join, normalize, resolve, sep } from 'node:path';
@@ -529,13 +529,70 @@ export class Page {
     return count > 0;
   }
 
+  /**
+   * What a failed flow leaves behind: a screenshot in `dir`, and the reader state a
+   * timeout message cannot show (which popover is open, in which mode, the note being
+   * typed, where focus is). For flakes seen only on CI runners.
+   */
+  async diagnose(dir, name) {
+    const state = await this.evaluate(
+      `(() => {
+      const popover = document.querySelector('[data-testid="selection-popover"]');
+      const active = document.activeElement;
+      return {
+        hasFocus: document.hasFocus(),
+        activeElement: active && (active.getAttribute('data-testid') || active.getAttribute('aria-label') || active.tagName),
+        popover: popover && { mode: popover.dataset.popoverMode, rect: popover.getBoundingClientRect().toJSON() },
+        noteField: document.querySelector('[data-testid="popover-note-input"]')?.value ?? null,
+        selection: String(window.getSelection()).slice(0, 80),
+        marks: document.querySelectorAll('[data-annotation-id]:not([data-annotation-id^="__"])').length,
+        noteMarkers: document.querySelectorAll('[data-note-marker]').length,
+        viewport: [innerWidth, innerHeight],
+      };
+    })()`,
+    ).catch((error) => ({ error: error.message }));
+    console.error(`     ${name} state: ${JSON.stringify(state)}`);
+    try {
+      const { data } = await this.cdp.send('Page.captureScreenshot', { format: 'png' });
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${name}.png`), Buffer.from(data, 'base64'));
+    } catch (error) {
+      console.error(`     ${name}: no screenshot: ${error.message}`);
+    }
+  }
+
   /** CSP violations recorded since the page loaded. */
   cspViolations() {
     return this.evaluate('window.__cspViolations');
   }
 }
 
-export async function launchPage(url, { width = 1440, height = 900 } = {}) {
+/** How long a launched Chromium may take to open DevTools before it counts as hung. */
+const DEVTOOLS_TIMEOUT_MS = 15000;
+/**
+ * The first launch on a fresh CI runner is not a hang: on ubuntu-latest it took 11-18 s
+ * on every run (pages in the browser from a cold disk, builds font and code caches),
+ * where every later launch takes about 1 s. `warmUp` pays that once, so the flows
+ * keep the short deadline.
+ */
+const COLD_START_TIMEOUT_MS = 120000;
+
+/**
+ * Launches Chromium once and opens the app, with a deadline for a cold start, so the
+ * one-off first-launch cost does not land on whichever flow happens to run first.
+ * Returns how long it took.
+ */
+export async function warmUp(url) {
+  const started = Date.now();
+  const { close } = await launchPage(url, { devtoolsTimeoutMs: COLD_START_TIMEOUT_MS });
+  await close();
+  return Date.now() - started;
+}
+
+export async function launchPage(
+  url,
+  { width = 1440, height = 900, devtoolsTimeoutMs = DEVTOOLS_TIMEOUT_MS } = {},
+) {
   const chrome = CHROME_CANDIDATES.find((candidate) => existsSync(candidate));
   if (!chrome) throw new Error('No Chromium found. Set CHROME_PATH to a Chromium-based browser.');
 
@@ -590,7 +647,7 @@ export async function launchPage(url, { width = 1440, height = 900 } = {}) {
       let output = '';
       const timer = setTimeout(
         () => fail(new Error(`timed out waiting for Chromium DevTools: ${output}`)),
-        15000,
+        devtoolsTimeoutMs,
       );
       const settle = (fn, value) => {
         clearTimeout(timer);

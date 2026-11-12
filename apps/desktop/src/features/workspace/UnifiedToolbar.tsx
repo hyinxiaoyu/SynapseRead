@@ -38,11 +38,12 @@ function isToolbarPinned(toolbar: HTMLElement | null, hasReaderSelection: boolea
 /**
  * Whether running `id` changes something drawn in the toolbar: a button, a
  * segment, or the Find field that declares the command. Page turns and other
- * `go.*` moves show on the page, so they leave a hidden toolbar hidden (#45).
+ * `go.*` moves show on the page, so they leave a hidden toolbar hidden (#45); Go To
+ * is the exception, because it puts the keyboard in a toolbar field.
  * Controls collapsed into `»` stay in the DOM under `display: none`, and do not count.
  */
 export function toolbarShowsCommand(toolbar: HTMLElement | null, id: CommandId): boolean {
-  if (!toolbar || id.startsWith('go.')) return false;
+  if (!toolbar || (id.startsWith('go.') && id !== 'go.page')) return false;
   return [...toolbar.querySelectorAll<HTMLElement>(`[data-command~="${id}"]`)].some((control) =>
     isLaidOutWithin(control, toolbar),
   );

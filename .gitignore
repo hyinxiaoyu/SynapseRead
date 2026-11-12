@@ -9,6 +9,7 @@ dist-ssr/
 .vite/
 .eslintcache
 coverage/
+apps/desktop/e2e-failures/
 
 # Rust / Tauri build output
 # Cargo.lock IS committed: this workspace ships an application binary.

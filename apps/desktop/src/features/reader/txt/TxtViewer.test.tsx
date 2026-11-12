@@ -1238,6 +1238,94 @@ describe('TxtViewer', () => {
       await waitFor(() => expect(scroller().scrollTop).toBe(0));
     });
 
+    it('steps back from the end even when the last chapters fit on one page', async () => {
+      const short = (chapter: string) =>
+        Array.from({ length: 3 }, (_, line) => `${chapter} line ${line + 1}.`);
+      const tail = [
+        'Chapter 1',
+        ...filler('One'),
+        '',
+        'Chapter 2',
+        ...filler('Two'),
+        '',
+        'Epilogue',
+        ...short('Epilogue'),
+        '',
+        'Afterword',
+        ...short('Afterword'),
+      ];
+      // Lay the file out as a browser would: the offset clamps where the text ends.
+      const maxTop = tail.length * ROW_PX - VIEWPORT_PX;
+      vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(tail.length * ROW_PX);
+      Element.prototype.scrollTo = function (this: Element, options) {
+        this.scrollTop = Math.min(Math.max((options as ScrollToOptions).top ?? 0, 0), maxTop);
+        this.dispatchEvent(new Event('scroll'));
+      };
+      const { store, documentId } = await setup(new TextEncoder().encode(tail.join('\n')));
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('One prose line 1 goes on.');
+      await waitFor(() => expect(screen.getAllByTestId('progress-scrubber-tick')).toHaveLength(3));
+
+      // At the very end the last chapter is the one being read, though it never reaches the top.
+      scrollTo(maxTop);
+      await waitFor(() => expect(subtitle()).toBe('Afterword'));
+      // The Epilogue is on the same page, so going to it cannot move the view.
+      fireEvent.keyDown(scroller(), { key: 'ArrowUp', code: 'ArrowUp', altKey: true });
+      await waitFor(() => expect(subtitle()).toBe('Epilogue'));
+      expect(scroller().scrollTop).toBe(maxTop);
+      fireEvent.keyDown(scroller(), { key: 'ArrowUp', code: 'ArrowUp', altKey: true });
+      await waitFor(() => expect(subtitle()).toBe('Chapter 2'));
+      expect(scroller().scrollTop).toBe(tail.indexOf('Chapter 2') * ROW_PX);
+
+      // Contents can pick the Epilogue at the end too, and scrolling by hand lets go of it.
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Epilogue' }));
+      await waitFor(() => expect(subtitle()).toBe('Epilogue'));
+      expect(screen.getByRole('treeitem', { name: 'Epilogue' })).toHaveAttribute(
+        'aria-current',
+        'location',
+      );
+      fireEvent.wheel(scroller());
+      scrollTo(maxTop - 1);
+      scrollTo(maxTop);
+      await waitFor(() => expect(subtitle()).toBe('Afterword'));
+    });
+
+    it('offers no way back from a jump to where the reader already is', async () => {
+      await open();
+      const input = screen.getByTestId('go-to-input');
+      input.focus();
+      fireEvent.change(input, { target: { value: '1' } });
+      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+      expect(scroller()).toHaveFocus();
+      expect(screen.queryByTestId('reader-back-chip')).toBeNull();
+
+      // Contents on the chapter already shown keeps the way back to where the jump began.
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Chapter 2' }));
+      await waitFor(() => expect(scroller().scrollTop).toBe(rowOf('Chapter 2') * ROW_PX));
+      expect(await screen.findByTestId('reader-back-chip')).toHaveTextContent('Back to line 1');
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Chapter 2' }));
+      expect(screen.getByTestId('reader-back-chip')).toHaveTextContent('Back to line 1');
+      // One step back is the start, not Chapter 2 again.
+      fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+      expect(scroller().scrollTop).toBe(0);
+    });
+
+    it('marks no tick for a heading on the first line, after a BOM too', async () => {
+      const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+      const body = new TextEncoder().encode(
+        ['Chapter 1', ...filler('One'), '', 'Chapter 2', ...filler('Two')].join('\n'),
+      );
+      const { store, documentId } = await setup(new Uint8Array([...bom, ...body]));
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('One prose line 1 goes on.');
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      await screen.findByRole('treeitem', { name: 'Chapter 2' });
+      expect(screen.getByRole('treeitem', { name: 'Chapter 1' })).toBeInTheDocument();
+      expect(screen.getAllByTestId('progress-scrubber-tick')).toHaveLength(1);
+    });
+
     it('keeps Home and End on the file edges when it has no headings', async () => {
       const { store, documentId } = await setup(new TextEncoder().encode(filler('x').join('\n')));
       render(<Harness store={store} documentId={documentId} />);

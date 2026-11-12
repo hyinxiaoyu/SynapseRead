@@ -45,6 +45,11 @@ describe('matchNumberedHeading', () => {
     ['Prologue', 1],
     ['Epilogue: Ten Years Later', 1],
     ['  Chapter 7  ', 1],
+    // An ordinal that starts with a Roman numeral's letter is still the ordinal.
+    ['Chapter Last', 1],
+    ['Part Last', 0],
+    ['Chapter xiv', 1],
+    ['CHAPTER MCMXC', 1],
   ])('%j is level %j', (line, level) => {
     expect(matchNumberedHeading(line)?.level ?? null).toBe(level);
   });
@@ -76,8 +81,24 @@ describe('matchNumberedHeading', () => {
     '他翻到第十二章看了起来。',
     '第十二章节选',
     `Chapter 1 ${'and a very long title that goes on '.repeat(3)}`,
+    // Words spelled with Roman numerals' letters, in mixed case, are not numerals.
+    'Chapter Civil War',
+    'Part Mid-Autumn',
+    'Book Did Not',
+    'Chapter Vivid Dreams',
+    'Part Mix And Match',
+    // Short Chinese clauses and sentences that open with a heading word.
+    '第一集 播出之后反响热烈，',
+    '序：这本书写于去年冬天。',
+    '第三回 说到这里；',
   ])('%j is prose', (line) => {
     expect(matchNumberedHeading(line)).toBeNull();
+  });
+
+  it('names a heading by its word and number, so a contents entry matches its chapter', () => {
+    expect(matchNumberedHeading('Chapter 1. Loomings')?.key).toBe('chapter 1');
+    expect(matchNumberedHeading('CHAPTER I')?.key).toBe(matchNumberedHeading('Chapter I: X')?.key);
+    expect(matchNumberedHeading('第１２章　归来')?.key).toBe(matchNumberedHeading('第12章')?.key);
   });
 
   it('collapses inner whitespace, including the ideographic space', () => {
@@ -137,6 +158,41 @@ describe('HeadingScanner', () => {
     expect(headings).toEqual([
       { row: 7, label: 'Chapter 1. Loomings', level: 1, joined: false },
       { row: 11, label: 'Chapter 2. The Carpet-Bag', level: 1, joined: false },
+    ]);
+  });
+
+  it('drops a whole table of contents when front matter separates it from the text', () => {
+    const headings = scan([
+      'Chapter 1. Loomings',
+      'Chapter 2. The Carpet-Bag',
+      'Chapter 3. The Spouter-Inn',
+      '',
+      'For my father, who never read past the first page.',
+      '',
+      'Chapter 1. Loomings',
+      prose,
+      'Chapter 2. The Carpet-Bag',
+      prose,
+    ]);
+    expect(headings).toEqual([
+      { row: 6, label: 'Chapter 1. Loomings', level: 1, joined: false },
+      { row: 8, label: 'Chapter 2. The Carpet-Bag', level: 1, joined: false },
+    ]);
+    // A contents at the very end of the file, settled by `finish()`, is dropped too.
+    expect(scan([prose, '', 'Chapter 1', 'Chapter 2', 'Chapter 3'])).toEqual([]);
+  });
+
+  it('keeps a first chapter that a contents of parts did not list, outside any part', () => {
+    expect(scan(['Part I', 'Part II', '', 'Chapter 1', prose, 'Part II', prose])).toEqual([
+      { row: 3, label: 'Chapter 1', level: 1, joined: false },
+      { row: 5, label: 'Part II', level: 0, joined: false },
+    ]);
+  });
+
+  it('keeps a part that a contents of chapters did not list, with its first chapter', () => {
+    expect(scan(['Chapter 1', 'Chapter 2', '', 'Part One', '', 'Chapter 1', prose])).toEqual([
+      { row: 3, label: 'Part One', level: 0, joined: false },
+      { row: 5, label: 'Chapter 1', level: 1, joined: true },
     ]);
   });
 

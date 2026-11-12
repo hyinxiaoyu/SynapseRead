@@ -132,4 +132,27 @@ export async function goToFlow(page) {
   await page.waitFor(hasKeyboard(visible('txt-scroll')), 'Esc to give the TXT page the keyboard');
   const stayed = await settled(page, sliderText('txt-viewer'));
   assert(stayed === end, `Esc leaves the TXT where it was: ${end} became ${stayed}`);
+
+  // Focus mode: the idle toolbar is inert, where focus() does nothing. ⌥⌘G brings it
+  // back and the box still takes the keyboard; Esc there leaves focus mode on.
+  await page.enterFocusMode(visible('txt-scroll'));
+  await pressGoTo(page);
+  await page.waitFor(`${toolbar}?.dataset.hidden !== 'true'`, '⌥⌘G to show the hidden toolbar');
+  await page.waitFor(hasKeyboard(goToBox), '⌥⌘G to focus the Go To box in focus mode');
+  await page.typeText('48');
+  await pressReturn(page);
+  await page.waitFor(
+    `${sliderText('txt-viewer')}.startsWith('Line 48 of')`,
+    'Return to go to line 48 in focus mode',
+  );
+  await page.waitFor(hasKeyboard(visible('txt-scroll')), 'the page to take the keyboard back');
+  await page.waitFor(`${toolbar}?.dataset.hidden === 'true'`, 'the toolbar to hide again');
+  await pressGoTo(page);
+  await page.waitFor(hasKeyboard(goToBox), '⌥⌘G to focus the Go To box again');
+  await page.press('Escape');
+  await page.waitFor(hasKeyboard(visible('txt-scroll')), 'Esc to give the page the keyboard');
+  assert(
+    (await page.evaluate(`${toolbar}?.dataset.immersive`)) === 'true',
+    'Esc in the Go To box leaves focus mode on',
+  );
 }
