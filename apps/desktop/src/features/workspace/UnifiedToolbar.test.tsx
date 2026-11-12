@@ -401,6 +401,30 @@ describe('UnifiedToolbar', () => {
       });
       expect(centerSlot.style.left).toBe('-152px');
       rafSpy.mockRestore();
+
+      // Controls mounted inside a `display: contents` wrapper in a group are still
+      // observed and measured by their real boxes rather than the 0x0 wrapper.
+      const leading = screen.getByTestId('toolbar-leading');
+      const contentsCluster = document.createElement('div');
+      contentsCluster.style.display = 'contents';
+      const leadingControl = document.createElement('button');
+      mockBox(leadingControl, 8, 440);
+      await act(async () => {
+        leading.append(contentsCluster);
+        await Promise.resolve();
+        contentsCluster.append(leadingControl);
+        await Promise.resolve();
+      });
+      expect(observed.has(contentsCluster)).toBe(false);
+      expect(observed.has(leadingControl)).toBe(true);
+
+      // Move trailing clear on the right so the new leading cluster drives a positive shift:
+      // 240px title ([380, 620] centered) vs `440 + 12 = 452` on the left -> +72px shift.
+      trailingLeft = 800;
+      act(() => {
+        vi.advanceTimersToNextFrame();
+      });
+      expect(centerSlot.style.left).toBe('72px');
     } finally {
       vi.unstubAllGlobals();
     }

@@ -126,17 +126,23 @@ export function useAutoHideToolbar(
   return { hidden: enabled && hidden, reveal };
 }
 
-/** Direct visible items of `element`, descending past `display: contents` wrappers. */
-function visibleChildren(element: HTMLElement): HTMLElement[] {
+/**
+ * Layout-box children of `element`, descending past `display: contents` wrappers
+ * (which have no box of their own, while their children participate in layout).
+ */
+function boxChildren(element: HTMLElement): HTMLElement[] {
   const found: HTMLElement[] = [];
   for (const child of element.children) {
     if (!(child instanceof HTMLElement)) continue;
-    const display = getComputedStyle(child).display;
-    if (display === 'none') continue;
-    if (display === 'contents') found.push(...visibleChildren(child));
+    if (getComputedStyle(child).display === 'contents') found.push(...boxChildren(child));
     else found.push(child);
   }
   return found;
+}
+
+/** Direct visible items of `element`, descending past `display: contents` wrappers. */
+function visibleChildren(element: HTMLElement): HTMLElement[] {
+  return boxChildren(element).filter((child) => getComputedStyle(child).display !== 'none');
 }
 
 /**
@@ -192,7 +198,7 @@ function contentBounds(element: HTMLElement | null): { left: number; right: numb
   if (!element) return null;
   let left = Number.POSITIVE_INFINITY;
   let right = Number.NEGATIVE_INFINITY;
-  for (const child of element.children) {
+  for (const child of boxChildren(element)) {
     const box = child.getBoundingClientRect();
     // Hidden toolbar items collapse to nothing, and a zero box would drag the edges to 0.
     if (box.width === 0 && box.height === 0) continue;
@@ -278,7 +284,7 @@ function useTitleLayout(
     const syncObserved = () => {
       const next = new Set<Element>([toolbar]);
       for (const group of [leading, trailingGroup]) {
-        for (const child of group.children) next.add(child);
+        for (const child of boxChildren(group)) next.add(child);
       }
       for (const element of observed) {
         if (!next.has(element)) {
@@ -300,7 +306,7 @@ function useTitleLayout(
       scheduleMeasure();
     });
     for (const group of [leading, trailingGroup]) {
-      groupMutations.observe(group, { childList: true });
+      groupMutations.observe(group, { childList: true, subtree: true });
     }
 
     // In the narrow fallback layout the center slot's box is clamped, so text or page
