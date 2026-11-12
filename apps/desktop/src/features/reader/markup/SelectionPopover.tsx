@@ -312,8 +312,10 @@ export function SelectionPopover({
       data-placement={placement}
       data-reader-popover=""
       onKeyDown={onKeyDown}
+      // `duration-150` sets `--tw-duration` for `@keyframes` entrance; `transition-none`
+      // keeps `top`, `left`, and `transform-origin` pinned during scroll and note growth.
       className={cn(
-        'fixed z-40 flex w-max max-w-[min(26rem,calc(100vw-1rem))] animate-in flex-col rounded-xl border bg-background p-1 text-foreground shadow-lg duration-150 fade-in-0 zoom-in-[0.96] motion-reduce:animate-none',
+        'fixed z-40 flex w-max max-w-[min(26rem,calc(100vw-1rem))] transition-none animate-in flex-col rounded-xl border bg-background p-1 text-foreground shadow-lg duration-150 fade-in-0 zoom-in-[0.96] motion-reduce:animate-none',
         // It grows away from the anchor, so it appears to unfold from the text.
         placement === 'above' ? 'origin-bottom' : 'origin-top',
       )}

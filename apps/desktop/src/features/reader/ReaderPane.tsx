@@ -224,6 +224,16 @@ export function ReaderPane() {
                   aria-controls={`reader-tabpanel-${document.id}`}
                   tabIndex={isActive ? 0 : -1}
                   className="truncate py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onMouseDown={(event) => {
+                    // Clicking a tab picks a document to read, not to step through the tablist:
+                    // keep pointer focus off `[role="tab"]` so `useFocusPageOnActivate` hands
+                    // the keyboard to the newly shown page (#50).
+                    event.preventDefault();
+                    const active = window.document.activeElement;
+                    if (active instanceof HTMLElement && active.closest('[role="tablist"]')) {
+                      active.blur();
+                    }
+                  }}
                   onClick={() => activateDocument(document.id)}
                   onKeyDown={(event) => handleTabKeyDown(event, index)}
                 >
@@ -234,6 +244,7 @@ export function ReaderPane() {
                   aria-label={`Close ${document.title}`}
                   title={`Close ${document.title}`}
                   className="mr-0.5 flex size-6 shrink-0 items-center justify-center rounded outline-none hover:bg-background focus-visible:ring-2 focus-visible:ring-ring"
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={() => closeDocument(document.id)}
                 >
                   <X className="size-3.5" />

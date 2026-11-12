@@ -65,9 +65,18 @@ export async function keyboardFlow(page) {
   );
   await page.waitFor(pageHasKeyboard(visibleTxtScroll), 'the reopened tab to take the keyboard');
 
-  // Back to the PDF for Preview's three layout keys (⌘1, ⌘2, ⌘3).
-  await page.press('[', 'BracketLeft', META | SHIFT);
-  await page.waitFor(pageHasKeyboard(visiblePdfScroll), 'the PDF tab to take the keyboard');
+  // Back to the PDF for Preview's three layout keys (⌘1, ⌘2, ⌘3) via a real mouse click
+  // on the tab: clicking a tab must hand the keyboard to the page, not leave it on `[role="tab"]`.
+  const pdfTabPoint = await page.evaluate(`(() => {
+    const tab = [...document.querySelectorAll('[aria-label="Open documents"] [role="tab"]')][0];
+    const r = tab.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`);
+  await page.click(pdfTabPoint);
+  await page.waitFor(
+    pageHasKeyboard(visiblePdfScroll),
+    'clicking the PDF tab to give the keyboard to the PDF page',
+  );
   for (const [key, code, mode] of [
     ['1', 'Digit1', 'single'],
     ['2', 'Digit2', 'two-page'],

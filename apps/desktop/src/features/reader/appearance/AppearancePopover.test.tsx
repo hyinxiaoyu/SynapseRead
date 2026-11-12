@@ -63,6 +63,7 @@ describe('AppearanceMenu', () => {
     try {
       render(<Harness />);
       fireEvent.click(trigger());
+      expect(popover()).toHaveClass('transition-none');
       expect(popover()?.style.translate).toBe('76px');
       rect.mockReturnValue({ right: window.innerWidth + 20 } as DOMRect);
       fireEvent(window, new Event('resize'));
