@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { DEFAULT_READING_PREFERENCES } from '@/types/domain';
 import {
   decorateWithNoteMarker,
   openEpubDocument,
@@ -28,18 +29,31 @@ const fake = vi.hoisted(() => {
   interface LocationState {
     start: { href: string; cfi: string };
   }
+  interface FakeContents {
+    document: Document;
+    window: Window;
+    expand: ReturnType<typeof vi.fn<() => void>>;
+  }
+  interface SpineSection {
+    href: string;
+    document?: Document;
+  }
+  const spineItems: SpineSection[] = [{ href: 'chapter1.xhtml' }, { href: 'chapter2.xhtml' }];
   const state = {
     displays: [] as (string | undefined)[],
     resizes: [] as (number | string | undefined)[][],
-    contents: [] as { document: Document }[],
+    contents: [] as FakeContents[],
+    views: [] as { _needsReframe?: boolean }[],
     pending: [] as Pending[],
+    spineHooks: [] as ((chapter: Document) => void)[],
+    renditionHooks: [] as ((contents: FakeContents) => void)[],
   };
   const hrefOf = (target: string | undefined) =>
     chapters.find((chapter) => chapter.href === target || chapter.cfi === target)?.href;
   const sectionOf = (target: string | undefined) => {
     const found = chapters.find((chapter) => chapter.href === target || chapter.cfi === target);
     if (!found) return null;
-    const index = chapters.findIndex((chapter) => chapter.href === found.href);
+    const index = spineItems.findIndex((item) => item.href === found.href);
     return { index, href: found.href };
   };
   /** Resolves the pending display for `target`, as a rendered chapter would. */
@@ -49,12 +63,40 @@ const fake = vi.hoisted(() => {
     if (!entry) throw new Error(`no pending display for ${String(target)}`);
     const href = hrefOf(target);
     if (href) rendition.location = { start: { href, cfi: target ?? '' } };
-    state.contents = Array.from({ length: contents }, () => ({ document }));
+    const spineSection = href ? spineItems.find((item) => item.href === href) : undefined;
+    // Matches `epubjs/src/section.js`: `book.spine.hooks.content` runs only on the
+    // first parse of a section; later re-renders clone/serialize cached `document`.
+    if (spineSection && !spineSection.document) {
+      const parsed = document.implementation.createHTMLDocument('');
+      parsed.body.innerHTML = '<p>Sample chapter text</p>';
+      for (const hook of state.spineHooks) hook(parsed);
+      spineSection.document = parsed;
+    }
+    state.views = Array.from({ length: contents }, () => ({ _needsReframe: false }));
+    state.contents = Array.from({ length: contents }, () => {
+      const frameDoc = document.implementation.createHTMLDocument('');
+      if (spineSection?.document) {
+        frameDoc.documentElement.innerHTML = spineSection.document.documentElement.innerHTML;
+      }
+      const item: FakeContents = {
+        document: frameDoc,
+        window,
+        expand: vi.fn<() => void>(),
+      };
+      for (const hook of state.renditionHooks) hook(item);
+      return item;
+    });
     entry.resolve();
   };
   const rendition = {
     location: undefined as LocationState | undefined,
-    hooks: { content: { register: () => undefined } },
+    hooks: {
+      content: {
+        register: (hook: (contents: FakeContents) => void) => {
+          state.renditionHooks.push(hook);
+        },
+      },
+    },
     q: {
       enqueue: (task: () => unknown) =>
         Promise.resolve()
@@ -63,6 +105,7 @@ const fake = vi.hoisted(() => {
     },
     on: () => undefined,
     getContents: () => state.contents,
+    views: () => state.views,
     display: (target?: string) => {
       state.displays.push(target);
       // epub.js: a newer display resolves the one it replaces, landing or not.
@@ -75,12 +118,14 @@ const fake = vi.hoisted(() => {
     spread: () => undefined,
     clear: () => {
       state.contents = [];
+      state.views = [];
     },
     resize: (width?: number, height?: number, epubcfi?: string) => {
       state.resizes.push([width, height, epubcfi]);
       // epub.js: `manager.resize` clears views; `onResized` only re-displays when
       // `this.location && this.location.start` is truthy (`rendition.js` L479-481).
       state.contents = [];
+      state.views = [];
       if (rendition.location?.start) {
         const target =
           typeof epubcfi === 'string' && epubcfi.length > 0
@@ -106,15 +151,21 @@ const fake = vi.hoisted(() => {
     packaging: {},
     navigation: { toc: [] },
     spine: {
-      hooks: { content: { register: () => undefined } },
-      spineItems: chapters.map(({ href }) => ({ href })),
+      hooks: {
+        content: {
+          register: (hook: (chapter: Document) => void) => {
+            state.spineHooks.push(hook);
+          },
+        },
+      },
+      spineItems,
       get: sectionOf,
     },
     renderTo: () => rendition,
     load: () => Promise.resolve(),
     destroy: () => undefined,
   };
-  return { state, settle, rendition, book };
+  return { state, settle, rendition, book, spineItems };
 });
 
 vi.mock('epubjs', () => ({ default: () => fake.book }));
@@ -130,6 +181,12 @@ describe('EPUB navigation', () => {
     fake.state.resizes = [];
     fake.state.pending = [];
     fake.state.contents = [];
+    fake.state.views = [];
+    fake.state.spineHooks = [];
+    fake.state.renditionHooks = [];
+    for (const item of fake.spineItems) {
+      delete item.document;
+    }
     fake.rendition.location = undefined;
   });
 
@@ -228,6 +285,40 @@ describe('EPUB navigation', () => {
     fake.settle('epubcfi(/6/2!/4/2/1:0)');
     await jump;
     expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
+  });
+
+  it('preserves font size across cached chapter re-renders on resize and expands live views', async () => {
+    const handle = await open();
+    const initial = handle.display('epubcfi(/6/2!/4/2/1:0)');
+    fake.settle('epubcfi(/6/2!/4/2/1:0)');
+    await initial;
+
+    const preferenceStyle = (doc: Document | undefined) =>
+      doc?.querySelector('style[data-synapse-preferences="true"]')?.textContent ?? '';
+
+    expect(preferenceStyle(fake.state.contents[0]?.document)).toContain(
+      'font-size: 1.050rem !important;',
+    );
+
+    const liveContents = fake.state.contents[0];
+    const liveView = fake.state.views[0];
+    handle.setPreferences({ ...DEFAULT_READING_PREFERENCES, fontSize: 160 });
+
+    expect(preferenceStyle(liveContents?.document)).toContain('font-size: 1.680rem !important;');
+    expect(preferenceStyle(fake.spineItems[0]?.document)).toContain(
+      'font-size: 1.680rem !important;',
+    );
+    expect(liveView?._needsReframe).toBe(true);
+    expect(liveContents?.expand).toHaveBeenCalledTimes(1);
+
+    // Changing page width or margins resizes the host, clearing live views and
+    // re-mounting the cached chapter without re-running `book.spine.hooks.content`.
+    handle.resize(694, 900);
+    fake.settle('epubcfi(/6/2!/4/2/1:0)');
+    expect(fake.state.contents[0]).not.toBe(liveContents);
+    expect(preferenceStyle(fake.state.contents[0]?.document)).toContain(
+      'font-size: 1.680rem !important;',
+    );
   });
 });
 

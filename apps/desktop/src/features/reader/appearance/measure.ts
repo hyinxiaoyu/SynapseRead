@@ -47,8 +47,12 @@ export interface ReadingLayout {
 
 /**
  * Lays out a reflowable page: two columns only where each holds at least
- * `MIN_MEASURE_CH`, with the user-selected column cap. Mirrors epub.js,
- * where each page is its column plus one gutter.
+ * `MIN_MEASURE_CH` at the face's base (100%) size, with the user-selected
+ * column cap. Mirrors epub.js, where each page is its column plus one gutter.
+ *
+ * `charWidth` is measured at the 100% base size rather than the scaled
+ * `fontSize`, so adjusting font size changes glyph size and line wrapping
+ * without altering page width or column count.
  */
 export function computeReadingLayout({
   availableWidth,
@@ -58,7 +62,7 @@ export function computeReadingLayout({
   pageWidth = 'standard',
 }: {
   availableWidth: number;
-  /** Average character advance at the current face and size, in px. */
+  /** Average character advance of the chosen face at 100% base size, in px. */
   charWidth: number;
   margins: ReadingMargins;
   pageWidth?: ReadingPageWidth;

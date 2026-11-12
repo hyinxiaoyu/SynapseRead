@@ -306,7 +306,7 @@ function AppearancePanel({
   format: 'epub' | 'txt' | 'pdf';
   onChange: (patch: Partial<ReadingPreferences>) => void;
 }) {
-  const ids = { font: useId(), customize: useId() };
+  const ids = { fontSize: useId(), font: useId(), customize: useId() };
   const [customizing, setCustomizing] = useState(false);
   const canDecrease = preferences.fontSize > MIN_FONT_SIZE;
   const canIncrease = preferences.fontSize < MAX_FONT_SIZE;
@@ -361,34 +361,41 @@ function AppearancePanel({
 
   return (
     <div className="flex flex-col gap-3.5">
-      <div role="group" aria-label="Text size" className="flex items-center rounded-md bg-muted">
-        <button
-          type="button"
-          aria-label="Decrease font size"
-          title="Smaller text (⌘−)"
-          disabled={!canDecrease}
-          onClick={() => stepFontSize(-1)}
-          className="flex h-9 flex-1 items-center justify-center rounded-l-md text-foreground outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-40 [&_svg]:size-4"
+      <div>
+        <SectionLabel id={ids.fontSize}>Font size</SectionLabel>
+        <div
+          role="group"
+          aria-labelledby={ids.fontSize}
+          className="flex items-center rounded-md bg-muted"
         >
-          <AArrowDown aria-hidden="true" />
-        </button>
-        <span
-          data-testid="reading-font-size"
-          aria-live="polite"
-          className="min-w-12 text-center text-xs font-medium text-foreground tabular-nums"
-        >
-          {preferences.fontSize}%
-        </span>
-        <button
-          type="button"
-          aria-label="Increase font size"
-          title="Bigger text (⌘+)"
-          disabled={!canIncrease}
-          onClick={() => stepFontSize(1)}
-          className="flex h-9 flex-1 items-center justify-center rounded-r-md text-foreground outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-40 [&_svg]:size-5"
-        >
-          <AArrowUp aria-hidden="true" />
-        </button>
+          <button
+            type="button"
+            aria-label="Decrease font size"
+            title="Decrease font size (⌘−)"
+            disabled={!canDecrease}
+            onClick={() => stepFontSize(-1)}
+            className="flex h-9 flex-1 items-center justify-center rounded-l-md text-foreground outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-40 [&_svg]:size-4"
+          >
+            <AArrowDown aria-hidden="true" />
+          </button>
+          <span
+            data-testid="reading-font-size"
+            aria-live="polite"
+            className="min-w-12 text-center text-xs font-medium text-foreground tabular-nums"
+          >
+            {preferences.fontSize}%
+          </span>
+          <button
+            type="button"
+            aria-label="Increase font size"
+            title="Increase font size (⌘+)"
+            disabled={!canIncrease}
+            onClick={() => stepFontSize(1)}
+            className="flex h-9 flex-1 items-center justify-center rounded-r-md text-foreground outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:opacity-40 [&_svg]:size-5"
+          >
+            <AArrowUp aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <ThemeChoices theme={preferences.theme} onChange={(theme) => onChange({ theme })} />

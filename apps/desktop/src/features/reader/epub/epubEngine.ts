@@ -525,8 +525,11 @@ export async function openEpubDocument(
 
   const toc = mapToc(book.navigation?.toc ?? []);
   const spineItems =
-    (book.spine as unknown as { spineItems?: { href: string; canonical?: string }[] }).spineItems ??
-    [];
+    (
+      book.spine as unknown as {
+        spineItems?: { href: string; canonical?: string; document?: Document }[];
+      }
+    ).spineItems ?? [];
   const resolveTarget = (target?: string): string | undefined => {
     if (!target || target.startsWith('epubcfi(')) return target;
     if (book.spine.get(target)) return target;
@@ -665,6 +668,10 @@ export async function openEpubDocument(
       },
       { passive: false },
     );
+    // `section.load()` runs `book.spine.hooks.content` only on the first parse of a
+    // chapter, so any later view created by a resize, mode switch, or chapter revisit
+    // must receive the latest preferences here too before author colors are audited.
+    applyUserPreferencesToDocument(contents.document, currentPreferences, isFixedLayout);
     // Dark and Sepia color `html` and `body`; a chapter's own colors survive.
     // The iframe's load event has already run, so its stylesheets are applied.
     if (!isFixedLayout) applyReadableAuthorColors(contents.document, currentPreferences.theme);
@@ -1015,6 +1022,15 @@ export async function openEpubDocument(
         preferences.lineSpacing !== currentPreferences.lineSpacing ||
         preferences.justify !== currentPreferences.justify;
       currentPreferences = { ...preferences };
+      // `section.render()` re-serializes cached `section.document` on resize or mode
+      // switches without re-running `book.spine.hooks.content`, and `IframeView.onLoad`
+      // measures the frame before `rendition.hooks.content` runs. Keep every loaded
+      // section document in sync so re-renders measure and paint at the current size.
+      for (const item of spineItems) {
+        if (item.document) {
+          applyUserPreferencesToDocument(item.document, currentPreferences, isFixedLayout);
+        }
+      }
       for (const contents of contentsList()) {
         applyUserPreferencesToDocument(contents.document, currentPreferences, isFixedLayout);
         // Free when the theme has not changed: the chapter remembers which theme
@@ -1023,22 +1039,33 @@ export async function openEpubDocument(
           applyReadableAuthorColors(contents.document, currentPreferences.theme);
         }
       }
-      if (
-        typographyChanged &&
-        !isFixedLayout &&
-        element.clientWidth > 0 &&
-        element.clientHeight > 0
-      ) {
-        const target = pendingTarget ?? currentCfi;
-        resizeTo(element.clientWidth, element.clientHeight, target);
-        if (target && currentMode !== 'scroll') {
-          const epoch = beginNavigation();
-          pendingTarget = target;
-          void (rendition.display(target) as unknown as Promise<void>)
-            .catch(() => undefined)
-            .finally(() => {
-              if (epoch === navigation) pendingTarget = undefined;
-            });
+      if (typographyChanged && !isFixedLayout) {
+        // `manager.resize` early-returns when the host dimensions did not change
+        // (such as a font-size change inside a fixed page width), so expand live
+        // views explicitly to reflow iframe bounds and re-place highlight marks.
+        const views = (
+          rendition as unknown as {
+            views?: () => { forEach?: (fn: (view: { _needsReframe?: boolean }) => void) => void };
+          }
+        ).views?.();
+        views?.forEach?.((view) => {
+          view._needsReframe = true;
+        });
+        for (const contents of contentsList()) {
+          (contents as unknown as { expand?: () => void }).expand?.();
+        }
+        if (element.clientWidth > 0 && element.clientHeight > 0) {
+          const target = pendingTarget ?? currentCfi;
+          resizeTo(element.clientWidth, element.clientHeight, target);
+          if (target && currentMode !== 'scroll') {
+            const epoch = beginNavigation();
+            pendingTarget = target;
+            void (rendition.display(target) as unknown as Promise<void>)
+              .catch(() => undefined)
+              .finally(() => {
+                if (epoch === navigation) pendingTarget = undefined;
+              });
+          }
         }
       }
     },

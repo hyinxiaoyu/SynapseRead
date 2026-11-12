@@ -77,13 +77,20 @@ describe('computeReadingLayout', () => {
     expect(layout.pageWidth).toBe(MAX_MEASURE_CH * CHAR + PAGE_GUTTER_PX);
   });
 
-  it('caps the column at the maximum measure and grows it with the text size', () => {
+  it('caps the column at the maximum measure for the chosen face advance', () => {
     const at = (charWidth: number) =>
       computeReadingLayout({ availableWidth: 2560, charWidth, margins: 'normal', spread: true });
     expect(at(CHAR).columnWidth).toBe(MAX_MEASURE_CH * CHAR);
-    expect(at(CHAR * 1.5).columnWidth).toBeCloseTo(MAX_MEASURE_CH * CHAR * 1.5);
-    // Bigger text needs more room for two pages: here it falls back to one.
-    expect(at(CHAR * 3.5).columns).toBe(1);
+    expect(at(CHAR * 1.2).columnWidth).toBeCloseTo(MAX_MEASURE_CH * CHAR * 1.2);
+    // A very wide advance in a narrower viewport falls back to one column.
+    expect(
+      computeReadingLayout({
+        availableWidth: 900,
+        charWidth: CHAR,
+        margins: 'normal',
+        spread: true,
+      }).columns,
+    ).toBe(1);
   });
 
   it('pads the page by the margin setting, with a 32 px outer margin at the least', () => {

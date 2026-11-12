@@ -439,6 +439,72 @@ export async function epubFlow(page) {
     );
     await page.press('Escape');
   }
+  // Font size and page width stay orthogonal: raising font size under Standard never
+  // widens the column cap toward Full width, and changing page width never resets the
+  // rendered font size when epub.js destroys and re-mounts the chapter frame.
+  await page.clickButton('Single page');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'paged'`, 'single-page mode');
+  await page.clickButton('Reading appearance');
+  await page.clickButton('Standard');
+  await page.waitFor(
+    `${visibleHost}.getBoundingClientRect().width < 1200`,
+    'EPUB Standard width settles at 2560 px',
+  );
+  // Let epub.js finish its 150 ms debounced resize for the Standard host width first.
+  await new Promise((done) => setTimeout(done, 250));
+  const epubStandardWidth = await page.evaluate(`${visibleHost}.getBoundingClientRect().width`);
+  const epubFontPx = `parseFloat(getComputedStyle(${frameDocument}.body).fontSize)`;
+  const baseEpubFontPx = await page.waitFor(epubFontPx, 'EPUB base body font size');
+  for (let step = 0; step < 6; step += 1) {
+    await page.clickButton('Increase font size');
+  }
+  await page.waitFor(
+    `document.querySelector('[data-testid="reading-font-size"]')?.textContent === '160%'`,
+    'EPUB font size reaches 160%',
+  );
+  await page.waitFor(
+    `Math.abs(${epubFontPx} - ${baseEpubFontPx * 1.6}) < 0.5`,
+    'EPUB rendered font size scales to 160%',
+  );
+  await new Promise((done) => setTimeout(done, 250));
+  assert(
+    Math.abs(
+      (await page.evaluate(`${visibleHost}.getBoundingClientRect().width`)) - epubStandardWidth,
+    ) < 2,
+    'increasing EPUB font size keeps Standard page width fixed instead of expanding to full width',
+  );
+  await page.clickButton('Wide');
+  await page.waitFor(
+    `${visibleHost}.getBoundingClientRect().width > ${epubStandardWidth} + 100`,
+    'EPUB Wide expands the host at 160% font size',
+  );
+  await new Promise((done) => setTimeout(done, 300));
+  await page.waitFor(`${frameDocument}?.body`, 'EPUB chapter frame re-mounted at Wide width');
+  assert(
+    Math.abs((await page.evaluate(epubFontPx)) - baseEpubFontPx * 1.6) < 0.5,
+    'changing EPUB page width to Wide preserves rendered 160% font size across iframe re-render',
+  );
+  await page.clickButton('Full width');
+  await page.waitFor(
+    `${visibleHost}.getBoundingClientRect().width >= ${visibleHost}.parentElement.clientWidth - 33`,
+    'EPUB Full width fills the pane at 160% font size',
+  );
+  await new Promise((done) => setTimeout(done, 300));
+  await page.waitFor(`${frameDocument}?.body`, 'EPUB chapter frame re-mounted at Full width');
+  assert(
+    Math.abs((await page.evaluate(epubFontPx)) - baseEpubFontPx * 1.6) < 0.5,
+    'changing EPUB page width to Full width preserves rendered 160% font size',
+  );
+  for (let step = 0; step < 6; step += 1) {
+    await page.clickButton('Decrease font size');
+  }
+  await page.waitFor(
+    `document.querySelector('[data-testid="reading-font-size"]')?.textContent === '100%'`,
+    'EPUB font size returns to 100%',
+  );
+  await page.press('Escape');
+  await page.clickButton('Scroll');
+  await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'scroll mode restored');
   await page.setViewport(480);
   await page.waitFor(
     `${visibleHost}.getBoundingClientRect().width <= 480`,

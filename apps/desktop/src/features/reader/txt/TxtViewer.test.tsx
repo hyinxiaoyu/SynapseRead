@@ -424,11 +424,30 @@ describe('TxtViewer', () => {
       const docEl = screen.getByRole('document');
       expect(docEl.style.fontSize).toBe('1.1rem');
       expect(docEl.style.lineHeight).toBe('2.1');
-      // Capped at 75ch (fallback 0.5em of 17.6 px) plus 32 px a side at narrow margins.
-      expect(docEl.style.maxWidth).toBe(`${75 * 8.8 + 64}px`);
+      // Capped at 75ch of the 100% base size (fallback 0.5em of 16 px = 8 px) plus 32 px a side:
+      // font size changes glyph size without widening the page column.
+      expect(docEl.style.maxWidth).toBe(`${75 * 8 + 64}px`);
+      const pageWidthGroup = screen.getByRole('radiogroup', { name: 'Page width' });
       await act(async () => {
-        screen.getByRole('radio', { name: 'Full width' }).click();
+        within(pageWidthGroup).getByRole('radio', { name: 'Wide' }).click();
       });
+      expect(docEl.style.fontSize).toBe('1.1rem');
+      expect(docEl.style.maxWidth).toBe(`${110 * 8 + 64}px`);
+      await act(async () => {
+        within(pageWidthGroup).getByRole('radio', { name: 'Standard' }).click();
+      });
+      // Adjusting font size up to 200% after setting Standard width keeps Standard width.
+      for (let step = 0; step < 9; step += 1) {
+        await act(async () => {
+          screen.getByRole('button', { name: 'Increase font size' }).click();
+        });
+      }
+      expect(docEl.style.fontSize).toBe('2rem');
+      expect(docEl.style.maxWidth).toBe(`${75 * 8 + 64}px`);
+      await act(async () => {
+        within(pageWidthGroup).getByRole('radio', { name: 'Full width' }).click();
+      });
+      expect(docEl.style.fontSize).toBe('2rem');
       expect(docEl.style.maxWidth).toBe('100%');
       expect(scroller().scrollTop).toBe(40 * ROW_PX);
       const row = docEl.querySelector<HTMLElement>('[data-index]');
@@ -440,7 +459,9 @@ describe('TxtViewer', () => {
       await reopened.getState().openDocument();
       render(<Harness store={reopened} documentId={documentId} />);
       await waitFor(() => expect(scroller().scrollTop).toBe(40 * ROW_PX));
+      expect(screen.getByRole('document').style.fontSize).toBe('2rem');
       expect(screen.getByRole('document').style.maxWidth).toBe('100%');
+      expect(reopened.getState().readingPreferences.fontSize).toBe(200);
       expect(reopened.getState().readingPreferences.pageWidth).toBe('full');
       expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-theme', 'dark');
       expect(screen.getByTestId('txt-viewer')).toHaveAttribute('data-reading-margins', 'narrow');
