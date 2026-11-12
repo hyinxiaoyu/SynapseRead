@@ -50,13 +50,13 @@ function Harness() {
 }
 
 describe('SelectionPopover', () => {
-  it('disables CSS property transitions so scroll and note growth keep coordinates pinned (#40)', () => {
+  it('uses animation-duration-150 without arming CSS property transitions (#40)', () => {
     render(<Harness />);
     const dialog = screen.getByTestId('selection-popover');
-    // `duration-150` drives `@keyframes` entrance via `--tw-duration`; `transition-none`
-    // prevents `top`, `left`, and `transform-origin` from rubber-banding over 150ms.
-    expect(dialog).toHaveClass('transition-none');
-    expect(dialog).toHaveClass('animate-in');
+    // `animation-duration-150` drives `@keyframes` entrance without setting
+    // `transition-duration`, keeping `top`, `left`, and `transform-origin` pinned.
+    expect(dialog).toHaveClass('animate-in', 'animation-duration-150');
+    expect(dialog).not.toHaveClass('duration-150');
 
     const noteField = screen.getByTestId('popover-note-input');
     expect(noteField.closest('[inert]')).not.toBeNull();

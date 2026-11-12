@@ -22,7 +22,7 @@ export function ReaderPopoverLayer({
 }) {
   if (hidden) return null;
   return (
-    <div className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none">
+    <div className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:animation-duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none">
       {children}
     </div>
   );

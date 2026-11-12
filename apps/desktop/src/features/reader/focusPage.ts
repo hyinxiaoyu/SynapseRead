@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useEffect } from 'react';
+import { type RefObject, useCallback, useEffect, useSyncExternalStore } from 'react';
 
 import { isEditableShortcutTarget } from '@/features/commands/registry';
 
@@ -35,17 +35,50 @@ export function focusReadingPage(
   return true;
 }
 
+let focusRequestVersion = 0;
+const focusRequestListeners = new Set<() => void>();
+
+function subscribeFocusRequests(listener: () => void): () => void {
+  focusRequestListeners.add(listener);
+  return () => {
+    focusRequestListeners.delete(listener);
+  };
+}
+
+function getFocusRequestSnapshot(): number {
+  return focusRequestVersion;
+}
+
+const noopSubscribe = (): (() => void) => () => {};
+const zeroSnapshot = (): number => 0;
+
 /**
- * Gives the page the keyboard when this tab opens or becomes active. One place
- * for the three viewers' activation rule; an explicit leave can force it.
+ * Asks whichever reading page is active after the current render to take the
+ * keyboard, using the same non-forced rules as tab activation (so keyboard
+ * Enter/Space inside `[role="tablist"]` or an undisturbed text field keeps focus).
+ */
+export function requestActivePageFocus(): void {
+  focusRequestVersion += 1;
+  for (const listener of focusRequestListeners) listener();
+}
+
+/**
+ * Gives the page the keyboard when this tab opens, becomes active, or is
+ * explicitly re-selected by pointer click. One place for the three viewers'
+ * activation rule; an explicit leave can force it.
  */
 export function useFocusPageOnActivate<T extends HTMLElement>(
   ref: RefObject<T | null>,
   isActive: boolean,
 ): (force?: boolean) => boolean {
+  const focusRequest = useSyncExternalStore(
+    isActive ? subscribeFocusRequests : noopSubscribe,
+    isActive ? getFocusRequestSnapshot : zeroSnapshot,
+    zeroSnapshot,
+  );
   const focusPage = useCallback((force = false) => focusReadingPage(ref.current, { force }), [ref]);
   useEffect(() => {
     if (isActive) focusPage();
-  }, [isActive, focusPage]);
+  }, [isActive, focusRequest, focusPage]);
   return focusPage;
 }

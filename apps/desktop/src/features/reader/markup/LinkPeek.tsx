@@ -152,9 +152,9 @@ export function LinkPeek({
       data-reader-popover=""
       onKeyDown={onKeyDown}
       className={cn(
-        // `duration-150` times the opening keyframes; with no transition, the card does not
-        // slide from where it was measured or stay unfocusable while it fades in.
-        'fixed z-40 flex w-[min(22rem,calc(100vw-1rem))] transition-none animate-in flex-col gap-2 rounded-xl border bg-background p-3 text-foreground shadow-lg duration-150 fade-in-0 zoom-in-[0.96] motion-reduce:animate-none',
+        // `animation-duration-150` times only the opening keyframes, so `top` and `left`
+        // never transition from where the card was measured.
+        'fixed z-40 flex w-[min(22rem,calc(100vw-1rem))] animate-in flex-col gap-2 rounded-xl border bg-background p-3 text-foreground shadow-lg animation-duration-150 fade-in-0 zoom-in-[0.96] motion-reduce:animate-none',
         placement === 'above' ? 'origin-bottom' : 'origin-top',
       )}
       style={

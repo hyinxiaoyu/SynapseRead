@@ -561,7 +561,7 @@ export function ToolbarSearchField<TMatch extends DocumentSearchResultItem>({
               role="menu"
               aria-label="Search options"
               data-reader-popover=""
-              className="absolute top-full left-0 z-50 mt-1 min-w-48 origin-top-left animate-in rounded-md border bg-background p-1 text-xs shadow-lg duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
+              className="absolute top-full left-0 z-50 mt-1 min-w-48 origin-top-left animate-in rounded-md border bg-background p-1 text-xs shadow-lg animation-duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
             >
               {(
                 [

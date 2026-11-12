@@ -601,7 +601,7 @@ export function AppearanceMenu({
           aria-label="Appearance"
           data-testid="appearance-popover"
           data-reader-popover=""
-          className="absolute top-full right-0 z-50 mt-2 max-h-[min(75vh,640px)] w-72 origin-top-right transition-none animate-in overflow-y-auto rounded-xl border bg-background p-3 text-foreground shadow-xl duration-150 fade-in-0 slide-in-from-top-1 select-none zoom-in-[0.96] motion-reduce:animate-none"
+          className="absolute top-full right-0 z-50 mt-2 max-h-[min(75vh,640px)] w-72 origin-top-right animate-in overflow-y-auto rounded-xl border bg-background p-3 text-foreground shadow-xl animation-duration-150 fade-in-0 slide-in-from-top-1 select-none zoom-in-[0.96] motion-reduce:animate-none"
         >
           <AppearancePanel preferences={preferences} format={format} onChange={onChange} />
         </div>

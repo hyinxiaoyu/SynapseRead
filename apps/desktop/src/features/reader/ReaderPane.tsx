@@ -3,6 +3,7 @@ import {
   Component,
   type ComponentType,
   type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -12,8 +13,9 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
-import { useCommands } from '@/features/commands/registry';
+import { isEditableShortcutTarget, useCommands } from '@/features/commands/registry';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
+import { requestActivePageFocus } from '@/features/reader/focusPage';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn, describeError } from '@/lib/utils';
 import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
@@ -187,6 +189,21 @@ export function ReaderPane() {
     [reopenRecentDocument],
   );
 
+  const releaseTabPointerFocus = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    // Clicking a tab or its close button picks a document to read, not to step through
+    // the tablist: keep pointer focus off the tab strip and flush any active editable
+    // field's `onBlur` commit/reset handler before activation or close (#50, #64).
+    event.preventDefault();
+    const active = window.document.activeElement;
+    if (
+      active instanceof HTMLElement &&
+      (active.closest('[role="tablist"]') !== null || isEditableShortcutTarget(active))
+    ) {
+      active.blur();
+    }
+  }, []);
+
   return (
     <section
       aria-label="Document reader"
@@ -224,17 +241,11 @@ export function ReaderPane() {
                   aria-controls={`reader-tabpanel-${document.id}`}
                   tabIndex={isActive ? 0 : -1}
                   className="truncate py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  onMouseDown={(event) => {
-                    // Clicking a tab picks a document to read, not to step through the tablist:
-                    // keep pointer focus off `[role="tab"]` so `useFocusPageOnActivate` hands
-                    // the keyboard to the newly shown page (#50).
-                    event.preventDefault();
-                    const active = window.document.activeElement;
-                    if (active instanceof HTMLElement && active.closest('[role="tablist"]')) {
-                      active.blur();
-                    }
+                  onMouseDown={releaseTabPointerFocus}
+                  onClick={() => {
+                    activateDocument(document.id);
+                    requestActivePageFocus();
                   }}
-                  onClick={() => activateDocument(document.id)}
                   onKeyDown={(event) => handleTabKeyDown(event, index)}
                 >
                   {document.title}
@@ -244,8 +255,11 @@ export function ReaderPane() {
                   aria-label={`Close ${document.title}`}
                   title={`Close ${document.title}`}
                   className="mr-0.5 flex size-6 shrink-0 items-center justify-center rounded outline-none hover:bg-background focus-visible:ring-2 focus-visible:ring-ring"
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => closeDocument(document.id)}
+                  onMouseDown={releaseTabPointerFocus}
+                  onClick={() => {
+                    closeDocument(document.id);
+                    requestActivePageFocus();
+                  }}
                 >
                   <X className="size-3.5" />
                 </button>
@@ -286,7 +300,7 @@ export function ReaderPane() {
             aria-label="Recent documents"
             data-testid="recent-documents-menu"
             data-reader-popover=""
-            className="absolute top-10 right-2 z-30 w-80 origin-top-right animate-in rounded-md border bg-background p-1.5 shadow-md duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
+            className="absolute top-10 right-2 z-30 w-80 origin-top-right animate-in rounded-md border bg-background p-1.5 shadow-md animation-duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
           >
             <p className="px-2 py-1 text-xs font-medium text-muted-foreground">Recent documents</p>
             <ol data-testid="recent-documents-list" className="max-h-60 divide-y overflow-y-auto">
