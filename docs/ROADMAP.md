@@ -80,6 +80,20 @@ for task IDs, acceptance evidence, and measurements.
       whole-window themes (`Auto`/`Light`/`Sepia`/`Dark`), Books-style footer progress
       scrubber, page-turn click zones/trackpad swipes/transitions, contextual selection
       popover and Markup bar, and WCAG AA chrome contrast/hit-target compliance.
+- [x] Post-R12 reader UX refinement and parity pass (`#35`, `#37`–`#40`, `#43`–`#52`,
+      `#64`, `#75`; SQLite migrations through `0010`): persistent page-width modes
+      (`Standard`/`Wide`/`Full`), `flip` and `stack` page-turn animations and anchored
+      chrome disclosures, inactive EPUB tab isolation, debounced Find with diacritic and
+      soft-hyphen folding, all-match tinting, and scrubber marks, Dark/Sepia PDF page
+      tinting and EPUB author-ink contrast guard, distraction-free focus mode with
+      full-screen linkage and 5-layer `Escape` dismissal, inline note markers with
+      multiline editing and CFI-ordered notes, sandboxed `LinkPeek` footnote cards,
+      keyboard and pointer tab-switch page focus with expanded shortcut matrix, per-PDF
+      layout persistence (`0009`), cover-page-alone spreads, printed page labels, and
+      pointer-anchored trackpad pinch zoom, character-weighted EPUB progress and chapter
+      minutes with Recent percentages (`0010`), streaming TXT chapter detection and
+      unified `Go To` (`⌥⌘G`), centered toolbar title, and native macOS `WKWebView`
+      acceptance (`macOS 15.6.1`, `Apple M4`, `AppleWebKit/605.1.15`).
 
 ## M3: Card operations (after reader experience)
 

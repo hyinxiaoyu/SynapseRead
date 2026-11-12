@@ -97,6 +97,25 @@ describe('ReaderPane tab commands', () => {
     expect(screen.getByRole('tab', { name: 'b' })).toHaveFocus();
   });
 
+  it('hands the keyboard to the page when a tab is clicked with the pointer (#50)', async () => {
+    await openDocuments(['a.txt', 'b.txt']);
+    const store = useStudySyncStore.getState;
+    const [first, second] = store().openDocumentIds;
+    render(<ReaderPane />);
+    await waitFor(() => expect(screen.getByTestId(`fake-viewer-${second}`)).toHaveFocus());
+
+    // Even if keyboard focus was previously inside the tablist, clicking an inactive tab
+    // prevents pointer focus on `[role="tab"]` so the newly shown page receives focus.
+    screen.getByRole('tab', { name: 'b' }).focus();
+    const firstTab = screen.getByRole('tab', { name: 'a' });
+    const downPrevented = !fireEvent.mouseDown(firstTab);
+    expect(downPrevented).toBe(true);
+    fireEvent.click(firstTab);
+
+    expect(store().activeDocumentId).toBe(first);
+    await waitFor(() => expect(screen.getByTestId(`fake-viewer-${first}`)).toHaveFocus());
+  });
+
   it('reopens the closed tab with Reopen Closed Tab, once', async () => {
     await openDocuments(['a.txt', 'b.txt']);
     const store = useStudySyncStore.getState;
