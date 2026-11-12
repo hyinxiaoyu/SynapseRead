@@ -260,8 +260,17 @@ const reopen = async (backend: ReturnType<typeof createMemoryBackend>) => {
   return store;
 };
 
+/**
+ * The book is open and wired up. The button enables on the commit that sets the
+ * handle, but that commit's effects (the engine's preferences, the page-turn
+ * callbacks) run in a later task, which under load is after the test's next
+ * synchronous assertion. Every such commit hands the engine its preferences.
+ */
 const opened = () =>
-  waitFor(() => expect(screen.getByRole('button', { name: 'Next Page' })).toBeEnabled());
+  waitFor(() => {
+    expect(screen.getByRole('button', { name: 'Next Page' })).toBeEnabled();
+    expect(engine.setPreferences).toHaveBeenCalled();
+  });
 
 const select = (cfiRange = CFI, text = 'quick brown fox') =>
   act(() => engine.emitSelection({ cfiRange, chapterHref: 'OEBPS/chapter1.xhtml', text }));
@@ -986,7 +995,7 @@ describe('EpubViewer', () => {
     fireEvent.change(searchInput, { target: { value: 'the' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 2'));
 
-    expect(engine.highlighted.get(searchMatchId(1))).toBe(`${CFI}@1`);
+    await waitFor(() => expect(engine.highlighted.get(searchMatchId(1))).toBe(`${CFI}@1`));
     expect(engine.highlightStyles.get(searchMatchId(1))).toBe('highlight');
     expect(screen.getAllByTestId('progress-scrubber-search-mark')).toHaveLength(1);
   });
@@ -1021,13 +1030,13 @@ describe('EpubViewer', () => {
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 2'));
     // Typing leaves the sidebar alone: opening it would resize the page.
     expect(screen.queryByTestId('navigator-sidebar')).not.toBeInTheDocument();
-    expect(engine.highlighted.get(SEARCH_HIGHLIGHT_ID)).toBe(CFI);
+    await waitFor(() => expect(engine.highlighted.get(SEARCH_HIGHLIGHT_ID)).toBe(CFI));
 
     // Jump to the next match in Chapter Two.
     fireEvent.click(screen.getByRole('button', { name: 'Next match' }));
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('2 of 2'));
     await waitFor(() => expect(engine.displayed.at(-1)).toBe(FAR_CFI));
-    expect(engine.highlighted.get(SEARCH_HIGHLIGHT_ID)).toBe(FAR_CFI);
+    await waitFor(() => expect(engine.highlighted.get(SEARCH_HIGHLIGHT_ID)).toBe(FAR_CFI));
     expect(engine.pulsing.has(SEARCH_HIGHLIGHT_ID)).toBe(true);
 
     // Return to previous location returns to Chapter One (`CFI`).

@@ -2,6 +2,8 @@ import { assert } from './harness.mjs';
 import { notesInPlaceFlow } from './notes.mjs';
 
 const TEXT = '.textLayer span';
+/** `WHEEL_ZOOM_IDLE_MS` in `usePinchZoom.ts`: how long a quiet wheel takes to end a pinch. */
+const WHEEL_ZOOM_IDLE_MS = 160;
 const visibleScroller = `[...document.querySelectorAll('[data-testid="pdf-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
 const statusIs = (value) =>
   `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '${value}'`;
@@ -924,13 +926,49 @@ export async function pdfZoomFlow(page) {
     const before = await pagePointAt(point);
     assert(before, `${label}: a page under the pointer`);
     const level = await page.evaluate(zoomLevel);
+    // Each CDP call is a round trip, and on a loaded runner one can outlast the
+    // hook's idle window: an evaluate after the wheels may then see the release, or
+    // a second gesture, rather than the preview. So the page samples itself as each
+    // wheel is handled. A capture listener on window runs before the scroller's
+    // handler and a bubble one after it, which bounds when the handler ran.
+    await page.evaluate(`(() => {
+      const samples = (window.__pinchSamples = []);
+      let started = 0;
+      const before = () => { started = performance.now(); };
+      const after = () => samples.push({
+        started,
+        handled: performance.now(),
+        transform: ${content}.style.transform,
+        level: ${zoomLevel},
+      });
+      window.addEventListener('wheel', before, { capture: true });
+      window.addEventListener('wheel', after);
+      window.__stopPinchSamples = () => {
+        window.removeEventListener('wheel', before, { capture: true });
+        window.removeEventListener('wheel', after);
+        return samples;
+      };
+    })()`);
     await page.wheel(point, -100, 2);
     await page.wheel(point, -100, 2);
-    const preview = await page.evaluate(
-      `({ transform: ${content}.style.transform, level: ${zoomLevel} })`,
-    );
-    assert(preview.transform.startsWith('scale('), `${label}: previews with a transform`);
-    assert(preview.level === level, `${label}: does not re-render during the gesture`);
+    const samples = await page.evaluate('window.__stopPinchSamples()');
+    assert(samples.length === 2, `${label}: both wheel notches reached the page`);
+    const [first, second] = samples;
+    for (const sample of samples) {
+      assert(sample.transform.startsWith('scale('), `${label}: previews with a transform`);
+    }
+    assert(first.level === level, `${label}: does not re-render during the gesture`);
+    // The first notch's idle timer is not due before it was set plus the window, and
+    // no timer runs inside an event dispatch: handled before then, the second notch
+    // is certainly the same gesture. Later than that, it may rightly start another.
+    if (second.handled < first.started + WHEEL_ZOOM_IDLE_MS) {
+      assert(second.level === level, `${label}: does not re-render during the gesture`);
+      const ratio = (sample) => Number(/^scale\(([^)]+)\)/.exec(sample.transform)?.[1]);
+      assert(ratio(second) > ratio(first), `${label}: the second notch adds to the first`);
+    } else {
+      const gap = Math.round(second.handled - first.started);
+      console.log(`     ${label}: notches handled ${gap} ms apart, so two gestures`);
+    }
     await page.waitFor(
       `${zoomLevel} !== ${JSON.stringify(level)} && ${content}.style.transform === ''`,
       `${label}: the zoom to apply on release`,

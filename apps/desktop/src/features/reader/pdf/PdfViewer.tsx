@@ -1289,6 +1289,28 @@ function PdfPages({
     },
     [offsetWithin, pageHeight, virtualizer],
   );
+  /**
+   * The page and fraction at the top of the view when it is scrolled to `scrollTop`,
+   * preferring `pageIndex` when it shares the row there.
+   */
+  const locationAt = useCallback(
+    (scrollTop: number, pageIndex: number): PdfReturnLocation => {
+      if (displayMode === 'single') {
+        const height = pageHeight(pageIndex);
+        const fraction = height > 0 ? Math.min(Math.max(scrollTop / height, 0), 0.99) : 0;
+        return { pageIndex, fraction };
+      }
+      const item = virtualizer.getVirtualItemForOffset(scrollTop);
+      if (!item) return { pageIndex, fraction: 0 };
+      const pages = pagesInRow(item.index);
+      const topPage = pages.includes(pageIndex) ? pageIndex : (pages[0] ?? pageIndex);
+      const height = pageHeight(topPage);
+      const fraction =
+        height > 0 ? Math.min(Math.max((scrollTop - item.start) / height, 0), 0.99) : 0;
+      return { pageIndex: topPage, fraction };
+    },
+    [virtualizer, pageHeight, displayMode, pagesInRow],
+  );
   const currentReturnLocation = useCallback((): PdfReturnLocation => {
     if (
       programmaticScrollRef.current &&
@@ -1299,22 +1321,37 @@ function PdfPages({
       const { pageIndex } = programmaticScrollRef.current;
       return anchor?.pageIndex === pageIndex ? anchor : { pageIndex, fraction: 0 };
     }
-    if (displayMode === 'single') {
-      const height = pageHeight(currentPageIndex);
-      const fraction = height > 0 ? Math.min(Math.max(lastScrollTop.current / height, 0), 0.99) : 0;
-      return { pageIndex: currentPageIndex, fraction };
-    }
-    const item = virtualizer.getVirtualItemForOffset(lastScrollTop.current);
-    if (!item) return { pageIndex: currentPageIndex, fraction: 0 };
-    const pages = pagesInRow(item.index);
-    const pageIndex = pages.includes(currentPageIndex)
-      ? currentPageIndex
-      : (pages[0] ?? currentPageIndex);
-    const height = pageHeight(pageIndex);
-    const fraction =
-      height > 0 ? Math.min(Math.max((lastScrollTop.current - item.start) / height, 0), 0.99) : 0;
-    return { pageIndex, fraction };
-  }, [virtualizer, pageHeight, currentPageIndex, displayMode, pagesInRow]);
+    return locationAt(lastScrollTop.current, currentPageIndex);
+  }, [locationAt, currentPageIndex]);
+
+  const reportCursor = useCallback(() => {
+    if (!restored.current) return;
+    const loc = currentReturnLocation();
+    const y = Math.round(loc.fraction * 1e4) / 1e4;
+    const key = `${loc.pageIndex}:${y}`;
+    if (key === lastReported.current) return;
+    lastReported.current = key;
+    onCursorChange({
+      format: 'pdf',
+      pageIndex: loc.pageIndex,
+      rects: [{ x: 0, y, width: 1, height: CURSOR_RECT_HEIGHT }],
+    });
+  }, [currentReturnLocation, onCursorChange]);
+
+  const pendingCursor = useRef<number | null>(null);
+  const reportCursorRef = useRef(reportCursor);
+  useEffect(() => {
+    reportCursorRef.current = reportCursor;
+  }, [reportCursor]);
+
+  /** Reports the reading position once scrolling (or a pinch) has settled. */
+  const scheduleCursorReport = useCallback(() => {
+    if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
+    pendingCursor.current = window.setTimeout(() => {
+      pendingCursor.current = null;
+      reportCursorRef.current();
+    }, CURSOR_DEBOUNCE_MS);
+  }, []);
 
   const currentScale = scaleOf(currentPageIndex);
   const zoomPercent = Math.round(currentScale * 100);
@@ -1366,6 +1403,9 @@ function PdfPages({
         height > 0 ? Math.min(1, Math.max(0, (point.y - (item?.start ?? 0)) / height)) : 0;
       pendingZoomTarget.current = null;
       pendingPointerAnchor.current = { pageIndex, fractionX, fractionY, pointer };
+      // One render at the new scale and page: the content's minimum width, which
+      // the scroll left set on release must fit in, already allows for its row.
+      setCurrentPageIndex(pageIndex);
       setZoomMode('custom');
       setCustomScale(nextScale);
       return true;
@@ -1389,13 +1429,14 @@ function PdfPages({
     scrollRef,
     contentRef: pageContentRef,
     baseScale: currentScale,
+    layoutKey: [zoomMode, customScale, displayMode, rotation, coverPageAlone].join(' '),
     onCommit: commitPinch,
   });
   // The re-layout below reads these only when a pinch ends, so it takes the latest
   // without re-running (and re-measuring) each time the current page changes.
-  const rowGeometry = useRef({ rowOfPage, pagesInRow, rowLeft, pageWidth });
+  const rowGeometry = useRef({ rowOfPage, pagesInRow, rowLeft, pageWidth, locationAt });
   useLayoutEffect(() => {
-    rowGeometry.current = { rowOfPage, pagesInRow, rowLeft, pageWidth };
+    rowGeometry.current = { rowOfPage, pagesInRow, rowLeft, pageWidth, locationAt };
   });
 
   const applyDisplayMode = useCallback(
@@ -1444,7 +1485,7 @@ function PdfPages({
     if (anchor) {
       pendingPointerAnchor.current = null;
       pendingZoomTarget.current = null;
-      const { rowOfPage, pagesInRow, rowLeft, pageWidth } = rowGeometry.current;
+      const { rowOfPage, pagesInRow, rowLeft, pageWidth, locationAt } = rowGeometry.current;
       const rowIndex = rowOfPage(anchor.pageIndex);
       const pages = pagesInRow(rowIndex);
       const lefts = pageLefts(
@@ -1458,10 +1499,17 @@ function PdfPages({
         y: offsetWithin(anchor.pageIndex, anchor.fractionY),
       };
       const next = anchoredScroll(content, anchor.pointer);
-      lastScrollTop.current = next.top;
-      setCurrentPageIndex(anchor.pageIndex);
       virtualizer.scrollToOffset(next.top);
-      if (scrollRef.current) scrollRef.current.scrollLeft = next.left;
+      const scroller = scrollRef.current;
+      if (scroller) scroller.scrollLeft = next.left;
+      // Zooming out near the end asks for more than the browser can scroll, and its
+      // scroll event comes a frame later, or never when the top does not move. So
+      // record where the view really is now, as a scroll would, and report it.
+      const top = scroller?.scrollTop ?? next.top;
+      lastScrollTop.current = top;
+      programmaticScrollRef.current = null;
+      layoutAnchor.current = locationAt(top, anchor.pageIndex);
+      scheduleCursorReport();
       // The pages are laid out at the new scale now, so the preview gives way to them
       // in the same frame; each canvas redraws sharp as its render completes.
       clearPinchPreview();
@@ -1488,6 +1536,7 @@ function PdfPages({
     rotation,
     offsetWithin,
     clearPinchPreview,
+    scheduleCursorReport,
   ]);
 
   useLayoutEffect(() => {
@@ -1610,26 +1659,6 @@ function PdfPages({
     navigateToPage(target);
   };
 
-  const reportCursor = useCallback(() => {
-    if (!restored.current) return;
-    const loc = currentReturnLocation();
-    const y = Math.round(loc.fraction * 1e4) / 1e4;
-    const key = `${loc.pageIndex}:${y}`;
-    if (key === lastReported.current) return;
-    lastReported.current = key;
-    onCursorChange({
-      format: 'pdf',
-      pageIndex: loc.pageIndex,
-      rects: [{ x: 0, y, width: 1, height: CURSOR_RECT_HEIGHT }],
-    });
-  }, [currentReturnLocation, onCursorChange]);
-
-  const pendingCursor = useRef<number | null>(null);
-  const reportCursorRef = useRef(reportCursor);
-  useEffect(() => {
-    reportCursorRef.current = reportCursor;
-  }, [reportCursor]);
-
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     const nextScrollTop = event.currentTarget.scrollTop;
     lastScrollTop.current = nextScrollTop;
@@ -1658,11 +1687,7 @@ function PdfPages({
         }
       }
     }
-    if (pendingCursor.current !== null) window.clearTimeout(pendingCursor.current);
-    pendingCursor.current = window.setTimeout(() => {
-      pendingCursor.current = null;
-      reportCursor();
-    }, CURSOR_DEBOUNCE_MS);
+    scheduleCursorReport();
   };
 
   useEffect(

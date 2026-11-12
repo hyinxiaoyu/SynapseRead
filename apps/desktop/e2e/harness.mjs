@@ -570,6 +570,10 @@ export async function launchPage(url, { width = 1440, height = 900 } = {}) {
         '--headless=new',
         '--no-sandbox',
         '--disable-gpu',
+        // Nothing but the flow: no component downloads or background requests to
+        // compete with it (or change the browser) while it runs.
+        '--disable-component-update',
+        '--disable-background-networking',
         '--remote-debugging-port=0',
         `--user-data-dir=${profile}`,
         `--window-size=${width},${height}`,

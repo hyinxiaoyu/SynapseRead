@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useEffect, useRef } from 'react';
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 
 import { clampZoomRatio, type Point, previewStyle, wheelZoomFactor } from './pdfZoom';
 
@@ -45,12 +45,16 @@ interface Gesture {
  * ratio and the caller re-lays out once, then calls `clearPreview` in the same frame.
  *
  * Default handling is cancelled so the webview never zooms the whole app instead.
+ *
+ * A change to `layoutKey` mid-pinch (a toolbar zoom, a rotation), or to the pane's
+ * size, drops the pinch: its origin and ratio describe a layout that is gone.
  */
 export function usePinchZoom({
   enabled,
   scrollRef,
   contentRef,
   baseScale,
+  layoutKey,
   onCommit,
 }: {
   enabled: boolean;
@@ -58,6 +62,11 @@ export function usePinchZoom({
   contentRef: RefObject<HTMLElement | null>;
   /** The scale the preview starts from, which bounds how far it may go. */
   baseScale: number;
+  /**
+   * Changes whenever a setting lays the pages out anew (other than this pinch).
+   * Not the pane's size, which this watches itself.
+   */
+  layoutKey: string;
   /**
    * Re-lays out at the new scale and returns true, or returns false when the scale
    * does not change, and the preview is dropped here.
@@ -69,6 +78,8 @@ export function usePinchZoom({
     latest.current = { baseScale, onCommit };
   });
   const gestureRef = useRef<Gesture | null>(null);
+  /** A WebKit gesture was dropped, and its own events (and ctrl-wheels) still arrive. */
+  const droppedWebkit = useRef(false);
 
   const clearPreview = useCallback(() => {
     const content = contentRef.current;
@@ -78,9 +89,39 @@ export function usePinchZoom({
     content.style.willChange = '';
   }, [contentRef]);
 
+  const cancel = useCallback(() => {
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    if (gesture.idleTimer !== null) clearTimeout(gesture.idleTimer);
+    gestureRef.current = null;
+    if (gesture.source === 'webkit') droppedWebkit.current = true;
+    clearPreview();
+  }, [clearPreview]);
+
+  // A commit clears the gesture before it re-lays out, so only an outside change
+  // finds one here. A layout effect, so the stale preview is never painted over
+  // the new layout.
+  useLayoutEffect(() => {
+    cancel();
+  }, [layoutKey, cancel]);
+
   useEffect(() => {
     const area = scrollRef.current;
     if (!enabled || !area) return;
+    // A gesture dropped when the tab was put away never sent its end here.
+    droppedWebkit.current = false;
+
+    // The pane resized (a sidebar, the window). Its border box, not its client
+    // size: the preview itself can overflow the pane and bring in a scrollbar,
+    // which shrinks the client size, and that must not end the pinch.
+    let paneSize = { width: area.offsetWidth, height: area.offsetHeight };
+    const resizes = new ResizeObserver(() => {
+      const next = { width: area.offsetWidth, height: area.offsetHeight };
+      if (next.width === paneSize.width && next.height === paneSize.height) return;
+      paneSize = next;
+      cancel();
+    });
+    resizes.observe(area, { box: 'border-box' });
 
     const viewportPoint = (clientX: number, clientY: number): Point => {
       const box = area.getBoundingClientRect();
@@ -135,7 +176,7 @@ export function usePinchZoom({
       event.preventDefault();
       const current = gestureRef.current;
       // WebKit may also send ctrl-wheel for the pinch it reports as a gesture.
-      if (current?.source === 'webkit') return;
+      if (current?.source === 'webkit' || droppedWebkit.current) return;
       const gesture = current ?? begin('wheel', event.clientX, event.clientY);
       const factor = wheelZoomFactor(event.deltaY, event.deltaMode, area.clientHeight);
       preview(gesture, gesture.ratio * factor, event.clientX, event.clientY);
@@ -146,6 +187,7 @@ export function usePinchZoom({
     const onGestureStart = (event: Event) => {
       const gestureEvent = event as GestureEventLike;
       event.preventDefault();
+      droppedWebkit.current = false;
       const current = gestureRef.current;
       if (current) {
         // A wheel burst that turns into a gesture continues from where it is.
@@ -173,6 +215,7 @@ export function usePinchZoom({
 
     const onGestureEnd = (event: Event) => {
       event.preventDefault();
+      droppedWebkit.current = false;
       if (gestureRef.current?.source === 'webkit') finish();
     };
 
@@ -181,17 +224,16 @@ export function usePinchZoom({
     area.addEventListener('gesturechange', onGestureChange, { passive: false });
     area.addEventListener('gestureend', onGestureEnd, { passive: false });
     return () => {
+      resizes.disconnect();
       area.removeEventListener('wheel', onWheel);
       area.removeEventListener('gesturestart', onGestureStart);
       area.removeEventListener('gesturechange', onGestureChange);
       area.removeEventListener('gestureend', onGestureEnd);
       // A tab put away mid-pinch drops it rather than committing out of view.
-      const gesture = gestureRef.current;
-      if (gesture?.idleTimer != null) clearTimeout(gesture.idleTimer);
-      gestureRef.current = null;
+      cancel();
       clearPreview();
     };
-  }, [enabled, scrollRef, contentRef, clearPreview]);
+  }, [enabled, scrollRef, contentRef, clearPreview, cancel]);
 
   return { clearPreview };
 }
