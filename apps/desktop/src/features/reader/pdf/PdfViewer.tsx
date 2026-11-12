@@ -44,6 +44,7 @@ import {
   type ViewportRect,
 } from '@/features/reader/markup/geometry';
 import { LinkPeek, type LinkPeekTarget } from '@/features/reader/markup/LinkPeek';
+import { useLinkPeek } from '@/features/reader/markup/useLinkPeek';
 import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
@@ -1594,19 +1595,24 @@ function PdfPages({
   );
 
   /** A footnote shown beside its marker, and the link Go to Note follows (#49). */
-  const [linkPeek, setLinkPeek] = useState<(LinkPeekTarget & { link: PdfInternalLink }) | null>(
-    null,
+  // Turning the page, zooming, rotating or changing the layout can move the marker
+  // without a scroll event, and a background tab must not keep its card (or its Esc).
+  const {
+    peek: linkPeek,
+    begin: beginLinkPeek,
+    dismiss: dismissLinkPeek,
+  } = useLinkPeek<LinkPeekTarget & { link: PdfInternalLink }>(
+    `${isActive}|${currentPageIndex}|${displayMode}|${zoomMode}|${customScale}|${rotation}`,
   );
-  const dismissLinkPeek = useCallback(() => setLinkPeek(null), []);
-  const peekRequest = useRef(0);
   // A link whose own text is a note marker, with a point destination, shows the text
   // there first. Anything else, or a page with no text, jumps as before.
   const activateInternalLink = useCallback(
     (link: PdfInternalLink, pageIndex: number, rect: ViewportRect) => {
-      const ticket = ++peekRequest.current;
+      const request = beginLinkPeek();
       const fraction = link.targetFraction;
       const getPageText = engine.getPageText?.bind(engine);
       if (fraction === undefined || !getPageText) {
+        request.finish(null);
         navigateToInternalLink(link);
         return;
       }
@@ -1617,12 +1623,11 @@ function PdfPages({
       })()
         .catch(() => '')
         .then((text) => {
-          if (ticket !== peekRequest.current) return;
-          if (text) setLinkPeek({ text, rect, link });
-          else navigateToInternalLink(link);
+          if (!request.finish(text ? { text, rect, link } : null)) return;
+          if (!text) navigateToInternalLink(link);
         });
     },
-    [engine, navigateToInternalLink],
+    [beginLinkPeek, engine, navigateToInternalLink],
   );
 
   const handleReturnBack = () => {

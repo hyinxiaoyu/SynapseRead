@@ -24,6 +24,7 @@ import {
 import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
 import { dispatchColorShortcut } from '@/features/reader/markup/colorShortcut';
 import { LinkPeek, type LinkPeekTarget } from '@/features/reader/markup/LinkPeek';
+import { useLinkPeek } from '@/features/reader/markup/useLinkPeek';
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
@@ -843,14 +844,16 @@ export function EpubViewer({
   });
   const { openForAnnotation, reportPointer } = popover;
   /** A footnote shown beside its reference, and where Go to Note goes (#49). */
-  const [linkPeek, setLinkPeek] = useState<(LinkPeekTarget & { href: string }) | null>(null);
-  const dismissLinkPeek = useCallback(() => setLinkPeek(null), []);
-  // Turning the page leaves the reference behind, so its card goes too.
-  const [peekCfi, setPeekCfi] = useState(currentCfi);
-  if (peekCfi !== currentCfi) {
-    setPeekCfi(currentCfi);
-    if (linkPeek) setLinkPeek(null);
-  }
+  // Turning the page leaves the reference behind, and a new mode, spread or typeface
+  // moves it, so its card goes too. A background tab must not keep its card (or its Esc).
+  const preferencesKey = JSON.stringify(effectivePreferences);
+  const {
+    peek: linkPeek,
+    begin: beginLinkPeek,
+    dismiss: dismissLinkPeek,
+  } = useLinkPeek<LinkPeekTarget & { href: string }>(
+    `${isActive}|${currentCfi}|${readingMode}|${layout.columns}|${preferencesKey}`,
+  );
   useEffect(() => {
     if (!handle) return;
     handle.onMarkClick((annotationId, rect) => {
@@ -859,10 +862,10 @@ export function EpubViewer({
     });
     handle.onPointer((down) => {
       // A press in the chapter never reaches the window, where a card listens.
-      if (down) setLinkPeek(null);
+      if (down) dismissLinkPeek();
       reportPointer(down);
     });
-  }, [handle, openForAnnotation, reportPointer]);
+  }, [handle, openForAnnotation, reportPointer, dismissLinkPeek]);
 
   useEffect(() => {
     if (!handle) return;
@@ -1166,12 +1169,12 @@ export function EpubViewer({
   // beside the link first; Go to Note then makes the same jump (#49).
   useEffect(() => {
     if (!handle) return;
-    let request = 0;
     handle.onInternalLink((href, link) => {
       if (!isActive) return;
-      const ticket = ++request;
+      const request = beginLinkPeek();
       const jump = () => jumpWithBackChip(() => handle.display(href), href);
       if (!handle.peekLink) {
+        request.finish(null);
         jump();
         return;
       }
@@ -1179,16 +1182,14 @@ export function EpubViewer({
         .peekLink(href, { noteref: link.noteref })
         .catch(() => null)
         .then((text) => {
-          if (ticket !== request) return;
-          if (text) setLinkPeek({ text, rect: link.rect, href });
-          else jump();
+          if (!request.finish(text ? { text, rect: link.rect, href } : null)) return;
+          if (!text) jump();
         });
     });
     return () => {
-      request += 1;
       handle.onInternalLink(() => undefined);
     };
-  }, [handle, isActive, jumpWithBackChip]);
+  }, [handle, isActive, jumpWithBackChip, beginLinkPeek]);
 
   const turnPage = (direction: TurnDirection) => {
     if (!handle) return;

@@ -80,13 +80,62 @@ const lineText = (line: Line) =>
     .trim();
 
 /**
- * The paragraph a destination points at: lines from the first one at or below
- * `fraction` (`0` the page's top) until a gap wider than a line, the next note's
- * marker, or the card's limit. Empty when nothing is there.
+ * How far down a line's box a destination may sit and still point at that line. A
+ * run's box reaches 0.2 of its font height below the baseline and 0.85 above it, so
+ * the baseline is about 0.81 of the way down: producers that aim `/XYZ` at the
+ * baseline, not the line's top, would otherwise skip the line they point at.
+ */
+const LINE_REACH = 0.85;
+/** Lines whose left edges differ by less than this, as a page fraction, are aligned. */
+const ALIGNED = 0.002;
+
+/**
+ * The note marker a line begins with, if any: a run of its own (`2`, `2.`, `[2]`) or
+ * the start of the line's first run (`2. The note…`), as some producers write it.
+ */
+function leadingMarker(line: Line): { superscript: boolean; punctuated: boolean } | null {
+  const first = line.runs[0];
+  if (!first) return null;
+  const text = first.text.trim();
+  const punctuated = (marker: string) => /^[[(]|[\]).]$/.test(marker);
+  if (isNoteMarker(text.replace(/\.$/, ''))) {
+    const body = Math.max(0, ...line.runs.slice(1).map((run) => run.rect.height));
+    return { superscript: first.rect.height < body * 0.85, punctuated: punctuated(text) };
+  }
+  const inline = /^([[(]?(?:\d{1,4}|[*†‡§¶]{1,3})[\])]?\.?)\s+\S/.exec(text)?.[1];
+  if (inline && isNoteMarker(inline.replace(/\.$/, ''))) {
+    return { superscript: false, punctuated: punctuated(inline) };
+  }
+  return null;
+}
+
+/**
+ * Whether `line` starts the next note rather than continuing this one. A number at
+ * the start of a wrapped line (`1998`, `10`) is not enough: the marker must be raised,
+ * or the line must leave the previous line's edge for the edge this note began on (a
+ * hanging or first-line indent), or the marker must be punctuated on that edge.
+ */
+function startsNote(line: Line, previous: Line, noteStart: Line): boolean {
+  const marker = leadingMarker(line);
+  if (!marker) return false;
+  if (marker.superscript) return true;
+  const left = line.runs[0]?.rect.x ?? 0;
+  const onNoteEdge = Math.abs(left - (noteStart.runs[0]?.rect.x ?? 0)) <= ALIGNED;
+  if (!onNoteEdge) return false;
+  const leavesPrevious = Math.abs(left - (previous.runs[0]?.rect.x ?? 0)) > ALIGNED;
+  return leavesPrevious || marker.punctuated;
+}
+
+/**
+ * The paragraph a destination points at: lines from the first one the destination
+ * reaches (`0` the page's top) until a gap wider than a line, the next note, or the
+ * card's limit. Empty when nothing is there.
  */
 export function textNearDestination(pageText: PdfPageText, fraction: number): string {
   const all = lines(pageText);
-  const start = all.findIndex((line) => (line.top + line.bottom) / 2 >= fraction);
+  const start = all.findIndex(
+    (line) => line.top + (line.bottom - line.top) * LINE_REACH >= fraction,
+  );
   if (start < 0) return '';
   const taken: string[] = [];
   let length = 0;
@@ -97,7 +146,8 @@ export function textNearDestination(pageText: PdfPageText, fraction: number): st
       const previous = all[index - 1];
       const height = previous ? previous.bottom - previous.top : 0;
       if (previous && line.top - previous.bottom > height) break;
-      if (isNoteMarker(line.runs[0]?.text ?? '')) break;
+      const noteStart = all[start];
+      if (previous && noteStart && startsNote(line, previous, noteStart)) break;
     }
     const text = lineText(line);
     // A hyphen at a line's end joins a word, as it would in the paragraph.

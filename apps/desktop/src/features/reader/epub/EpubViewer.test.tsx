@@ -966,6 +966,52 @@ describe('EpubViewer', () => {
     expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
   });
 
+  it('puts a footnote card away when the reader moves on without a press (#49)', async () => {
+    engine.peek = async () => 'A note.';
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    const peek = async () => {
+      act(() => engine.emitInternalLink('OEBPS/notes.xhtml#fn1', { noteref: true, rect: null }));
+      await screen.findByTestId('link-peek');
+    };
+
+    // A tab switched from the keyboard keeps its card no more than its Esc.
+    await peek();
+    view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+    view.rerender(<Harness store={store} documentId={documentId} />);
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+
+    // A new font size, as Cmd+= sets it, moves the reference.
+    await peek();
+    await act(async () => store.getState().updateReadingPreferences({ fontSize: 120 }));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+  });
+
+  it('never opens a card, or jumps, once the reader moved on while it was read (#49)', async () => {
+    let release: (text: string) => void = () => undefined;
+    engine.peek = () => new Promise<string>((resolve) => (release = resolve));
+    const { store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    const jumps = engine.displayed.length;
+
+    // A press in the chapter while the note is read.
+    act(() => engine.emitInternalLink('OEBPS/notes.xhtml#fn1', { noteref: true, rect: null }));
+    act(() => engine.emitPointer(true));
+    await act(async () => release('A note.'));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+
+    // A tab switch while the note is read.
+    act(() => engine.emitInternalLink('OEBPS/notes.xhtml#fn1', { noteref: true, rect: null }));
+    view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+    view.rerender(<Harness store={store} documentId={documentId} />);
+    await act(async () => release('A note.'));
+    expect(screen.queryByTestId('link-peek')).not.toBeInTheDocument();
+    expect(engine.displayed.length).toBe(jumps);
+  });
+
   it('turns pages from the page edges, swipes, and Space, never over text', async () => {
     const { store, documentId } = await setup();
     render(<Harness store={store} documentId={documentId} />);

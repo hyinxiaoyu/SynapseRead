@@ -67,6 +67,25 @@ describe('noteTextAt', () => {
     expect(noteTextAt(doc, 'n', { noteref: true })).toBe('Note text.');
   });
 
+  it('reads the whole note when the id sits on its label, as EPUB 2 books do', () => {
+    const doc = chapter(`
+      <p class="footnote"><a id="fn1" href="ch1.xhtml#ref1">[1]</a> The first note.</p>
+      <p><span id="fn2">2.</span> The second <em>note</em>.</p>
+      <ol><li><a name="fn3" href="ch1.xhtml#ref3">3</a> A listed note.</li></ol>`);
+    // With noteref or without: a link that only says `[1]` is not worth a card.
+    for (const noteref of [true, false]) {
+      expect(noteTextAt(doc, 'fn1', { noteref })).toBe('[1] The first note.');
+      expect(noteTextAt(doc, 'fn2', { noteref })).toBe('2. The second note.');
+      expect(noteTextAt(doc, 'fn3', { noteref })).toBe('3 A listed note.');
+    }
+  });
+
+  it('jumps from an inline target in a long paragraph', () => {
+    const long = 'word '.repeat(SHORT_TARGET_CHARS / 4);
+    const doc = chapter(`<p>${long}<span id="term">a term</span> ${long}</p>`);
+    expect(noteTextAt(doc, 'term', { noteref: false })).toBeNull();
+  });
+
   it('peeks at a short target without noteref, and jumps to a long one', () => {
     const short = 'An aside of a sentence.';
     const long = 'word '.repeat(SHORT_TARGET_CHARS / 4);

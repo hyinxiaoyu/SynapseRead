@@ -17,7 +17,7 @@ const NOTE_ROLES = ['doc-footnote', 'doc-endnote'];
 const SKIPPED = new Set(['script', 'style', 'template', 'noscript', 'svg', 'math', 'head']);
 /** Targets that start a part of the book, not a note, so a link to one jumps. */
 const STRUCTURAL = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'body', 'html', 'nav']);
-/** An empty anchor (`<a id="fn1"/>`) stands for the block it sits in. */
+/** An inline target (`<a id="fn1"/>`, `<span id="fn1">1.</span>`) stands for the block it sits in. */
 const BLOCKS = new Set(['p', 'li', 'dd', 'dt', 'aside', 'div', 'blockquote', 'td', 'footer']);
 
 function epubTypes(element: Element): string[] {
@@ -81,11 +81,16 @@ function findTarget(chapterDoc: Document, fragment: string): Element | null {
   return null;
 }
 
-/** The element whose text is the note: an empty marker stands for its block. */
+/**
+ * The element whose text is the note. An inline target stands for its block, empty
+ * (`<a id="fn1"/>`) or not: books without `epub:type` often put the id on the note's
+ * own label (`<p><a id="fn1" href="…">[1]</a> The note…</p>`), and the label alone
+ * says nothing.
+ */
 function noteElement(target: Element): Element {
   const note = findNoteAncestor(target);
   if (note) return note;
-  if (plainText(target) !== '' || BLOCKS.has(tagOf(target))) return target;
+  if (BLOCKS.has(tagOf(target)) || STRUCTURAL.has(tagOf(target))) return target;
   let block: Element | null = target.parentElement;
   while (block && !BLOCKS.has(tagOf(block)) && !STRUCTURAL.has(tagOf(block))) {
     block = block.parentElement;

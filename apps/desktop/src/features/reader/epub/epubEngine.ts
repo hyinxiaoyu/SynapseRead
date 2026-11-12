@@ -510,6 +510,52 @@ const toBuffer = async (source: DocumentSource): Promise<ArrayBuffer> => {
   return source.bytes.slice().buffer as ArrayBuffer;
 };
 
+/**
+ * Links resolve against this, not the frame's base. A chapter is a `srcdoc` frame
+ * whose base is the app's page, and a packaged app is served from `tauri://localhost`,
+ * whose origin is the opaque `"null"`, so neither can anchor a relative URL.
+ */
+const BOOK_ORIGIN = 'https://book.invalid';
+
+function decodePath(path: string): string {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    // A malformed escape is matched as written.
+    return path;
+  }
+}
+
+/**
+ * Where a relative link in the chapter at `chapterHref` points, as a book path with
+ * its query and fragment (`/OEBPS/notes.xhtml#fn1`), or null when it leaves the book.
+ * The path is decoded so it compares with the manifest's hrefs, which are often not.
+ */
+export function resolveChapterLink(raw: string, chapterHref: string | undefined): string | null {
+  if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith('//')) return null;
+  try {
+    const chapterBase = new URL(`/${(chapterHref ?? '').replace(/^\/+/, '')}`, BOOK_ORIGIN);
+    const href = new URL(raw, chapterBase);
+    if (href.origin !== BOOK_ORIGIN) return null;
+    return `${decodePath(href.pathname)}${href.search}${href.hash}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `path` names this spine item, written relative or rooted, encoded or not. */
+function isSpinePath(item: { href: string; canonical?: string }, path: string): boolean {
+  const clean = decodePath(path.replace(/^(\.\/|\/)+/, ''));
+  if (!clean) return false;
+  const href = decodePath(item.href);
+  return (
+    href === clean ||
+    (item.canonical !== undefined && decodePath(item.canonical) === clean) ||
+    href.endsWith(`/${clean}`) ||
+    clean.endsWith(`/${href}`)
+  );
+}
+
 export async function openEpubDocument(
   source: DocumentSource,
   element: HTMLElement,
@@ -548,14 +594,7 @@ export async function openEpubDocument(
     if (!target || target.startsWith('epubcfi(')) return target;
     if (book.spine.get(target)) return target;
     const [rawPath = '', fragment] = target.split('#');
-    const cleanPath = rawPath.replace(/^(\.\/|\/)+/, '');
-    const matched = spineItems.find(
-      (item) =>
-        item.href === cleanPath ||
-        item.canonical === cleanPath ||
-        item.href.endsWith(`/${cleanPath}`) ||
-        cleanPath.endsWith(`/${item.href}`),
-    );
+    const matched = spineItems.find((item) => isSpinePath(item, rawPath));
     if (!matched) return target;
     return fragment ? `${matched.href}#${fragment}` : matched.href;
   };
@@ -602,19 +641,8 @@ export async function openEpubDocument(
         const target = event.target as Element | null;
         const anchor = target?.closest?.('a[href]') ?? null;
         const raw = anchor?.getAttribute('href') ?? '';
-        if (!raw || /^[a-z][a-z0-9+.-]*:/.test(raw) || raw.startsWith('//')) return;
-        let href: URL;
-        try {
-          const base = new URL(contents.document.baseURI);
-          // A chapter is a `srcdoc` frame whose base is the app, not the chapter, so
-          // `#note` or `../notes.xhtml` resolve against the chapter's own path instead.
-          const chapterHref = spineItems[contents.sectionIndex]?.href;
-          const chapterBase = chapterHref ? new URL(`/${chapterHref}`, base.origin) : base;
-          href = new URL(raw, chapterBase);
-          if (href.origin !== base.origin) return;
-        } catch {
-          return;
-        }
+        const href = resolveChapterLink(raw, spineItems[contents.sectionIndex]?.href);
+        if (href === null) return;
         event.preventDefault();
         event.stopPropagation();
         const frame = contents.window.frameElement?.getBoundingClientRect();
@@ -628,7 +656,7 @@ export async function openEpubDocument(
                 right: box.right + (frame?.left ?? 0),
               }
             : null;
-        internalLinkListener(`${href.pathname}${href.search}${href.hash}`, {
+        internalLinkListener(href, {
           noteref: anchor ? isNoteRef(anchor) : false,
           rect,
         });
@@ -868,15 +896,9 @@ export async function openEpubDocument(
   };
 
   const spineIndexOf = (href: string) => {
-    const clean = (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
-    if (!clean) return -1;
-    return spineItems.findIndex(
-      (item) =>
-        item.href === clean ||
-        item.canonical === clean ||
-        item.href.endsWith(`/${clean}`) ||
-        clean.endsWith(`/${item.href}`),
-    );
+    const path = href.split('#')[0] ?? '';
+    if (!path.replace(/^(\.\/|\/)+/, '')) return -1;
+    return spineItems.findIndex((item) => isSpinePath(item, path));
   };
 
   return {

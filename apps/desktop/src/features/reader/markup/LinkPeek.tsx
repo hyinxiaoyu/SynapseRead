@@ -3,6 +3,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -45,6 +46,7 @@ export function LinkPeek({
   /** Where focus goes when the card is put away with Esc. */
   onReturnFocus: () => void;
 }) {
+  const textId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const goRef = useRef<HTMLButtonElement>(null);
   // Placed for one card, so a new card is measured before it shows, not at the old spot.
@@ -144,7 +146,7 @@ export function LinkPeek({
       ref={rootRef}
       role="dialog"
       aria-label="Note"
-      aria-describedby="link-peek-text"
+      aria-describedby={textId}
       data-testid="link-peek"
       data-placement={placement}
       data-reader-popover=""
@@ -162,7 +164,7 @@ export function LinkPeek({
       }
     >
       <p
-        id="link-peek-text"
+        id={textId}
         data-testid="link-peek-text"
         className="max-h-48 overflow-y-auto text-sm leading-relaxed break-words select-text"
       >

@@ -1664,6 +1664,86 @@ describe('PdfViewer', () => {
     expect(await scroller()).toHaveFocus();
   });
 
+  describe('a footnote card that the reader moved away from (#49)', () => {
+    const noteLink = () => {
+      engineState.pageAnnotations.set(0, {
+        links: [
+          {
+            id: 'note-1',
+            rect: { x: 0.75, y: 0.19, width: 0.02, height: 0.05 },
+            targetPageIndex: 3,
+            targetFraction: 0.45,
+          },
+        ],
+        embeddedAnnotations: [],
+        unsupportedSubtypes: [],
+      });
+      engineState.extraRuns.set(0, [
+        { text: '1', rect: { x: 0.755, y: 0.2, width: 0.01, height: 0.02 } },
+      ]);
+      engineState.extraRuns.set(3, [
+        { text: '1 The note.', rect: { x: 0.1, y: 0.5, width: 0.8, height: 0.03 } },
+      ]);
+    };
+
+    it('closes when its tab goes to the background, and stays closed', async () => {
+      noteLink();
+      const { store, documentId } = await setup();
+      const view = render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      fireEvent.click(await screen.findByTestId('pdf-internal-link'));
+      await screen.findByTestId('link-peek');
+
+      // Switching tabs from the keyboard presses nothing in the window.
+      view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+      expect(screen.queryByTestId('link-peek')).toBeNull();
+      view.rerender(<Harness store={store} documentId={documentId} />);
+      expect(screen.queryByTestId('link-peek')).toBeNull();
+    });
+
+    it('closes when the layout moves the marker without a scroll', async () => {
+      noteLink();
+      // As a browser does: a scroll that ends where it started fires no event, so at
+      // the top of the document the card cannot rely on one.
+      Element.prototype.scrollTo = function (this: Element, options) {
+        const top = (options as ScrollToOptions).top ?? 0;
+        if (top === this.scrollTop) return;
+        this.scrollTop = top;
+        this.dispatchEvent(new Event('scroll'));
+      };
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      // A click with no press, as Cmd+R or Cmd+= would arrive.
+      for (const name of ['Rotate clockwise', 'Zoom in']) {
+        fireEvent.click(await screen.findByTestId('pdf-internal-link'));
+        await screen.findByTestId('link-peek');
+        fireEvent.click(screen.getByRole('button', { name }));
+        expect(screen.queryByTestId('link-peek'), name).toBeNull();
+      }
+    });
+
+    it('never opens, or jumps, once the reader moved on while it was reading', async () => {
+      noteLink();
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+      const link = await screen.findByTestId('pdf-internal-link');
+
+      let release = () => undefined as void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      engineState.pageTextGate = () => held;
+      fireEvent.click(link);
+      fireEvent.pointerDown(await scroller());
+      engineState.pageTextGate = null;
+      await act(async () => release());
+
+      expect(screen.queryByTestId('link-peek')).toBeNull();
+      expect(pageInput).toHaveValue('1');
+    });
+  });
+
   it('supports lazy thumbnails, continuous/single/two-page display modes, view rotation, internal links, and embedded annotations disclosure', async () => {
     engineState.pageAnnotations.set(0, {
       links: [

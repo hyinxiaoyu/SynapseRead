@@ -43,6 +43,28 @@ describe('LinkPeek', () => {
     expect((window as unknown as { __linkPeekRan?: number }).__linkPeekRan).toBeUndefined();
   });
 
+  it('describes each card by its own text when several tabs have one', () => {
+    const boundsRef = createRef<HTMLDivElement>();
+    const card = (text: string) => (
+      <LinkPeek
+        peek={{ text, rect: null }}
+        boundsRef={boundsRef}
+        onGo={vi.fn()}
+        onDismiss={vi.fn()}
+        onReturnFocus={vi.fn()}
+      />
+    );
+    render(
+      <div ref={boundsRef}>
+        {card('First tab.')}
+        {card('Second tab.')}
+      </div>,
+    );
+    const [first, second] = screen.getAllByRole('dialog', { name: 'Note' });
+    expect(first).toHaveAccessibleDescription('First tab.');
+    expect(second).toHaveAccessibleDescription('Second tab.');
+  });
+
   it('is a labelled dialog with the keyboard on Go to Note', () => {
     const { onGo, onDismiss } = setup({ text: 'A note.', rect: null });
     expect(screen.getByRole('dialog', { name: 'Note' })).toHaveAccessibleDescription('A note.');
