@@ -485,8 +485,10 @@ export async function epubFlow(page) {
   );
   await new Promise((done) => setTimeout(done, 300));
   await page.waitFor(`${frameDocument}?.body`, 'EPUB chapter frame re-mounted at Wide width');
-  assert(
-    Math.abs((await page.evaluate(epubFontPx)) - baseEpubFontPx * 1.6) < 0.5,
+  // The re-mounted chapter takes its styles a beat after its body appears, later on a
+  // slow runner, so this waits for the size to settle; it still fails if it never does.
+  await page.waitFor(
+    `Math.abs(${epubFontPx} - ${baseEpubFontPx * 1.6}) < 0.5`,
     'changing EPUB page width to Wide preserves rendered 160% font size across iframe re-render',
   );
   await page.clickButton('Full width');
@@ -496,8 +498,10 @@ export async function epubFlow(page) {
   );
   await new Promise((done) => setTimeout(done, 300));
   await page.waitFor(`${frameDocument}?.body`, 'EPUB chapter frame re-mounted at Full width');
-  assert(
-    Math.abs((await page.evaluate(epubFontPx)) - baseEpubFontPx * 1.6) < 0.5,
+  // The re-mounted chapter takes its styles a beat after its body appears, later on a
+  // slow runner, so this waits for the size to settle; it still fails if it never does.
+  await page.waitFor(
+    `Math.abs(${epubFontPx} - ${baseEpubFontPx * 1.6}) < 0.5`,
     'changing EPUB page width to Full width preserves rendered 160% font size',
   );
   for (let step = 0; step < 6; step += 1) {
