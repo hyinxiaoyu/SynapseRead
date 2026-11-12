@@ -126,18 +126,65 @@ export function useAutoHideToolbar(
   return { hidden: enabled && hidden, reveal };
 }
 
-/**
- * The width the center slot's text would take without being truncated. `scrollWidth`
- * keeps the full text on the element that truncates, and the slot's own wrapper can
- * be as wide as the toolbar, so only the descendants are measured.
- */
-function titleWidth(element: HTMLElement): number {
-  let width = 0;
+/** Direct visible items of `element`, descending past `display: contents` wrappers. */
+function visibleChildren(element: HTMLElement): HTMLElement[] {
+  const found: HTMLElement[] = [];
   for (const child of element.children) {
     if (!(child instanceof HTMLElement)) continue;
-    width = Math.max(width, child.scrollWidth, titleWidth(child));
+    const display = getComputedStyle(child).display;
+    if (display === 'none') continue;
+    if (display === 'contents') found.push(...visibleChildren(child));
+    else found.push(child);
   }
-  return width;
+  return found;
+}
+
+/**
+ * The width the center slot's content would take without being truncated. `scrollWidth`
+ * keeps the full text on a leaf that truncates, horizontal flex rows (such as the PDF
+ * page form, or two items side by side in the slot) sum their items and gaps, and pixel
+ * `max-width` caps (such as `max-w-48` on a chapter subtitle) still bound the item.
+ */
+export function titleWidth(slot: HTMLElement): number {
+  const measureNode = (element: HTMLElement, isRoot: boolean): number => {
+    const style = getComputedStyle(element);
+    if (style.display === 'none') return 0;
+    const borderX =
+      (Number.parseFloat(style.borderLeftWidth) || 0) +
+      (Number.parseFloat(style.borderRightWidth) || 0);
+    const paddingX =
+      (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
+    const chromeX = isRoot ? 0 : paddingX + borderX;
+    const children = visibleChildren(element);
+
+    let width: number;
+    if (children.length === 0) {
+      if (isRoot) return 0;
+      width = Math.max(element.getBoundingClientRect().width, element.scrollWidth + borderX);
+    } else if (
+      (style.display === 'flex' || style.display === 'inline-flex') &&
+      !style.flexDirection.startsWith('column')
+    ) {
+      const gap = Number.parseFloat(style.columnGap) || 0;
+      let sum = 0;
+      for (const child of children) sum += measureNode(child, false);
+      const rowWidth = sum + gap * (children.length - 1) + chromeX;
+      width = isRoot ? rowWidth : Math.max(element.scrollWidth + borderX, rowWidth);
+    } else {
+      let widest = 0;
+      for (const child of children) widest = Math.max(widest, measureNode(child, false));
+      const stackWidth = widest + chromeX;
+      width = isRoot ? stackWidth : Math.max(element.scrollWidth + borderX, stackWidth);
+    }
+
+    if (!isRoot && style.maxWidth.endsWith('px')) {
+      const cap = Number.parseFloat(style.maxWidth);
+      if (Number.isFinite(cap)) width = Math.min(width, cap);
+    }
+    return width;
+  };
+
+  return measureNode(slot, true);
 }
 
 /** The outer edges of a group's visible controls; null when it has none to measure. */
@@ -181,15 +228,23 @@ function useTitleLayout(
 
   useLayoutEffect(() => {
     const toolbar = toolbarRef.current;
-    if (!toolbar || !leading || !center || !trailing) return;
+    const slot = center?.parentElement;
+    const trailingGroup = trailing?.parentElement;
+    if (!toolbar || !leading || !center || !slot || !trailing || !trailingGroup) return;
+
+    let frame: number | null = null;
+    const cancelFrame = () => {
+      if (frame === null) return;
+      window.cancelAnimationFrame(frame);
+      frame = null;
+    };
 
     const measure = () => {
-      const slot = center.parentElement;
-      if (!slot) return;
+      cancelFrame();
       const viewport = toolbar.getBoundingClientRect();
       // A group with no controls (before a document opens) still pins its edge.
       const group = contentBounds(leading) ?? { left: viewport.left, right: viewport.left };
-      const controls = contentBounds(trailing.parentElement) ?? {
+      const controls = contentBounds(trailingGroup) ?? {
         left: viewport.right,
         right: viewport.right,
       };
@@ -207,28 +262,69 @@ function useTitleLayout(
         current.centered === centered && current.shift === shift ? current : { centered, shift },
       );
     };
+
+    const scheduleMeasure = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(measure);
+    };
+
     measure();
 
-    // Resizing is not the only thing that changes the answer: the reader fills the
-    // slots, and the title changes with the document.
+    // Controls can animate their own width (the search field widens on a query) or
+    // collapse under a container query without resizing the toolbar itself, so watch
+    // each group's items directly as well as the bar.
     const resize = new ResizeObserver(measure);
-    resize.observe(toolbar);
-    const mutations = new MutationObserver(measure);
-    for (const element of [leading, center, trailing.parentElement]) {
-      if (!element) continue;
-      // A class change is how the search field widens and a control appears, which
-      // moves a group's edge without touching the DOM tree.
-      mutations.observe(element, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-        attributes: true,
-        attributeFilter: ['class', 'style'],
-      });
+    const observed = new Set<Element>();
+    const syncObserved = () => {
+      const next = new Set<Element>([toolbar]);
+      for (const group of [leading, trailingGroup]) {
+        for (const child of group.children) next.add(child);
+      }
+      for (const element of observed) {
+        if (!next.has(element)) {
+          resize.unobserve(element);
+          observed.delete(element);
+        }
+      }
+      for (const element of next) {
+        if (!observed.has(element)) {
+          resize.observe(element);
+          observed.add(element);
+        }
+      }
+    };
+    syncObserved();
+
+    const groupMutations = new MutationObserver(() => {
+      syncObserved();
+      scheduleMeasure();
+    });
+    for (const group of [leading, trailingGroup]) {
+      groupMutations.observe(group, { childList: true });
     }
+
+    // In the narrow fallback layout the center slot's box is clamped, so text or page
+    // input edits change `titleWidth` without resizing an observed box. Coalesce into
+    // one frame so page turns that touch several nodes only lay out once.
+    const centerMutations = new MutationObserver((records) => {
+      if (records.every((record) => record.type === 'attributes' && record.target === slot)) {
+        return;
+      }
+      scheduleMeasure();
+    });
+    centerMutations.observe(slot, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['class', 'style'],
+    });
+
     return () => {
+      cancelFrame();
       resize.disconnect();
-      mutations.disconnect();
+      groupMutations.disconnect();
+      centerMutations.disconnect();
     };
   }, [center, leading, toolbarRef, trailing]);
 
@@ -348,12 +444,9 @@ export function UnifiedToolbar({
           className={cn(
             'flex min-w-0 items-center justify-center gap-1',
             !centeredTitle && 'flex-1',
+            titleLayout.shift !== 0 && 'relative',
           )}
-          style={
-            titleLayout.shift === 0
-              ? undefined
-              : { transform: `translateX(${titleLayout.shift}px)` }
-          }
+          style={titleLayout.shift === 0 ? undefined : { left: titleLayout.shift }}
         >
           <div ref={setCenter} data-testid="toolbar-center" className="contents" />
           {showFallbackTitle && fallbackTitle}
