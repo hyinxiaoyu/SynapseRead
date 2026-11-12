@@ -10,6 +10,7 @@ import { keyboardFlow } from './keyboard.mjs';
 import { linkPeekFlow } from './linkPeek.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
 import { txtFlow } from './txt.mjs';
+import { toolbarTitleFlow } from './toolbarTitle.mjs';
 import { txtChaptersFlow } from './txtChapters.mjs';
 
 // The one CSP report that does not fail a flow, and only on a browser shown to send it
@@ -27,6 +28,7 @@ const FLOWS = {
   'txt-chapters': txtChaptersFlow,
   'go-to': goToFlow,
   'link-peek': linkPeekFlow,
+  'toolbar-title': toolbarTitleFlow,
 };
 
 // Screenshots of failed flows; CI uploads the folder.

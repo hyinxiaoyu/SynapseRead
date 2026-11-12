@@ -226,12 +226,13 @@ describe('UnifiedToolbar', () => {
     const header = toolbar();
     expect(header.className).toContain('motion-safe:transition-[opacity,translate]');
     expect(header).toHaveAttribute('data-tauri-drag-region');
-    expect(header.style.paddingLeft).toBe('84px');
+    // The inset lives on the leading column, so it does not offset the centered title.
+    expect(screen.getByTestId('toolbar-leading').style.paddingLeft).toBe('84px');
   });
 
   it('uses a standard frame elsewhere and in full screen', () => {
     renderToolbar({ immersive: false, chromeStyle: 'overlay', fullscreen: true });
-    expect(toolbar().style.paddingLeft).toBe('');
+    expect(screen.getByTestId('toolbar-leading').style.paddingLeft).toBe('');
     document.body.innerHTML = '';
     renderToolbar({ immersive: false });
     expect(screen.getAllByTestId('unified-toolbar').at(-1)).not.toHaveAttribute(
