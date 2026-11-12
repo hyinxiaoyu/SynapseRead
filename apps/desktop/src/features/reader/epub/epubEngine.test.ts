@@ -261,6 +261,44 @@ describe('EPUB navigation', () => {
     expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
   });
 
+  it('resolves a link against its chapter, not the frame, and says if it is a noteref', async () => {
+    const handle = await open();
+    const links: [string, boolean][] = [];
+    handle.onInternalLink((href, link) => links.push([href, link.noteref]));
+    const chapterDoc = document.implementation.createHTMLDocument('');
+    // A `srcdoc` frame inherits its parent page's URL as its base.
+    const base = chapterDoc.createElement('base');
+    base.href = 'http://127.0.0.1:1420/';
+    chapterDoc.head.append(base);
+    chapterDoc.body.innerHTML = `
+      <a id="same" href="#aside">*</a>
+      <a id="note" epub:type="noteref" href="chapter1.xhtml#fn1">1</a>
+      <a id="away" href="https://example.com/">out</a>`;
+    // A `srcdoc` chapter's base is the app's page, so only its spine index places it.
+    for (const hook of fake.state.renditionHooks) {
+      hook({
+        document: chapterDoc,
+        window,
+        expand: vi.fn<() => void>(),
+        sectionIndex: 1,
+      } as unknown as Parameters<(typeof fake.state.renditionHooks)[number]>[0]);
+    }
+    const click = (id: string) => {
+      const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+      chapterDoc.getElementById(id)?.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    expect(click('same')).toBe(true);
+    expect(click('note')).toBe(true);
+    // An absolute link keeps epub.js' own handling.
+    expect(click('away')).toBe(false);
+    expect(links).toEqual([
+      ['/chapter2.xhtml#aside', false],
+      ['/chapter1.xhtml#fn1', true],
+    ]);
+    expect(handle.spineIndexOf(links[0]?.[0] ?? '')).toBe(1);
+  });
+
   it('tags a mark with its annotation id only, noted or not', async () => {
     const handle = await open();
     fake.rendition.annotations.add.mockClear();

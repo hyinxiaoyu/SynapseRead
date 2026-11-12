@@ -36,6 +36,8 @@ const engineState = vi.hoisted(() => ({
   /** Holds back one page's annotations until the test resolves it. */
   pageAnnotationsGate: new Map<number, Promise<void>>(),
   pageLabels: null as string[] | null,
+  /** Runs added to a page's text, such as a footnote marker. */
+  extraRuns: new Map<number, PdfPageText['runs']>(),
 }));
 
 const PNG = 'iVBORw0KGgoAAAA';
@@ -81,6 +83,7 @@ vi.mock('./pdfEngine', () => ({
                   : `Second line of page ${pageIndex}`,
               rect: { x: 0.1, y: 0.4, width: 0.6, height: 0.03 },
             },
+            ...(engineState.extraRuns.get(pageIndex) ?? []),
           ],
         };
       },
@@ -227,6 +230,7 @@ describe('PdfViewer', () => {
     engineState.pageAnnotations = new Map();
     engineState.pageAnnotationsGate = new Map();
     engineState.pageLabels = null;
+    engineState.extraRuns = new Map();
     engineState.outline = [
       {
         id: 'outline-0',
@@ -1612,6 +1616,54 @@ describe('PdfViewer', () => {
     }
   });
 
+  it('shows a footnote beside its marker and goes to it with Go to Note (#49)', async () => {
+    engineState.pageAnnotations.set(0, {
+      links: [
+        {
+          id: 'note-1',
+          rect: { x: 0.75, y: 0.19, width: 0.02, height: 0.05 },
+          targetPageIndex: 3,
+          targetFraction: 0.45,
+        },
+      ],
+      embeddedAnnotations: [],
+      unsupportedSubtypes: [],
+    });
+    engineState.extraRuns.set(0, [
+      { text: '1', rect: { x: 0.755, y: 0.2, width: 0.01, height: 0.02 } },
+    ]);
+    // Markup in a PDF's text is only characters: the card shows it as written.
+    const note = '1 The endnote says <img src=x onerror=alert(1)> plainly.';
+    engineState.extraRuns.set(3, [
+      { text: note, rect: { x: 0.1, y: 0.5, width: 0.8, height: 0.03 } },
+    ]);
+
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+
+    fireEvent.click(await screen.findByTestId('pdf-internal-link'));
+    const card = await screen.findByTestId('link-peek');
+    expect(screen.getByTestId('link-peek-text').textContent).toBe(note);
+    expect(card.querySelector('img')).toBeNull();
+    // Peeking goes nowhere.
+    expect(pageInput).toHaveValue('1');
+    expect(screen.getByTestId('link-peek-go')).toHaveFocus();
+
+    // A press elsewhere puts it away.
+    fireEvent.pointerDown(await scroller());
+    expect(screen.queryByTestId('link-peek')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('pdf-internal-link'));
+    fireEvent.click(await screen.findByTestId('link-peek-go'));
+    expect(pageInput).toHaveValue('4');
+    expect((await scroller()).scrollTop).toBeCloseTo(3 * (PAGE_PX + GAP_PX) + 0.45 * PAGE_PX, 0);
+    expect(screen.getByTestId('reader-back-chip')).toHaveTextContent('Back to page 1');
+    expect(screen.queryByTestId('link-peek')).toBeNull();
+    expect(await scroller()).toHaveFocus();
+  });
+
   it('supports lazy thumbnails, continuous/single/two-page display modes, view rotation, internal links, and embedded annotations disclosure', async () => {
     engineState.pageAnnotations.set(0, {
       links: [
@@ -1689,8 +1741,10 @@ describe('PdfViewer', () => {
     // Internal link on Page 1 navigates to Page 4 (pageIndex 3), partway down it,
     // with a chip that leads back.
     const pageInput = screen.getByLabelText('Page number') as HTMLInputElement;
+    // The link's words are no note marker, so it jumps once its text is read (#49).
     fireEvent.click(await screen.findByTestId('pdf-internal-link'));
-    expect(pageInput).toHaveValue('4');
+    await waitFor(() => expect(pageInput).toHaveValue('4'));
+    expect(screen.queryByTestId('link-peek')).toBeNull();
     expect((await scroller()).scrollTop).toBeCloseTo(3 * (PAGE_PX + GAP_PX) + 0.25 * PAGE_PX, 0);
     expect(screen.getByTestId('reader-back-chip')).toHaveTextContent('Back to page 1');
     fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));

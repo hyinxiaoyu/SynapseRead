@@ -23,6 +23,7 @@ import {
 } from '@/features/reader/DocumentSearch';
 import { MarkupBar, MarkupToggleButton } from '@/features/reader/markup/MarkupBar';
 import { dispatchColorShortcut } from '@/features/reader/markup/colorShortcut';
+import { LinkPeek, type LinkPeekTarget } from '@/features/reader/markup/LinkPeek';
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import { useSelectionPopover } from '@/features/reader/markup/useSelectionPopover';
 import { ReaderNavigator } from '@/features/reader/navigator/NavigatorSidebar';
@@ -841,13 +842,26 @@ export function EpubViewer({
     getSelectionRect,
   });
   const { openForAnnotation, reportPointer } = popover;
+  /** A footnote shown beside its reference, and where Go to Note goes (#49). */
+  const [linkPeek, setLinkPeek] = useState<(LinkPeekTarget & { href: string }) | null>(null);
+  const dismissLinkPeek = useCallback(() => setLinkPeek(null), []);
+  // Turning the page leaves the reference behind, so its card goes too.
+  const [peekCfi, setPeekCfi] = useState(currentCfi);
+  if (peekCfi !== currentCfi) {
+    setPeekCfi(currentCfi);
+    if (linkPeek) setLinkPeek(null);
+  }
   useEffect(() => {
     if (!handle) return;
     handle.onMarkClick((annotationId, rect) => {
       if (!latest.current.isActive) return;
       openForAnnotation(annotationId, rect);
     });
-    handle.onPointer(reportPointer);
+    handle.onPointer((down) => {
+      // A press in the chapter never reaches the window, where a card listens.
+      if (down) setLinkPeek(null);
+      reportPointer(down);
+    });
   }, [handle, openForAnnotation, reportPointer]);
 
   useEffect(() => {
@@ -1148,13 +1162,30 @@ export function EpubViewer({
 
   // An internal link comes from the chapter's frame. The engine only forwards the
   // href, so the jump joins the reader's history and offers the way back here.
+  // A footnote reference, or a link to a short target, shows the target's text
+  // beside the link first; Go to Note then makes the same jump (#49).
   useEffect(() => {
     if (!handle) return;
-    handle.onInternalLink((href) => {
+    let request = 0;
+    handle.onInternalLink((href, link) => {
       if (!isActive) return;
-      jumpWithBackChip(() => handle.display(href), href);
+      const ticket = ++request;
+      const jump = () => jumpWithBackChip(() => handle.display(href), href);
+      if (!handle.peekLink) {
+        jump();
+        return;
+      }
+      void handle
+        .peekLink(href, { noteref: link.noteref })
+        .catch(() => null)
+        .then((text) => {
+          if (ticket !== request) return;
+          if (text) setLinkPeek({ text, rect: link.rect, href });
+          else jump();
+        });
     });
     return () => {
+      request += 1;
       handle.onInternalLink(() => undefined);
     };
   }, [handle, isActive, jumpWithBackChip]);
@@ -1453,6 +1484,19 @@ export function EpubViewer({
             boundsRef={readerAreaRef}
             onExcerpt={onExcerptSelection}
             canExcerpt={canExcerpt}
+            onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
+          />
+          <LinkPeek
+            peek={linkPeek}
+            boundsRef={readerAreaRef}
+            onGo={() => {
+              if (handle && linkPeek) {
+                const { href } = linkPeek;
+                jumpWithBackChip(() => handle.display(href), href);
+              }
+              hostRef.current?.focus({ preventScroll: true });
+            }}
+            onDismiss={dismissLinkPeek}
             onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
           />
           <ReaderPopoverLayer hidden={chromeHidden}>

@@ -7,6 +7,7 @@ import { epubProgressFlow } from './epubProgress.mjs';
 import { goToFlow } from './goTo.mjs';
 import { launchPage, serveDist, warmUp } from './harness.mjs';
 import { keyboardFlow } from './keyboard.mjs';
+import { linkPeekFlow } from './linkPeek.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
 import { txtFlow } from './txt.mjs';
 import { txtChaptersFlow } from './txtChapters.mjs';
@@ -25,6 +26,7 @@ const FLOWS = {
   keyboard: keyboardFlow,
   'txt-chapters': txtChaptersFlow,
   'go-to': goToFlow,
+  'link-peek': linkPeekFlow,
 };
 
 // Screenshots of failed flows; CI uploads the folder.
