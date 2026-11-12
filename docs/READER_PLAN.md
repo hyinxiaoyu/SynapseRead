@@ -1,6 +1,6 @@
 # Reader experience implementation plan
 
-Planning baseline: 2026-11-06. Status on `main`: R01–R12 complete (see [GitHub tracking](#github-tracking)).
+Planning baseline: 2026-11-06. Status on `main`: R01–R12 and follow-up Reader UX passes (`#20`–`#33`, `#35`, `#37`–`#40`, `#43`–`#52`, `#64`, `#75`) complete (see [Reader UX acceptance notes](#reader-ux-acceptance-notes) and [GitHub tracking](#github-tracking)).
 
 ## Outcome and scope
 
@@ -194,6 +194,75 @@ Accessibility and VoiceOver tree verification on `macOS 15.6.1 (24G90, Apple M4)
       read their text.
 - [x] Footer and notices: status messages (`role="status"`) and the chapter scrubber
       (`role="slider"`, `aria-valuetext="Chapter 1 of 2, 8%"`) are announced.
+
+### Post-R12 refinement and native WKWebView pass (`#35`, `#37`–`#40`, `#43`–`#52`, `#64`, `#75`)
+
+Second-wave reader polish and parity issues completed through SQLite migration `0010`:
+
+- **Typography, themes, and motion (`#35`, `#37`–`#40`, `#46`, `#75`)**: persistent
+  `Standard`/`Wide`/`Full` page-width modes decoupled from font size and margins; `flip`
+  (`300 ms`) and `stack` (`240 ms`) page-turn modes with click-through spine shadow,
+  anchored chrome entrance animations, `transition-none` popover coordinate pinning, and
+  `prefers-reduced-motion: reduce` static fallback; PDF `Aa` popover with optional
+  Dark/Sepia CSS `<canvas>` tinting (`tintPdfPages`, leaving underlying canvas pixels and
+  area-capture PNGs untinted) and non-black highlight blending; automatic EPUB Dark/Sepia
+  override for author text colors below `4.5:1` contrast; and centered document title in
+  the unified toolbar.
+- **Focus mode, tabs, and keyboard flow (`#43`, `#45`, `#50`, `#64`)**: CSS `visibility:
+hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` paginated EPUB
+  top inset in focus mode, non-waking `go.*` page turns, dismissible auto-fading notices,
+  optional full-screen linkage (`focusModeFullScreen`), and 5-layer cross-iframe `Escape`
+  dismissal (`NoteEditor` → `SelectionPopover` → `LinkPeek` → `Find` → `Focus Mode`);
+  immediate page focus (`preventScroll: true`) on document open, keyboard/pointer tab
+  switches (`onMouseDown` `preventDefault()` on `[role="tab"]`), and TOC `Enter`/`Escape`;
+  `1`–`5` highlight color keys; and `⇧⌘]`/`⇧⌘[`/`⇧⌘T`/`⌃⌘N`/`⇧⌘C`/`⌘1`–`⌘3` commands in
+  `fixtures/contract/commands.json`.
+- **Search, annotations, and footnote peek (`#44`, `#47`, `#48`, `#49`)**: `200 ms`
+  debounced Find anchored from the current viewport without auto-toggling the sidebar,
+  single-trip jump history with a `Back to…` chip, whitespace/soft-hyphen/diacritic/quote
+  folding with `Whole Word` and `Match Diacritics` toggles, all-match tinting, and
+  scrubber search marks; zero-drift inline note dots (`[data-note-end]::after` in TXT, SVG
+  markers in EPUB, scaled badges in PDF), click-to-read note disclosure, multiline
+  `<textarea>` editing (`Return` vs `⌘↩`), and chapter-titled CFI-sorted filterable notes;
+  and internal link `Back to…` chips plus sandboxed plain-text `LinkPeek` footnote cards
+  across EPUB and PDF (`ADR 0005`).
+- **PDF layout/zoom and long-document maps (`#51`, `#52`)**: migration
+  `0009_pdf_document_layout.sql` persisting per-PDF `displayMode`, `zoomMode`, `scale`,
+  `rotation`, and `coverPageAlone`, printed PDF page labels in `Go To`, and GPU-previewed
+  pointer-anchored WebKit `gesture*` and `ctrl+wheel` zoom across `0°`/`90°`/`180°`/`270°`
+  rotations; migration `0010_document_progress.sql` storing `documents.last_progress` for
+  Recent percentages, background character-weighted EPUB progress (`50 ms` timer fallback
+  when `requestIdleCallback` is absent, cached in `localStorage`) with optional "minutes
+  left in chapter", streaming TXT chapter/heading detection (`ADR 0002` byte offsets
+  preserved), and unified `Go To` (`⌥⌘G`) across PDF, EPUB, and TXT.
+
+Gate and native `macOS 15.6.1 (24G90, Apple M4, arm64)` verification (`WebKit.framework`
+`20621.3.11.11.3`, Safari `18.6`, `WKWebView` `AppleWebKit/605.1.15`, `Node v24.14.1`,
+`pnpm 12.16.1`, `rustc 1.99.1`):
+
+- **Repository CI gates**: `pnpm check` (`45` Vitest files, `731` unit tests, `0` ESLint
+  warnings, strict `tsc`), `pnpm e2e` (`11/11` Chromium flows: `txt`, `pdf`, `pdf-layout`,
+  `pdf-zoom`, `epub`, `epub-progress`, `keyboard`, `txt-chapters`, `go-to`, `link-peek`,
+  `toolbar-title`; `0` CSP violations), `cargo fmt --all --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`
+  (`118` Rust tests: `89` in `synapse-core`, `29` in `synapseread_desktop_lib`).
+- **Production macOS bundle (`pnpm build`)**: `SynapseRead.app` (`8.84 MiB` `arm64` Mach-O
+  linking `WebKit.framework` and `AppKit.framework`) and
+  `SynapseRead_0.1.0_aarch64.dmg` (`5.58 MiB`, `hdiutil verify` valid); isolated-`HOME`
+  smoke launch initialized all `11` SQLite schema tables through migration `0010` under the
+  strict ADR 0001/0004/0005 CSP (`assetProtocol.scope: []`, no `script-src` relaxation).
+- **Native `WKWebView` audit (`DPR=2` and `DPR=1`, `0` CSP violations, `0` page errors)**:
+  all `13/13` `#40` checks passed (`flip`/`stack` WAAPI turns across EPUB `paged`/`spread`,
+  PDF `single`/`two-page`, and TXT with `postTransform: "none"`, `0` iframe blank frames via
+  `WKWebView.takeSnapshot`, `0 px` immediate post-turn selection offset across 10 mode
+  combinations, click-through spine hinge, `PageTurnChevrons` `translate`/`scale`
+  composition, `grid-template-rows` disclosures, `prefers-reduced-motion: reduce`, `277 px`
+  closed/open `SelectionPopover` width parity, and `0 px` scroll/note coordinate lag),
+  alongside `#43`–`#52` WebKit checks (real `WKWebView.magnify` `gesture*` zoom `< 0.0007`
+  anchor error, `0.016 px` `270°` rotated area capture alignment, untinted `[26,102,204]`
+  PDF capture PNG under Dark canvas filter, `0` byte-offset drift on `[data-note-end]::after`,
+  plain-text `LinkPeek` against hostile `<img onerror>`, pointer tab-click page focus, and
+  CJK IME `isComposing` guard in `GoToField`).
 
 ## GitHub tracking
 

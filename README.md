@@ -17,34 +17,48 @@ from.
 
 - Resizable workspace: document tabs, mind map canvas, and card inspector
 - Excerpt workflow that saves an annotation, card, and node in one transaction
-- Independent highlights and notes with session-scoped deletion undo, plus independent
-  bookmarks (`Cmd/Ctrl+D`) without creating MindMap cards
+- Independent highlights and notes with inline note indicators, click-to-read note
+  popovers, multiline editing, chapter-ordered/filterable annotations, quick `1`–`5`
+  color keys, and session-scoped deletion undo, plus independent bookmarks (`Cmd/Ctrl+D`)
+  without creating MindMap cards
 - In-document search (`Cmd/Ctrl+F`) across unrendered PDF pages, EPUB chapters, and
-  TXT rows, with return-to-previous-location history
-- An "Aa" appearance popover for EPUB and TXT: `auto`/`light`/`sepia`/`dark` themes that
-  tint the whole reader window (`auto` follows the system), named reading faces, font
-  size (`Cmd/Ctrl +`/`-`/`0`), line spacing, margins, and justification. Page width
-  offers Standard (75 characters per line at 100%), Wide (110), and Full width
-  (available pane width), saved across restarts independently of font size and margins.
-  EPUB supports `spread`/`paged`/`scroll` modes, with two pages only when each fits at
-  least 45 characters
-- Jump from any card, bookmark, annotation, or search result back to its source, with
-  a pulse highlight
+  TXT rows: debounced from the current reading position, folds whitespace, soft hyphens,
+  diacritics, and quotes (`Match Case`, `Whole Word`, `Match Diacritics`), tints every
+  match on screen, marks matches on the progress scrubber, and returns to the starting
+  spot in one step (`Back to…`)
+- An "Aa" appearance popover across EPUB, TXT, and PDF: `auto`/`light`/`sepia`/`dark`
+  themes that tint the whole reader window (`auto` follows the system), optional Dark and
+  Sepia page tinting for PDFs (keeping underlying bitmaps and area captures untinted),
+  automatic EPUB low-contrast ink adjustment, named reading faces, font size
+  (`Cmd/Ctrl +`/`-`/`0`), line spacing, margins, justification, persistent page widths
+  (`Standard` 75 ch, `Wide` 110 ch, `Full`), `none`/`slide`/`fade`/`flip`/`stack`
+  page-turn animations, and distraction-free focus mode with optional full-screen linkage
+- Inline `LinkPeek` footnote preview cards for EPUB `noteref`s and PDF note markers
+  (rendered strictly as plain text), plus `Back to…` return chips on internal links and
+  jumps from any card, bookmark, annotation, or search result
 - Draggable nodes, parent-child nesting, and cross-link edges, with layout saved
 - Format-agnostic anchors covering PDF (including cross-page excerpts), EPUB, TXT, and
   (reserved) Markdown
 - TXT reader: virtualized rendering, highlights that stay on the right bytes even in
-  damaged files, cancellable backend streaming when tabs close, and reopening where
-  you left off
-- PDF reader: pages rendered off the main thread, `fit-width`/`fit-page`/`actual-size`
-  and explicit zoom (`25%`–`400%`), `continuous`/`single`/`two-page` display modes,
-  `90°` view rotation, lazy page thumbnails, internal links, embedded annotation
-  rendering/disclosure, text selection, cross-page excerpts, and rectangle captures
-- EPUB reader: nested table of contents, chapter-page vs whole-book progress, chapters
-  addressed by CFI, and book scripts kept from running
-- Recent documents (`Continue reading`), workspace session restoration across restarts,
-  per-tab error isolation, and source change detection (`missing`/`moved`/`changed`)
-  with explicit file relinking (`Cmd/Ctrl+O`, `Cmd/Ctrl+W`)
+  damaged files, streaming chapter/heading detection (`Chapter`, `Part`, CJK `第…章`)
+  driving Contents and scrubber ticks, `Go To` (`Opt+Cmd+G` / `Ctrl+Alt+G`) by line or
+  percentage, cancellable backend streaming when tabs close, and reopening where you left
+  off
+- PDF reader: pages rendered off the main thread, per-document saved layout
+  (`continuous`/`single`/`two-page`, `Cover page alone`, `fit-width`/`fit-page`/
+  `actual-size` and `25%`–`400%` zoom, `90°` view rotation), smooth pointer-anchored
+  trackpad pinch and `Ctrl`+wheel zoom, printed page labels in `Go To`, lazy page
+  thumbnails, internal links, embedded annotation rendering/disclosure, text selection,
+  cross-page excerpts, and rectangle captures
+- EPUB reader: nested table of contents, `spread`/`paged`/`scroll` modes (two pages only
+  when each fits at least 45 characters), background character-weighted whole-book
+  progress and scrubber ticks, optional "minutes left in chapter" readout, percentage
+  `Go To`, chapters addressed by CFI, and book scripts kept from running
+- Recent documents (`Continue reading`) with saved reading percentages, workspace session
+  restoration across restarts, reopen closed tab (`Shift+Cmd/Ctrl+T`), immediate page
+  keyboard focus on tab open/click/switch, per-tab error isolation, and source change
+  detection (`missing`/`moved`/`changed`) with explicit file relinking (`Cmd/Ctrl+O`,
+  `Cmd/Ctrl+W`)
 - Streaming UTF-8 text pipeline with a pluggable decoder interface
 - Local SQLite storage, with no accounts and no network access
 
