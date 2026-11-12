@@ -67,7 +67,10 @@ describe('LinkPeek', () => {
 
   it('is a labelled dialog with the keyboard on Go to Note', () => {
     const { onGo, onDismiss } = setup({ text: 'A note.', rect: null });
-    expect(screen.getByRole('dialog', { name: 'Note' })).toHaveAccessibleDescription('A note.');
+    const dialog = screen.getByRole('dialog', { name: 'Note' });
+    expect(dialog).toHaveAccessibleDescription('A note.');
+    expect(dialog).toHaveClass('animate-in', 'animation-duration-150');
+    expect(dialog).not.toHaveClass('duration-150');
     const go = screen.getByRole('button', { name: 'Go to Note' });
     expect(go).toHaveFocus();
     fireEvent.click(go);

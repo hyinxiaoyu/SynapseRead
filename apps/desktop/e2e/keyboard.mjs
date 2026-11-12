@@ -68,7 +68,7 @@ export async function keyboardFlow(page) {
   // Back to the PDF for Preview's three layout keys (⌘1, ⌘2, ⌘3) via a real mouse click
   // on the tab: clicking a tab must hand the keyboard to the page, not leave it on `[role="tab"]`.
   const pdfTabPoint = await page.evaluate(`(() => {
-    const tab = [...document.querySelectorAll('[aria-label="Open documents"] [role="tab"]')][0];
+    const tab = document.querySelector('[aria-label="Open documents"] [role="tab"][aria-selected="false"]');
     const r = tab.getBoundingClientRect();
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   })()`);
@@ -76,6 +76,25 @@ export async function keyboardFlow(page) {
   await page.waitFor(
     pageHasKeyboard(visiblePdfScroll),
     'clicking the PDF tab to give the keyboard to the PDF page',
+  );
+
+  // Clicking the already-active tab also returns keyboard focus to the page (#64).
+  await page.evaluate(
+    `document.querySelector('[aria-label="Open documents"] [role="tab"][aria-selected="true"]')?.focus()`,
+  );
+  await page.waitFor(
+    `document.activeElement?.getAttribute('role') === 'tab'`,
+    'focus to start on the active tab before clicking it',
+  );
+  const activeTabPoint = await page.evaluate(`(() => {
+    const tab = document.querySelector('[aria-label="Open documents"] [role="tab"][aria-selected="true"]');
+    const r = tab.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  })()`);
+  await page.click(activeTabPoint);
+  await page.waitFor(
+    pageHasKeyboard(visiblePdfScroll),
+    'clicking the already-active tab to return the keyboard to the PDF page',
   );
   for (const [key, code, mode] of [
     ['1', 'Digit1', 'single'],

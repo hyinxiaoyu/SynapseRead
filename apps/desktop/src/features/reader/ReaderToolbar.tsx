@@ -203,7 +203,7 @@ export function ToolbarOverflowMenu({ items }: { items: readonly OverflowItem[] 
           role="menu"
           aria-label="More toolbar items"
           data-reader-popover=""
-          className="absolute top-full right-0 z-50 mt-1 min-w-44 origin-top-right animate-in rounded-md border bg-background p-1 text-xs text-foreground shadow-lg duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
+          className="absolute top-full right-0 z-50 mt-1 min-w-44 origin-top-right animate-in rounded-md border bg-background p-1 text-xs text-foreground shadow-lg animation-duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
         >
           {items.map((item) => (
             <button

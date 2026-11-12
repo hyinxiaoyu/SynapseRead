@@ -60,7 +60,7 @@ export function MarkupBar({
       role="toolbar"
       aria-label="Markup"
       data-testid="markup-bar"
-      className="flex h-9 shrink-0 animate-in items-center gap-2 border-b bg-muted/40 px-2 text-xs duration-150 fade-in-0 slide-in-from-top-1 motion-reduce:animate-none"
+      className="flex h-9 shrink-0 animate-in items-center gap-2 border-b bg-muted/40 px-2 text-xs animation-duration-150 fade-in-0 slide-in-from-top-1 motion-reduce:animate-none"
     >
       <div role="group" aria-label="Highlight color" className="flex items-center">
         {ANNOTATION_COLORS.map(({ label, value }) => {
