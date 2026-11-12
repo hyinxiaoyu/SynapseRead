@@ -22,6 +22,7 @@ import {
 import type { PdfOutlineItem, PdfPageAnnotations, PdfPageText } from './pdfEngine';
 import { getBoundedLru, MAX_CACHED_TEXT_PAGES, setBoundedLru } from './pdfGeometry';
 import { PdfViewer } from './PdfViewer';
+import { WHEEL_ZOOM_IDLE_MS } from './usePinchZoom';
 
 // jsdom cannot run pdf.js or draw a canvas: this replaces only the engine seam, and
 // `pnpm e2e` drives the real one. Everything above that seam here is real.
@@ -1052,6 +1053,228 @@ describe('PdfViewer', () => {
     fireEvent.keyDown(pageInput, { key: '+', metaKey: true });
     expect(viewer).toHaveAttribute('data-zoom-mode', 'fit-width');
     expect(zoomLevel).toHaveTextContent('100%');
+  });
+
+  describe('pinch and ctrl-wheel zoom', () => {
+    /** WebKit's GestureEvent, which jsdom lacks: a plain event with its fields. */
+    const gesture = (type: string, scale: number, clientX = 318, clientY = 300) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { scale, clientX, clientY });
+      return event;
+    };
+    const content = (element: HTMLElement) => element.firstElementChild as HTMLElement;
+
+    it('previews ctrl-wheel with a transform, then re-lays out once with the pointer anchored', async () => {
+      const { backend, store, documentId } = await setup();
+      await store.getState().loadPdfLayout(documentId);
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      const saveSpy = vi.spyOn(backend, 'savePdfLayout');
+      const element = await scroller();
+      // Halfway down page 1, which starts at 812; the pointer is on its middle.
+      await scrollTo(PAGE_PX + GAP_PX + 100);
+      const zoomLevel = screen.getByTestId('pdf-zoom-level');
+
+      // A plain wheel scrolls as ever.
+      expect(fireEvent.wheel(element, { deltaY: 40, clientX: 318, clientY: 300 })).toBe(true);
+      expect(content(element).style.transform).toBe('');
+
+      // One notch up, which a webview would otherwise take as zooming the whole app.
+      expect(
+        fireEvent.wheel(element, { deltaY: -100, ctrlKey: true, clientX: 318, clientY: 300 }),
+      ).toBe(false);
+      expect(content(element).style.transform).toMatch(/^scale\(1\.22\d*\)$/);
+      expect(content(element).style.transformOrigin).toBe('318px 1212px');
+      // Nothing re-renders during the gesture.
+      expect(zoomLevel).toHaveTextContent('100%');
+      expect(saveSpy).not.toHaveBeenCalled();
+
+      await waitFor(() => expect(zoomLevel).toHaveTextContent('122%'));
+      expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-zoom-mode', 'custom');
+      expect(content(element).style.transform).toBe('');
+      // Page 1 is 976 px tall now and starts at 988, so its middle is at 1476; the
+      // pointer is 300 px down. Across, 746.64 px from 12 puts the middle at 385.32.
+      expect(element.scrollTop).toBeCloseTo(1476 - 300, 0);
+      expect(element.scrollLeft).toBeCloseTo(385.32 - 318, 0);
+      await waitFor(() => expect(saveSpy).toHaveBeenCalledTimes(1));
+      expect(saveSpy).toHaveBeenCalledWith(
+        documentId,
+        expect.objectContaining({ zoomMode: 'custom', scale: 1.22 }),
+      );
+    });
+
+    it('follows WebKit gesture events, stops at the zoom limit, and ignores the ctrl-wheel WebKit also sends', async () => {
+      const { backend, store, documentId } = await setup();
+      await store.getState().loadPdfLayout(documentId);
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      const saveSpy = vi.spyOn(backend, 'savePdfLayout');
+      const element = await scroller();
+      const zoomLevel = screen.getByTestId('pdf-zoom-level');
+
+      const start = gesture('gesturestart', 1);
+      act(() => void element.dispatchEvent(start));
+      expect(start.defaultPrevented).toBe(true);
+      act(() => void element.dispatchEvent(gesture('gesturechange', 2)));
+      expect(content(element).style.transform).toBe('scale(2)');
+      fireEvent.wheel(element, { deltaY: -100, ctrlKey: true, clientX: 318, clientY: 300 });
+      expect(content(element).style.transform).toBe('scale(2)');
+      act(() => void element.dispatchEvent(gesture('gestureend', 2)));
+      expect(zoomLevel).toHaveTextContent('200%');
+      expect(content(element).style.transform).toBe('');
+
+      // Past 400% the preview stops growing, and the scale stops there.
+      act(() => void element.dispatchEvent(gesture('gesturestart', 1)));
+      act(() => void element.dispatchEvent(gesture('gesturechange', 5)));
+      expect(content(element).style.transform).toBe('scale(2)');
+      act(() => void element.dispatchEvent(gesture('gestureend', 5)));
+      expect(zoomLevel).toHaveTextContent('400%');
+
+      // At the limit a pinch out changes nothing and leaves no transform behind.
+      act(() => void element.dispatchEvent(gesture('gesturestart', 1)));
+      act(() => void element.dispatchEvent(gesture('gesturechange', 1.5)));
+      act(() => void element.dispatchEvent(gesture('gestureend', 1.5)));
+      expect(zoomLevel).toHaveTextContent('400%');
+      expect(content(element).style.transform).toBe('');
+      await waitFor(() => expect(saveSpy).toHaveBeenCalledTimes(2));
+    });
+
+    it('drops a ctrl-wheel pinch when the toolbar zooms before it ends', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      const element = await scroller();
+      const zoomLevel = screen.getByTestId('pdf-zoom-level');
+      fireEvent.wheel(element, { deltaY: -100, ctrlKey: true, clientX: 318, clientY: 300 });
+      expect(content(element).style.transform).toMatch(/^scale\(1\.22\d*\)$/);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+      // The preview belonged to the old layout, so it goes as the new one appears.
+      expect(zoomLevel).toHaveTextContent('125%');
+      expect(content(element).style.transform).toBe('');
+      // Past the idle window nothing commits: 125% × 1.22 would be 153%.
+      await new Promise((resolve) => window.setTimeout(resolve, WHEEL_ZOOM_IDLE_MS + 100));
+      expect(zoomLevel).toHaveTextContent('125%');
+      expect(content(element).style.transform).toBe('');
+    });
+
+    it('drops a WebKit pinch when the pages rotate under it, and ignores the rest of it', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      const element = await scroller();
+      const zoomLevel = screen.getByTestId('pdf-zoom-level');
+      act(() => void element.dispatchEvent(gesture('gesturestart', 1)));
+      act(() => void element.dispatchEvent(gesture('gesturechange', 1.5)));
+      expect(content(element).style.transform).toBe('scale(1.5)');
+
+      fireEvent.click(screen.getByTestId('pdf-rotate-button'));
+      expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-rotation', '90');
+      // Fit width again, for a page now 800 px wide.
+      expect(zoomLevel).toHaveTextContent('77%');
+      expect(content(element).style.transform).toBe('');
+      // The fingers are still down: neither the gesture nor WebKit's ctrl-wheel restarts it.
+      act(() => void element.dispatchEvent(gesture('gesturechange', 2)));
+      fireEvent.wheel(element, { deltaY: -100, ctrlKey: true, clientX: 318, clientY: 300 });
+      expect(content(element).style.transform).toBe('');
+      act(() => void element.dispatchEvent(gesture('gestureend', 2)));
+      expect(zoomLevel).toHaveTextContent('77%');
+
+      // Once it has ended, the next pinch works as ever: 76.5% × 1.22.
+      fireEvent.wheel(element, { deltaY: -100, ctrlKey: true, clientX: 318, clientY: 300 });
+      expect(content(element).style.transform).toMatch(/^scale\(1\.22\d*\)$/);
+      await waitFor(() => expect(zoomLevel).toHaveTextContent('93%'));
+    });
+
+    it('drops a pinch when the pane resizes, but not when its preview brings in a scrollbar', async () => {
+      const notify: Array<() => void> = [];
+      vi.stubGlobal(
+        'ResizeObserver',
+        class implements ResizeObserver {
+          constructor(callback: ResizeObserverCallback) {
+            notify.push(() => callback([], this));
+          }
+          observe() {}
+          unobserve() {}
+          disconnect() {}
+        },
+      );
+      try {
+        let paneWidth = PANE_PX;
+        vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(() => paneWidth);
+        vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(VIEWPORT_PX);
+        const { store, documentId } = await setup();
+        render(<Harness store={store} documentId={documentId} />);
+        await pageElement(0);
+        const element = await scroller();
+        const zoomLevel = screen.getByTestId('pdf-zoom-level');
+        const observe = () => act(() => notify.forEach((callback) => callback()));
+
+        // Scaled up, the preview overflows the pane and a classic scrollbar takes
+        // some of its height: the client size changes, the pane does not.
+        fireEvent.wheel(element, { deltaY: -100, ctrlKey: true, clientX: 318, clientY: 300 });
+        vi.spyOn(Element.prototype, 'clientHeight', 'get').mockReturnValue(VIEWPORT_PX - 15);
+        observe();
+        expect(content(element).style.transform).toMatch(/^scale\(1\.22\d*\)$/);
+        await waitFor(() => expect(zoomLevel).toHaveTextContent('122%'));
+
+        // The pane itself is resized mid-pinch: that pinch is dropped.
+        fireEvent.wheel(element, { deltaY: -100, ctrlKey: true, clientX: 318, clientY: 300 });
+        expect(content(element).style.transform).toMatch(/^scale\(/);
+        paneWidth = PANE_PX + 200;
+        observe();
+        expect(content(element).style.transform).toBe('');
+        await new Promise((resolve) => window.setTimeout(resolve, WHEEL_ZOOM_IDLE_MS + 100));
+        expect(zoomLevel).toHaveTextContent('122%');
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('records and reports where the browser actually scrolled on release', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      const element = await scroller();
+      // An eighth of the way into page 1.
+      await scrollTo(PAGE_PX + GAP_PX + 100);
+      const cursor = () => store.getState().documents[0]?.lastCursorAnchor as PdfAnchor | null;
+      await waitFor(() => expect(cursor()?.rects[0]?.y).toBeCloseTo(0.125, 3), { timeout: 2000 });
+
+      // Near the end the browser stops short of the top asked for, and a scroll event
+      // may come a frame later or, when the top does not move, not at all.
+      const maxScrollTop = 500;
+      Element.prototype.scrollTo = function (this: Element, options) {
+        this.scrollTop = Math.min(maxScrollTop, (options as ScrollToOptions).top ?? 0);
+      };
+      // One notch out, about the middle of page 1, to 82%.
+      fireEvent.wheel(element, { deltaY: 100, ctrlKey: true, clientX: 318, clientY: 300 });
+      await waitFor(() => expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent('82%'));
+      // Asked for 696 (page 1 starts at 668 and is 656 tall, its middle 300 px down),
+      // but stopped at 500: 500 / 656 of the way down page 0.
+      expect(element.scrollTop).toBe(maxScrollTop);
+      await waitFor(
+        () => {
+          expect(cursor()?.pageIndex).toBe(0);
+          expect(cursor()?.rects[0]?.y).toBeCloseTo(500 / 656, 3);
+        },
+        { timeout: 2000 },
+      );
+    });
+
+    it('drops a pinch in progress when the tab is put away', async () => {
+      const { store, documentId } = await setup();
+      const view = render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      const element = await scroller();
+      act(() => void element.dispatchEvent(gesture('gesturestart', 1)));
+      act(() => void element.dispatchEvent(gesture('gesturechange', 1.5)));
+      expect(content(element).style.transform).toBe('scale(1.5)');
+      view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+      expect(content(element).style.transform).toBe('');
+      act(() => void element.dispatchEvent(gesture('gestureend', 1.5)));
+      expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent('100%');
+    });
   });
 
   it('searches across rendered and unrendered PDF pages, highlights matches, and supports return', async () => {

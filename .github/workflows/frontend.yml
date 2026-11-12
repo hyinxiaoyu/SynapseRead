@@ -67,5 +67,19 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The macOS image's own Chrome lives in /Applications, where GoogleUpdater runs
+      # through the job and can replace it in place mid-suite (run 43121437302 went from
+      # 156 to 157 between two flows, and the flows open across the swap timed out).
+      # Chrome for Testing goes to the tool cache, which nothing updates. Ubuntu runs the
+      # distribution's Chromium, which nothing updates during a job either.
+      - name: Pin Chrome for Testing
+        if: runner.os == 'macOS'
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: 157.0.8103.78
+
       - name: End-to-end
         run: pnpm e2e
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
