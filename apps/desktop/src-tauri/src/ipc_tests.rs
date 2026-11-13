@@ -16,6 +16,9 @@ use crate::access::{grant_all, register_and_grant, register_dropped_paths, relin
 use crate::state::AppState;
 
 /// Where bundled app content is served from on the mock runtime.
+#[cfg(windows)]
+const LOCAL_ORIGIN: &str = "http://tauri.localhost";
+#[cfg(not(windows))]
 const LOCAL_ORIGIN: &str = "tauri://localhost";
 
 struct Harness {

@@ -23,18 +23,24 @@ jobs:
 
   desktop:
     name: Clippy and test (${{ matrix.target }})
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # V1 ships for both architectures. An Apple Silicon runner can execute
-        # x86_64 test binaries through Rosetta only when it is installed, so the
-        # Intel target is compile-checked and tests run natively on aarch64.
+        # V1 ships for both macOS architectures and Windows x64. An Apple Silicon
+        # runner can execute x86_64 test binaries through Rosetta only when it is
+        # installed, so the Intel target is compile-checked and tests run natively
+        # on aarch64 and Windows.
         include:
-          - target: aarch64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
             run_tests: true
-          - target: x86_64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
             run_tests: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            run_tests: true
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install
@@ -46,6 +52,7 @@ jobs:
 
       # tauri::generate_context! requires frontendDist to exist at compile time.
       - name: Create placeholder frontend dist
+        shell: bash
         run: mkdir -p apps/desktop/dist
 
       - name: Clippy

@@ -103,12 +103,23 @@ in-memory backend, so **nothing is saved**:
 pnpm dev:web    # http://localhost:1420
 ```
 
-To build a macOS `.app` and `.dmg`:
+To build release packages:
 
-```sh
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-pnpm build --target universal-apple-darwin
-```
+- **macOS** (`.app` and `.dmg`):
+
+  ```sh
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin
+  pnpm build --target universal-apple-darwin
+  ```
+
+- **Windows** (`.exe` NSIS installer and `.msi`, on Windows with Visual Studio Build Tools):
+
+  ```sh
+  rustup target add x86_64-pc-windows-msvc
+  pnpm build --target x86_64-pc-windows-msvc
+  ```
+
+Pushing a `v*` tag or running [the release workflow](.github/workflows/release.yml) builds both macOS Universal and Windows x64 packages in GitHub Actions.
 
 App data is stored in the OS app-data directory, for example
 `~/Library/Application Support/app.synapseread.desktop/synapseread.sqlite3` on

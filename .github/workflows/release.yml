@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: Create or update a draft GitHub Release
+        type: boolean
+        default: false
+      tag_name:
+        description: Tag name when creating a draft release (defaults to v<tauri.conf version>)
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare draft release
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.create_release == true
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.release_id }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create or reuse draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+        run: |
+          APP_VERSION=$(jq -r '.version' apps/desktop/src-tauri/tauri.conf.json)
+          if [ "$EVENT_NAME" = "push" ]; then
+            TAG_NAME="$REF_NAME"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG_NAME="$INPUT_TAG"
+          else
+            TAG_NAME="v${APP_VERSION}"
+          fi
+
+          if [ "${TAG_NAME#v}" != "$APP_VERSION" ]; then
+            echo "Tag ${TAG_NAME} does not match tauri.conf.json version ${APP_VERSION}" >&2
+            exit 1
+          fi
+
+          # Create the draft release once before the matrix starts so parallel
+          # runners never race to create duplicate draft releases.
+          RELEASE_ID=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag) | .id' | head -n 1)
+          if [ -z "$RELEASE_ID" ]; then
+            RELEASE_ID=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+              -f tag_name="$TAG_NAME" \
+              -f target_commitish="$GITHUB_SHA" \
+              -f name="SynapseRead ${TAG_NAME}" \
+              -F draft=true \
+              -F prerelease=false \
+              -F generate_release_notes=true \
+              --jq '.id')
+          fi
+
+          echo "release_id=${RELEASE_ID}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.label }})
+    needs: prepare
+    if: always() && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped')
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS Universal
+            platform: macos-latest
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin x86_64-apple-darwin
+            args: --target universal-apple-darwin
+          - label: Windows x64
+            platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and package Tauri app
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          releaseDraft: true
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          uploadWorkflowArtifacts: true
+          retryAttempts: 2
+          args: ${{ matrix.args }}
