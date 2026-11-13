@@ -36,6 +36,7 @@ import { isNoteRef, noteTextAt } from './linkPeekText';
 import { sanitizeChapter } from './sanitizeChapter';
 import {
   countedOffsets,
+  forEachReadableText,
   rawOffsetOfCounted,
   type SectionTextCount,
   TextCounter,
@@ -390,27 +391,6 @@ function findTocLabel(items: readonly EpubTocItem[], href: string): string | nul
     if (nested) return nested;
   }
   return null;
-}
-
-/** Visits each text node a reader sees, in document order. */
-function forEachReadableText(chapterDoc: Document, visit: (node: Text) => void): void {
-  const root = chapterDoc.body ?? chapterDoc.documentElement;
-  if (!root) return;
-  const walker = chapterDoc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  for (let current = walker.nextNode(); current; current = walker.nextNode()) {
-    const textNode = current as Text;
-    const parentTag = textNode.parentElement?.tagName.toLowerCase();
-    if (
-      parentTag === 'style' ||
-      parentTag === 'script' ||
-      parentTag === 'noscript' ||
-      parentTag === 'title' ||
-      textNode.parentElement?.closest('head, style, script, noscript')
-    ) {
-      continue;
-    }
-    if (textNode.data) visit(textNode);
-  }
 }
 
 /** A chapter's readable text, with the text node behind each stretch of it. */

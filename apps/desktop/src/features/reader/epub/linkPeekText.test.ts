@@ -105,6 +105,20 @@ describe('noteTextAt', () => {
     expect(noteTextAt(doc, 'notes', { noteref: false })).toBe('An endnote.');
   });
 
+  it('jumps when an inline target sits directly inside a heading or nav, without climbing into section roots', () => {
+    const doc = chapter(`<section id="sec"><a id="top"/>
+      <h2><span id="sec2">Part Two</span></h2>
+      <h2><a id="sec21">2.1</a> Introduction</h2>
+      <h3><em><a name="sub">Sub</a></em></h3>
+      <nav><a id="toc">Contents</a></nav>
+      <p>Body text.</p></section>`);
+    expect(noteTextAt(doc, 'sec2', { noteref: false })).toBeNull();
+    expect(noteTextAt(doc, 'sec21', { noteref: false })).toBeNull();
+    expect(noteTextAt(doc, 'sub', { noteref: false })).toBeNull();
+    expect(noteTextAt(doc, 'toc', { noteref: false })).toBeNull();
+    expect(noteTextAt(doc, 'top', { noteref: true })).toBeNull();
+  });
+
   it('reads an empty marker as the block it sits in, and finds old name anchors', () => {
     const doc = chapter(`<p><a id="fn3"/>3. A note marked by an empty anchor.</p>
       <p><a name="fn4"></a>4. A note marked by name.</p>

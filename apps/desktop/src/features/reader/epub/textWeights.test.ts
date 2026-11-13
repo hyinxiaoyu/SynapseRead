@@ -5,6 +5,7 @@ import {
   buildTextWeights,
   countedOffsets,
   countSectionText,
+  forEachReadableText,
   locateBookFraction,
   measureBook,
   minutesLeftInSection,
@@ -12,6 +13,7 @@ import {
   rawOffsetOfCounted,
   readCachedWeights,
   type SectionTextCount,
+  TEXT_WEIGHT_RULES_VERSION,
   TextCounter,
   writeCachedWeights,
 } from './textWeights';
@@ -93,7 +95,9 @@ describe('cached weights', () => {
     expect(readCachedWeights('hash-a', 2)).toBeNull();
     window.localStorage.setItem(
       'synapseread.epubTextWeights.v1',
-      JSON.stringify({ 'hash-a': { at: 1, sections: [[-1, 0]] } }),
+      JSON.stringify({
+        'hash-a': { at: 1, rules: TEXT_WEIGHT_RULES_VERSION, sections: [[-1, 0]] },
+      }),
     );
     expect(readCachedWeights('hash-a', 1)).toBeNull();
 
@@ -103,6 +107,105 @@ describe('cached weights', () => {
     expect(readCachedWeights('book-0', 1)).toBeNull();
     expect(readCachedWeights('book-5', 1)).not.toBeNull();
     expect(readCachedWeights('book-44', 1)).not.toBeNull();
+  });
+
+  it('treats entries without a matching counting-rules version as misses (#68)', () => {
+    window.localStorage.clear();
+    window.localStorage.setItem(
+      'synapseread.epubTextWeights.v1',
+      JSON.stringify({
+        legacy: { at: 1, sections: [[10, 0]] },
+        future: { at: 1, rules: TEXT_WEIGHT_RULES_VERSION + 1, sections: [[10, 0]] },
+      }),
+    );
+    expect(readCachedWeights('legacy', 1)).toBeNull();
+    expect(readCachedWeights('future', 1)).toBeNull();
+  });
+
+  it('refreshes entry timestamps on hit for true LRU eviction (#67)', () => {
+    window.localStorage.clear();
+    const weights = buildTextWeights([text(1)]);
+    for (let book = 0; book < 40; book += 1) writeCachedWeights(`book-${book}`, weights, book);
+
+    // Reading book-0 promotes it above book-1..39 before book-40 forces eviction.
+    expect(readCachedWeights('book-0', 1, 100)).toEqual(weights);
+    writeCachedWeights('book-40', weights, 40);
+
+    expect(readCachedWeights('book-0', 1, 101)).toEqual(weights);
+    expect(readCachedWeights('book-1', 1, 102)).toBeNull();
+
+    // A failing localStorage.setItem during hit refresh still returns the validated hit.
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota exceeded');
+    });
+    try {
+      expect(readCachedWeights('book-0', 1, 103)).toEqual(weights);
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
+  it('pins the counting-rules version to a semantic digest of the counting rules (#68)', () => {
+    let fnv = 0x811c9dc5;
+    const mix = (value: number) => {
+      fnv ^= value >>> 0;
+      fnv = Math.imul(fnv, 0x01000193) >>> 0;
+    };
+
+    mix(TEXT_WEIGHT_RULES_VERSION);
+
+    // Pin `isSpace` and `TextCounter` transitions across all 65,536 UTF-16 code units.
+    for (let code = 0; code <= 0xffff; code += 1) {
+      const counter = new TextCounter();
+      counter.step(0x61); // 'a'
+      const spaceResult = counter.step(code) ? 1 : 0;
+      counter.step(0x62); // 'b'
+      mix((code << 4) | (spaceResult << 2) | counter.characters);
+    }
+
+    // Pin `CJK` script classification across assigned script samples (ICU-upgrade safe).
+    const scriptSamples = [
+      'A',
+      'é',
+      'Ω',
+      'Ж',
+      'א',
+      'ع',
+      '汉',
+      '\u{20000}',
+      'あ',
+      'ア',
+      '한',
+      'ㄱ',
+      'ㄅ',
+      '。',
+      '\u{1f600}',
+    ];
+    for (const sample of scriptSamples) {
+      const { characters, cjk } = countSectionText(sample);
+      mix((characters << 2) | cjk);
+    }
+
+    // Pin `forEachReadableText` DOM filtering and node traversal order.
+    const doc = new DOMParser().parseFromString(
+      `<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>t</title><style>s</style></head>
+<body><p>  a\u00a0b </p><script>x</script><noscript>y</noscript><style>z</style><svg><title>v</title><text>g</text></svg><div><!--c--><![CDATA[d]]><span></span>e</div></body>
+</html>`,
+      'application/xhtml+xml',
+    );
+    const domCounter = new TextCounter();
+    forEachReadableText(doc, (node) => domCounter.add(node.data));
+    mix(domCounter.characters);
+    mix(domCounter.cjk);
+
+    const digest = fnv.toString(16).padStart(8, '0');
+    expect(TEXT_WEIGHT_RULES_VERSION).toBe(1);
+    expect(
+      digest,
+      'Counting rules changed; bump TEXT_WEIGHT_RULES_VERSION and update this digest.',
+    ).toBe('ec4f7ddc');
   });
 });
 

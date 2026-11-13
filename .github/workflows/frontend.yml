@@ -80,7 +80,14 @@ jobs:
           chrome-version: 157.0.8103.78
 
       - name: End-to-end
-        run: pnpm e2e
+        # Headless Ubuntu has no desktop session bus; a transient session bus keeps
+        # Chromium's dbus/bus.cc error spam out of launch diagnostics (#70).
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ] && command -v dbus-run-session >/dev/null 2>&1; then
+            dbus-run-session -- pnpm e2e
+          else
+            pnpm e2e
+          fi
         env:
           CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
 

@@ -241,7 +241,7 @@ Gate and native `macOS 15.6.1 (24G90, Apple M4, arm64)` verification (`WebKit.fr
 `20621.3.11.11.3`, Safari `18.6`, `WKWebView` `AppleWebKit/605.1.15`, `Node v24.14.1`,
 `pnpm 12.16.1`, `rustc 1.99.1`):
 
-- **Repository CI gates**: `pnpm check` (`45` Vitest files, `735` unit tests, `0` ESLint
+- **Repository CI gates**: `pnpm check` (`46` Vitest files, `743` unit tests, `0` ESLint
   warnings, strict `tsc`), `pnpm e2e` (`11/11` Chromium flows: `txt`, `pdf`, `pdf-layout`,
   `pdf-zoom`, `epub`, `epub-progress`, `keyboard`, `txt-chapters`, `go-to`, `link-peek`,
   `toolbar-title`; `0` CSP violations), `cargo fmt --all --check`,
