@@ -1697,7 +1697,7 @@ describe('EpubViewer', () => {
       const fileHash = store.getState().documents.find((doc) => doc.id === documentId)?.fileHash;
       window.localStorage.setItem(
         'synapseread.epubTextWeights.v1',
-        JSON.stringify({ [fileHash ?? '']: { at: 1, sections: [[5, 0]] } }),
+        JSON.stringify({ [fileHash ?? '']: { at: 1, rules: 1, sections: [[5, 0]] } }),
       );
       render(<Harness store={store} documentId={documentId} />);
       await opened();

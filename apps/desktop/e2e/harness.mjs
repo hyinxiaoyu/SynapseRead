@@ -656,7 +656,7 @@ const DEVTOOLS_TIMEOUT_MS = 15000;
  * where every later launch takes about 1 s. `warmUp` pays that once, so the flows
  * keep the short deadline.
  */
-const COLD_START_TIMEOUT_MS = 120000;
+const COLD_START_TIMEOUT_MS = 60000;
 
 /**
  * Launches Chromium once and opens the app, with a deadline for a cold start, so the
@@ -672,11 +672,22 @@ export async function warmUp(url) {
 
 export async function launchPage(
   url,
-  { width = 1440, height = 900, devtoolsTimeoutMs = DEVTOOLS_TIMEOUT_MS } = {},
+  { width = 1440, height = 900, devtoolsTimeoutMs = DEVTOOLS_TIMEOUT_MS, retries = 1 } = {},
 ) {
   const chrome = CHROME_CANDIDATES.find((candidate) => existsSync(candidate));
   if (!chrome) throw new Error('No Chromium found. Set CHROME_PATH to a Chromium-based browser.');
 
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await launchPageOnce(chrome, url, { width, height, devtoolsTimeoutMs });
+    } catch (error) {
+      if (attempt >= retries) throw error;
+      console.warn(`     Chromium launch failed (${error.message}); retrying once`);
+    }
+  }
+}
+
+async function launchPageOnce(chrome, url, { width, height, devtoolsTimeoutMs }) {
   const profile = mkdtempSync(join(tmpdir(), 'synapseread-e2e-'));
   let cdp = null;
   let process_ = null;

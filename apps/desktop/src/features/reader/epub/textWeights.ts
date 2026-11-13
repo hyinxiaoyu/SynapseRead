@@ -47,6 +47,31 @@ function isSpace(code: number): boolean {
 }
 
 /**
+ * Visits each text node a reader sees, in document order.
+ * Shared with `epubEngine.ts` so section measurements, `collectText`, and Find
+ * walk the exact same nodes under `TEXT_WEIGHT_RULES_VERSION`.
+ */
+export function forEachReadableText(chapterDoc: Document, visit: (node: Text) => void): void {
+  const root = chapterDoc.body ?? chapterDoc.documentElement;
+  if (!root) return;
+  const walker = chapterDoc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+    const textNode = current as Text;
+    const parentTag = textNode.parentElement?.tagName.toLowerCase();
+    if (
+      parentTag === 'style' ||
+      parentTag === 'script' ||
+      parentTag === 'noscript' ||
+      parentTag === 'title' ||
+      textNode.parentElement?.closest('head, style, script, noscript')
+    ) {
+      continue;
+    }
+    if (textNode.data) visit(textNode);
+  }
+}
+
+/**
  * Counts text as a reader reads it, fed one stretch at a time: whitespace runs
  * count once, and none at either end. Measuring a chapter feeds it each text node
  * as it walks the tree, so it never builds the chapter's text.
@@ -296,17 +321,36 @@ export async function measureBook(
   return buildTextWeights(sections);
 }
 
+/**
+ * Version of the section counting rules (`TextCounter`, `isSpace`, `CJK`, and
+ * `forEachReadableText`). Bump this whenever any of those rules change so old
+ * cached section weights are treated as misses rather than mixing metrics (#68).
+ */
+export const TEXT_WEIGHT_RULES_VERSION = 1;
+
+/**
+ * Outer map storage key (`synapseread.epubTextWeights.v1`); per-entry counting
+ * compatibility is versioned by `TEXT_WEIGHT_RULES_VERSION` above.
+ */
 const CACHE_KEY = 'synapseread.epubTextWeights.v1';
 /** Enough for a reader's current shelf; each entry is a few bytes per chapter. */
 const CACHE_LIMIT = 40;
 
-type CachedBooks = Record<string, { at: number; sections: [number, number][] }>;
+interface CachedBookEntry {
+  at: number;
+  rules?: number;
+  sections: [number, number][];
+}
+
+type CachedBooks = Record<string, CachedBookEntry>;
 
 function readCache(): CachedBooks {
   try {
     const raw = globalThis.localStorage?.getItem(CACHE_KEY);
     const parsed: unknown = raw ? JSON.parse(raw) : null;
-    return parsed && typeof parsed === 'object' ? (parsed as CachedBooks) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as CachedBooks)
+      : {};
   } catch {
     return {};
   }
@@ -315,12 +359,19 @@ function readCache(): CachedBooks {
 /**
  * A book's measured text from an earlier open, so reopening it shows the
  * text-based percentage at once instead of re-measuring every chapter. Keyed by
- * the file's content hash, so a changed file is measured afresh. Null when there
- * is none or it does not fit this book.
+ * the file's content hash, so a changed file is measured afresh. Refreshes `at`
+ * on a hit for true LRU eviction (#67). Null when there is none, the rules
+ * version differs (#68), or the entry does not fit this book.
  */
-export function readCachedWeights(fileHash: string, sectionCount: number): TextWeights | null {
-  const entry = readCache()[fileHash];
-  const sections = entry?.sections;
+export function readCachedWeights(
+  fileHash: string,
+  sectionCount: number,
+  now = Date.now(),
+): TextWeights | null {
+  const books = readCache();
+  const entry = books[fileHash];
+  if (!entry || entry.rules !== TEXT_WEIGHT_RULES_VERSION) return null;
+  const sections = entry.sections;
   if (!Array.isArray(sections) || sections.length !== sectionCount) return null;
   const counts: SectionTextCount[] = [];
   for (const pair of sections) {
@@ -328,22 +379,31 @@ export function readCachedWeights(fileHash: string, sectionCount: number): TextW
     if (
       typeof characters !== 'number' ||
       typeof cjk !== 'number' ||
-      !(characters >= 0) ||
-      !(cjk >= 0)
+      !Number.isFinite(characters) ||
+      !Number.isFinite(cjk) ||
+      characters < 0 ||
+      cjk < 0
     ) {
       return null;
     }
     counts.push({ characters, cjk });
   }
+  try {
+    books[fileHash] = { ...entry, at: now };
+    globalThis.localStorage?.setItem(CACHE_KEY, JSON.stringify(books));
+  } catch {
+    // Storage can be full or read-only; the validated hit is still usable.
+  }
   return buildTextWeights(counts);
 }
 
-/** Remembers a measured book, dropping the least recently measured past the limit. */
+/** Remembers a measured book, dropping the least recently used past the limit. */
 export function writeCachedWeights(fileHash: string, weights: TextWeights, now = Date.now()): void {
   try {
     const books = readCache();
     books[fileHash] = {
       at: now,
+      rules: TEXT_WEIGHT_RULES_VERSION,
       sections: weights.sections.map((count) => [count.characters, count.cjk]),
     };
     const kept = Object.entries(books)

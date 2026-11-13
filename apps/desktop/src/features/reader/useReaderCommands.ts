@@ -94,6 +94,8 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
   const hasSelection = selectionText !== null;
   const sidebarReady = ready && !chromeHidden;
   const sidebarShown = navigator.open && !chromeHidden;
+  const focusInSidebar = () =>
+    Boolean(document.activeElement?.closest('[data-testid="navigator-sidebar"]'));
 
   const showTab = (tab: NavigatorTab) => ({
     // A sidebar shortcut puts the keyboard in the list it opens, on its current row.
@@ -140,19 +142,21 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
     },
     'view.toggleSidebar': {
       run: () => {
+        const closingFromSidebar = focusInSidebar();
         // Opening hands the sidebar the keyboard; closing gives it back to the page,
-        // taking it from the filter that is about to be unmounted.
+        // forcing only when focus was inside the sidebar that is about to unmount (#65).
         navigator.toggle({ focus: !navigator.open });
-        if (navigator.open) focusPage(true);
+        if (navigator.open) focusPage(closingFromSidebar);
       },
       enabled: sidebarReady,
       title: sidebarShown ? 'Hide Sidebar' : 'Show Sidebar',
     },
     'view.hideSidebar': {
       run: () => {
+        const closingFromSidebar = focusInSidebar();
         navigator.hide();
-        // The same as Toggle Sidebar: the sidebar's filter must not leave focus on <body>.
-        focusPage(true);
+        // Force only from inside the sidebar so hiding from the menu keeps external fields focused.
+        focusPage(closingFromSidebar);
       },
       enabled: sidebarShown,
     },

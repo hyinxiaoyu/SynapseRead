@@ -17,6 +17,11 @@ const NOTE_ROLES = ['doc-footnote', 'doc-endnote'];
 const SKIPPED = new Set(['script', 'style', 'template', 'noscript', 'svg', 'math', 'head']);
 /** Targets that start a part of the book, not a note, so a link to one jumps. */
 const STRUCTURAL = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'body', 'html', 'nav']);
+/**
+ * Structural elements an inline target may stand for (`<h2><span id="sec2">…</span></h2>`),
+ * unlike container roots (`section`, `body`, `html`) where climbing would read a whole chapter.
+ */
+const HEADINGS = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'nav']);
 /** An inline target (`<a id="fn1"/>`, `<span id="fn1">1.</span>`) stands for the block it sits in. */
 const BLOCKS = new Set(['p', 'li', 'dd', 'dt', 'aside', 'div', 'blockquote', 'td', 'footer']);
 
@@ -95,7 +100,7 @@ function noteElement(target: Element): Element {
   while (block && !BLOCKS.has(tagOf(block)) && !STRUCTURAL.has(tagOf(block))) {
     block = block.parentElement;
   }
-  return block && !STRUCTURAL.has(tagOf(block)) ? block : target;
+  return block && (!STRUCTURAL.has(tagOf(block)) || HEADINGS.has(tagOf(block))) ? block : target;
 }
 
 function findNoteAncestor(target: Element): Element | null {
