@@ -202,20 +202,21 @@ Second-wave reader polish and parity issues completed through SQLite migration `
 - **Typography, themes, and motion (`#35`, `#37`–`#40`, `#46`, `#75`)**: persistent
   `Standard`/`Wide`/`Full` page-width modes decoupled from font size and margins; `flip`
   (`300 ms`) and `stack` (`240 ms`) page-turn modes with click-through spine shadow,
-  anchored chrome entrance animations, `transition-none` popover coordinate pinning, and
-  `prefers-reduced-motion: reduce` static fallback; PDF `Aa` popover with optional
-  Dark/Sepia CSS `<canvas>` tinting (`tintPdfPages`, leaving underlying canvas pixels and
-  area-capture PNGs untinted) and non-black highlight blending; automatic EPUB Dark/Sepia
-  override for author text colors below `4.5:1` contrast; and centered document title in
-  the unified toolbar.
+  anchored chrome entrance animations, `animation-duration-150` popover coordinate
+  pinning, and `prefers-reduced-motion: reduce` static fallback; PDF `Aa` popover with
+  optional Dark/Sepia CSS `<canvas>` tinting (`tintPdfPages`, leaving underlying canvas
+  pixels and area-capture PNGs untinted) and non-black highlight blending; automatic EPUB
+  Dark/Sepia override for author text colors below `4.5:1` contrast; and centered document
+  title in the unified toolbar.
 - **Focus mode, tabs, and keyboard flow (`#43`, `#45`, `#50`, `#64`)**: CSS `visibility:
 hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` paginated EPUB
   top inset in focus mode, non-waking `go.*` page turns, dismissible auto-fading notices,
   optional full-screen linkage (`focusModeFullScreen`), and 5-layer cross-iframe `Escape`
   dismissal (`NoteEditor` → `SelectionPopover` → `LinkPeek` → `Find` → `Focus Mode`);
   immediate page focus (`preventScroll: true`) on document open, keyboard/pointer tab
-  switches (`onMouseDown` `preventDefault()` on `[role="tab"]`), and TOC `Enter`/`Escape`;
-  `1`–`5` highlight color keys; and `⇧⌘]`/`⇧⌘[`/`⇧⌘T`/`⌃⌘N`/`⇧⌘C`/`⌘1`–`⌘3` commands in
+  switches (`onMouseDown` `preventDefault()` + `requestActivePageFocus()` on `[role="tab"]`
+  with editable `onBlur` flush), and TOC `Enter`/`Escape`; `1`–`5` highlight color keys;
+  and `⇧⌘]`/`⇧⌘[`/`⇧⌘T`/`⌃⌘N`/`⇧⌘C`/`⌘1`–`⌘3` commands in
   `fixtures/contract/commands.json`.
 - **Search, annotations, and footnote peek (`#44`, `#47`, `#48`, `#49`)**: `200 ms`
   debounced Find anchored from the current viewport without auto-toggling the sidebar,
@@ -240,7 +241,7 @@ Gate and native `macOS 15.6.1 (24G90, Apple M4, arm64)` verification (`WebKit.fr
 `20621.3.11.11.3`, Safari `18.6`, `WKWebView` `AppleWebKit/605.1.15`, `Node v24.14.1`,
 `pnpm 12.16.1`, `rustc 1.99.1`):
 
-- **Repository CI gates**: `pnpm check` (`45` Vitest files, `731` unit tests, `0` ESLint
+- **Repository CI gates**: `pnpm check` (`45` Vitest files, `735` unit tests, `0` ESLint
   warnings, strict `tsc`), `pnpm e2e` (`11/11` Chromium flows: `txt`, `pdf`, `pdf-layout`,
   `pdf-zoom`, `epub`, `epub-progress`, `keyboard`, `txt-chapters`, `go-to`, `link-peek`,
   `toolbar-title`; `0` CSP violations), `cargo fmt --all --check`,
