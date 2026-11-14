@@ -292,6 +292,41 @@ describe('command registry', () => {
     }
   });
 
+  it('leaves AltGr characters to the field, which Windows reports as Ctrl+Alt', () => {
+    const addNote = vi.fn();
+    const sidebar = vi.fn();
+    const rotate = vi.fn();
+    register(() => ({
+      'edit.addNote': { run: addNote },
+      'view.toggleSidebar': { run: sidebar },
+      'view.rotateRight': { run: rotate },
+    }));
+    document.body.innerHTML = `<textarea id="note"></textarea>`;
+    const note = document.getElementById('note');
+
+    // A Polish layout types `ń` with AltGr+N and `ś` with AltGr+S; both arrive as
+    // the Ctrl+Alt bindings of Add Note and Toggle Sidebar.
+    for (const init of [
+      { key: 'ń', code: 'KeyN', ctrlKey: true, altKey: true },
+      { key: 'ś', code: 'KeyS', ctrlKey: true, altKey: true },
+    ]) {
+      const event = key({ ...init, bubbles: true });
+      note?.dispatchEvent(event);
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(false);
+    }
+    expect(addNote).not.toHaveBeenCalled();
+    expect(sidebar).not.toHaveBeenCalled();
+
+    // `getModifierState` names AltGr directly, for a platform that reports it alone.
+    const altGraph = key({ key: 'r', code: 'KeyR', ctrlKey: true, bubbles: true });
+    Object.defineProperty(altGraph, 'getModifierState', {
+      value: (modifier: string) => modifier === 'AltGraph',
+    });
+    note?.dispatchEvent(altGraph);
+    expect(altGraph.defaultPrevented).toBe(false);
+    expect(rotate).not.toHaveBeenCalled();
+  });
+
   it('dispatches window keydowns, preventing the default', () => {
     const run = vi.fn();
     register(() => ({ 'bookmarks.toggle': { run } }));

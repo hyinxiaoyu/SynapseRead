@@ -217,7 +217,18 @@ const TEXT_FIELD_SHORTCUTS = [
 
 /** The modifier a browser's own shortcuts use: ⌘ on macOS, Ctrl elsewhere. */
 function hasPrimaryModifier(event: KeyboardEvent, platform: Platform): boolean {
+  if (isCharacterInput(event)) return false;
   return platform === 'mac' ? event.metaKey : event.ctrlKey;
+}
+
+/**
+ * Whether this keydown types a character rather than pressing a shortcut. Windows
+ * reports AltGr as Ctrl+Alt, so `AltGr+N` on a Polish layout arrives as the
+ * `Ctrl+Alt+N` Add Note binding and must still reach the field; `getModifierState`
+ * names the same key directly, for a platform that reports it without Alt.
+ */
+function isCharacterInput(event: KeyboardEvent): boolean {
+  return event.altKey || event.getModifierState('AltGraph');
 }
 
 /**
