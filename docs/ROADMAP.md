@@ -82,7 +82,7 @@ for task IDs, acceptance evidence, and measurements.
       popover and Markup bar, and WCAG AA chrome contrast/hit-target compliance.
 - [x] Post-R12 reader UX refinement and parity pass (`#35`, `#37`–`#40`, `#43`–`#52`,
       `#64`, `#75`; SQLite migrations through `0010`): persistent page-width modes
-      (`Standard`/`Wide`/`Full`), `flip` and `stack` page-turn animations and anchored
+      (`Standard`/`Wide`/`Full`), `curl` and `stack` page-turn animations and anchored
       chrome disclosures, inactive EPUB tab isolation, debounced Find with diacritic and
       soft-hyphen folding, all-match tinting, and scrubber marks, Dark/Sepia PDF page
       tinting and EPUB author-ink contrast guard, distraction-free focus mode with
@@ -99,7 +99,7 @@ for task IDs, acceptance evidence, and measurements.
       inertial tail instead of locking out rapid flicks; EPUB slides its own column
       strip across a whole page and holds the outgoing chapter across a spine seam;
       PDF `single`/`two-page` keep a three-slot stage of already-rasterized spreads;
-      `flip` is a simulated paper curl hinged at the spine of a two-page spread, with
+      `curl` is a simulated paper curl hinged at the spine of a two-page spread, with
       the fold and the cast shadow confined to their own halves; and TXT slides along
       its vertical reading axis.
 

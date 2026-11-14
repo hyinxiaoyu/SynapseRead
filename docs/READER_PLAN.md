@@ -200,8 +200,9 @@ Accessibility and VoiceOver tree verification on `macOS 15.6.1 (24G90, Apple M4)
 Second-wave reader polish and parity issues completed through SQLite migration `0010`:
 
 - **Typography, themes, and motion (`#35`, `#37`–`#40`, `#46`, `#75`)**: persistent
-  `Standard`/`Wide`/`Full` page-width modes decoupled from font size and margins; `flip`
-  (`300 ms`) and `stack` (`240 ms`) page-turn modes with click-through spine shadow,
+  `Standard`/`Wide`/`Full` page-width modes decoupled from font size and margins; `curl`
+  (`320 ms`, renamed from `flip`) and `stack` (`240 ms`) page-turn modes with click-through
+  spine shadow,
   anchored chrome entrance animations, `animation-duration-150` popover coordinate
   pinning, and `prefers-reduced-motion: reduce` static fallback; PDF `Aa` popover with
   optional Dark/Sepia CSS `<canvas>` tinting (`tintPdfPages`, leaving underlying canvas
@@ -237,7 +238,7 @@ hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` pagina
   strip across a whole page at `opacity: 1`, and a turn across a spine seam holds the
   outgoing chapter's frame in the strip until the incoming one is up, so no turn shows a
   blank page; PDF `single` and `two-page` render a three-slot stage whose neighbouring
-  spreads are already rasterized (bounded to `<= 3` spreads / `<= 6` canvases); `flip` is
+  spreads are already rasterized (bounded to `<= 3` spreads / `<= 6` canvases); `curl` is
   a simulated paper curl — it hinges at the `50%` spine of a two-page spread, shades the
   turning half with a fold gradient and throws a cast shadow on the half that stays put,
   each layer confined to its own side of the spine and both falling off as the leaf
@@ -270,8 +271,9 @@ Gate and native `macOS 15.6.1 (24G90, Apple M4, arm64)` verification (`WebKit.fr
   smoke launch initialized all `11` SQLite schema tables through migration `0010` under the
   strict ADR 0001/0004/0005 CSP (`assetProtocol.scope: []`, no `script-src` relaxation).
 - **Native `WKWebView` audit (`DPR=2` and `DPR=1`, `0` CSP violations, `0` page errors)**:
-  all `13/13` `#40` checks passed (`flip`/`stack` WAAPI turns across EPUB `paged`/`spread`,
-  PDF `single`/`two-page`, and TXT with `postTransform: "none"`, `0` iframe blank frames via
+  all `13/13` `#40` checks passed (`flip`/`stack` WAAPI turns — `flip` is now `curl` — across
+  EPUB `paged`/`spread`, PDF `single`/`two-page`, and TXT with `postTransform: "none"`, `0`
+  iframe blank frames via
   `WKWebView.takeSnapshot`, `0 px` immediate post-turn selection offset across 10 mode
   combinations, click-through spine hinge, `PageTurnChevrons` `translate`/`scale`
   composition, `grid-template-rows` disclosures, `prefers-reduced-motion: reduce`, `277 px`
