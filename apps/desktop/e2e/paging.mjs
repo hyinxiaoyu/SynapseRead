@@ -214,15 +214,20 @@ export async function pagingFlow(page) {
     const shadow = viewer?.querySelector('[data-testid="page-turn-shadow"]');
     const layer = (name) => shadow?.querySelector('[data-page-turn-layer="' + name + '"]');
     const fold = layer('fold');
+    const back = layer('back');
     const cast = layer('cast');
+    // The leaf itself: its outline is what bends.
+    const leaf = viewer?.querySelector('[data-testid="pdf-stage"]')?.parentElement;
     window.__curlSamples = [];
     let frames = 0;
     const step = () => {
       window.__curlSamples.push({
         fold: fold ? Number(getComputedStyle(fold).opacity) : 0,
+        back: back ? Number(getComputedStyle(back).opacity) : 0,
         cast: cast ? Number(getComputedStyle(cast).opacity) : 0,
         foldLeft: fold ? fold.style.left : '',
         castRight: cast ? cast.style.right : '',
+        leafClip: leaf ? getComputedStyle(leaf).clipPath : 'none',
       });
       frames += 1;
       if (frames < 40) requestAnimationFrame(step);
@@ -238,8 +243,26 @@ export async function pagingFlow(page) {
     'the turning leaf has to be shaded while it curls',
   );
   assert(
+    curl.some((sample) => sample.back > 0.3),
+    "the folded-over strip has to show the paper's reverse",
+  );
+  assert(
     curl.some((sample) => sample.cast > 0.3),
     "the half that stays put has to catch the leaf's shadow",
+  );
+  // A curl bends the leaf's own outline; a rotation alone would leave it straight.
+  // The outline is only bent while the fold is visible, so that is the window to
+  // read it in: before the turn and after it settles there is nothing to clip.
+  const curling = curl.filter((sample) => sample.fold > 0.1);
+  assert(curling.length > 0, 'the turn has to be in progress for at least a frame');
+  assert(
+    curling.every((sample) => sample.leafClip !== 'none'),
+    'the leaf has to be clipped while it curls',
+  );
+  const outlines = new Set(curling.map((sample) => sample.leafClip));
+  assert(
+    outlines.size > 3,
+    `the leaf's outline has to bend over several frames, saw ${outlines.size} shapes`,
   );
   const shaded = curl.filter((sample) => sample.fold > 0 || sample.cast > 0);
   assert(shaded.length > 0, 'the turn has to shade the page at all');
@@ -261,7 +284,14 @@ export async function pagingFlow(page) {
   );
   const afterCurl = await page.evaluate(`(() => {
     const content = ${visibleScroller}?.querySelector('[data-testid="pdf-stage"]')?.parentElement;
-    return content ? getComputedStyle(content).transform : 'none';
+    if (!content) return { transform: 'none', clipPath: 'none' };
+    const style = getComputedStyle(content);
+    return { transform: style.transform, clipPath: style.clipPath };
   })()`);
-  assert(afterCurl === 'none', `a curl must not stay transformed: ${afterCurl}`);
+  assert(
+    afterCurl.transform === 'none',
+    `a curl must not stay transformed: ${afterCurl.transform}`,
+  );
+  // The fold is a clip on the leaf, so it has to be gone once the page is flat.
+  assert(afterCurl.clipPath === 'none', `a curl must not stay clipped: ${afterCurl.clipPath}`);
 }

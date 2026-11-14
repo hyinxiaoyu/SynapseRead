@@ -4,6 +4,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   animatePageTurn,
+  CURL_BULGE,
+  curlBackClip,
+  curlFoldClip,
   directionOf,
   easeOut,
   PAGE_TURN_ANIMATION_ID,
@@ -444,6 +447,45 @@ describe('usePageTurnGestures', () => {
   });
 });
 
+/** The x of each point in a `polygon()` clip, in percent. */
+const clipXs = (clip: string) =>
+  clip
+    .replace(/^polygon\(|\)$/g, '')
+    .split(', ')
+    .map((point) => Number.parseFloat(point.split(' ')[0] ?? '0'));
+
+describe('curlFoldClip', () => {
+  it('is the page rectangle when nothing is curled', () => {
+    const flat = clipXs(curlFoldClip(1, 0));
+    // The corners and every point of the right edge sit on the edge itself.
+    expect(flat.filter((x) => x === 100)).toHaveLength(flat.length - 2);
+    expect(flat[0]).toBe(0);
+    expect(flat.at(-1)).toBe(0);
+  });
+
+  it('pulls the middle of the free edge in, and leaves the corners alone', () => {
+    const forward = clipXs(curlFoldClip(1, CURL_BULGE));
+    // The curve starts and ends on the edge, and is deepest half-way down it.
+    const curve = forward.slice(1, -1);
+    expect(curve[0]).toBeCloseTo(100, 2);
+    expect(curve.at(-1)).toBeCloseTo(100, 2);
+    const deepest = Math.min(...curve);
+    expect(deepest).toBeCloseTo(100 - CURL_BULGE * 100, 1);
+    // A back turn bends the other edge the other way.
+    const backward = clipXs(curlFoldClip(-1, CURL_BULGE));
+    expect(backward[0]).toBe(100);
+    expect(Math.max(...backward.slice(1, -1))).toBeCloseTo(CURL_BULGE * 100, 1);
+  });
+
+  it('keeps the same number of points at every bulge, so it can interpolate', () => {
+    for (const direction of [1, -1] as const) {
+      const flat = curlFoldClip(direction, 0).split(', ').length;
+      expect(curlFoldClip(direction, CURL_BULGE).split(', ').length).toBe(flat);
+      expect(curlFoldClip(direction, CURL_BULGE / 2).split(', ').length).toBe(flat);
+    }
+  });
+});
+
 describe('turningLeafSides', () => {
   const whole = { top: '0', right: '0', bottom: '0', left: '0' };
 
@@ -477,7 +519,7 @@ describe('animatePageTurn', () => {
   /** The curl overlay the viewers render, with each layer's animations recorded. */
   const mountShadow = () => {
     const shadow = document.createElement('div');
-    const layer = (name: 'fold' | 'cast') => {
+    const layer = (name: 'back' | 'fold' | 'cast') => {
       const element = document.createElement('div');
       element.dataset.pageTurnLayer = name;
       const animate = vi.fn<Animate>();
@@ -486,9 +528,10 @@ describe('animatePageTurn', () => {
       shadow.append(element);
       return { element, animate };
     };
+    const back = layer('back');
     const fold = layer('fold');
     const cast = layer('cast');
-    return { shadow, fold, cast };
+    return { shadow, back, fold, cast };
   };
 
   afterEach(() => {
@@ -519,25 +562,35 @@ describe('animatePageTurn', () => {
     expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 200 });
   });
 
-  it('curls around the leading edge: left for next, right for previous', () => {
+  it('curls around the leading edge, bending the free one', () => {
     const { element, animate } = mountPage();
     animatePageTurn(element, 1, 'curl');
     expect(animate.mock.calls[0]?.[0]).toEqual([
       {
-        transform: 'perspective(1400px) rotateY(-20deg) scaleX(0.99)',
+        transform: 'perspective(1200px) rotateY(-26deg)',
         transformOrigin: '0% 50%',
+        clipPath: curlFoldClip(1, CURL_BULGE),
       },
-      { transform: 'perspective(1400px) rotateY(0deg) scaleX(1)', transformOrigin: '0% 50%' },
+      {
+        transform: 'perspective(1200px) rotateY(0deg)',
+        transformOrigin: '0% 50%',
+        clipPath: curlFoldClip(1, 0),
+      },
     ]);
     animatePageTurn(element, -1, 'curl');
     expect(animate.mock.calls[1]?.[0]).toEqual([
       {
-        transform: 'perspective(1400px) rotateY(20deg) scaleX(0.99)',
+        transform: 'perspective(1200px) rotateY(26deg)',
         transformOrigin: '100% 50%',
+        clipPath: curlFoldClip(-1, CURL_BULGE),
       },
-      { transform: 'perspective(1400px) rotateY(0deg) scaleX(1)', transformOrigin: '100% 50%' },
+      {
+        transform: 'perspective(1200px) rotateY(0deg)',
+        transformOrigin: '100% 50%',
+        clipPath: curlFoldClip(-1, 0),
+      },
     ]);
-    expect(animate.mock.calls[1]?.[1]).toMatchObject({ duration: 320 });
+    expect(animate.mock.calls[1]?.[1]).toMatchObject({ duration: 420 });
   });
 
   it('hinges a two-page spread at its centre spine, without dimming the paper', () => {
@@ -545,10 +598,15 @@ describe('animatePageTurn', () => {
     animatePageTurn(element, 1, 'curl', null, { spread: true });
     expect(animate.mock.calls[0]?.[0]).toEqual([
       {
-        transform: 'perspective(1800px) rotateY(-9deg) scaleX(0.994)',
+        transform: 'perspective(1500px) rotateY(-12deg)',
         transformOrigin: '50% 50%',
+        clipPath: curlFoldClip(1, CURL_BULGE),
       },
-      { transform: 'perspective(1800px) rotateY(0deg) scaleX(1)', transformOrigin: '50% 50%' },
+      {
+        transform: 'perspective(1500px) rotateY(0deg)',
+        transformOrigin: '50% 50%',
+        clipPath: curlFoldClip(1, 0),
+      },
     ]);
     for (const frame of animate.mock.calls[0]?.[0] ?? []) {
       expect(frame).not.toHaveProperty('opacity');
@@ -602,32 +660,41 @@ describe('animatePageTurn', () => {
 
   it('curls a spread: the fold on the turning half, the cast shadow on the other', () => {
     const { element } = mountPage();
-    const { shadow, fold, cast } = mountShadow();
+    const { shadow, back, fold, cast } = mountShadow();
 
     animatePageTurn(element, 1, 'curl', shadow, { spread: true });
-    // Each layer covers only its own side of the spine, so neither spills across.
+    // Each layer covers only its own side of the spine, so none spills across.
     expect(fold.element.style.left).toBe('50%');
     expect(fold.element.style.right).toBe('0px');
+    expect(back.element.style.left).toBe('50%');
     expect(cast.element.style.right).toBe('50%');
     expect(cast.element.style.left).toBe('0px');
-    // The fold darkens away from the hinge; the cast shadow darkens toward it.
-    expect(fold.element.style.backgroundImage).toContain('to right');
+    // The folded-over strip is the paper's reverse, lit at its free edge.
+    expect(back.element.style.backgroundImage).toContain('--page-turn-paper');
+    expect(back.element.style.backgroundPosition).toBe('100% 0px');
+    expect(back.animate.mock.calls[0]?.[0]).toEqual([
+      { opacity: 0, clipPath: curlBackClip(1, CURL_BULGE) },
+      { opacity: 1, clipPath: curlBackClip(1, CURL_BULGE), offset: 0.2 },
+      { opacity: 0, clipPath: curlBackClip(1, 0) },
+    ]);
+    // The fold shadow hugs the fold at the free edge; the cast shadow darkens
+    // toward the spine on the other half.
+    expect(fold.element.style.backgroundImage).toContain('to left');
     expect(cast.element.style.backgroundImage).toContain('to left');
-    expect(fold.element.style.transformOrigin).toBe('left center');
     expect(cast.element.style.transformOrigin).toBe('right center');
-    // Both fall off as the leaf settles: out from the hinge, then away.
+    // The fold is clipped by the same curve as the page, and flattens with it.
     expect(fold.animate.mock.calls[0]?.[0]).toEqual([
-      { opacity: 0, transform: 'scaleX(0.55)' },
-      { opacity: 1, transform: 'scaleX(1)', offset: 0.3 },
-      { opacity: 0, transform: 'scaleX(1.18)' },
+      { opacity: 0, clipPath: curlFoldClip(1, CURL_BULGE) },
+      { opacity: 1, clipPath: curlFoldClip(1, CURL_BULGE), offset: 0.25 },
+      { opacity: 0, clipPath: curlFoldClip(1, 0) },
     ]);
     expect(cast.animate.mock.calls[0]?.[0]).toEqual([
       { opacity: 0, transform: 'scaleX(0.6)' },
-      { opacity: 0.9, transform: 'scaleX(1)', offset: 0.42 },
+      { opacity: 0.75, transform: 'scaleX(1)', offset: 0.42 },
       { opacity: 0, transform: 'scaleX(1.1)' },
     ]);
     for (const call of [fold.animate.mock.calls[0], cast.animate.mock.calls[0]]) {
-      expect(call?.[1]).toMatchObject({ duration: 320 });
+      expect(call?.[1]).toMatchObject({ duration: 420 });
       expect(call?.[1]?.fill).toBeUndefined();
     }
 
@@ -637,50 +704,55 @@ describe('animatePageTurn', () => {
     expect(fold.element.style.left).toBe('0px');
     expect(cast.element.style.left).toBe('50%');
     expect(cast.element.style.right).toBe('0px');
-    expect(fold.element.style.backgroundImage).toContain('to left');
+    expect(fold.element.style.backgroundImage).toContain('to right');
     expect(cast.element.style.backgroundImage).toContain('to right');
+    expect(back.element.style.backgroundPosition).toBe('0px 0px');
+    expect(back.animate).toHaveBeenCalledTimes(2);
     expect(fold.animate).toHaveBeenCalledTimes(2);
     expect(cast.animate).toHaveBeenCalledTimes(2);
   });
 
   it('curls a single page on its leading edge, with no page under it to shade', () => {
     const { element } = mountPage();
-    const { shadow, fold, cast } = mountShadow();
+    const { shadow, back, fold, cast } = mountShadow();
 
     animatePageTurn(element, 1, 'curl', shadow);
     expect(fold.element.style.left).toBe('0px');
     expect(fold.element.style.right).toBe('0px');
-    expect(fold.element.style.backgroundImage).toContain('to right');
+    expect(fold.element.style.backgroundImage).toContain('to left');
     expect(fold.animate).toHaveBeenCalledTimes(1);
-    // A single page is its own leaf: the cast layer stays out of the way.
+    // A single page is still a leaf, so it still folds over; only the shadow it
+    // would throw on the page beneath has nowhere to fall.
+    expect(back.animate).toHaveBeenCalledTimes(1);
     expect(cast.animate).not.toHaveBeenCalled();
     expect(cast.element.style.opacity).toBe('0');
 
     animatePageTurn(element, -1, 'curl', shadow);
-    expect(fold.element.style.backgroundImage).toContain('to left');
-    expect(fold.element.style.transformOrigin).toBe('right center');
+    expect(fold.element.style.backgroundImage).toContain('to right');
   });
 
   it('leaves the shadow alone for every other mode', () => {
     const { element } = mountPage();
-    const { shadow, fold, cast } = mountShadow();
+    const { shadow, back, fold, cast } = mountShadow();
     for (const mode of ['slide', 'fade', 'stack'] as const) {
       animatePageTurn(element, 1, mode, shadow, { spread: true });
     }
     expect(fold.animate).not.toHaveBeenCalled();
     expect(cast.animate).not.toHaveBeenCalled();
+    expect(back.animate).not.toHaveBeenCalled();
   });
 
   it('turns instantly with reduced motion', () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce') }));
     const { element, animate } = mountPage();
-    const { shadow, fold, cast } = mountShadow();
+    const { shadow, back, fold, cast } = mountShadow();
     for (const mode of ['slide', 'fade', 'curl', 'stack'] as const) {
       animatePageTurn(element, 1, mode, shadow, { spread: true });
     }
     expect(animate).not.toHaveBeenCalled();
     expect(fold.animate).not.toHaveBeenCalled();
     expect(cast.animate).not.toHaveBeenCalled();
+    expect(back.animate).not.toHaveBeenCalled();
   });
 
   it('tolerates a page that is not mounted', () => {

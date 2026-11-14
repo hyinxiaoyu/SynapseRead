@@ -239,12 +239,17 @@ hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` pagina
   outgoing chapter's frame in the strip until the incoming one is up, so no turn shows a
   blank page; PDF `single` and `two-page` render a three-slot stage whose neighbouring
   spreads are already rasterized (bounded to `<= 3` spreads / `<= 6` canvases); `curl` is
-  a simulated paper curl — it hinges at the `50%` spine of a two-page spread, shades the
-  turning half with a fold gradient and throws a cast shadow on the half that stays put,
-  each layer confined to its own side of the spine and both falling off as the leaf
-  settles, with nothing rasterized so live text is never sampled; and TXT slides along
-  its vertical reading axis instead of nudging the rows sideways. No turn leaves a persistent transform, and `prefers-reduced-motion:
-reduce` still turns instantaneously.
+  a simulated paper curl — it hinges at the `50%` spine of a two-page spread, and the
+  leaf's own free edge bends: an animated `polygon()` clip pulls that edge in by `8%` on
+  a half-sine and straightens it as the leaf settles, so the page keeps every pixel and
+  loses its straight silhouette. A `back` layer fills the strip the fold pulled away
+  from with the paper's reverse, lit at its free edge and dark at the fold; a `fold`
+  layer, clipped by the same curve, shades the leaf's own face; and a `cast` layer
+  shadows the half that stays put. Every layer is confined to its own side of the spine.
+  Nothing is rasterized — no WebGL, no canvas, no `foreignObject` — so live text is never
+  sampled, and the clip is gone once the turn settles; and TXT slides along its vertical
+  reading axis instead of nudging the rows sideways. No turn leaves a persistent
+  transform, and `prefers-reduced-motion: reduce` still turns instantaneously.
 - **PDF layout/zoom and long-document maps (`#51`, `#52`)**: migration
   `0009_pdf_document_layout.sql` persisting per-PDF `displayMode`, `zoomMode`, `scale`,
   `rotation`, and `coverPageAlone`, printed PDF page labels in `Go To`, and GPU-previewed

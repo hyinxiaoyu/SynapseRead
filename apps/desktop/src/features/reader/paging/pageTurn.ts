@@ -551,6 +551,52 @@ function curlOrigin(direction: TurnDirection, spread: boolean): string {
   return direction > 0 ? '0% 50%' : '100% 50%';
 }
 
+/** Points that approximate the fold curve. More is smoother, not slower. */
+const CURL_STEPS = 12;
+/**
+ * How far the fold pulls the free edge in, as a fraction of the page width. Live
+ * text cannot be deformed without rasterizing it (`ADR 0005`), so the fold is the
+ * page's own outline bending: the leaf keeps its pixels and loses its straight
+ * edge, which is what the eye reads as paper.
+ */
+export const CURL_BULGE = 0.08;
+
+/** The free edge a curl bends: the page's trailing edge, away from its hinge. */
+function curledEdge(direction: TurnDirection): number {
+  return direction > 0 ? 100 : 0;
+}
+
+/** How far the fold pulls the edge in at `at` (0 top, 1 bottom), in percent. */
+function foldOffset(direction: TurnDirection, bulge: number, at: number): number {
+  return (direction > 0 ? -1 : 1) * Math.sin(at * Math.PI) * bulge * 100;
+}
+
+/**
+ * The outline of a page whose free edge is curling, as a clip path. The curve is a
+ * half-sine, so the corners stay where they are and the middle of the edge bends.
+ * At `bulge` 0 this is the page's own rectangle, which is where the turn ends.
+ */
+export function curlFoldClip(direction: TurnDirection, bulge: number): string {
+  const edge = curledEdge(direction);
+  const curve = Array.from({ length: CURL_STEPS + 1 }, (_, step) => {
+    const at = step / CURL_STEPS;
+    return `${(edge + foldOffset(direction, bulge, at)).toFixed(2)}% ${(at * 100).toFixed(2)}%`;
+  });
+  const corner = direction > 0 ? '0% 0%' : '100% 0%';
+  const foot = direction > 0 ? '0% 100%' : '100% 100%';
+  return `polygon(${[corner, ...curve, foot].join(', ')})`;
+}
+
+/** The folded-over strip itself: the part of the page beyond the fold. */
+export function curlBackClip(direction: TurnDirection, bulge: number): string {
+  const edge = curledEdge(direction);
+  const curve = Array.from({ length: CURL_STEPS + 1 }, (_, step) => {
+    const at = 1 - step / CURL_STEPS;
+    return `${(edge + foldOffset(direction, bulge, at)).toFixed(2)}% ${(at * 100).toFixed(2)}%`;
+  });
+  return `polygon(${[`${edge}% 0%`, `${edge}% 100%`, ...curve].join(', ')})`;
+}
+
 /**
  * How each mode draws the incoming page. Durations and easings are starting
  * points to tune by eye; the shape of each motion is not.
@@ -576,7 +622,7 @@ export const PAGE_TURN_MOTION = {
     keyframes: (): Keyframe[] => [{ opacity: 0.2 }, { opacity: 1 }],
   },
   curl: {
-    duration: 320,
+    duration: 420,
     easing: PAGE_SLIDE_EASING,
     keyframes: (direction: TurnDirection, spread = false): Keyframe[] => {
       // Both frames carry the origin so it never has to be written to the
@@ -585,23 +631,24 @@ export const PAGE_TURN_MOTION = {
       // A spread hinges at its own spine, so the leaf lifts instead of the whole
       // spread swinging like a plank. No opacity: the paper never goes grey.
       // The angle stays small because a spread is one element: the half that is
-      // not turning cannot be exempted from its transform, so the curl has to
-      // read from the shading rather than from a large swing.
-      const angle = spread ? 9 : 20;
-      const perspective = spread ? 1800 : 1400;
-      // A leaf settling also pinches a little into its hinge, as paper under
-      // tension does. It is a transform, so nothing is rasterized.
-      const pinch = spread ? 0.994 : 0.99;
+      // not turning cannot be exempted from its transform, so most of the curl
+      // has to come from the fold in the leaf's own outline.
+      const angle = spread ? 12 : 26;
+      const perspective = spread ? 1500 : 1200;
+      // The leaf's free edge bends as it lifts and straightens as it settles. The
+      // clip is what makes this a curl rather than a card rotating: the page keeps
+      // every pixel it had and loses its straight edge, which is the shape paper
+      // takes. Both frames carry the same number of points, so it interpolates.
       return [
         {
-          transform: `perspective(${perspective}px) rotateY(${
-            direction * -angle
-          }deg) scaleX(${pinch})`,
+          transform: `perspective(${perspective}px) rotateY(${direction * -angle}deg)`,
           transformOrigin,
+          clipPath: curlFoldClip(direction, CURL_BULGE),
         },
         {
-          transform: `perspective(${perspective}px) rotateY(0deg) scaleX(1)`,
+          transform: `perspective(${perspective}px) rotateY(0deg)`,
           transformOrigin,
+          clipPath: curlFoldClip(direction, 0),
         },
       ];
     },
@@ -694,21 +741,40 @@ function animateTurnShadow(
 ): void {
   const fold = shadow?.querySelector<HTMLElement>('[data-page-turn-layer="fold"]') ?? null;
   if (!shadow || !fold) return;
+  const back = shadow.querySelector<HTMLElement>('[data-page-turn-layer="back"]');
   const cast = shadow.querySelector<HTMLElement>('[data-page-turn-layer="cast"]');
   const forward = direction > 0;
   const { leaf, rest } = turningLeafSides(direction, spread);
   const shade = 'var(--page-turn-shadow, rgb(0 0 0 / 0.28))';
-  // The fold is darkest at the hinge and fades across the turning half; the cast
-  // shadow lies on the other half, darkest where it meets the spine.
+  const paper = 'var(--page-turn-paper, rgb(252 251 248))';
+  // The strip that has folded over: the paper's reverse, lit at its free edge and
+  // dark where it meets the fold. It fills exactly the part of the page the fold
+  // pulled away from, so the leaf reads as paper bent over rather than cut off.
+  if (back) {
+    placeLayer(back, leaf);
+    back.style.backgroundSize = `${(CURL_BULGE * 100 + 8).toFixed(1)}% 100%`;
+    back.style.backgroundPosition = forward ? '100% 0' : '0 0';
+    back.style.backgroundImage = `linear-gradient(to ${
+      forward ? 'right' : 'left'
+    }, ${shade}, ${paper} 72%)`;
+    animateCurlLayer(back, [
+      { opacity: 0, clipPath: curlBackClip(direction, CURL_BULGE) },
+      { opacity: 1, clipPath: curlBackClip(direction, CURL_BULGE), offset: 0.2 },
+      { opacity: 0, clipPath: curlBackClip(direction, 0) },
+    ]);
+  }
+  // The fold shadow sits just inside the fold, so it is a band whose darkest part
+  // is the bulge's width in from the free edge, not a wash from the edge itself.
+  // It is clipped by the same curve as the page, so the two can never disagree
+  // about where the paper ends, and it flattens as the leaf straightens.
   placeLayer(fold, leaf);
-  fold.style.transformOrigin = forward ? 'left center' : 'right center';
   fold.style.backgroundImage = `linear-gradient(to ${
-    forward ? 'right' : 'left'
-  }, ${shade}, transparent ${spread ? '55%' : '48%'})`;
+    forward ? 'left' : 'right'
+  }, transparent 2%, ${shade} ${(CURL_BULGE * 100 + 2).toFixed(1)}%, transparent 32%)`;
   animateCurlLayer(fold, [
-    { opacity: 0, transform: 'scaleX(0.55)' },
-    { opacity: 1, transform: 'scaleX(1)', offset: 0.3 },
-    { opacity: 0, transform: 'scaleX(1.18)' },
+    { opacity: 0, clipPath: curlFoldClip(direction, CURL_BULGE) },
+    { opacity: 1, clipPath: curlFoldClip(direction, CURL_BULGE), offset: 0.25 },
+    { opacity: 0, clipPath: curlFoldClip(direction, 0) },
   ]);
   if (!cast) return;
   if (!spread) {
@@ -717,14 +783,17 @@ function animateTurnShadow(
     cast.style.opacity = '0';
     return;
   }
+  // The cast shadow lies on the half that stays put, darkest where it meets the
+  // spine and gone within a third of the page: a leaf this close to the paper
+  // under it shades the gutter, not the whole page.
   placeLayer(cast, rest);
   cast.style.transformOrigin = forward ? 'right center' : 'left center';
   cast.style.backgroundImage = `linear-gradient(to ${
     forward ? 'left' : 'right'
-  }, ${shade}, transparent 62%)`;
+  }, ${shade}, transparent 38%)`;
   animateCurlLayer(cast, [
     { opacity: 0, transform: 'scaleX(0.6)' },
-    { opacity: 0.9, transform: 'scaleX(1)', offset: 0.42 },
+    { opacity: 0.75, transform: 'scaleX(1)', offset: 0.42 },
     { opacity: 0, transform: 'scaleX(1.1)' },
   ]);
 }

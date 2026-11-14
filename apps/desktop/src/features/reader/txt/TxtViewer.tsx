@@ -1293,6 +1293,7 @@ export function TxtViewer({
             <PageTurnShadow
               shadowRef={turnShadowRef}
               color={PAGE_PALETTES[theme].spine}
+              paper={PAGE_PALETTES[theme].background}
               className="inset-y-0 left-1/2 w-full -translate-x-1/2"
               style={{ maxWidth: Number.isFinite(page.maxWidth) ? page.maxWidth : '100%' }}
             />

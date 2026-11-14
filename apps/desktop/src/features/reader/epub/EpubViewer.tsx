@@ -1582,6 +1582,7 @@ export function EpubViewer({
             <PageTurnShadow
               shadowRef={turnShadowRef}
               color={PAGE_PALETTES[theme].spine}
+              paper={PAGE_PALETTES[theme].background}
               className={availableWidth > 0 ? 'inset-y-0 left-1/2 -translate-x-1/2' : 'inset-0'}
               style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
             />
