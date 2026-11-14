@@ -1358,7 +1358,8 @@ describe('PdfViewer', () => {
     expect(screen.getByLabelText('Page number')).toHaveValue('1');
     fireEvent.change(searchInput, { target: { value: 'Fox' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
-    expect(screen.getByLabelText('Page number')).toHaveValue('5');
+    // The turn to the match is its own commit, so the page box catches up after it.
+    await waitFor(() => expect(screen.getByLabelText('Page number')).toHaveValue('5'));
   });
 
   it('cancels an in-flight PDF search on explicit cancel or tab deactivation', async () => {

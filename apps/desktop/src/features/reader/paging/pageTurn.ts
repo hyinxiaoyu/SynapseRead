@@ -678,12 +678,15 @@ export function animatePageTurn(
  *
  * Resolves when the motion has settled, or at once with reduced motion. The
  * caller keeps the element's own scroll position authoritative: nothing is
- * transformed and nothing is left behind.
+ * transformed and nothing is left behind. Aborting `signal` stops the motion
+ * where it is, so a jump the reader asked for is never overwritten by a frame of
+ * a slide they started before it.
  */
 export function slideScroll(
   scroller: HTMLElement | null,
   delta: { left?: number; top?: number },
   duration = PAGE_SLIDE_MS,
+  signal?: AbortSignal,
 ): Promise<void> {
   const left = delta.left ?? 0;
   const top = delta.top ?? 0;
@@ -697,6 +700,10 @@ export function slideScroll(
   return new Promise((resolve) => {
     const started = performance.now();
     const step = () => {
+      if (signal?.aborted) {
+        resolve();
+        return;
+      }
       const progress = Math.min((performance.now() - started) / duration, 1);
       const eased = easeOut(progress);
       scroller.scrollTo({ left: fromLeft + left * eased, top: fromTop + top * eased });

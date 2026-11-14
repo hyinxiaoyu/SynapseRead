@@ -497,6 +497,7 @@ export function TxtViewer({
    * at the clamped end of the file) fires no scroll event, so read the position here.
    */
   const scrollUnpinned = (move: () => void) => {
+    cancelSlide();
     pinnedRow.current = null;
     const scroller = scrollRef.current;
     const before = scroller?.scrollTop;
@@ -830,6 +831,26 @@ export function TxtViewer({
     }
   }
 
+  /**
+   * The slide in flight, if any. A jump the reader asked for — Home, End, Back, a
+   * chapter — must not be overwritten by the next frame of a turn they started
+   * before it, so every other move cancels it first.
+   */
+  const slideAbort = useRef<AbortController | null>(null);
+  const cancelSlide = () => {
+    slideAbort.current?.abort();
+    slideAbort.current = null;
+  };
+  const slideBy = (top: number) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    cancelSlide();
+    const controller = new AbortController();
+    slideAbort.current = controller;
+    void slideScroll(scroller, { top }, PAGE_SLIDE_MS, controller.signal);
+  };
+  useEffect(() => cancelSlide, []);
+
   /** One screen of rows, the step every page turn has always used. */
   const pageStep = (direction: TurnDirection) => {
     const scroller = scrollRef.current;
@@ -842,18 +863,17 @@ export function TxtViewer({
     unpin();
     backChip.dismiss();
     const transition = effectivePreferences.pageTransition;
-    if (transition === 'none') {
-      scroller.scrollBy({ top: pageStep(direction) });
-      return;
-    }
     if (transition === 'slide') {
       // A text file reads down the page, so its page turn travels down the page.
       // The old horizontal nudge fought the vertical scroll and read as a twitch.
-      void slideScroll(scroller, { top: pageStep(direction) }, PAGE_SLIDE_MS);
+      slideBy(pageStep(direction));
       return;
     }
+    cancelSlide();
     scroller.scrollBy({ top: pageStep(direction) });
-    animatePageTurn(pageRef.current, direction, transition, turnShadowRef.current);
+    if (transition !== 'none') {
+      animatePageTurn(pageRef.current, direction, transition, turnShadowRef.current);
+    }
   };
 
   // ---- A two-finger swipe scrubs the page it is on ----
@@ -877,6 +897,8 @@ export function TxtViewer({
       const scroller = scrollRef.current;
       if (!scroller) return;
       unpin();
+      // A scrub starts from a whole page, never from half of a slide.
+      cancelSlide();
       scrubBase.current = scroller.scrollTop;
     },
     move: (displacement: number) => scrubTo(scrubBase.current + displacement),
@@ -886,7 +908,7 @@ export function TxtViewer({
       const target =
         committed === null ? scrubBase.current : scrubBase.current + pageStep(committed);
       // Spring back, or finish the turn the fingers started, along the same axis.
-      void slideScroll(scroller, { top: target - scroller.scrollTop }, PAGE_SLIDE_MS);
+      slideBy(target - scroller.scrollTop);
     },
   };
 
@@ -895,6 +917,7 @@ export function TxtViewer({
     if (!scroller) return;
     unpin();
     backChip.dismiss();
+    cancelSlide();
     scroller.scrollTo({ top: edge === 'start' ? 0 : scroller.scrollHeight });
   };
 
@@ -970,6 +993,7 @@ export function TxtViewer({
     return model.rowAtUnit(model.unitAtSourceOffset(byte, 'down') ?? 0);
   };
   function showRow(row: number) {
+    cancelSlide();
     pinnedRow.current = row;
     setCurrentRow(row);
     setAtEnd(false);

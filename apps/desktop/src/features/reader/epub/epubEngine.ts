@@ -1229,6 +1229,8 @@ export async function openEpubDocument(
     turnPage: (direction, options) => turn(direction, options?.animate ?? true),
     canTurnInPlace,
     beginScrub() {
+      // A scrub starts from a whole page, never from half of a slide.
+      settleSlide();
       scrubBase = strip()?.container.scrollLeft ?? 0;
     },
     scrubTo(displacement) {

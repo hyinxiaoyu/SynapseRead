@@ -116,7 +116,9 @@ export async function pagingFlow(page) {
   })()`);
   const beforeSwipe = await page.evaluate(scrollLeft);
   // Fingers moving right scroll the strip forward, and each event must move it.
-  await page.swipe(pageBox, 20, { steps: 6, gapMs: 16 });
+  // Back to back, as a flick's events arrive: a gap longer than the idle window
+  // would end the gesture between two of them and turn the flick into several.
+  await page.swipe(pageBox, 20, { steps: 6 });
   const scrubbed = await page.evaluate(scrollLeft);
   assert(
     scrubbed > beforeSwipe + 40,
