@@ -626,7 +626,7 @@ describe('useStudySyncStore', () => {
       expect(state().error).toMatch(/fontSize/);
 
       // The newer modes are accepted by the backend's validation list too.
-      for (const pageTransition of ['flip', 'stack'] as const) {
+      for (const pageTransition of ['curl', 'stack'] as const) {
         await state().updateReadingPreferences({ pageTransition });
         expect(state().readingPreferences.pageTransition).toBe(pageTransition);
         expect((await backend.getReadingPreferences()).pageTransition).toBe(pageTransition);

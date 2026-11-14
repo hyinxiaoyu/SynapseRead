@@ -186,21 +186,21 @@ export async function pagingFlow(page) {
     `a paged stage keeps at most three spreads live, saw ${stage.pages.length} pages`,
   );
 
-  // ---- A spread's flip is a curl: the fold on the turning half, the cast shadow
-  // on the half that stays put, both clipped at the spine ----
+  // ---- A spread's curl: the fold on the turning half, the cast shadow on the
+  // half that stays put, each confined to its own side of the spine ----
   await page.evaluate(
     `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-mode-two-page"]').click()`,
   );
   await page.waitFor(
     `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'two-page'`,
-    'two pages, so a flip has a spine to hinge on',
+    'two pages, so a curl has a spine to hinge on',
   );
   await page.clickButton('Reading appearance');
   await page.waitFor(
     `document.querySelector('[data-testid="appearance-popover"]')`,
     'the PDF appearance popover',
   );
-  await page.clickButton('Flip');
+  await page.clickButton('Curl');
   await page.press('Escape');
   await page.waitFor(
     `!document.querySelector('[data-testid="appearance-popover"]')`,
@@ -259,9 +259,9 @@ export async function pagingFlow(page) {
     settledCurl.fold === 0 && settledCurl.cast === 0,
     `the curl must fade out: ${JSON.stringify(settledCurl)}`,
   );
-  const afterFlip = await page.evaluate(`(() => {
+  const afterCurl = await page.evaluate(`(() => {
     const content = ${visibleScroller}?.querySelector('[data-testid="pdf-stage"]')?.parentElement;
     return content ? getComputedStyle(content).transform : 'none';
   })()`);
-  assert(afterFlip === 'none', `a flip must not stay transformed: ${afterFlip}`);
+  assert(afterCurl === 'none', `a curl must not stay transformed: ${afterCurl}`);
 }

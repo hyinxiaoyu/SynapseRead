@@ -543,10 +543,10 @@ export interface PageTurnMotion {
 }
 
 /**
- * The edge the incoming page swings around: its leading edge, or the centre
- * spine of a two-page spread, where the turning leaf is hinged.
+ * The edge the incoming page curls around: its leading edge, or the centre spine
+ * of a two-page spread, where the turning leaf is hinged.
  */
-function flipOrigin(direction: TurnDirection, spread: boolean): string {
+function curlOrigin(direction: TurnDirection, spread: boolean): string {
   if (spread) return '50% 50%';
   return direction > 0 ? '0% 50%' : '100% 50%';
 }
@@ -575,13 +575,13 @@ export const PAGE_TURN_MOTION = {
     easing: 'cubic-bezier(0.2, 0, 0, 1)',
     keyframes: (): Keyframe[] => [{ opacity: 0.2 }, { opacity: 1 }],
   },
-  flip: {
+  curl: {
     duration: 320,
     easing: PAGE_SLIDE_EASING,
     keyframes: (direction: TurnDirection, spread = false): Keyframe[] => {
       // Both frames carry the origin so it never has to be written to the
       // element and then restored.
-      const transformOrigin = flipOrigin(direction, spread);
+      const transformOrigin = curlOrigin(direction, spread);
       // A spread hinges at its own spine, so the leaf lifts instead of the whole
       // spread swinging like a plank. No opacity: the paper never goes grey.
       // The angle stays small because a spread is one element: the half that is
@@ -670,14 +670,14 @@ function animateCurlLayer(layer: HTMLElement, keyframes: Keyframe[]): void {
   if (typeof layer.animate !== 'function') return;
   cancelPageTurn(layer);
   const animation = layer.animate(keyframes, {
-    duration: PAGE_TURN_MOTION.flip.duration,
+    duration: PAGE_TURN_MOTION.curl.duration,
     easing: 'ease-out',
   });
   animation.id = PAGE_TURN_ANIMATION_ID;
 }
 
 /**
- * The shading a `flip` lays over the page: the curvature of the turning leaf and
+ * The shading a `curl` lays over the page: the curvature of the turning leaf and
  * the shadow it throws on the half that stays put.
  *
  * Both layers are clipped to their own side of the spine, so neither can spill
@@ -731,10 +731,10 @@ function animateTurnShadow(
 
 /**
  * Shows which way the page turned: the new page slides in from that side, fades
- * in, flips in around its leading edge or spine, or rises from behind. Instant
+ * in, curls in around its leading edge or spine, or rises from behind. Instant
  * with reduced motion, and never delays the turn itself.
  *
- * `shadow` is the overlay the viewer owns beside the page; only `flip` uses it.
+ * `shadow` is the overlay the viewer owns beside the page; only `curl` uses it.
  * Nothing fills forwards, so hit-testing and selection geometry are accurate
  * again as soon as the animation ends.
  */
@@ -754,7 +754,7 @@ export function animatePageTurn(
     easing: motion.easing,
   });
   animation.id = PAGE_TURN_ANIMATION_ID;
-  if (transition === 'flip') animateTurnShadow(shadow, direction, spread);
+  if (transition === 'curl') animateTurnShadow(shadow, direction, spread);
 }
 
 /**

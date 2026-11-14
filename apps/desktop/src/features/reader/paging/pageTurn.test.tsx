@@ -519,9 +519,9 @@ describe('animatePageTurn', () => {
     expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 200 });
   });
 
-  it('flips around the leading edge: left for next, right for previous', () => {
+  it('curls around the leading edge: left for next, right for previous', () => {
     const { element, animate } = mountPage();
-    animatePageTurn(element, 1, 'flip');
+    animatePageTurn(element, 1, 'curl');
     expect(animate.mock.calls[0]?.[0]).toEqual([
       {
         transform: 'perspective(1400px) rotateY(-20deg) scaleX(0.99)',
@@ -529,7 +529,7 @@ describe('animatePageTurn', () => {
       },
       { transform: 'perspective(1400px) rotateY(0deg) scaleX(1)', transformOrigin: '0% 50%' },
     ]);
-    animatePageTurn(element, -1, 'flip');
+    animatePageTurn(element, -1, 'curl');
     expect(animate.mock.calls[1]?.[0]).toEqual([
       {
         transform: 'perspective(1400px) rotateY(20deg) scaleX(0.99)',
@@ -542,7 +542,7 @@ describe('animatePageTurn', () => {
 
   it('hinges a two-page spread at its centre spine, without dimming the paper', () => {
     const { element, animate } = mountPage();
-    animatePageTurn(element, 1, 'flip', null, { spread: true });
+    animatePageTurn(element, 1, 'curl', null, { spread: true });
     expect(animate.mock.calls[0]?.[0]).toEqual([
       {
         transform: 'perspective(1800px) rotateY(-9deg) scaleX(0.994)',
@@ -589,7 +589,7 @@ describe('animatePageTurn', () => {
 
   it('tags its animation, and never fills forwards', () => {
     const { element, animate } = mountPage();
-    for (const mode of ['slide', 'fade', 'flip', 'stack'] as const) {
+    for (const mode of ['slide', 'fade', 'curl', 'stack'] as const) {
       animatePageTurn(element, 1, mode);
     }
     expect(animate).toHaveBeenCalledTimes(4);
@@ -604,7 +604,7 @@ describe('animatePageTurn', () => {
     const { element } = mountPage();
     const { shadow, fold, cast } = mountShadow();
 
-    animatePageTurn(element, 1, 'flip', shadow, { spread: true });
+    animatePageTurn(element, 1, 'curl', shadow, { spread: true });
     // Each layer covers only its own side of the spine, so neither spills across.
     expect(fold.element.style.left).toBe('50%');
     expect(fold.element.style.right).toBe('0px');
@@ -632,7 +632,7 @@ describe('animatePageTurn', () => {
     }
 
     // Back turns mirror both the sides and the shading.
-    animatePageTurn(element, -1, 'flip', shadow, { spread: true });
+    animatePageTurn(element, -1, 'curl', shadow, { spread: true });
     expect(fold.element.style.right).toBe('50%');
     expect(fold.element.style.left).toBe('0px');
     expect(cast.element.style.left).toBe('50%');
@@ -647,7 +647,7 @@ describe('animatePageTurn', () => {
     const { element } = mountPage();
     const { shadow, fold, cast } = mountShadow();
 
-    animatePageTurn(element, 1, 'flip', shadow);
+    animatePageTurn(element, 1, 'curl', shadow);
     expect(fold.element.style.left).toBe('0px');
     expect(fold.element.style.right).toBe('0px');
     expect(fold.element.style.backgroundImage).toContain('to right');
@@ -656,7 +656,7 @@ describe('animatePageTurn', () => {
     expect(cast.animate).not.toHaveBeenCalled();
     expect(cast.element.style.opacity).toBe('0');
 
-    animatePageTurn(element, -1, 'flip', shadow);
+    animatePageTurn(element, -1, 'curl', shadow);
     expect(fold.element.style.backgroundImage).toContain('to left');
     expect(fold.element.style.transformOrigin).toBe('right center');
   });
@@ -675,7 +675,7 @@ describe('animatePageTurn', () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce') }));
     const { element, animate } = mountPage();
     const { shadow, fold, cast } = mountShadow();
-    for (const mode of ['slide', 'fade', 'flip', 'stack'] as const) {
+    for (const mode of ['slide', 'fade', 'curl', 'stack'] as const) {
       animatePageTurn(element, 1, mode, shadow, { spread: true });
     }
     expect(animate).not.toHaveBeenCalled();
@@ -684,7 +684,7 @@ describe('animatePageTurn', () => {
   });
 
   it('tolerates a page that is not mounted', () => {
-    expect(() => animatePageTurn(null, 1, 'flip')).not.toThrow();
+    expect(() => animatePageTurn(null, 1, 'curl')).not.toThrow();
   });
 });
 

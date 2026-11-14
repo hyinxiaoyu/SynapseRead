@@ -3,7 +3,7 @@ import type { CSSProperties, RefObject } from 'react';
 import { cn } from '@/lib/utils';
 
 /**
- * The shading a `flip` lays over the page. It is a sibling of the animated page,
+ * The shading a `curl` lays over the page. It is a sibling of the animated page,
  * never a child: the EPUB host's children belong to epubjs, and the PDF text and
  * annotation layers must never be transformed. `animatePageTurn` only moves these
  * layers' opacity and scale, so they can never affect hit-testing or selection
