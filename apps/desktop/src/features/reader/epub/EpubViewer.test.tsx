@@ -76,6 +76,15 @@ const engine = vi.hoisted(() => ({
   measure: null as ((index: number) => Promise<{ characters: number; cjk: number } | null>) | null,
   next: vi.fn(async () => undefined),
   previous: vi.fn(async () => undefined),
+  /** A page turn, recorded as the `next`/`previous` the rest of the suite watches. */
+  turnPage: vi.fn(async (direction: 1 | -1) => {
+    if (direction > 0) await engine.next();
+    else await engine.previous();
+  }),
+  /** Whether the chapter has another page that way; the fixture chapter does. */
+  inPlace: true,
+  scrubs: [] as number[],
+  scrubEnds: [] as (1 | -1 | null)[],
   setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
   setPreferences: vi.fn(),
   setColumns: vi.fn<(columns: 1 | 2) => void>(),
@@ -128,6 +137,20 @@ vi.mock('./epubEngine', () => ({
     },
     next: engine.next,
     previous: engine.previous,
+    turnPage: engine.turnPage,
+    canTurnInPlace: () => engine.inPlace,
+    beginScrub: () => {
+      engine.scrubs.length = 0;
+    },
+    scrubTo: (displacement: number) => {
+      engine.scrubs.push(displacement);
+    },
+    endScrub: async (committed: 1 | -1 | null) => {
+      engine.scrubEnds.push(committed);
+      if (committed === null) return;
+      if (committed > 0) await engine.next();
+      else await engine.previous();
+    },
     setReadingMode: engine.setReadingMode,
     setPreferences: engine.setPreferences,
     setColumns: engine.setColumns,
@@ -1062,7 +1085,7 @@ describe('EpubViewer', () => {
     act(() => engine.emitGesture({ kind: 'move', x: 1080, y: 300, overContent: true }));
     expect(engine.cursor).toBe('');
 
-    // One swipe turns one page, however many events its momentum sends.
+    // A swipe scrubs the strip live, and turns one page when the fingers lift.
     let used = false;
     act(() => {
       for (let event = 0; event < 8; event += 1) {
@@ -1070,6 +1093,8 @@ describe('EpubViewer', () => {
       }
     });
     expect(used).toBe(true);
+    expect(engine.scrubs.at(-1)).toBe(240);
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1]));
     expect(engine.next).toHaveBeenCalledTimes(2);
     expect(engine.emitWheel({ deltaX: 0, deltaY: 40, ctrlKey: false })).toBe(false);
 

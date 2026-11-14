@@ -528,8 +528,10 @@ pub enum PageTransition {
     #[default]
     Slide,
     Fade,
-    /// The incoming page swings in around its leading edge.
-    Flip,
+    /// The incoming page curls in around its leading edge, or around the spine of
+    /// a two-page spread. Renamed from `flip`; stored rows still carry that name.
+    #[serde(alias = "flip")]
+    Curl,
     /// The incoming page rises from slightly behind the one it replaces.
     Stack,
 }
@@ -824,7 +826,7 @@ mod tests {
             (PageTransition::None, "none"),
             (PageTransition::Slide, "slide"),
             (PageTransition::Fade, "fade"),
-            (PageTransition::Flip, "flip"),
+            (PageTransition::Curl, "curl"),
             (PageTransition::Stack, "stack"),
         ] {
             assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(wire));
@@ -833,6 +835,18 @@ mod tests {
                 mode
             );
         }
+
+        // `flip` is the name this mode had before it became `curl`. A stored row
+        // written by an older build still carries it, and must keep loading.
+        assert_eq!(
+            serde_json::from_value::<PageTransition>(serde_json::json!("flip")).unwrap(),
+            PageTransition::Curl
+        );
+        // What this build writes is the new name, so a rewrite is a no-op.
+        assert_eq!(
+            serde_json::to_value(PageTransition::Curl).unwrap(),
+            serde_json::json!("curl")
+        );
 
         // The wire enum is what `save_reading_preferences` takes, so it stays
         // strict: a mode this build does not know is a rejected argument, not a
@@ -847,7 +861,7 @@ mod tests {
             "justify": false,
             "dimImages": true,
             "epubReadingMode": "paged",
-            "pageTransition": "curl",
+            "pageTransition": "peel",
         });
         assert!(serde_json::from_value::<ReadingPreferences>(sent).is_err());
     }

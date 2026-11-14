@@ -82,7 +82,7 @@ for task IDs, acceptance evidence, and measurements.
       popover and Markup bar, and WCAG AA chrome contrast/hit-target compliance.
 - [x] Post-R12 reader UX refinement and parity pass (`#35`, `#37`–`#40`, `#43`–`#52`,
       `#64`, `#75`; SQLite migrations through `0010`): persistent page-width modes
-      (`Standard`/`Wide`/`Full`), `flip` and `stack` page-turn animations and anchored
+      (`Standard`/`Wide`/`Full`), `curl` and `stack` page-turn animations and anchored
       chrome disclosures, inactive EPUB tab isolation, debounced Find with diacritic and
       soft-hyphen folding, all-match tinting, and scrubber marks, Dark/Sepia PDF page
       tinting and EPUB author-ink contrast guard, distraction-free focus mode with
@@ -94,6 +94,18 @@ for task IDs, acceptance evidence, and measurements.
       minutes with Recent percentages (`0010`), streaming TXT chapter detection and
       unified `Go To` (`⌥⌘G`), centered toolbar title, and native macOS `WKWebView`
       acceptance (`macOS 15.6.1`, `Apple M4`, `AppleWebKit/605.1.15`).
+- [x] Books-style continuous page turns (`#86`): a trackpad swipe scrubs the page 1:1
+      with the fingers, rubber-bands at the ends of the document, and absorbs a mac's
+      inertial tail instead of locking out rapid flicks; EPUB slides its own column
+      strip across a whole page and holds the outgoing chapter across a spine seam;
+      PDF `single`/`two-page` keep a three-slot stage of already-rasterized spreads;
+      `curl` is a stationary dual-page conical paper-curl peel with live 1:1
+      horizontal trackpad scrubbing: the outgoing surface stays pinned at `(0, 0)`
+      while an angled, lower-corner-leading crease `clip-path` sweeps over the
+      stationary incoming page, paired with four coordinated CSS overlay layers
+      (`leaf` conical backside + rim + specular highlight + subtle bleed,
+      `cast-shadow`, `under-shadow`, and a two-page `spine` valley);
+      and TXT slides along its vertical reading axis.
 
 ## M3: Card operations (after reader experience)
 

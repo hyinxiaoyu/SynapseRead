@@ -634,8 +634,12 @@ export async function pdfFlow(page) {
     `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-mode-single"]').click()`,
   );
   await page.waitFor(
-    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'single' && document.querySelectorAll('[data-page-index]').length === 1`,
-    'PDF single-page display mode',
+    `(() => {
+      const pages = [...document.querySelectorAll('[data-page-index]')].map((p) => p.dataset.pageIndex);
+      return document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'single'
+        && pages.includes('0') && pages.includes('1');
+    })()`,
+    'PDF single-page display mode, with the next page already staged',
   );
   // Page turns in single-page mode: edge clicks, Space, and Page Up, as in Preview.
   const pageField = `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value`;
@@ -748,13 +752,14 @@ export async function pdfLayoutFlow(page) {
         && data.rotation === '${rotation}'
         && ${cover === undefined ? 'true' : `data.coverPageAlone === '${cover}'`};
     })()`;
-  /** Where pages sit on screen: the same top means the same spread. */
-  const pageTops = `(() => {
-    const tops = {};
+  /** Where pages sit on screen: one spread shares a top, and its pages rise in left. */
+  const pageBoxes = `(() => {
+    const boxes = {};
     for (const element of ${viewer}.querySelectorAll('[data-page-index]')) {
-      tops[element.dataset.pageIndex] = Math.round(element.getBoundingClientRect().top);
+      const r = element.getBoundingClientRect();
+      boxes[element.dataset.pageIndex] = { top: Math.round(r.top), left: Math.round(r.left) };
     }
-    return tops;
+    return boxes;
   })()`;
 
   await page.hideSidebar();
@@ -762,20 +767,24 @@ export async function pdfLayoutFlow(page) {
   await page.evaluate(`${control('pdf-mode-two-page')}.click()`);
   await page.waitFor(`${viewer}?.dataset.coverPageAlone === 'false'`, 'two pages, cover paired');
   await page.waitFor(
-    `(() => { const t = ${pageTops}; return t[0] !== undefined && t[0] === t[1]; })()`,
+    `(() => {
+      const b = ${pageBoxes};
+      return b[0] !== undefined && b[1] !== undefined && b[0].top === b[1].top
+        && b[0].left < b[1].left;
+    })()`,
     'pages 1 and 2 to face each other',
   );
   await page.evaluate(`${control('pdf-cover-page-alone')}.click()`);
   await page.waitFor(`${viewer}?.dataset.coverPageAlone === 'true'`, 'the cover page alone');
-  const tops = await page.waitFor(
+  const boxes = await page.waitFor(
     `(() => {
-      const t = ${pageTops};
-      return t[0] !== undefined && t[1] !== undefined && t[2] !== undefined && t[1] === t[2]
-        && t[0] < t[1] ? t : null;
+      const b = ${pageBoxes};
+      return b[0] !== undefined && b[1] !== undefined && b[2] !== undefined
+        && b[1].top === b[2].top && b[1].left < b[2].left && b[0].left < b[1].left ? b : null;
     })()`,
     'page 1 alone, then pages 2 and 3 side by side',
   );
-  assert(tops[0] < tops[1], 'the cover sits above the first spread');
+  assert(boxes[0].left < boxes[1].left, 'the cover sits before the first spread');
   await page.evaluate(`${control('pdf-rotate-button')}.click()`);
   await page.clickButton('Fit page');
   const chosen = { displayMode: 'two-page', zoomMode: 'fit-page', rotation: 90, cover: true };
@@ -1026,6 +1035,12 @@ export async function pdfZoomFlow(page) {
   await page.waitFor(`${viewer}?.dataset.displayMode === 'two-page'`, 'two pages');
   await page.evaluate(`${control('pdf-cover-page-alone')}.click()`);
   await page.waitFor(`${viewer}?.dataset.coverPageAlone === 'true'`, 'the cover page alone');
+  // A paged mode shows one spread, so turn to the 2-3 spread before pinching over it.
+  await page.clickButton('Next Page');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value === '2'`,
+    'the 2-3 spread to come up',
+  );
   const overSpread = await page.waitFor(
     `(() => {
       const second = ${viewer}.querySelector('[data-page-index="1"]');
@@ -1033,10 +1048,9 @@ export async function pdfZoomFlow(page) {
       if (!second || !third) return null;
       const a = second.getBoundingClientRect();
       const b = third.getBoundingClientRect();
-      if (Math.round(a.top) !== Math.round(b.top)) return null;
-      second.scrollIntoView({ block: 'start' });
-      const r = second.getBoundingClientRect();
-      return { x: r.left + r.width * 0.3, y: r.top + Math.min(r.height * 0.3, 200) };
+      const pane = ${visibleScroller}.getBoundingClientRect();
+      if (Math.round(a.top) !== Math.round(b.top) || a.left < pane.left) return null;
+      return { x: a.left + a.width * 0.3, y: a.top + Math.min(a.height * 0.3, 200) };
     })()`,
     'pages 2 and 3 side by side',
   );

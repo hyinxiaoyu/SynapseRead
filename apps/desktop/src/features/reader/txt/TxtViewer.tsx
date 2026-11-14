@@ -54,13 +54,21 @@ import {
 import {
   DEFAULT_SERIF_STACK,
   fontStack,
-  PAGE_PALETTES,
   pageFooterStyle,
   pageSurfaceStyle,
+  PAPER_CURL_PALETTES,
 } from '@/features/reader/appearance/themes';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
   animatePageTurn,
+  animatePaperCurl,
+  applyPaperCurl,
+  PAGE_CURL_MS,
+  PAGE_SLIDE_MS,
+  PAGE_SPRING_BACK_MS,
+  prefersReducedMotion,
+  resetPaperCurl,
+  slideScroll,
   type TurnDirection,
   usePageTurnGestures,
   zoneCursor,
@@ -301,7 +309,15 @@ export function TxtViewer({
     pinnedRow.current = null;
   };
   const pageRef = useRef<HTMLDivElement>(null);
+  const curlHostRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
+  const cancelCurlRef = useRef<(() => void) | null>(null);
+  const curlScrubRef = useRef<{
+    active: boolean;
+    direction: TurnDirection | null;
+    progress: number;
+    captured: boolean;
+  }>({ active: false, direction: null, progress: 0, captured: false });
   const [annotationPulsingId, setAnnotationPulsingId] = useState<string | null>(null);
   const annotationPulseTimerRef = useRef<number | null>(null);
 
@@ -495,6 +511,7 @@ export function TxtViewer({
    * at the clamped end of the file) fires no scroll event, so read the position here.
    */
   const scrollUnpinned = (move: () => void) => {
+    cancelSlide();
     pinnedRow.current = null;
     const scroller = scrollRef.current;
     const before = scroller?.scrollTop;
@@ -828,22 +845,254 @@ export function TxtViewer({
     }
   }
 
-  const pageBy = (direction: 1 | -1) => {
+  /**
+   * The slide in flight, if any. A jump the reader asked for — Home, End, Back, a
+   * chapter — must not be overwritten by the next frame of a turn they started
+   * before it, so every other move cancels it first.
+   */
+  const slideAbort = useRef<AbortController | null>(null);
+  const cancelSlide = () => {
+    slideAbort.current?.abort();
+    slideAbort.current = null;
+  };
+  const slideBy = (top: number) => {
     const scroller = scrollRef.current;
     if (!scroller) return;
-    scroller.scrollBy({ top: direction * scroller.clientHeight * 0.9 });
+    cancelSlide();
+    const controller = new AbortController();
+    slideAbort.current = controller;
+    void slideScroll(scroller, { top }, PAGE_SLIDE_MS, controller.signal);
+  };
+  useEffect(() => cancelSlide, []);
+
+  const clearTxtCurlDom = useCallback(() => {
+    const host = curlHostRef.current;
+    if (host) {
+      host.style.visibility = 'hidden';
+      host.style.left = '';
+      host.style.width = '';
+      host.style.transform = '';
+      host.style.translate = '';
+      host.replaceChildren();
+    }
+    const shadow = turnShadowRef.current;
+    if (shadow) {
+      shadow.style.left = '';
+      shadow.style.width = '';
+      shadow.style.transform = '';
+      shadow.style.translate = '';
+    }
+  }, []);
+
+  const clearTxtCurl = useCallback(() => {
+    cancelCurlRef.current?.();
+    cancelCurlRef.current = null;
+    curlScrubRef.current = { active: false, direction: null, progress: 0, captured: false };
+    resetPaperCurl(curlHostRef.current, turnShadowRef.current);
+    clearTxtCurlDom();
+  }, [clearTxtCurlDom]);
+
+  useEffect(() => () => clearTxtCurl(), [clearTxtCurl]);
+
+  const captureTxtOutgoing = (): boolean => {
+    const scroller = scrollRef.current;
+    const column = pageRef.current;
+    const host = curlHostRef.current;
+    const shadow = turnShadowRef.current;
+    if (!scroller || !column || !host) return false;
+
+    const hostParent = host.parentElement;
+    const columnRect = column.getBoundingClientRect();
+    const parentRect = hostParent?.getBoundingClientRect();
+    const useMeasuredBox = columnRect.width > 0 && parentRect && parentRect.width > 0;
+    const boxLeft = useMeasuredBox ? columnRect.left - parentRect.left : column.offsetLeft;
+    const boxWidth = useMeasuredBox ? columnRect.width : column.offsetWidth;
+    if (boxWidth > 0) {
+      for (const layer of shadow ? [host, shadow] : [host]) {
+        layer.style.left = `${boxLeft}px`;
+        layer.style.width = `${boxWidth}px`;
+        layer.style.transform = 'none';
+        // Tailwind v4 `-translate-x-1/2` uses the standalone CSS `translate` property,
+        // which `transform: none` does not cancel.
+        layer.style.translate = 'none';
+      }
+    }
+
+    const clone = column.cloneNode(true) as HTMLElement;
+    clone.removeAttribute('role');
+    clone.removeAttribute('aria-label');
+    clone.removeAttribute('id');
+    // Strip virtualizer, annotation, and unit markers so inert curl snapshots
+    // never collide with selection, highlights, or ADR 0002 byte-offset indexing.
+    for (const candidate of [clone, ...clone.querySelectorAll('*')]) {
+      candidate.removeAttribute('data-index');
+      candidate.removeAttribute('data-annotation-id');
+      candidate.removeAttribute('data-unit');
+      candidate.removeAttribute('id');
+      candidate.classList.remove('anchor-pulse');
+    }
+    clone.style.position = 'absolute';
+    clone.style.left = '0px';
+    clone.style.right = '0px';
+    clone.style.top = `${-scroller.scrollTop}px`;
+    clone.style.height = '0px';
+    clone.style.overflow = 'visible';
+
+    host.replaceChildren(clone);
+    host.style.visibility = 'visible';
+    return true;
+  };
+
+  /** One screen of rows, the step every page turn has always used. */
+  const pageStep = (direction: TurnDirection) => {
+    const scroller = scrollRef.current;
+    return scroller ? direction * scroller.clientHeight * 0.9 : 0;
   };
 
   const turnPage = (direction: TurnDirection) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
     unpin();
     backChip.dismiss();
-    pageBy(direction);
-    animatePageTurn(
-      pageRef.current,
-      direction,
-      effectivePreferences.pageTransition,
-      turnShadowRef.current,
-    );
+    const transition = effectivePreferences.pageTransition;
+    if (transition === 'slide') {
+      // A text file reads down the page, so its page turn travels down the page.
+      // The old horizontal nudge fought the vertical scroll and read as a twitch.
+      clearTxtCurl();
+      slideBy(pageStep(direction));
+      return;
+    }
+    cancelSlide();
+    clearTxtCurl();
+    if (transition === 'curl') {
+      if (prefersReducedMotion()) {
+        scroller.scrollBy({ top: pageStep(direction) });
+        return;
+      }
+      const captured = captureTxtOutgoing();
+      scroller.scrollBy({ top: pageStep(direction) });
+      cancelCurlRef.current = animatePaperCurl({
+        outgoing: captured ? curlHostRef.current : null,
+        shadow: turnShadowRef.current,
+        direction,
+        duration: PAGE_CURL_MS,
+        onFinish: () => {
+          cancelCurlRef.current = null;
+          clearTxtCurlDom();
+        },
+      });
+      return;
+    }
+    scroller.scrollBy({ top: pageStep(direction) });
+    if (transition !== 'none') {
+      animatePageTurn(pageRef.current, direction, transition, turnShadowRef.current);
+    }
+  };
+
+  // ---- A two-finger swipe scrubs the page it is on ----
+
+  /** Where the rows sat when the fingers landed; a cancelled swipe returns here. */
+  const scrubBase = useRef(0);
+  const canTurn = (direction: TurnDirection) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return false;
+    return direction > 0
+      ? scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1
+      : scroller.scrollTop > 1;
+  };
+  const scrubTo = (top: number) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    scroller.scrollTop = Math.max(0, Math.min(top, scroller.scrollHeight - scroller.clientHeight));
+  };
+  const scrub = {
+    start: () => {
+      const scroller = scrollRef.current;
+      if (!scroller) return;
+      unpin();
+      // A scrub starts from a whole page, never from half of a slide or curl.
+      cancelSlide();
+      clearTxtCurl();
+      scrubBase.current = scroller.scrollTop;
+      if (effectivePreferences.pageTransition === 'curl' && !prefersReducedMotion()) {
+        curlScrubRef.current = { active: true, direction: null, progress: 0, captured: false };
+      }
+    },
+    move: (displacement: number) => {
+      const state = curlScrubRef.current;
+      if (!state.active) {
+        scrubTo(scrubBase.current + displacement);
+        return;
+      }
+      const scroller = scrollRef.current;
+      if (!scroller || displacement === 0) return;
+      const dir: TurnDirection = displacement < 0 ? -1 : 1;
+      if (!state.captured) {
+        scrubTo(scrubBase.current);
+        state.captured = captureTxtOutgoing();
+      }
+      if (state.direction !== dir) {
+        scrubTo(scrubBase.current);
+        if (canTurn(dir)) scrubTo(scrubBase.current + pageStep(dir));
+        state.direction = dir;
+      }
+      const width = Math.max(pageRef.current?.clientWidth ?? 0, scroller.clientWidth, 1);
+      const progress = Math.min(Math.max(Math.abs(displacement) / width, 0.005), 0.995);
+      state.progress = progress;
+      applyPaperCurl(
+        state.captured ? curlHostRef.current : null,
+        turnShadowRef.current,
+        progress,
+        dir,
+      );
+    },
+    end: (_velocity: number, committed: TurnDirection | null) => {
+      const scroller = scrollRef.current;
+      const state = curlScrubRef.current;
+      if (state.active) {
+        curlScrubRef.current = { active: false, direction: null, progress: 0, captured: false };
+        if (!scroller || state.direction === null) {
+          clearTxtCurl();
+          return;
+        }
+        scrubTo(scrubBase.current);
+        const canCommit = committed !== null && committed === state.direction && canTurn(committed);
+        if (!canCommit) {
+          cancelCurlRef.current = animatePaperCurl({
+            outgoing: state.captured ? curlHostRef.current : null,
+            shadow: turnShadowRef.current,
+            direction: state.direction,
+            from: state.progress,
+            to: 0,
+            duration: PAGE_SPRING_BACK_MS,
+            onFinish: () => {
+              cancelCurlRef.current = null;
+              clearTxtCurlDom();
+            },
+          });
+          return;
+        }
+        scrubTo(scrubBase.current + pageStep(committed));
+        cancelCurlRef.current = animatePaperCurl({
+          outgoing: state.captured ? curlHostRef.current : null,
+          shadow: turnShadowRef.current,
+          direction: committed,
+          from: state.progress,
+          to: 1,
+          duration: Math.max(120, Math.round((1 - state.progress) * PAGE_CURL_MS)),
+          onFinish: () => {
+            cancelCurlRef.current = null;
+            clearTxtCurlDom();
+          },
+        });
+        return;
+      }
+      if (!scroller) return;
+      const target =
+        committed === null ? scrubBase.current : scrubBase.current + pageStep(committed);
+      // Spring back, or finish the turn the fingers started, along the same axis.
+      slideBy(target - scroller.scrollTop);
+    },
   };
 
   const scrollToEdge = (edge: 'start' | 'end') => {
@@ -851,6 +1100,8 @@ export function TxtViewer({
     if (!scroller) return;
     unpin();
     backChip.dismiss();
+    cancelSlide();
+    clearTxtCurl();
     scroller.scrollTo({ top: edge === 'start' ? 0 : scroller.scrollHeight });
   };
 
@@ -906,6 +1157,8 @@ export function TxtViewer({
     }
     unpin();
     backChip.dismiss();
+    cancelSlide();
+    clearTxtCurl();
     const last = Math.max(next - 1, chapterStarts[chapterIndex] ?? 0);
     virtualizer.scrollToIndex(last, { align: 'end' });
   };
@@ -926,6 +1179,8 @@ export function TxtViewer({
     return model.rowAtUnit(model.unitAtSourceOffset(byte, 'down') ?? 0);
   };
   function showRow(row: number) {
+    cancelSlide();
+    clearTxtCurl();
     pinnedRow.current = row;
     setCurrentRow(row);
     setAtEnd(false);
@@ -993,6 +1248,10 @@ export function TxtViewer({
       const scroller = scrollRef.current;
       return !scroller || scroller.scrollWidth <= scroller.clientWidth + 1;
     },
+    canTurn,
+    onScrubStart: scrub.start,
+    onScrubMove: scrub.move,
+    onScrubEnd: scrub.end,
   });
 
   useReaderCommands({
@@ -1218,9 +1477,20 @@ export function TxtViewer({
             )}
           </ReaderPopoverLayer>
           <div className="group/page relative flex min-h-0 flex-1 flex-col">
+            <div
+              ref={curlHostRef}
+              inert
+              aria-hidden="true"
+              data-testid="txt-curl-host"
+              className="pointer-events-none invisible absolute inset-y-0 left-1/2 z-10 w-full -translate-x-1/2 overflow-hidden"
+              style={{
+                ...pageSurfaceStyle(theme),
+                maxWidth: Number.isFinite(page.maxWidth) ? page.maxWidth : '100%',
+              }}
+            />
             <PageTurnShadow
               shadowRef={turnShadowRef}
-              color={PAGE_PALETTES[theme].spine}
+              palette={PAPER_CURL_PALETTES[theme]}
               className="inset-y-0 left-1/2 w-full -translate-x-1/2"
               style={{ maxWidth: Number.isFinite(page.maxWidth) ? page.maxWidth : '100%' }}
             />

@@ -254,13 +254,13 @@ describe('AppearanceMenu', () => {
       'None',
       'Slide',
       'Fade',
-      'Flip',
+      'Curl',
       'Stack',
     ]);
     expect(turns.getByRole('radio', { name: 'Slide' })).toHaveAttribute('aria-checked', 'true');
 
-    fireEvent.click(turns.getByRole('radio', { name: 'Flip' }));
-    expect(current().pageTransition).toBe('flip');
+    fireEvent.click(turns.getByRole('radio', { name: 'Curl' }));
+    expect(current().pageTransition).toBe('curl');
     fireEvent.click(turns.getByRole('radio', { name: 'Stack' }));
     expect(current().pageTransition).toBe('stack');
   });

@@ -31,7 +31,7 @@ from.
   Sepia page tinting for PDFs (keeping underlying bitmaps and area captures untinted),
   automatic EPUB low-contrast ink adjustment, named reading faces, font size
   (`Cmd/Ctrl +`/`-`/`0`), line spacing, margins, justification, persistent page widths
-  (`Standard` 75 ch, `Wide` 110 ch, `Full`), `none`/`slide`/`fade`/`flip`/`stack`
+  (`Standard` 75 ch, `Wide` 110 ch, `Full`), `none`/`slide`/`fade`/`curl`/`stack`
   page-turn animations, and distraction-free focus mode with optional full-screen linkage
 - Inline `LinkPeek` footnote preview cards for EPUB `noteref`s and PDF note markers
   (rendered strictly as plain text), plus `Back to…` return chips on internal links and

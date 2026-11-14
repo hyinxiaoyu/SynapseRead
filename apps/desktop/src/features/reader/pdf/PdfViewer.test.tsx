@@ -923,9 +923,12 @@ describe('PdfViewer', () => {
     expect(readout).toHaveTextContent('Page 2 of 5');
     fireEvent.keyDown(pane, { key: 'PageUp', code: 'PageUp' });
     expect(readout).toHaveTextContent('Page 1 of 5');
+    // A swipe drags the strip live, and turns the page when the fingers lift.
     fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
     fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
-    expect(readout).toHaveTextContent('Page 2 of 5');
+    expect(screen.getByTestId('pdf-stage').style.transform).toBe('translateX(-160px)');
+    await waitFor(() => expect(readout).toHaveTextContent('Page 2 of 5'));
+    expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
     fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
     expect(readout).toHaveTextContent('Page 3 of 5');
 
@@ -1355,7 +1358,8 @@ describe('PdfViewer', () => {
     expect(screen.getByLabelText('Page number')).toHaveValue('1');
     fireEvent.change(searchInput, { target: { value: 'Fox' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
-    expect(screen.getByLabelText('Page number')).toHaveValue('5');
+    // The turn to the match is its own commit, so the page box catches up after it.
+    await waitFor(() => expect(screen.getByLabelText('Page number')).toHaveValue('5'));
   });
 
   it('cancels an in-flight PDF search on explicit cancel or tab deactivation', async () => {
@@ -1842,8 +1846,12 @@ describe('PdfViewer', () => {
     fireEvent.click(screen.getByTestId('pdf-mode-single'));
     expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'single');
     expect(pageInput).toHaveValue('3');
-    expect(document.querySelectorAll('[data-page-index]')).toHaveLength(1);
+    // The paged stage keeps the pages either side rendered, so a turn never has to
+    // wait for a canvas: three slots, and no more.
+    expect(document.querySelectorAll('[data-page-index]')).toHaveLength(3);
+    expect(document.querySelector('[data-page-index="1"]')).not.toBeNull();
     expect(document.querySelector('[data-page-index="2"]')).not.toBeNull();
+    expect(document.querySelector('[data-page-index="3"]')).not.toBeNull();
 
     fireEvent.click(screen.getByTestId('pdf-mode-two-page'));
     expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'two-page');
@@ -1891,5 +1899,74 @@ describe('PdfViewer', () => {
     view.unmount();
     expect(page0Canvas.width).toBe(0);
     expect(page0Canvas.height).toBe(0);
+  });
+
+  it('peels stationary stage slots in curl mode, tracks horizontal scrubs, and resets on settle', async () => {
+    const { store, documentId } = await setup();
+    render(
+      <Harness
+        store={store}
+        documentId={documentId}
+        preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'curl' }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId('pdf-mode-two-page'));
+    await pageElement(0);
+    const scroll = await scroller();
+    const stage = screen.getByTestId('pdf-stage');
+
+    const frames: FrameRequestCallback[] = [];
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+
+      const outgoingSlot = stage.querySelector<HTMLElement>('[data-stage-row="0"]')!;
+      const incomingSlot = stage.querySelector<HTMLElement>('[data-stage-row="1"]')!;
+      const shadow = screen.getByTestId('page-turn-shadow');
+      const leaf = shadow.querySelector<HTMLElement>('[data-curl-part="leaf"]')!;
+      const spine = shadow.querySelector<HTMLElement>('[data-curl-part="spine"]')!;
+
+      // Initial curl frame starts cleanly; mid-turn frame clips outgoing slot without rotateY.
+      clock = 40;
+      act(() => {
+        frames.shift()?.(clock);
+      });
+      expect(stage.style.transform).toBe('');
+      expect(outgoingSlot.style.zIndex).toBe('2');
+      expect(incomingSlot.style.zIndex).toBe('1');
+      expect(outgoingSlot.style.clipPath).toContain('polygon(');
+      expect(Number(leaf.style.opacity)).toBeGreaterThan(0.5);
+      expect(Number(spine.style.opacity)).toBeGreaterThan(0.2);
+
+      // Finishing the rAF loop clears clipPath, zIndex overrides, and shadow opacity.
+      clock = 500;
+      act(() => {
+        frames.shift()?.(clock);
+      });
+      expect(outgoingSlot.style.clipPath).toBe('');
+      expect(outgoingSlot.style.zIndex).toBe('');
+      expect(leaf.style.opacity).toBe('0');
+
+      // Horizontal trackpad wheel scrubs the curl 1:1 from the landed spread before release.
+      vi.spyOn(scroll, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+      act(() => {
+        fireEvent.wheel(scroll, { deltaX: -80, deltaY: 0 });
+      });
+      const scrubbingSlot = stage.querySelector<HTMLElement>('[data-stage-row="1"]')!;
+      expect(scrubbingSlot.style.clipPath).toContain('polygon(');
+      expect(Number(leaf.style.opacity)).toBeGreaterThan(0.1);
+    } finally {
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
   });
 });

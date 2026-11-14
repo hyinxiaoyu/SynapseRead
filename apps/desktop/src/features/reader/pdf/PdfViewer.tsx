@@ -77,7 +77,21 @@ import {
   ToolbarSeparator,
 } from '@/features/reader/ReaderToolbar';
 import {
+  PAPER_CURL_PALETTES,
+  PDF_UNTINTED_CURL_PALETTE,
+} from '@/features/reader/appearance/themes';
+import {
   animatePageTurn,
+  animatePaperCurl,
+  applyPaperCurl,
+  cancelPageTurn,
+  PAGE_CURL_MS,
+  PAGE_SLIDE_EASING,
+  PAGE_SLIDE_MS,
+  PAGE_SPRING_BACK_MS,
+  PAGE_TURN_ANIMATION_ID,
+  prefersReducedMotion,
+  resetPaperCurl,
   type TurnDirection,
   usePageTurnGestures,
   zoneCursor,
@@ -1051,7 +1065,21 @@ function PdfPages({
   const offerBackChip = backChip.offer;
   const markup = useMarkupToolbar();
   const pageContentRef = useRef<HTMLDivElement>(null);
+  /** The three-slot strip a paged mode slides; nothing else is transformed. */
+  const stageRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
+  const pendingCurlRef = useRef<{
+    outgoingRow: number;
+    incomingRow: number;
+    direction: TurnDirection;
+    fromProgress: number;
+    duration: number;
+  } | null>(null);
+  const cancelCurlRef = useRef<(() => void) | null>(null);
+  const curlScrubRef = useRef<{ direction: TurnDirection | null; progress: number }>({
+    direction: null,
+    progress: 0,
+  });
   // Focuses after the commit that reveals a hidden toolbar, as the other readers' box.
   const { inputRef: pageInputRef, focus: goToPage } = useGoToField();
   const pendingZoomTarget = useRef<PdfReturnLocation | null>(null);
@@ -1087,31 +1115,27 @@ function PdfPages({
     setPageInputInvalid(false);
   }, [currentPageIndex, currentPageLabel]);
 
+  /**
+   * A paged mode shows one row at a time, and keeps every row in the virtualizer so
+   * the rows either side are rendered — and, for a PDF, rasterized — before a turn
+   * needs them. Only Continuous stacks them down the pane.
+   */
+  const paged = displayMode !== 'continuous';
   const rowCount =
-    displayMode === 'single'
-      ? 1
-      : displayMode === 'two-page'
-        ? spreadCount(engine.pageCount, coverPageAlone)
-        : engine.pageCount;
+    displayMode === 'two-page' ? spreadCount(engine.pageCount, coverPageAlone) : engine.pageCount;
 
   const rowOfPage = useCallback(
-    (pageIndex: number): number => {
-      if (displayMode === 'single') return 0;
-      if (displayMode === 'two-page') return spreadOfPage(pageIndex, coverPageAlone);
-      return pageIndex;
-    },
+    (pageIndex: number): number =>
+      displayMode === 'two-page' ? spreadOfPage(pageIndex, coverPageAlone) : pageIndex,
     [coverPageAlone, displayMode],
   );
 
   const pagesInRow = useCallback(
-    (rowIndex: number): readonly number[] => {
-      if (displayMode === 'single') return [currentPageIndex];
-      if (displayMode === 'two-page') {
-        return pagesInSpread(rowIndex, engine.pageCount, coverPageAlone);
-      }
-      return [rowIndex];
-    },
-    [coverPageAlone, currentPageIndex, displayMode, engine.pageCount],
+    (rowIndex: number): readonly number[] =>
+      displayMode === 'two-page'
+        ? pagesInSpread(rowIndex, engine.pageCount, coverPageAlone)
+        : [rowIndex],
+    [coverPageAlone, displayMode, engine.pageCount],
   );
 
   const rowHeight = useCallback(
@@ -1270,13 +1294,36 @@ function PdfPages({
   // Excerpting adds a highlight, which then replaces the box.
   const visibleCapture = capture?.highlightCount === highlights.length ? capture : null;
 
+  /**
+   * Moves the pane down to `offset`. A paged mode shows one row at a time, so the
+   * only vertical travel it has is within the page itself; a continuous one asks
+   * the virtualizer, which also decides which rows are rendered.
+   */
+  const scrollToOffset = useCallback(
+    (offset: number) => {
+      if (!paged) {
+        virtualizer.scrollToOffset(offset);
+        return;
+      }
+      const scroller = scrollRef.current;
+      if (scroller) scroller.scrollTop = offset;
+    },
+    [paged, virtualizer],
+  );
+
+  /**
+   * How far down the pane a point on a page sits. A paged mode's row is always at
+   * the top, so only the fraction within the page moves; a continuous one adds the
+   * row's own offset.
+   */
   const offsetWithin = useCallback(
     (pageIndex: number, fraction: number) => {
+      if (paged) return fraction * pageHeight(pageIndex);
       const rowIndex = rowOfPage(pageIndex);
       const [start] = virtualizer.getOffsetForIndex(rowIndex, 'start') ?? [0];
       return start + fraction * pageHeight(pageIndex);
     },
-    [virtualizer, pageHeight, rowOfPage],
+    [virtualizer, pageHeight, paged, rowOfPage],
   );
 
   const lastScrollTop = useRef(0);
@@ -1291,7 +1338,7 @@ function PdfPages({
   const scrollToPageOffset = useCallback(
     (pageIndex: number, offset: number) => {
       setCurrentPageIndex(pageIndex);
-      virtualizer.scrollToOffset(offset);
+      scrollToOffset(offset);
       const actualScrollTop = scrollRef.current?.scrollTop ?? offset;
       lastScrollTop.current = actualScrollTop;
       programmaticScrollRef.current = { pageIndex, scrollTop: actualScrollTop };
@@ -1299,7 +1346,7 @@ function PdfPages({
       const fraction = height > 0 ? (offset - offsetWithin(pageIndex, 0)) / height : 0;
       layoutAnchor.current = { pageIndex, fraction: Math.min(Math.max(fraction, 0), 0.99) };
     },
-    [offsetWithin, pageHeight, virtualizer],
+    [offsetWithin, pageHeight, scrollToOffset],
   );
   /**
    * The page and fraction at the top of the view when it is scrolled to `scrollTop`,
@@ -1307,7 +1354,7 @@ function PdfPages({
    */
   const locationAt = useCallback(
     (scrollTop: number, pageIndex: number): PdfReturnLocation => {
-      if (displayMode === 'single') {
+      if (paged) {
         const height = pageHeight(pageIndex);
         const fraction = height > 0 ? Math.min(Math.max(scrollTop / height, 0), 0.99) : 0;
         return { pageIndex, fraction };
@@ -1321,7 +1368,7 @@ function PdfPages({
         height > 0 ? Math.min(Math.max((scrollTop - item.start) / height, 0), 0.99) : 0;
       return { pageIndex: topPage, fraction };
     },
-    [virtualizer, pageHeight, displayMode, pagesInRow],
+    [virtualizer, pageHeight, paged, pagesInRow],
   );
   const currentReturnLocation = useCallback((): PdfReturnLocation => {
     if (
@@ -1397,15 +1444,15 @@ function PdfPages({
       // The point now under the pointer, in the content as it is laid out before release.
       const seen = { x: scroller.scrollLeft + pointer.x, y: scroller.scrollTop + pointer.y };
       const point = unscalePoint(seen, origin, ratio);
-      const item =
-        displayMode === 'single'
-          ? virtualizer.getVirtualItems()[0]
-          : (virtualizer.getVirtualItemForOffset(point.y) ??
-            virtualizer.getVirtualItems().find((row) => row.index === rowOfPage(currentPageIndex)));
-      const pages = item ? pagesInRow(item.index) : [currentPageIndex];
+      const item = paged
+        ? null
+        : (virtualizer.getVirtualItemForOffset(point.y) ??
+          virtualizer.getVirtualItems().find((row) => row.index === rowOfPage(currentPageIndex)));
+      const rowIndex = item ? item.index : rowOfPage(currentPageIndex);
+      const pages = pagesInRow(rowIndex);
       const { slot, fraction: fractionX } = locateInRow(
         point.x,
-        item ? rowLeft(item.index) : SIDE_PADDING_PX,
+        rowLeft(rowIndex),
         pages.map((p) => pageWidth(p)),
         PAGE_GAP_PX,
       );
@@ -1426,9 +1473,9 @@ function PdfPages({
       currentPageIndex,
       currentScale,
       customScale,
-      displayMode,
       pageHeight,
       pageWidth,
+      paged,
       pagesInRow,
       rowLeft,
       rowOfPage,
@@ -1511,7 +1558,7 @@ function PdfPages({
         y: offsetWithin(anchor.pageIndex, anchor.fractionY),
       };
       const next = anchoredScroll(content, anchor.pointer);
-      virtualizer.scrollToOffset(next.top);
+      scrollToOffset(next.top);
       const scroller = scrollRef.current;
       if (scroller) scroller.scrollLeft = next.left;
       // Zooming out near the end asks for more than the browser can scroll, and its
@@ -1534,7 +1581,7 @@ function PdfPages({
       const nextTop = offsetWithin(target.pageIndex, target.fraction);
       lastScrollTop.current = nextTop;
       setCurrentPageIndex(target.pageIndex);
-      virtualizer.scrollToOffset(nextTop);
+      scrollToOffset(nextTop);
     }
   }, [
     virtualizer,
@@ -1547,6 +1594,7 @@ function PdfPages({
     coverPageAlone,
     rotation,
     offsetWithin,
+    scrollToOffset,
     clearPinchPreview,
     scheduleCursorReport,
   ]);
@@ -1561,10 +1609,10 @@ function PdfPages({
     if (sizes.length <= pageIndex) return;
     setCurrentPageIndex(pageIndex);
     const nextTop = offsetWithin(pageIndex, initialCursor.rects[0]?.y ?? 0);
-    virtualizer.scrollToOffset(nextTop);
+    scrollToOffset(nextTop);
     lastScrollTop.current = scrollRef.current?.scrollTop ?? nextTop;
     restored.current = true;
-  }, [engine, initialCursor, offsetWithin, sizes, virtualizer, width]);
+  }, [engine, initialCursor, offsetWithin, scrollToOffset, sizes, width]);
 
   // ---- Reporting the reading position --------------------------------------
 
@@ -1726,7 +1774,7 @@ function PdfPages({
       }
     } else {
       programmaticScrollRef.current = null;
-      if (displayMode !== 'single') {
+      if (!paged) {
         const item = virtualizer.getVirtualItemForOffset(nextScrollTop);
         if (item) {
           const pages = pagesInRow(item.index);
@@ -2015,7 +2063,7 @@ function PdfPages({
     }
     setCurrentPageIndex(jumpAnchor.pageIndex);
     const top = offsetWithin(jumpAnchor.pageIndex, jumpAnchor.rects[0]?.y ?? 0);
-    virtualizer.scrollToOffset(Math.max(top - (viewportHeight ?? 0) / 3, 0));
+    scrollToOffset(Math.max(top - (viewportHeight ?? 0) / 3, 0));
     // Only a new jump, or the layout it depends on, should move the page.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jumpNonce, jumpReady, contentWidth]);
@@ -2036,31 +2084,354 @@ function PdfPages({
 
   // ---- Commands -----------------------------------------------------------
 
-  const stepPage = (direction: 1 | -1) => {
-    let target: number | undefined;
-    if (displayMode === 'single') {
-      target = currentPageIndex + direction;
-    } else {
-      // Two pages turn a whole spread, which may hold one page (the cover) or two.
-      const row = virtualizer.getVirtualItemForOffset(lastScrollTop.current)?.index ?? 0;
-      target = pagesInRow(row + direction)[0];
-    }
-    if (target === undefined || target < 0 || target >= engine.pageCount) return false;
-    scrollToPageOffset(target, offsetWithin(target, 0));
-    return true;
+  /** The page a turn would land on, or null at either end of the document. */
+  const turnTarget = (direction: TurnDirection): number | null => {
+    const row = rowOfPage(currentPageIndex) + direction;
+    if (row < 0 || row >= rowCount) return null;
+    return pagesInRow(row)[0] ?? null;
   };
 
-  const paged = displayMode !== 'continuous';
+  /**
+   * Slides the three-slot strip to `to` and then commits the page it lands on. The
+   * stage is rebuilt around the new row, so nothing stays transformed and selection
+   * geometry is exact again as soon as the motion ends.
+   */
+  const settleStage = (to: number, duration: number, done?: () => void) => {
+    const stage = stageRef.current;
+    if (!stage) {
+      if (done) done();
+      return;
+    }
+    const from = stage.style.transform || 'translateX(0px)';
+    const target = `translateX(${to}px)`;
+    // The inline style is the animation's own end state, so the strip does not snap
+    // back to where it started when the animation finishes. The layout effect below
+    // clears it once the new row is the one rendered, in the same frame.
+    stage.style.transform = target;
+    const finish = () => {
+      // A cancelled scrub ends where it began, which is no transform at all.
+      if (to === 0) stage.style.transform = '';
+      if (done) done();
+    };
+    if (typeof stage.animate !== 'function' || prefersReducedMotion() || duration <= 0) {
+      finish();
+      return;
+    }
+    cancelPageTurn(stage);
+    const animation = stage.animate([{ transform: from }, { transform: target }], {
+      duration,
+      easing: PAGE_SLIDE_EASING,
+    });
+    animation.id = PAGE_TURN_ANIMATION_ID;
+    void animation.finished.then(finish).catch(() => undefined);
+  };
+
+  const curlBoxFor = useCallback(
+    (firstRow: number, secondRow: number) => {
+      const firstValid = firstRow >= 0 && firstRow < rowCount;
+      const secondValid = secondRow >= 0 && secondRow < rowCount;
+      const w = Math.max(
+        firstValid ? rowWidth(firstRow) : 0,
+        secondValid ? rowWidth(secondRow) : 0,
+        1,
+      );
+      const h = Math.max(
+        firstValid ? rowHeight(firstRow) : 0,
+        secondValid ? rowHeight(secondRow) : 0,
+        1,
+      );
+      const left = SIDE_PADDING_PX + Math.max(0, (contentWidth - w) / 2);
+      return { left, width: w, height: h };
+    },
+    [contentWidth, rowCount, rowHeight, rowWidth],
+  );
+
+  const restoreStageSlots = (stage: HTMLElement) => {
+    for (const slot of stage.querySelectorAll<HTMLElement>('[data-stage-row]')) {
+      if (slot.dataset.stageLeft !== undefined) slot.style.left = `${slot.dataset.stageLeft}px`;
+      if (slot.dataset.stageWidth !== undefined) slot.style.width = `${slot.dataset.stageWidth}px`;
+      if (slot.dataset.stageHeight !== undefined)
+        slot.style.height = `${slot.dataset.stageHeight}px`;
+      slot.style.paddingLeft = '';
+      slot.style.justifyContent = '';
+      slot.style.backgroundColor = '';
+      slot.style.zIndex = '';
+      slot.style.clipPath = '';
+    }
+  };
+
+  const placeCurlSlots = (
+    stage: HTMLElement,
+    shadow: HTMLElement | null,
+    outgoingRow: number,
+    incomingRow: number,
+    box: { left: number; width: number; height: number },
+    rowsTotal: number,
+    slotContentWidth: number,
+  ) => {
+    const outgoingSlot = stage.querySelector<HTMLElement>(`[data-stage-row="${outgoingRow}"]`);
+    const incomingSlot =
+      incomingRow >= 0 && incomingRow < rowsTotal
+        ? stage.querySelector<HTMLElement>(`[data-stage-row="${incomingRow}"]`)
+        : null;
+    if (outgoingSlot) {
+      const outgoingWidth = Number(outgoingSlot.dataset.stageWidth ?? 0);
+      const outgoingNaturalLeft =
+        SIDE_PADDING_PX + Math.max(0, (slotContentWidth - outgoingWidth) / 2);
+      outgoingSlot.style.left = `${box.left}px`;
+      outgoingSlot.style.width = `${box.width}px`;
+      outgoingSlot.style.height = `${box.height}px`;
+      outgoingSlot.style.paddingLeft = `${Math.max(0, outgoingNaturalLeft - box.left)}px`;
+      outgoingSlot.style.justifyContent = '';
+      outgoingSlot.style.backgroundColor = outgoingWidth < box.width ? 'var(--muted)' : '';
+      outgoingSlot.style.zIndex = '2';
+    }
+    if (incomingSlot) {
+      const incomingWidth = Number(incomingSlot.dataset.stageWidth ?? box.width);
+      const incomingLeft = SIDE_PADDING_PX + Math.max(0, (slotContentWidth - incomingWidth) / 2);
+      incomingSlot.style.left = `${incomingLeft}px`;
+      incomingSlot.style.zIndex = '1';
+    }
+    if (shadow) {
+      shadow.style.top = '0px';
+      shadow.style.left = `${box.left}px`;
+      shadow.style.width = `${box.width}px`;
+      shadow.style.height = `${box.height}px`;
+    }
+    return { outgoingSlot, incomingSlot };
+  };
+
+  const curlLayoutRef = useRef({
+    currentPageIndex,
+    displayMode,
+    contentWidth,
+    rowOfPage,
+    pagesInRow,
+    rowCount,
+    curlBoxFor,
+  });
+  useLayoutEffect(() => {
+    curlLayoutRef.current = {
+      currentPageIndex,
+      displayMode,
+      contentWidth,
+      rowOfPage,
+      pagesInRow,
+      rowCount,
+      curlBoxFor,
+    };
+  });
+
+  // The strip is rebuilt around the row just turned to, so its slide offset is done
+  // with: clearing it here, before the frame is painted, leaves no transform behind.
+  // When a paper curl is pending, the outgoing slot stays pinned above the incoming
+  // slot and sweeps its conical crease to completion.
+  useLayoutEffect(() => {
+    const stage = stageRef.current;
+    if (stage) stage.style.transform = '';
+    cancelCurlRef.current?.();
+    cancelCurlRef.current = null;
+    if (stage) restoreStageSlots(stage);
+
+    const pending = pendingCurlRef.current;
+    pendingCurlRef.current = null;
+    if (!pending || !stage) {
+      resetPaperCurl(null, turnShadowRef.current);
+      return;
+    }
+
+    const layout = curlLayoutRef.current;
+    if (layout.rowOfPage(layout.currentPageIndex) !== pending.incomingRow) {
+      resetPaperCurl(null, turnShadowRef.current);
+      return;
+    }
+
+    const box = layout.curlBoxFor(pending.outgoingRow, pending.incomingRow);
+    const { outgoingSlot } = placeCurlSlots(
+      stage,
+      turnShadowRef.current,
+      pending.outgoingRow,
+      pending.incomingRow,
+      box,
+      layout.rowCount,
+      layout.contentWidth,
+    );
+    if (!outgoingSlot) {
+      restoreStageSlots(stage);
+      resetPaperCurl(null, turnShadowRef.current);
+      return;
+    }
+
+    const isSpread =
+      layout.displayMode === 'two-page' &&
+      (layout.pagesInRow(pending.outgoingRow).length === 2 ||
+        layout.pagesInRow(pending.incomingRow).length === 2);
+
+    cancelCurlRef.current = animatePaperCurl({
+      outgoing: outgoingSlot,
+      shadow: turnShadowRef.current,
+      direction: pending.direction,
+      from: pending.fromProgress,
+      to: 1,
+      duration: pending.duration,
+      spread: isSpread,
+      onFinish: () => {
+        cancelCurlRef.current = null;
+        restoreStageSlots(stage);
+      },
+    });
+  }, [currentPageIndex, displayMode]);
+
+  useEffect(() => {
+    return () => {
+      cancelCurlRef.current?.();
+      cancelCurlRef.current = null;
+    };
+  }, []);
+
   const turnPage = (direction: TurnDirection) => {
     backChip.dismiss();
-    if (stepPage(direction) && paged) {
-      animatePageTurn(
-        pageContentRef.current,
-        direction,
-        effectivePreferences.pageTransition,
-        turnShadowRef.current,
+    const target = turnTarget(direction);
+    if (target === null) return;
+    cancelCurlRef.current?.();
+    cancelCurlRef.current = null;
+    const transition = effectivePreferences.pageTransition;
+    if (paged && transition === 'slide') {
+      settleStage(-direction * stageStride, PAGE_SLIDE_MS, () =>
+        scrollToPageOffset(target, offsetWithin(target, 0)),
       );
+      return;
     }
+    if (paged && transition === 'curl') {
+      if (!prefersReducedMotion() && stageRef.current) {
+        pendingCurlRef.current = {
+          outgoingRow: rowOfPage(currentPageIndex),
+          incomingRow: rowOfPage(target),
+          direction,
+          fromProgress: 0,
+          duration: PAGE_CURL_MS,
+        };
+      } else if (!prefersReducedMotion()) {
+        animatePaperCurl({
+          shadow: turnShadowRef.current,
+          direction,
+          spread: displayMode === 'two-page',
+        });
+      }
+      scrollToPageOffset(target, offsetWithin(target, 0));
+      return;
+    }
+    scrollToPageOffset(target, offsetWithin(target, 0));
+    if (paged && transition !== 'none') {
+      animatePageTurn(pageContentRef.current, direction, transition, turnShadowRef.current, {
+        spread: displayMode === 'two-page',
+      });
+    }
+  };
+
+  // ---- A two-finger swipe drags the strip, or peels the curl live ----
+
+  const scrub = {
+    start: () => {
+      cancelCurlRef.current?.();
+      cancelCurlRef.current = null;
+      pendingCurlRef.current = null;
+      curlScrubRef.current = { direction: null, progress: 0 };
+      if (stageRef.current) restoreStageSlots(stageRef.current);
+    },
+    move: (displacement: number) => {
+      const stage = stageRef.current;
+      if (!stage) return;
+      if (effectivePreferences.pageTransition !== 'curl') {
+        stage.style.transform = `translateX(${-displacement}px)`;
+        return;
+      }
+      if (Math.abs(displacement) < 0.5) {
+        restoreStageSlots(stage);
+        resetPaperCurl(null, turnShadowRef.current);
+        curlScrubRef.current = { direction: null, progress: 0 };
+        return;
+      }
+      const dir: TurnDirection = displacement < 0 ? -1 : 1;
+      const outgoingRow = rowOfPage(currentPageIndex);
+      const incomingRow = outgoingRow + dir;
+      const hasIncoming = incomingRow >= 0 && incomingRow < rowCount;
+      const box = curlBoxFor(outgoingRow, hasIncoming ? incomingRow : outgoingRow);
+      const progress = Math.min(Math.abs(displacement) / box.width, 0.995);
+      if (curlScrubRef.current.direction !== null && curlScrubRef.current.direction !== dir) {
+        restoreStageSlots(stage);
+      }
+      const { outgoingSlot } = placeCurlSlots(
+        stage,
+        turnShadowRef.current,
+        outgoingRow,
+        incomingRow,
+        box,
+        rowCount,
+        contentWidth,
+      );
+      if (!outgoingSlot) return;
+      const isSpread =
+        displayMode === 'two-page' &&
+        (pagesInRow(outgoingRow).length === 2 ||
+          (hasIncoming && pagesInRow(incomingRow).length === 2));
+      applyPaperCurl(outgoingSlot, turnShadowRef.current, progress, dir, { spread: isSpread });
+      curlScrubRef.current = { direction: dir, progress };
+    },
+    end: (_velocity: number, committed: TurnDirection | null) => {
+      if (effectivePreferences.pageTransition === 'curl') {
+        const { direction: dir, progress } = curlScrubRef.current;
+        curlScrubRef.current = { direction: null, progress: 0 };
+        const stage = stageRef.current;
+        if (!stage || dir === null) {
+          resetPaperCurl(null, turnShadowRef.current);
+          return;
+        }
+        const outgoingRow = rowOfPage(currentPageIndex);
+        const target = committed !== null ? turnTarget(committed) : null;
+        if (committed === null || committed !== dir || target === null) {
+          const outgoingSlot = stage.querySelector<HTMLElement>(
+            `[data-stage-row="${outgoingRow}"]`,
+          );
+          const isSpread = displayMode === 'two-page' && pagesInRow(outgoingRow).length === 2;
+          cancelCurlRef.current = animatePaperCurl({
+            outgoing: outgoingSlot,
+            shadow: turnShadowRef.current,
+            direction: dir,
+            from: progress,
+            to: 0,
+            duration: PAGE_SPRING_BACK_MS,
+            spread: isSpread,
+            onFinish: () => {
+              cancelCurlRef.current = null;
+              restoreStageSlots(stage);
+            },
+          });
+          return;
+        }
+        pendingCurlRef.current = {
+          outgoingRow,
+          incomingRow: rowOfPage(target),
+          direction: committed,
+          fromProgress: progress,
+          duration: Math.max(120, Math.round((1 - progress) * PAGE_CURL_MS)),
+        };
+        scrollToPageOffset(target, offsetWithin(target, 0));
+        return;
+      }
+      if (committed === null) {
+        settleStage(0, PAGE_SPRING_BACK_MS);
+        return;
+      }
+      const target = turnTarget(committed);
+      if (target === null) {
+        settleStage(0, PAGE_SPRING_BACK_MS);
+        return;
+      }
+      settleStage(-committed * stageStride, PAGE_SLIDE_MS, () =>
+        scrollToPageOffset(target, offsetWithin(target, 0)),
+      );
+    },
   };
 
   /** Where each top-level outline chapter starts, in page order. */
@@ -2151,6 +2522,13 @@ function PdfPages({
       const scroller = scrollRef.current;
       return !scroller || scroller.scrollWidth <= scroller.clientWidth + 1;
     },
+    canTurn: (direction) => {
+      const row = rowOfPage(currentPageIndex) + direction;
+      return row >= 0 && row < rowCount;
+    },
+    onScrubStart: scrub.start,
+    onScrubMove: scrub.move,
+    onScrubEnd: scrub.end,
   });
 
   // Entering focus mode puts the panels away; leaving it does not reopen them.
@@ -2266,11 +2644,23 @@ function PdfPages({
     return pages;
   }, [effectiveHighlights, search.results, search.activeIndex, activeSearchMatch]);
 
-  const virtualItems = virtualizer.getVirtualItems();
-  const maxRowWidth = virtualItems.reduce(
-    (max, item) => Math.max(max, rowWidth(item.index)),
-    rowWidth(rowOfPage(currentPageIndex)),
-  );
+  /**
+   * The rows a paged mode keeps on screen: the one being read and the two either
+   * side of it. Rendering the neighbours is what makes the turn continuous — their
+   * canvases are already rasterized by pdf.js before the slide starts — and
+   * stopping at two keeps the live canvases bounded to three spreads.
+   */
+  const currentRow = rowOfPage(currentPageIndex);
+  const stageRows = paged
+    ? [currentRow - 1, currentRow, currentRow + 1].filter((row) => row >= 0 && row < rowCount)
+    : [];
+  /** One page's worth of horizontal travel, the same for every slot. */
+  const stageStride = contentWidth + PAGE_GAP_PX;
+  const stageHeight = paged ? Math.max(...stageRows.map(rowHeight), 1) : virtualizer.getTotalSize();
+  const virtualItems = paged ? [] : virtualizer.getVirtualItems();
+  const maxRowWidth = paged
+    ? Math.max(...stageRows.map(rowWidth), 1)
+    : virtualItems.reduce((max, item) => Math.max(max, rowWidth(item.index)), rowWidth(currentRow));
   const innerMinWidth =
     width > 0 && maxRowWidth > contentWidth + 1
       ? `${Math.ceil(maxRowWidth + SIDE_PADDING_PX * 2)}px`
@@ -2607,13 +2997,6 @@ function PdfPages({
             selection already made.
           */}
           <div className="group/page relative flex min-h-0 min-w-0 flex-1 flex-col">
-            {/*
-              PDF pages are rendered images on white paper and the viewer has no
-              reading theme, so the shadow keeps the neutral default rather than
-              a theme's spine colour. It spans the whole pane because a PDF page
-              is scaled to fill it.
-            */}
-            <PageTurnShadow shadowRef={turnShadowRef} className="inset-0" />
             <div
               ref={scrollRef}
               onScroll={onScroll}
@@ -2626,12 +3009,95 @@ function PdfPages({
             >
               <div
                 ref={pageContentRef}
-                className="relative"
+                className={cn('relative', paged && 'overflow-hidden')}
                 style={{
                   width: innerMinWidth,
-                  height: virtualizer.getTotalSize(),
+                  height: stageHeight,
                 }}
               >
+                {width > 0 && paged && (
+                  <div
+                    ref={stageRef}
+                    data-testid="pdf-stage"
+                    className="absolute top-0 left-0"
+                    style={{ width: '100%', height: stageHeight }}
+                  >
+                    {stageRows.map((row) => {
+                      const pages = pagesInRow(row);
+                      const itemWidth = rowWidth(row);
+                      const itemHeight = rowHeight(row);
+                      // Slots sit one page apart, each page centred in its slot, so a
+                      // slide of exactly one stride lands the neighbour where it was.
+                      const slotLeft =
+                        SIDE_PADDING_PX +
+                        (row - currentRow) * stageStride +
+                        Math.max(0, (contentWidth - itemWidth) / 2);
+                      return (
+                        <div
+                          key={`${displayMode}-${row}`}
+                          data-stage-row={row}
+                          data-stage-left={slotLeft}
+                          data-stage-width={itemWidth}
+                          data-stage-height={itemHeight}
+                          className="absolute flex items-start"
+                          style={{
+                            top: 0,
+                            left: slotLeft,
+                            width: itemWidth,
+                            height: itemHeight,
+                            gap: PAGE_GAP_PX,
+                          }}
+                        >
+                          {pages.map((pageIndex) => (
+                            <div
+                              key={pageIndex}
+                              style={{
+                                width: pageWidth(pageIndex),
+                                height: pageHeight(pageIndex),
+                              }}
+                            >
+                              <PdfPage
+                                engine={engine}
+                                pageIndex={pageIndex}
+                                scale={scaleOf(pageIndex)}
+                                rotation={rotation}
+                                tint={tint}
+                                highlights={byPage.get(pageIndex) ?? EMPTY_HIGHLIGHTS}
+                                pulsingAnnotationId={pulsingAnnotationId}
+                                captureMode={captureMode}
+                                captureBox={
+                                  visibleCapture?.pageIndex === pageIndex
+                                    ? visibleCapture.rect
+                                    : null
+                                }
+                                onCapture={(canvas, rect) => onCapture(pageIndex, canvas, rect)}
+                                onNavigateLink={activateInternalLink}
+                                onPageAnnotationsLoaded={handlePageAnnotationsLoaded}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {/*
+                  The paper-curl overlay lives inside `pageContentRef` so its
+                  crease, conical backside, and 50% spine valley track the exact
+                  PDF page or spread bounds rather than outer desk margins.
+                */}
+                {width > 0 && (
+                  <PageTurnShadow
+                    shadowRef={turnShadowRef}
+                    palette={tint ? PAPER_CURL_PALETTES[resolvedTheme] : PDF_UNTINTED_CURL_PALETTE}
+                    className="top-0 left-0"
+                    style={{
+                      left: rowLeft(currentRow),
+                      width: rowWidth(currentRow),
+                      height: rowHeight(currentRow),
+                    }}
+                  />
+                )}
                 {width > 0 &&
                   virtualItems.map((item) => {
                     const pages = pagesInRow(item.index);
