@@ -175,44 +175,44 @@ describe('TxtViewer', () => {
       expect(screen.queryByTestId('reader-back-chip')).not.toBeInTheDocument();
     });
 
-    it('pages with edge clicks, Space, and Page Down, and goes to the ends with Home and End', async () => {
-      const scrollBy = vi.fn();
-      Element.prototype.scrollBy = scrollBy as unknown as Element['scrollBy'];
+    it('pages along the reading axis with edge clicks, Space, and Page Down, and goes to the ends with Home and End', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);
       await segmentWith('SynapseRead sample text');
+      const page = scroller();
       vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
         new DOMRect(0, 0, 800, VIEWPORT_PX),
       );
+      const step = VIEWPORT_PX * 0.9;
+      /** Waits for the eased slide to settle on `top`. */
+      const settlesAt = (top: number) => waitFor(() => expect(page.scrollTop).toBe(top));
 
-      fireEvent.click(scroller(), { clientX: 790, clientY: 100, button: 0, detail: 1 });
-      expect(scrollBy).toHaveBeenLastCalledWith({ top: VIEWPORT_PX * 0.9 });
-      fireEvent.click(scroller(), { clientX: 10, clientY: 100, button: 0, detail: 1 });
-      expect(scrollBy).toHaveBeenLastCalledWith({ top: -VIEWPORT_PX * 0.9 });
+      fireEvent.click(page, { clientX: 790, clientY: 100, button: 0, detail: 1 });
+      await settlesAt(step);
+      fireEvent.click(page, { clientX: 10, clientY: 100, button: 0, detail: 1 });
+      await settlesAt(0);
       // The middle of the page never turns it.
-      fireEvent.click(scroller(), { clientX: 400, clientY: 100, button: 0, detail: 1 });
-      expect(scrollBy).toHaveBeenCalledTimes(2);
+      fireEvent.click(page, { clientX: 400, clientY: 100, button: 0, detail: 1 });
+      expect(page.scrollTop).toBe(0);
 
-      fireEvent.keyDown(scroller(), { key: ' ', code: 'Space' });
-      fireEvent.keyDown(scroller(), { key: 'PageDown', code: 'PageDown' });
-      fireEvent.keyDown(scroller(), { key: ' ', code: 'Space', shiftKey: true });
-      expect(scrollBy.mock.calls.map(([options]) => (options as ScrollToOptions).top)).toEqual([
-        VIEWPORT_PX * 0.9,
-        -VIEWPORT_PX * 0.9,
-        VIEWPORT_PX * 0.9,
-        VIEWPORT_PX * 0.9,
-        -VIEWPORT_PX * 0.9,
-      ]);
+      fireEvent.keyDown(page, { key: ' ', code: 'Space' });
+      await settlesAt(step);
+      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      await settlesAt(step * 2);
+      fireEvent.keyDown(page, { key: ' ', code: 'Space', shiftKey: true });
+      await settlesAt(step);
+      // A slide travels down the page; it never nudges the rows sideways.
+      expect(page.scrollLeft).toBe(0);
       // Space on a focused button presses the button instead.
       fireEvent.keyDown(screen.getByRole('button', { name: 'Next Page' }), {
         key: ' ',
         code: 'Space',
       });
-      expect(scrollBy).toHaveBeenCalledTimes(5);
+      expect(page.scrollTop).toBeCloseTo(step, 0);
 
-      fireEvent.keyDown(scroller(), { key: 'End', code: 'End' });
-      expect(scroller().scrollTop).toBe(ROW_PX * 10_000);
-      fireEvent.keyDown(scroller(), { key: 'Home', code: 'Home' });
+      fireEvent.keyDown(page, { key: 'End', code: 'End' });
+      expect(page.scrollTop).toBe(ROW_PX * 10_000);
+      fireEvent.keyDown(page, { key: 'Home', code: 'Home' });
       expect(scroller().scrollTop).toBe(0);
     });
 

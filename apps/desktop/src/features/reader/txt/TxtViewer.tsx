@@ -61,6 +61,8 @@ import {
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
   animatePageTurn,
+  PAGE_SLIDE_MS,
+  slideScroll,
   type TurnDirection,
   usePageTurnGestures,
   zoneCursor,
@@ -828,22 +830,64 @@ export function TxtViewer({
     }
   }
 
-  const pageBy = (direction: 1 | -1) => {
+  /** One screen of rows, the step every page turn has always used. */
+  const pageStep = (direction: TurnDirection) => {
     const scroller = scrollRef.current;
-    if (!scroller) return;
-    scroller.scrollBy({ top: direction * scroller.clientHeight * 0.9 });
+    return scroller ? direction * scroller.clientHeight * 0.9 : 0;
   };
 
   const turnPage = (direction: TurnDirection) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
     unpin();
     backChip.dismiss();
-    pageBy(direction);
-    animatePageTurn(
-      pageRef.current,
-      direction,
-      effectivePreferences.pageTransition,
-      turnShadowRef.current,
-    );
+    const transition = effectivePreferences.pageTransition;
+    if (transition === 'none') {
+      scroller.scrollBy({ top: pageStep(direction) });
+      return;
+    }
+    if (transition === 'slide') {
+      // A text file reads down the page, so its page turn travels down the page.
+      // The old horizontal nudge fought the vertical scroll and read as a twitch.
+      void slideScroll(scroller, { top: pageStep(direction) }, PAGE_SLIDE_MS);
+      return;
+    }
+    scroller.scrollBy({ top: pageStep(direction) });
+    animatePageTurn(pageRef.current, direction, transition, turnShadowRef.current);
+  };
+
+  // ---- A two-finger swipe scrubs the page it is on ----
+
+  /** Where the rows sat when the fingers landed; a cancelled swipe returns here. */
+  const scrubBase = useRef(0);
+  const canTurn = (direction: TurnDirection) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return false;
+    return direction > 0
+      ? scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 1
+      : scroller.scrollTop > 1;
+  };
+  const scrubTo = (top: number) => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    scroller.scrollTop = Math.max(0, Math.min(top, scroller.scrollHeight - scroller.clientHeight));
+  };
+  const scrub = {
+    start: () => {
+      const scroller = scrollRef.current;
+      if (!scroller) return;
+      unpin();
+      scrubBase.current = scroller.scrollTop;
+    },
+    move: (displacement: number) => scrubTo(scrubBase.current + displacement),
+    end: (_velocity: number, committed: TurnDirection | null) => {
+      const scroller = scrollRef.current;
+      if (!scroller) return;
+      const target =
+        committed === null ? scrubBase.current : scrubBase.current + pageStep(committed);
+      // Spring back, or finish the turn the fingers started, along the same axis.
+      void slideScroll(scroller, { top: target - scroller.scrollTop }, PAGE_SLIDE_MS);
+    },
   };
 
   const scrollToEdge = (edge: 'start' | 'end') => {
@@ -993,6 +1037,10 @@ export function TxtViewer({
       const scroller = scrollRef.current;
       return !scroller || scroller.scrollWidth <= scroller.clientWidth + 1;
     },
+    canTurn,
+    onScrubStart: scrub.start,
+    onScrubMove: scrub.move,
+    onScrubEnd: scrub.end,
   });
 
   useReaderCommands({
