@@ -274,6 +274,14 @@ export class Page {
   }
 
   /**
+   * Overrides the media features the page sees. A CI runner may have "Reduce motion"
+   * switched on, which would make every animated check here pass vacuously.
+   */
+  async emulateMedia(features) {
+    await this.cdp.send('Emulation.setEmulatedMedia', { features });
+  }
+
+  /**
    * A real horizontal trackpad swipe: the `wheel` events a two-finger pan sends, one
    * per step, so the page can follow them frame by frame.
    */

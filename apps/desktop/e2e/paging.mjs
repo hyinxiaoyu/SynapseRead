@@ -54,7 +54,13 @@ const turnSamples = (page) => page.evaluate('window.__turnSamples');
 /** How many distinct positions the samples hold: more than two means it glided. */
 const distinctPositions = (samples) => new Set(samples.map((sample) => sample.position)).size;
 
+const REDUCED = [{ name: 'prefers-reduced-motion', value: 'reduce' }];
+const ANIMATED = [{ name: 'prefers-reduced-motion', value: 'no-preference' }];
+
 export async function pagingFlow(page) {
+  // A CI runner may have "Reduce motion" switched on, and this flow is about the
+  // motion itself: ask for it explicitly, and check the reduced path separately.
+  await page.emulateMedia(ANIMATED);
   await page.clickButton('Show MindMap');
   await page.clickButton('Show inspector');
   await openEpub(page);
@@ -88,6 +94,20 @@ export async function pagingFlow(page) {
   })()`);
   assert(settled.transform === 'none', `the page must not stay transformed: ${settled.transform}`);
   assert(settled.left > before, 'the turn must move to the next page');
+
+  // ---- With reduced motion a turn is instantaneous ----
+  await page.emulateMedia(REDUCED);
+  const beforeReduced = await page.evaluate(scrollLeft);
+  await sampleTurn(page, { frames: 20 });
+  await page.click(edge);
+  await page.waitFor(`${scrollLeft} > ${beforeReduced}`, 'the reduced-motion turn');
+  await new Promise((done) => setTimeout(done, 300));
+  const reduced = await turnSamples(page);
+  assert(
+    distinctPositions(reduced) <= 2,
+    `reduced motion must turn at once, saw ${distinctPositions(reduced)} positions`,
+  );
+  await page.emulateMedia(ANIMATED);
 
   // ---- A two-finger swipe scrubs the strip, then commits ----
   const pageBox = await page.evaluate(`(() => {
