@@ -9,13 +9,27 @@ export type TurnZone = 'previous' | 'next';
 export const CLICK_ZONE_FRACTION = 0.12;
 /** A pointer that moved further than this between press and release was a drag. */
 const CLICK_SLOP_PX = 4;
-/** Horizontal wheel travel that makes one swipe. */
-export const SWIPE_THRESHOLD_PX = 50;
 /**
- * A swipe turns one page, then nothing more until the wheel has been quiet this
- * long: trackpad momentum keeps sending events well after the fingers lift.
+ * A scrub that travelled this fraction of the page width commits the turn when
+ * the fingers lift, as a page dragged past its own edge would.
  */
-export const SWIPE_IDLE_MS = 300;
+export const SCRUB_COMMIT_FRACTION = 0.18;
+/** Release speed, in px/ms, that commits a turn however short the travel was. */
+export const SCRUB_COMMIT_VELOCITY = 0.45;
+/** How far a scrub may be dragged past the end of the document, as a fraction. */
+export const RUBBER_BAND_LIMIT_FRACTION = 0.35;
+/** Wheel silence that ends a scrub: the fingers lifted without a commit. */
+export const SCRUB_IDLE_MS = 90;
+/**
+ * A wheel event this much faster than the one before it is a new physical flick,
+ * not the decaying inertial tail of the one before. Trackpads keep emitting
+ * `wheel` events for 400–800 ms after the fingers lift, and those must not turn
+ * another page; a fresh flick must, without waiting for the tail to die.
+ */
+const MOMENTUM_SPIKE_RATIO = 1.6;
+const MOMENTUM_SPIKE_SLACK = 2;
+/** How much of the gesture the release velocity is measured over. */
+const VELOCITY_WINDOW_MS = 80;
 /** Marks the animations this module starts, so a new turn cancels only the last one. */
 export const PAGE_TURN_ANIMATION_ID = 'page-turn';
 
@@ -85,6 +99,188 @@ export interface WheelSample {
   ctrlKey: boolean;
 }
 
+/** What the page should do next about one wheel gesture. */
+export type ScrubUpdate =
+  | { kind: 'start' }
+  | { kind: 'move'; displacement: number }
+  | { kind: 'end'; velocity: number; committed: TurnDirection | null };
+
+/**
+ * A scrub is dragged past the end of the document: it still follows the fingers,
+ * but ever less, so the page never leaves the pane and never tears away.
+ */
+export function rubberBand(displacement: number, limit: number): number {
+  if (limit <= 0) return 0;
+  const magnitude = Math.abs(displacement);
+  const damped = limit * (1 - Math.exp(-magnitude / limit));
+  return displacement < 0 ? -damped : damped;
+}
+
+/** The direction a displacement of the strip means: positive travels forward. */
+export function directionOf(displacement: number): TurnDirection {
+  return displacement < 0 ? -1 : 1;
+}
+
+const IDLE = 0;
+const SCRUBBING = 1;
+const SETTLING = 2;
+
+interface Sample {
+  deltaX: number;
+  at: number;
+}
+
+export interface WheelScrubContext {
+  /** The page width in px, measured once per gesture; thresholds scale with it. */
+  pageWidth: () => number;
+  /** Whether a page exists in that direction; a scrub toward nothing rubber-bands. */
+  canTurn: (direction: TurnDirection) => boolean;
+}
+
+/**
+ * Turns horizontal trackpad travel into a page scrub.
+ *
+ * The old controller waited for 50 px of travel, turned once, then ignored every
+ * wheel event for 300 ms of silence. That made the page jump instead of following
+ * the fingers, and it swallowed a second flick made while the first one's
+ * momentum was still decaying. This one reports every event so the page can move
+ * 1:1, commits while the fingers are still down once a whole page has been
+ * dragged, and then absorbs the decaying inertial tail — starting a new scrub the
+ * moment a faster event or a reversed one shows a new physical flick.
+ *
+ * It is a plain state machine over `(deltaX, timestamp)` pairs so the physics can
+ * be tested without a DOM or a clock.
+ */
+export class WheelScrub {
+  private phase = IDLE;
+  private travel = 0;
+  private samples: Sample[] = [];
+  private width = 0;
+  private lastDeltaX = 0;
+  private lastAbs = 0;
+  private context: WheelScrubContext | null = null;
+
+  /** Feeds one horizontal wheel event, and says what the page should do. */
+  push(deltaX: number, at: number, context: WheelScrubContext): readonly ScrubUpdate[] {
+    if (this.phase === SETTLING) {
+      if (!this.isNewFlick(deltaX)) {
+        this.lastDeltaX = deltaX;
+        this.lastAbs = Math.abs(deltaX);
+        return [];
+      }
+      return this.start(deltaX, at, context);
+    }
+    if (this.phase === IDLE) return this.start(deltaX, at, context);
+    return this.advance(deltaX, at);
+  }
+
+  /** The wheel has been quiet for `SCRUB_IDLE_MS`: the fingers are off the pad. */
+  release(at: number): readonly ScrubUpdate[] {
+    if (this.phase === SETTLING) {
+      this.phase = IDLE;
+      this.travel = 0;
+      return [];
+    }
+    if (this.phase === IDLE) return [];
+    const velocity = this.velocity(at);
+    const committed = this.commitDirection(velocity);
+    if (committed === null) {
+      this.phase = IDLE;
+      this.travel = 0;
+      return [{ kind: 'end', velocity, committed: null }];
+    }
+    return this.finish(velocity, committed);
+  }
+
+  /** Forgets any gesture, as when the reader is deactivated mid-scrub. */
+  reset(): void {
+    this.phase = IDLE;
+    this.travel = 0;
+    this.samples = [];
+    this.lastDeltaX = 0;
+    this.lastAbs = 0;
+    this.context = null;
+  }
+
+  private start(deltaX: number, at: number, context: WheelScrubContext): readonly ScrubUpdate[] {
+    this.phase = SCRUBBING;
+    this.travel = 0;
+    this.samples = [];
+    this.lastDeltaX = 0;
+    this.lastAbs = 0;
+    this.context = context;
+    // One layout read per gesture, not one per wheel event.
+    this.width = Math.max(context.pageWidth(), 1);
+    return [{ kind: 'start' }, ...this.advance(deltaX, at)];
+  }
+
+  private advance(deltaX: number, at: number): readonly ScrubUpdate[] {
+    this.travel += deltaX;
+    this.samples.push({ deltaX, at });
+    if (this.samples.length > 32) this.samples.shift();
+    this.lastDeltaX = deltaX;
+    this.lastAbs = Math.abs(deltaX);
+    const direction = directionOf(this.travel);
+    if (Math.abs(this.travel) >= this.width && this.canTurn(direction)) {
+      // A whole page has been dragged: the turn is made under the fingers, and
+      // everything after this in the same gesture is inertia.
+      return this.finish(this.velocity(at), direction);
+    }
+    return [{ kind: 'move', displacement: this.displacement() }];
+  }
+
+  private canTurn(direction: TurnDirection): boolean {
+    return this.context?.canTurn(direction) ?? true;
+  }
+
+  private displacement(): number {
+    if (this.canTurn(directionOf(this.travel))) return this.travel;
+    return rubberBand(this.travel, this.width * RUBBER_BAND_LIMIT_FRACTION);
+  }
+
+  private commitDirection(velocity: number): TurnDirection | null {
+    const direction = directionOf(this.travel);
+    if (!this.canTurn(direction)) return null;
+    if (Math.abs(this.travel) >= this.width * SCRUB_COMMIT_FRACTION) return direction;
+    // A short but fast flick still turns, as it does in Books.
+    if (Math.abs(velocity) >= SCRUB_COMMIT_VELOCITY && directionOf(velocity) === direction) {
+      return direction;
+    }
+    return null;
+  }
+
+  private finish(velocity: number, committed: TurnDirection): readonly ScrubUpdate[] {
+    this.phase = SETTLING;
+    this.travel = 0;
+    return [{ kind: 'end', velocity, committed }];
+  }
+
+  private isNewFlick(deltaX: number): boolean {
+    if (Math.abs(deltaX) > this.lastAbs * MOMENTUM_SPIKE_RATIO + MOMENTUM_SPIKE_SLACK) return true;
+    // Inertia only ever decays one way; a reversal is a new gesture.
+    return (
+      deltaX !== 0 && this.lastDeltaX !== 0 && Math.sign(deltaX) !== Math.sign(this.lastDeltaX)
+    );
+  }
+
+  private velocity(at: number): number {
+    // Measured over the last moments of the gesture, not up to `at`: the release
+    // fires after the wheel has been quiet, and would otherwise average in nothing.
+    const end = this.samples.at(-1)?.at ?? at;
+    const recent = this.samples.filter((sample) => end - sample.at <= VELOCITY_WINDOW_MS);
+    const first = recent[0];
+    const last = recent.at(-1);
+    if (!first || !last) return 0;
+    const span = last.at - first.at;
+    if (span <= 0) return 0;
+    let travel = 0;
+    for (let index = 1; index < recent.length; index += 1) {
+      travel += recent[index]?.deltaX ?? 0;
+    }
+    return travel / span;
+  }
+}
+
 export interface PageTurnGestures {
   /** The zone under the pointer, for a direction cursor. */
   zone: TurnZone | null;
@@ -99,10 +295,19 @@ function hasSelectionIn(doc: Document): boolean {
   return selection !== null && !selection.isCollapsed;
 }
 
+/** The clock the scrub runs on. Wall time, so fake timers drive it in tests. */
+function now(): number {
+  return Date.now();
+}
+
 /**
  * Page turns from the page itself: clicks in the outer edges of the page and
  * two-finger horizontal swipes. Neither ever starts on top of text, so
  * selecting text works everywhere, edges included.
+ *
+ * A swipe is reported live through `onScrubStart` / `onScrubMove` /
+ * `onScrubEnd`, so the page can follow the fingers and only then commit or
+ * spring back. Without those callbacks a swipe turns one page, as before.
  *
  * `areaRef` is where gestures are heard; zones are measured on `pageRef` (the
  * page, which can be narrower than the area) or else the area.
@@ -113,6 +318,10 @@ export function usePageTurnGestures({
   pageRef,
   onTurn,
   canSwipe,
+  canTurn,
+  onScrubStart,
+  onScrubMove,
+  onScrubEnd,
 }: {
   enabled: boolean;
   areaRef: RefObject<HTMLElement | null>;
@@ -120,14 +329,29 @@ export function usePageTurnGestures({
   onTurn: (direction: TurnDirection) => void;
   /** False while the page scrolls sideways itself (a zoomed PDF). */
   canSwipe?: () => boolean;
+  /** Whether a page exists in that direction, for the end-of-document rubber band. */
+  canTurn?: (direction: TurnDirection) => boolean;
+  onScrubStart?: () => void;
+  /** Follows the fingers: px of travel, signed, already rubber-banded. */
+  onScrubMove?: (displacement: number) => void;
+  onScrubEnd?: (velocity: number, committed: TurnDirection | null) => void;
 }): PageTurnGestures {
   const [zone, setZone] = useState<TurnZone | null>(null);
-  const latest = useRef({ enabled, onTurn, canSwipe });
+  const latest = useRef({
+    enabled,
+    onTurn,
+    canSwipe,
+    canTurn,
+    onScrubStart,
+    onScrubMove,
+    onScrubEnd,
+  });
   useEffect(() => {
-    latest.current = { enabled, onTurn, canSwipe };
+    latest.current = { enabled, onTurn, canSwipe, canTurn, onScrubStart, onScrubMove, onScrubEnd };
   });
   const press = useRef<{ x: number; y: number; hadSelection: boolean } | null>(null);
-  const swipe = useRef({ travel: 0, turned: false, timer: undefined as number | undefined });
+  const idleTimer = useRef<number | undefined>(undefined);
+  const [scrub] = useState(() => new WheelScrub());
 
   const zoneFor = useCallback(
     (x: number): TurnZone | null => {
@@ -172,26 +396,53 @@ export function usePageTurnGestures({
     [zoneFor],
   );
 
-  const handleWheel = useCallback((wheel: WheelSample): boolean => {
-    const { enabled: on, onTurn: turn, canSwipe: swipeAllowed } = latest.current;
-    if (!on || wheel.ctrlKey) return false;
-    if (Math.abs(wheel.deltaX) <= Math.abs(wheel.deltaY) * 1.5) return false;
-    if (swipeAllowed && !swipeAllowed()) return false;
-    const state = swipe.current;
-    window.clearTimeout(state.timer);
-    state.timer = window.setTimeout(() => {
-      state.travel = 0;
-      state.turned = false;
-    }, SWIPE_IDLE_MS);
-    if (state.turned) return true;
-    state.travel += wheel.deltaX;
-    if (Math.abs(state.travel) >= SWIPE_THRESHOLD_PX) {
-      state.turned = true;
-      // Fingers moving left scroll content right: the next page.
-      turn(state.travel > 0 ? 1 : -1);
+  const emit = useCallback((updates: readonly ScrubUpdate[]) => {
+    for (const update of updates) {
+      switch (update.kind) {
+        case 'start':
+          latest.current.onScrubStart?.();
+          break;
+        case 'move':
+          latest.current.onScrubMove?.(update.displacement);
+          break;
+        case 'end': {
+          const { onScrubEnd: end, onTurn: turn } = latest.current;
+          // A page that cannot follow the fingers still turns on a committed swipe.
+          if (end) end(update.velocity, update.committed);
+          else if (update.committed !== null) turn(update.committed);
+          break;
+        }
+      }
     }
-    return true;
   }, []);
+
+  const armIdle = useCallback(() => {
+    window.clearTimeout(idleTimer.current);
+    idleTimer.current = window.setTimeout(() => {
+      emit(scrub.release(now()));
+    }, SCRUB_IDLE_MS);
+  }, [emit, scrub]);
+
+  const handleWheel = useCallback(
+    (wheel: WheelSample): boolean => {
+      const { enabled: on, canSwipe: swipeAllowed } = latest.current;
+      if (!on || wheel.ctrlKey) return false;
+      if (Math.abs(wheel.deltaX) <= Math.abs(wheel.deltaY) * 1.5) return false;
+      if (swipeAllowed && !swipeAllowed()) return false;
+      // Built here, in the event, so nothing that reads a ref is handed to the
+      // tracker while React is rendering.
+      emit(
+        scrub.push(wheel.deltaX, now(), {
+          pageWidth: () =>
+            (pageRef?.current ?? areaRef.current)?.getBoundingClientRect().width ?? 0,
+          canTurn: (direction) => latest.current.canTurn?.(direction) ?? true,
+        }),
+      );
+      armIdle();
+      return true;
+    },
+    [areaRef, armIdle, emit, pageRef, scrub],
+  );
 
   useEffect(() => {
     const area = areaRef.current;
@@ -248,8 +499,15 @@ export function usePageTurnGestures({
   }, [areaRef, handleSample, handleWheel]);
 
   useEffect(() => {
-    const state = swipe.current;
-    return () => window.clearTimeout(state.timer);
+    if (enabled) return;
+    // A reader that loses focus mid-scrub must not keep the page off its mark.
+    scrub.reset();
+    window.clearTimeout(idleTimer.current);
+    idleTimer.current = undefined;
+  }, [enabled, scrub]);
+
+  useEffect(() => {
+    return () => window.clearTimeout(idleTimer.current);
   }, []);
 
   return { zone: enabled ? zone : null, handleSample, handleWheel };
@@ -270,29 +528,46 @@ export function prefersReducedMotion(): boolean {
   );
 }
 
+/** The easing a whole-page strip slide uses, as in Books. */
+export const PAGE_SLIDE_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
+/** How long a committed slide takes to cross the page. */
+export const PAGE_SLIDE_MS = 260;
+/** How long a cancelled scrub takes to spring back. */
+export const PAGE_SPRING_BACK_MS = 200;
+
 /** How one mode draws the incoming page. */
 export interface PageTurnMotion {
   duration: number;
   easing: string;
-  keyframes: (direction: TurnDirection) => Keyframe[];
+  keyframes: (direction: TurnDirection, spread?: boolean) => Keyframe[];
 }
 
-/** The edge the incoming page swings around: its leading edge. */
-function flipOrigin(direction: TurnDirection): string {
+/**
+ * The edge the incoming page swings around: its leading edge, or the centre
+ * spine of a two-page spread, where the turning leaf is hinged.
+ */
+function flipOrigin(direction: TurnDirection, spread: boolean): string {
+  if (spread) return '50% 50%';
   return direction > 0 ? '0% 50%' : '100% 50%';
 }
 
 /**
  * How each mode draws the incoming page. Durations and easings are starting
  * points to tune by eye; the shape of each motion is not.
+ *
+ * `slide` here is the fallback for a page that has no second buffer to move with
+ * it — an EPUB chapter seam or a TXT row. It nudges the incoming page without
+ * touching opacity, so no turn ever flashes the page dimmer. The viewers that do
+ * have a strip (EPUB within a chapter, PDF in a paged mode) move both pages
+ * together themselves and never use this.
  */
 export const PAGE_TURN_MOTION = {
   slide: {
     duration: 220,
-    easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+    easing: PAGE_SLIDE_EASING,
     keyframes: (direction: TurnDirection): Keyframe[] => [
-      { transform: `translateX(${direction * 32}px)`, opacity: 0.35 },
-      { transform: 'translateX(0)', opacity: 1 },
+      { transform: `translateX(${direction * 32}px)` },
+      { transform: 'translateX(0)' },
     ],
   },
   fade: {
@@ -302,23 +577,27 @@ export const PAGE_TURN_MOTION = {
   },
   flip: {
     duration: 300,
-    easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
-    keyframes: (direction: TurnDirection): Keyframe[] => {
+    easing: PAGE_SLIDE_EASING,
+    keyframes: (direction: TurnDirection, spread = false): Keyframe[] => {
       // Both frames carry the origin so it never has to be written to the
       // element and then restored.
-      const transformOrigin = flipOrigin(direction);
+      const transformOrigin = flipOrigin(direction, spread);
+      // A spread hinges at its own spine, so the leaf lifts instead of the whole
+      // spread swinging like a plank. No opacity: the paper never goes grey.
+      const angle = spread ? 8 : 18;
+      const perspective = spread ? 1600 : 1400;
       return [
         {
-          transform: `perspective(1400px) rotateY(${direction * -18}deg)`,
+          transform: `perspective(${perspective}px) rotateY(${direction * -angle}deg)`,
           transformOrigin,
         },
-        { transform: 'perspective(1400px) rotateY(0deg)', transformOrigin },
+        { transform: `perspective(${perspective}px) rotateY(0deg)`, transformOrigin },
       ];
     },
   },
   stack: {
     duration: 240,
-    easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+    easing: PAGE_SLIDE_EASING,
     keyframes: (direction: TurnDirection): Keyframe[] => [
       { transform: `scale(0.965) translateX(${direction * 16}px)`, opacity: 0.6 },
       { transform: 'scale(1) translateX(0)', opacity: 1 },
@@ -331,7 +610,7 @@ export const PAGE_TURN_MOTION = {
  * it instead of stacking. Only our own animations are cancelled: CSS
  * transitions and the readers' own effects are left alone.
  */
-function cancelPageTurn(element: HTMLElement): void {
+export function cancelPageTurn(element: HTMLElement): void {
   if (typeof element.getAnimations !== 'function') return;
   for (const animation of element.getAnimations()) {
     if (animation.id === PAGE_TURN_ANIMATION_ID) animation.cancel();
@@ -343,11 +622,19 @@ function cancelPageTurn(element: HTMLElement): void {
  * inside it, so the EPUB iframe and the PDF text layers are never transformed,
  * and only its opacity moves.
  */
-function animateTurnShadow(shadow: HTMLElement | null, direction: TurnDirection): void {
+function animateTurnShadow(
+  shadow: HTMLElement | null,
+  direction: TurnDirection,
+  spread: boolean,
+): void {
   if (!shadow || typeof shadow.animate !== 'function') return;
-  shadow.style.backgroundImage = `linear-gradient(to ${
-    direction > 0 ? 'right' : 'left'
-  }, var(--page-turn-shadow, rgb(0 0 0 / 0.28)), transparent 55%)`;
+  // A spread's shadow falls away from the centre spine on both sides; a single
+  // page's falls away from the edge it is hinged on.
+  shadow.style.backgroundImage = spread
+    ? 'linear-gradient(to right, transparent, var(--page-turn-shadow, rgb(0 0 0 / 0.28)) 50%, transparent)'
+    : `linear-gradient(to ${
+        direction > 0 ? 'right' : 'left'
+      }, var(--page-turn-shadow, rgb(0 0 0 / 0.28)), transparent 55%)`;
   cancelPageTurn(shadow);
   const animation = shadow.animate([{ opacity: 0 }, { opacity: 1, offset: 0.35 }, { opacity: 0 }], {
     duration: PAGE_TURN_MOTION.flip.duration,
@@ -358,8 +645,8 @@ function animateTurnShadow(shadow: HTMLElement | null, direction: TurnDirection)
 
 /**
  * Shows which way the page turned: the new page slides in from that side, fades
- * in, flips in around its leading edge, or rises from behind. Instant with
- * reduced motion, and never delays the turn itself.
+ * in, flips in around its leading edge or spine, or rises from behind. Instant
+ * with reduced motion, and never delays the turn itself.
  *
  * `shadow` is the overlay the viewer owns beside the page; only `flip` uses it.
  * Nothing fills forwards, so hit-testing and selection geometry are accurate
@@ -370,15 +657,80 @@ export function animatePageTurn(
   direction: TurnDirection,
   transition: PageTransition,
   shadow: HTMLElement | null = null,
+  { spread = false }: { spread?: boolean } = {},
 ): void {
   if (!element || transition === 'none' || prefersReducedMotion()) return;
   if (typeof element.animate !== 'function') return;
   const motion = PAGE_TURN_MOTION[transition];
   cancelPageTurn(element);
-  const animation = element.animate(motion.keyframes(direction), {
+  const animation = element.animate(motion.keyframes(direction, spread), {
     duration: motion.duration,
     easing: motion.easing,
   });
   animation.id = PAGE_TURN_ANIMATION_ID;
-  if (transition === 'flip') animateTurnShadow(shadow, direction);
+  if (transition === 'flip') animateTurnShadow(shadow, direction, spread);
+}
+
+/**
+ * Moves a scroll container one page's width — or height — with the same eased
+ * whole-page motion the strip readers use, so both pages travel together at full
+ * opacity instead of the incoming one being nudged after a cut.
+ *
+ * Resolves when the motion has settled, or at once with reduced motion. The
+ * caller keeps the element's own scroll position authoritative: nothing is
+ * transformed and nothing is left behind.
+ */
+export function slideScroll(
+  scroller: HTMLElement | null,
+  delta: { left?: number; top?: number },
+  duration = PAGE_SLIDE_MS,
+): Promise<void> {
+  const left = delta.left ?? 0;
+  const top = delta.top ?? 0;
+  if (!scroller || (left === 0 && top === 0)) return Promise.resolve();
+  const fromLeft = scroller.scrollLeft;
+  const fromTop = scroller.scrollTop;
+  if (typeof scroller.scrollTo !== 'function' || prefersReducedMotion()) {
+    scroller.scrollTo({ left: fromLeft + left, top: fromTop + top });
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const started = performance.now();
+    const step = () => {
+      const progress = Math.min((performance.now() - started) / duration, 1);
+      const eased = easeOut(progress);
+      scroller.scrollTo({ left: fromLeft + left * eased, top: fromTop + top * eased });
+      if (progress < 1) {
+        window.requestAnimationFrame(step);
+      } else {
+        resolve();
+      }
+    };
+    window.requestAnimationFrame(step);
+  });
+}
+
+/**
+ * The curve `PAGE_SLIDE_EASING` draws, solved here because motion driven from
+ * script cannot hand the browser a CSS easing function.
+ */
+export function easeOut(t: number): number {
+  const x = Math.min(Math.max(t, 0), 1);
+  if (x === 0) return 0;
+  if (x === 1) return 1;
+  // cubic-bezier(0.22, 1, 0.36, 1): x is monotonic, so bisection finds the
+  // parameter whose x matches the time we were asked about.
+  let low = 0;
+  let high = 1;
+  for (let step = 0; step < 24; step += 1) {
+    const mid = (low + high) / 2;
+    if (bezierAxis(mid, 0.22, 0.36) < x) low = mid;
+    else high = mid;
+  }
+  return bezierAxis((low + high) / 2, 1, 1);
+}
+
+function bezierAxis(t: number, first: number, second: number): number {
+  const inverse = 1 - t;
+  return 3 * inverse * inverse * t * first + 3 * inverse * t * t * second + t * t * t;
 }
