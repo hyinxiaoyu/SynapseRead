@@ -227,6 +227,21 @@ hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` pagina
   `<textarea>` editing (`Return` vs `⌘↩`), and chapter-titled CFI-sorted filterable notes;
   and internal link `Back to…` chips plus sandboxed plain-text `LinkPeek` footnote cards
   across EPUB and PDF (`ADR 0005`).
+- **Continuous page turns and trackpad scrubbing (`#86`)**: a `WheelScrub` state
+  machine in `paging/pageTurn.ts` reports every horizontal wheel event, so the page
+  follows the fingers 1:1, rubber-bands exponentially at either end of the document,
+  commits on an `18%` drag or a `0.45 px/ms` release, and springs back over `200 ms`;
+  after a commit it absorbs the decaying inertial tail a mac trackpad keeps sending and
+  starts a new scrub on a velocity spike or a direction reversal, so rapid flicks no
+  longer wait out a `300 ms` silence lockout. EPUB turns slide the chapter's own column
+  strip across a whole page at `opacity: 1`, and a turn across a spine seam holds the
+  outgoing chapter's frame in the strip until the incoming one is up, so no turn shows a
+  blank page; PDF `single` and `two-page` render a three-slot stage whose neighbouring
+  spreads are already rasterized (bounded to `<= 3` spreads / `<= 6` canvases); `flip`
+  hinges at the `50%` spine of a two-page spread instead of tilting the whole spread from
+  its outer edge; and TXT slides along its vertical reading axis instead of nudging the
+  rows sideways. No turn leaves a persistent transform, and `prefers-reduced-motion:
+reduce` still turns instantaneously.
 - **PDF layout/zoom and long-document maps (`#51`, `#52`)**: migration
   `0009_pdf_document_layout.sql` persisting per-PDF `displayMode`, `zoomMode`, `scale`,
   `rotation`, and `coverPageAlone`, printed PDF page labels in `Go To`, and GPU-previewed
@@ -241,10 +256,10 @@ Gate and native `macOS 15.6.1 (24G90, Apple M4, arm64)` verification (`WebKit.fr
 `20621.3.11.11.3`, Safari `18.6`, `WKWebView` `AppleWebKit/605.1.15`, `Node v24.14.1`,
 `pnpm 12.16.1`, `rustc 1.99.1`):
 
-- **Repository CI gates**: `pnpm check` (`46` Vitest files, `743` unit tests, `0` ESLint
-  warnings, strict `tsc`), `pnpm e2e` (`11/11` Chromium flows: `txt`, `pdf`, `pdf-layout`,
+- **Repository CI gates**: `pnpm check` (`46` Vitest files, `764` unit tests, `0` ESLint
+  warnings, strict `tsc`), `pnpm e2e` (`12/12` Chromium flows: `txt`, `pdf`, `pdf-layout`,
   `pdf-zoom`, `epub`, `epub-progress`, `keyboard`, `txt-chapters`, `go-to`, `link-peek`,
-  `toolbar-title`; `0` CSP violations), `cargo fmt --all --check`,
+  `paging`, `toolbar-title`; `0` CSP violations), `cargo fmt --all --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`
   (`118` Rust tests: `89` in `synapse-core`, `29` in `synapseread_desktop_lib`).
 - **Production macOS bundle (`pnpm build`)**: `SynapseRead.app` (`8.84 MiB` `arm64` Mach-O
