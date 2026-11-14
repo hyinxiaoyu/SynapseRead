@@ -150,6 +150,8 @@ export async function linkPeekFlow(page) {
   );
   await assertCardBeside(page, marker1, 'PDF footnote');
   assert(await page.evaluate(`${pdfPageField}.value === '1'`), 'peeking stays on page 1');
+  await page.press('Escape');
+  await page.waitFor(`!${card}`, 'Esc to put the first PDF card away');
 
   // Markup in a PDF's text is only characters.
   await page.click(await pdfLinkPoint(page, 1));

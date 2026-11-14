@@ -414,7 +414,7 @@ export function UnifiedToolbar({
           '@container/toolbar z-40 shrink-0 border-b bg-background text-foreground select-none',
           centeredTitle
             ? 'grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3'
-            : 'flex items-center gap-3 px-2',
+            : 'flex items-center gap-3',
           immersive && 'absolute inset-x-0 top-0 bg-background/90 shadow-sm backdrop-blur-md',
           hidden && 'pointer-events-none -translate-y-full opacity-0',
           'motion-safe:transition-[opacity,translate] motion-safe:duration-200',
@@ -422,28 +422,23 @@ export function UnifiedToolbar({
         style={{
           height: TOOLBAR_HEIGHT_PX,
           ...themeStyle,
-          // The centered layout insets the leading column instead, so both side
-          // columns stay equal and the title stays on the toolbar's center.
-          ...(!centeredTitle && insetForWindowControls
-            ? { paddingLeft: TRAFFIC_LIGHTS_INSET_PX }
-            : undefined),
         }}
       >
         <div
           ref={setLeading}
           data-testid="toolbar-leading"
           {...dragRegion}
+          // Outer padding and macOS traffic-light inset always live on the side
+          // groups rather than `<header>`: changing horizontal padding on
+          // `@container/toolbar` when switching grid <-> flex would shrink its
+          // container-query inline size, hiding `@max-*` items and oscillating.
           className={cn(
-            'flex items-center gap-1',
+            'flex items-center gap-1 pl-2',
             // Keeping the controls their own size lets the title measure them and give
             // way, rather than squeezing a label into two lines.
-            centeredTitle ? 'min-w-0 pl-2 [&>*]:shrink-0' : 'shrink-0',
+            centeredTitle ? 'min-w-0 [&>*]:shrink-0' : 'shrink-0',
           )}
-          style={
-            centeredTitle && insetForWindowControls
-              ? { paddingLeft: TRAFFIC_LIGHTS_INSET_PX }
-              : undefined
-          }
+          style={insetForWindowControls ? { paddingLeft: TRAFFIC_LIGHTS_INSET_PX } : undefined}
         />
         <div
           {...dragRegion}
@@ -460,8 +455,8 @@ export function UnifiedToolbar({
         <div
           {...dragRegion}
           className={cn(
-            'flex items-center gap-1',
-            centeredTitle ? 'min-w-0 justify-end pr-2 [&>*]:shrink-0' : 'shrink-0',
+            'flex items-center gap-1 pr-2',
+            centeredTitle ? 'min-w-0 justify-end [&>*]:shrink-0' : 'shrink-0',
           )}
         >
           <div

@@ -154,9 +154,14 @@ export async function epubFlow(page) {
   await page.evaluate(`${visibleHost}.focus()`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (await page.evaluate(chapterIs('Chapter Two'))) break;
+    const stepBefore = await page.evaluate(`${location}`);
     if (attempt % 2 === 0) await page.press(' ', 'Space');
     else await page.clickButton('Next Page');
-    await new Promise((done) => setTimeout(done, 120));
+    await page.waitFor(
+      `${chapterIs('Chapter Two')} || (Boolean(${frameDocument}?.querySelector('h1')) && (${location}) !== ${stepBefore})`,
+      'the page turn to advance',
+    );
+    await page.waitFor(`${visibleHost}.getAnimations().length === 0`, 'the page turn animation');
   }
   await page.waitFor(chapterIs('Chapter Two'), 'the second chapter');
   // The page slides in as it turns; text moves until the transition ends.
@@ -522,7 +527,7 @@ export async function epubFlow(page) {
   await page.clickButton('Reading appearance');
   await page.clickButton('Standard');
   await page.press('Escape');
-  await page.cdp.send('Emulation.clearDeviceMetricsOverride');
+  await page.resetViewport();
   await page.clickButton('Scroll');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'back to scroll mode');
 
@@ -804,7 +809,7 @@ const firstLineWords = `(() => {
   const outer = view.getBoundingClientRect();
   const walker = book.createTreeWalker(book.body, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.data.trim().length < 12) continue;
+    if (node.data.trim().length < 8) continue;
     const range = book.createRange();
     range.selectNodeContents(node);
     for (const r of range.getClientRects()) {
