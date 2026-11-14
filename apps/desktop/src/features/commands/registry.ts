@@ -8,11 +8,13 @@ import {
   commandDefinition,
   shortcutMatches,
 } from '@/features/commands/commands';
+import { detectPlatform, type Platform } from '@/lib/platform';
 
 /**
  * What a component does for a command while it is mounted and active. A command
  * with no handler, or with `enabled: false`, is greyed out in the menu and its
- * shortcut does nothing (the key reaches the page as usual).
+ * shortcut runs nothing; a modified key is still swallowed, so the webview's own
+ * browser UI cannot answer it either.
  */
 export interface CommandHandler {
   run: () => void;
@@ -177,24 +179,75 @@ function blocksShortcut(event: KeyboardEvent, definition: CommandDefinition): bo
 }
 
 /**
+ * Keys the webview answers as a browser rather than as the app: reload, Find,
+ * print, view source, and caret browsing. None of them is an app command, and
+ * none is a text-editing key, so they are swallowed wherever the focus is.
+ *
+ * Written per platform rather than as `CmdOrCtrl` because the app accepts either
+ * primary modifier while a browser does not: on macOS `⌃P` and `⌃U` move the
+ * caret in a text field, and only `⌘P` and `⌘U` are the browser's.
+ */
+const BROWSER_ONLY_SHORTCUTS: Record<Platform, readonly string[]> = {
+  mac: ['F3', 'Shift+F3', 'F5', 'Cmd+F5', 'Cmd+Shift+R', 'Cmd+P', 'Cmd+U', 'F7'],
+  other: ['F3', 'Shift+F3', 'F5', 'Ctrl+F5', 'Ctrl+Shift+R', 'Ctrl+P', 'Ctrl+U', 'F7'],
+};
+
+/** Whether the webview would answer this key itself, as a browser rather than as the app. */
+export function isBrowserOnlyShortcut(
+  event: KeyboardEvent,
+  platform: Platform = detectPlatform(),
+): boolean {
+  return BROWSER_ONLY_SHORTCUTS[platform].some((shortcut) => shortcutMatches(event, shortcut));
+}
+
+/** A key that carries a command's modifier, rather than a bare key the page owns. */
+function isModified(event: KeyboardEvent): boolean {
+  return event.metaKey || event.ctrlKey || event.altKey;
+}
+
+/**
+ * Why a keydown left the command loop. `passed` means a command matched but did
+ * not run, and the key has already been dealt with: either the page keeps it (a
+ * bare arrow in a text field) or it was swallowed so the webview cannot act on it.
+ */
+type KeydownResult = 'ran' | 'passed' | 'unclaimed';
+
+/**
  * Matches a keydown to a command and runs it. Viewers whose content lives in an
  * iframe forward the frame's keydowns here. Returns whether a command ran.
  */
 export function dispatchCommandKeydown(event: KeyboardEvent): boolean {
   if (event.defaultPrevented || event.isComposing) return false;
+  const result = dispatchToCommand(event);
+  if (result !== 'unclaimed') return result === 'ran';
+  // Nothing in the app claims this key, so it is the webview's own browser UI
+  // (reload, Find, print, view source) or nothing at all.
+  if (!isBrowserOnlyShortcut(event)) return false;
+  event.preventDefault();
+  return false;
+}
+
+function dispatchToCommand(event: KeyboardEvent): KeydownResult {
   for (const id of COMMAND_IDS) {
     const definition = commandDefinition(id);
     const binding = commandBindings(definition).find((candidate) =>
       shortcutMatches(event, candidate),
     );
     if (binding === undefined) continue;
-    if (blocksShortcut(event, definition)) return false;
-    if (binding !== definition.shortcut && resolve(id)?.nativeAliases) return false;
-    if (!runCommand(id, 'keyboard')) return false;
-    event.preventDefault();
-    return true;
+    if (blocksShortcut(event, definition)) return 'passed';
+    if (binding !== definition.shortcut && resolve(id)?.nativeAliases) return 'passed';
+    if (runCommand(id, 'keyboard')) {
+      event.preventDefault();
+      return 'ran';
+    }
+    // The command is greyed out here, but a modified key must not fall through to
+    // the webview: on Windows, `Ctrl+R` reloads the whole app and `Ctrl+F` opens
+    // Edge's Find bar over the reader. A bare key (an arrow, Space) still belongs
+    // to the page.
+    if (isModified(event)) event.preventDefault();
+    return 'passed';
   }
-  return false;
+  return 'unclaimed';
 }
 
 let keyboardListenerInstalled = false;

@@ -16,6 +16,7 @@ import {
 import {
   commandState,
   dispatchCommandKeydown,
+  isBrowserOnlyShortcut,
   onCommandRun,
   registerCommands,
   runCommand,
@@ -229,14 +230,25 @@ describe('command registry', () => {
     expect(older).toHaveBeenCalledTimes(1);
   });
 
-  it('does nothing for a disabled command and lets the key through', () => {
+  it('runs nothing for a disabled command, and still takes its modified key', () => {
     const run = vi.fn();
     register(() => ({ 'view.rotateLeft': { run, enabled: false } }));
+    // Rotate Left on a PDF tab; on a TXT tab the key has no handler, and left alone
+    // WebView2 would reload the whole app with it.
     const event = key({ key: 'l', code: 'KeyL', metaKey: true });
     expect(dispatchCommandKeydown(event)).toBe(false);
-    expect(event.defaultPrevented).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
     expect(run).not.toHaveBeenCalled();
     expect(commandState('view.rotateLeft').enabled).toBe(false);
+  });
+
+  it('leaves a bare key to the page when its command is disabled', () => {
+    const next = vi.fn();
+    register(() => ({ 'go.nextPage': { run: next, enabled: false } }));
+    const arrow = key({ key: 'ArrowRight', code: 'ArrowRight' });
+    expect(dispatchCommandKeydown(arrow)).toBe(false);
+    expect(arrow.defaultPrevented).toBe(false);
+    expect(next).not.toHaveBeenCalled();
   });
 
   it('dispatches window keydowns, preventing the default', () => {
@@ -360,5 +372,60 @@ describe('command registry', () => {
     runCommand('go.back', 'menu');
     expect(run).toHaveBeenCalledTimes(1);
     expect(observed).toHaveBeenCalledWith('go.back', 'keyboard');
+  });
+});
+
+describe('the webview browser keys', () => {
+  it('names the keys a browser answers, per platform', () => {
+    // Windows and Linux: WebView2's reload, Find, print, view source, and caret browsing.
+    for (const init of [
+      { key: 'F3', code: 'F3' },
+      { key: 'F3', code: 'F3', shiftKey: true },
+      { key: 'F5', code: 'F5' },
+      { key: 'F5', code: 'F5', ctrlKey: true },
+      { key: 'R', code: 'KeyR', ctrlKey: true, shiftKey: true },
+      { key: 'p', code: 'KeyP', ctrlKey: true },
+      { key: 'u', code: 'KeyU', ctrlKey: true },
+      { key: 'F7', code: 'F7' },
+    ]) {
+      expect(isBrowserOnlyShortcut(key(init), 'other'), JSON.stringify(init)).toBe(true);
+    }
+
+    // macOS: the browser's are the ⌘ keys. ⌃P and ⌃U move the caret in a text field.
+    expect(isBrowserOnlyShortcut(key({ key: 'p', code: 'KeyP', metaKey: true }), 'mac')).toBe(true);
+    expect(isBrowserOnlyShortcut(key({ key: 'p', code: 'KeyP', ctrlKey: true }), 'mac')).toBe(
+      false,
+    );
+    expect(isBrowserOnlyShortcut(key({ key: 'u', code: 'KeyU', ctrlKey: true }), 'mac')).toBe(
+      false,
+    );
+
+    // Neither platform's browser owns these, and the editing keys stay the field's.
+    for (const platform of ['mac', 'other'] as const) {
+      for (const init of [
+        { key: 'k', code: 'KeyK', ctrlKey: true },
+        { key: 'F9', code: 'F9' },
+        { key: 'c', code: 'KeyC', metaKey: true },
+        { key: 'v', code: 'KeyV', ctrlKey: true },
+      ]) {
+        expect(isBrowserOnlyShortcut(key(init), platform), JSON.stringify(init)).toBe(false);
+      }
+    }
+  });
+
+  it('swallows them with nothing registered, and leaves every other key alone', () => {
+    for (const init of [
+      { key: 'F3', code: 'F3' },
+      { key: 'F5', code: 'F5' },
+      { key: 'F7', code: 'F7' },
+    ]) {
+      const event = key(init);
+      expect(dispatchCommandKeydown(event), JSON.stringify(init)).toBe(false);
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(true);
+    }
+
+    const unrelated = key({ key: 'k', code: 'KeyK', ctrlKey: true });
+    expect(dispatchCommandKeydown(unrelated)).toBe(false);
+    expect(unrelated.defaultPrevented).toBe(false);
   });
 });
