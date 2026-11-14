@@ -46,15 +46,15 @@ jobs:
         run: pnpm build:web
 
   e2e:
-    # Real engines in real Chromium, under the app's CSP. Both images ship Chrome;
-    # macOS catches platform differences in headless window activation and rendering.
+    # Real engines in real Chromium, under the app's CSP. Ubuntu, macOS, and Windows
+    # cover platform differences in browser discovery, viewport metrics, activation, and rendering.
     name: End-to-end (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
 
@@ -71,7 +71,7 @@ jobs:
       # through the job and can replace it in place mid-suite (run 43121437302 went from
       # 156 to 157 between two flows, and the flows open across the swap timed out).
       # Chrome for Testing goes to the tool cache, which nothing updates. Ubuntu runs the
-      # distribution's Chromium, which nothing updates during a job either.
+      # distribution's Chromium, and Windows uses CHROME_PATH-unset browser discovery.
       - name: Pin Chrome for Testing
         if: runner.os == 'macOS'
         id: chrome
@@ -82,6 +82,7 @@ jobs:
       - name: End-to-end
         # Headless Ubuntu has no desktop session bus; a transient session bus keeps
         # Chromium's dbus/bus.cc error spam out of launch diagnostics (#70).
+        shell: bash
         run: |
           if [ "$RUNNER_OS" = "Linux" ] && command -v dbus-run-session >/dev/null 2>&1; then
             dbus-run-session -- pnpm e2e

@@ -182,9 +182,16 @@ export async function epubFlow(page) {
   await page.evaluate(`${visibleHost}.focus()`);
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (await page.evaluate(chapterIs('Chapter Two'))) break;
+    const stepBefore = await page.evaluate(`${location}`);
     if (attempt % 2 === 0) await page.press(' ', 'Space');
     else await page.clickButton('Next Page');
-    // A turn slides the strip for a moment; the next one starts from a whole page.
+    // The turn has to move the strip before the next one is asked for, and it then
+    // slides for a moment: the next one starts from a whole page. `getAnimations()`
+    // is empty while the strip is still travelling, so wait on the strip itself.
+    await page.waitFor(
+      `${chapterIs('Chapter Two')} || (Boolean(${frameDocument}?.querySelector('h1')) && (${location}) !== ${stepBefore})`,
+      'the page turn to advance',
+    );
     await waitForTurnToSettle(page);
   }
   await page.waitFor(chapterIs('Chapter Two'), 'the second chapter');
@@ -556,7 +563,7 @@ export async function epubFlow(page) {
   await page.clickButton('Reading appearance');
   await page.clickButton('Standard');
   await page.press('Escape');
-  await page.cdp.send('Emulation.clearDeviceMetricsOverride');
+  await page.resetViewport();
   await page.clickButton('Scroll');
   await page.waitFor(`${visibleViewer}.dataset.readingMode === 'scroll'`, 'back to scroll mode');
 
@@ -838,7 +845,7 @@ const firstLineWords = `(() => {
   const outer = view.getBoundingClientRect();
   const walker = book.createTreeWalker(book.body, NodeFilter.SHOW_TEXT);
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.data.trim().length < 12) continue;
+    if (node.data.trim().length < 8) continue;
     const range = book.createRange();
     range.selectNodeContents(node);
     for (const r of range.getClientRects()) {
