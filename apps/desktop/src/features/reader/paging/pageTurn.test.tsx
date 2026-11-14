@@ -220,6 +220,21 @@ describe('WheelScrub', () => {
     expect(push(scrub, 5, 1000)).toEqual([{ kind: 'start' }, { kind: 'move', displacement: 5 }]);
   });
 
+  it('knows a scrub still under the fingers from one that already turned', () => {
+    const scrub = make();
+    expect(scrub.isDragging()).toBe(false);
+    push(scrub, 20, 0);
+    expect(scrub.isDragging()).toBe(true);
+    // A gesture that turned under the fingers is settling, not dragging: the page
+    // must not be pulled back off the turn it already made.
+    run(
+      scrub,
+      Array.from({ length: 40 }, () => 30),
+      16,
+    );
+    expect(scrub.isDragging()).toBe(false);
+  });
+
   it('measures the page once per gesture', () => {
     const pageWidth = vi.fn(() => WIDTH);
     const scrub = new WheelScrub();
@@ -509,6 +524,73 @@ describe('usePageTurnGestures', () => {
     expect(scrub.start).not.toHaveBeenCalled();
     expect(onTurn).toHaveBeenNthCalledWith(1, 1);
     expect(onTurn).toHaveBeenNthCalledWith(2, -1);
+  });
+
+  it('reads a fast flick that starts past the notch size as one flick, not five notches', () => {
+    vi.useFakeTimers();
+    const { onTurn, scrub, gestures } = mount();
+    // A plausible decaying trackpad sequence at about one event a frame. Its first
+    // events are as large as a mouse notch, but the whole run is one physical flick.
+    act(() => {
+      for (const deltaX of [120, 110, 100, 90, 65, 40]) {
+        expect(gestures().handleWheel({ deltaX, deltaY: 0, deltaMode: 0, ctrlKey: false })).toBe(
+          true,
+        );
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenCalledWith(1);
+    // The tail was absorbed, so it never started a scrub of its own either.
+    expect(scrub.start).not.toHaveBeenCalled();
+    expect(scrub.end).not.toHaveBeenCalled();
+  });
+
+  it('turns a page for each genuine wheel notch, however fast it is spun', () => {
+    vi.useFakeTimers();
+    const { onTurn, gestures } = mount();
+    act(() => {
+      for (let notch = 0; notch < 3; notch += 1) {
+        gestures().handleWheel({ deltaX: 120, deltaY: 0, deltaMode: 0, ctrlKey: false });
+        vi.advanceTimersByTime(16);
+      }
+    });
+    // Equal, not decaying: each one is a deliberate notch, not inertia.
+    expect(onTurn).toHaveBeenCalledTimes(3);
+    act(() => {
+      vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+      gestures().handleWheel({ deltaX: 120, deltaY: 0, deltaMode: 0, ctrlKey: false });
+    });
+    expect(onTurn).toHaveBeenCalledTimes(4);
+  });
+
+  it('cancels the scrub it was in the middle of when the reader loses focus', () => {
+    vi.useFakeTimers();
+    const onTurn = vi.fn();
+    const scrub = { start: vi.fn(), move: vi.fn(), end: vi.fn() };
+    let gestures: PageTurnGestures | null = null;
+    const expose = (value: PageTurnGestures) => (gestures = value);
+    const view = render(<Probe onTurn={onTurn} enabled expose={expose} scrub={scrub} />);
+    vi.spyOn(
+      view.container.firstElementChild as HTMLElement,
+      'getBoundingClientRect',
+    ).mockReturnValue(new DOMRect(0, 0, 1000, 600));
+    act(() => {
+      (gestures as unknown as PageTurnGestures).handleWheel({
+        deltaX: 60,
+        deltaY: 0,
+        ctrlKey: false,
+      });
+    });
+    expect(scrub.start).toHaveBeenCalledTimes(1);
+    expect(scrub.move).toHaveBeenLastCalledWith(60);
+
+    // Switching tabs drops the gesture without a release: the viewer is only told
+    // to undo its displacement by a cancelled `end`.
+    view.rerender(<Probe onTurn={onTurn} enabled={false} expose={expose} scrub={scrub} />);
+    expect(scrub.end).toHaveBeenCalledTimes(1);
+    expect(scrub.end).toHaveBeenCalledWith(0, null);
+    expect(onTurn).not.toHaveBeenCalled();
   });
 
   it('normalizes line-mode wheel events and accumulates sub-line ticks', () => {

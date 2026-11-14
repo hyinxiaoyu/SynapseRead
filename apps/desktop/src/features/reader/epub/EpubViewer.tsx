@@ -1275,12 +1275,15 @@ export function EpubViewer({
     end: (_velocity: number, committed: TurnDirection | null) => {
       if (committed !== null) backChip.dismiss();
       if (!handle) return;
-      const fadeSeam =
-        committed !== null && paged && transition === 'fade' && !handle.canTurnInPlace(committed);
+      // `slide` and `curl` settle the strip themselves. Fade and stack do not own
+      // it, so the engine lands the page at once and the motion plays here — as a
+      // turn of the same mode does, in place or across a seam.
+      const motion =
+        committed !== null && paged && (transition === 'fade' || transition === 'stack');
       void handle
         .endScrub(committed)
         .then(() => {
-          if (fadeSeam) {
+          if (motion) {
             animatePageTurn(hostRef.current, committed, transition, turnShadowRef.current, {
               spread,
             });

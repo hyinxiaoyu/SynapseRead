@@ -851,17 +851,34 @@ export function TxtViewer({
    * before it, so every other move cancels it first.
    */
   const slideAbort = useRef<AbortController | null>(null);
+  /** Where the slide in flight is heading, so the next turn lands from there. */
+  const slideTarget = useRef<number | null>(null);
   const cancelSlide = () => {
     slideAbort.current?.abort();
     slideAbort.current = null;
+    slideTarget.current = null;
   };
-  const slideBy = (top: number) => {
+  /**
+   * Where the next page turn starts. A second turn made during the first one's
+   * animation starts from where that one was heading, not from half-way: two
+   * quick inputs then move two pages instead of collapsing into one.
+   */
+  const slideBase = () => slideTarget.current ?? scrollRef.current?.scrollTop ?? 0;
+  const slideTo = (top: number) => {
     const scroller = scrollRef.current;
     if (!scroller) return;
+    const from = slideBase();
     cancelSlide();
+    const delta = top - from;
+    if (delta === 0) return;
     const controller = new AbortController();
     slideAbort.current = controller;
-    void slideScroll(scroller, { top }, PAGE_SLIDE_MS, controller.signal);
+    slideTarget.current = top;
+    void slideScroll(scroller, { top: delta }, PAGE_SLIDE_MS, controller.signal, {
+      top: from,
+    }).finally(() => {
+      if (slideAbort.current === controller) slideTarget.current = null;
+    });
   };
   useEffect(() => cancelSlide, []);
 
@@ -959,7 +976,7 @@ export function TxtViewer({
       // A text file reads down the page, so its page turn travels down the page.
       // The old horizontal nudge fought the vertical scroll and read as a twitch.
       clearTxtCurl();
-      slideBy(pageStep(direction));
+      slideTo(slideBase() + pageStep(direction));
       return;
     }
     cancelSlide();
@@ -1090,8 +1107,19 @@ export function TxtViewer({
       if (!scroller) return;
       const target =
         committed === null ? scrubBase.current : scrubBase.current + pageStep(committed);
-      // Spring back, or finish the turn the fingers started, along the same axis.
-      slideBy(target - scroller.scrollTop);
+      const transition = effectivePreferences.pageTransition;
+      if (transition === 'slide') {
+        // Spring back, or finish the turn the fingers started, along the same axis.
+        slideTo(target);
+        return;
+      }
+      // None, fade and stack do not own the scroll position: land at once and let
+      // the configured motion play on the incoming page.
+      cancelSlide();
+      scroller.scrollTo({ top: target });
+      if (committed !== null && transition !== 'none') {
+        animatePageTurn(pageRef.current, committed, transition, turnShadowRef.current);
+      }
     },
   };
 

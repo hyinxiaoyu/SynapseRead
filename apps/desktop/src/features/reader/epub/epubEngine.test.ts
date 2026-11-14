@@ -773,4 +773,173 @@ describe('EPUB slide seam scrubbing', () => {
       nowSpy.mockRestore();
     }
   });
+
+  /** A strip one page wide, laid out as epub.js lays a two-page chapter out. */
+  const stripHarness = () => {
+    const container = document.createElement('div');
+    let scrollWidth = 1280;
+    let scrollLeft = 0;
+    Object.defineProperty(container, 'clientWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'offsetWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'scrollWidth', {
+      get: () => scrollWidth,
+      configurable: true,
+    });
+    Object.defineProperty(container, 'scrollLeft', {
+      get: () => scrollLeft,
+      set: (value: number) => {
+        scrollLeft = value;
+      },
+      configurable: true,
+    });
+    return {
+      container,
+      get scrollLeft() {
+        return scrollLeft;
+      },
+      set scrollLeft(value: number) {
+        scrollLeft = value;
+      },
+      setScrollWidth(value: number) {
+        scrollWidth = value;
+      },
+    };
+  };
+
+  it('runs epub.js own teardown for the views a seam turn held', async () => {
+    const frames: FrameRequestCallback[] = [];
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+    const strip = stripHarness();
+    const heldView = document.createElement('div');
+    heldView.className = 'epub-view';
+    Object.defineProperty(heldView, 'offsetWidth', { value: 1280, configurable: true });
+    strip.container.appendChild(heldView);
+
+    const viewDestroy = vi.fn();
+    const held = { element: heldView, displayed: true, destroy: viewDestroy };
+    // Stands in for `Views.destroy`: epub.js runs `IframeView.destroy` and then takes
+    // the element out of the strip.
+    const destroyView = vi.fn((view: typeof held) => {
+      view.destroy();
+      view.element.remove();
+    });
+    const views = {
+      _views: [held],
+      length: 1,
+      container: strip.container,
+      clear: vi.fn(),
+      destroy: destroyView,
+    };
+    Reflect.set(fake.rendition, 'manager', {
+      container: strip.container,
+      layout: { delta: 640 },
+      views,
+    });
+    Reflect.set(fake.rendition, 'reportLocation', vi.fn());
+    const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(async () => {
+      views.clear();
+      strip.scrollLeft = 0;
+      strip.setScrollWidth(1920);
+    });
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument(
+        { kind: 'bytes', bytes: new Uint8Array() },
+        document.createElement('div'),
+      );
+
+      strip.scrollLeft = 640;
+      handle.beginScrub({ transition: 'slide', spread: false });
+      handle.scrubTo(160);
+      strip.scrollLeft = 640;
+      const done = handle.endScrub(1);
+      for (let tick = 0; tick < 4; tick += 1) await Promise.resolve();
+      expect(heldView.parentElement).toBe(strip.container);
+
+      clock = 1500;
+      frames.shift()?.(clock);
+      await done;
+      // Removing only the element would leave the chapter's ResizeObserver,
+      // listeners and blob URL behind on every seam turn.
+      expect(heldView.parentElement).toBeNull();
+      expect(destroyView).toHaveBeenCalledTimes(1);
+      expect(viewDestroy).toHaveBeenCalledTimes(1);
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      Reflect.set(fake.rendition, 'reportLocation', undefined);
+      nextSpy.mockRestore();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('stops a running slide when a newer relayout replaces its chapter', async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const tick = (at: number) => {
+      clock = at;
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(at);
+    };
+
+    const strip = stripHarness();
+    Reflect.set(fake.rendition, 'manager', {
+      container: strip.container,
+      layout: { delta: 640 },
+    });
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument(
+        { kind: 'bytes', bytes: new Uint8Array() },
+        document.createElement('div'),
+      );
+
+      const turn = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      expect(frames.size).toBe(1);
+      tick(130);
+      expect(strip.scrollLeft).toBeGreaterThan(0);
+      expect(strip.scrollLeft).toBeLessThan(640);
+
+      // A relayout re-displays the chapter: the frame loop must not keep writing its
+      // old page offset into the strip afterwards.
+      handle.resize(640, 480);
+      expect(frames.size).toBe(0);
+      tick(500);
+      expect(strip.scrollLeft).toBe(640);
+      await turn;
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
 });

@@ -199,6 +199,15 @@ export class WheelScrub {
     return this.phase !== IDLE;
   }
 
+  /**
+   * Whether the fingers are still down on a scrub that has not been released.
+   * A settled turn is not dragging: it has already committed and must be left
+   * alone.
+   */
+  isDragging(): boolean {
+    return this.phase === SCRUBBING;
+  }
+
   /** Feeds one horizontal wheel event, and says what the page should do. */
   push(deltaX: number, at: number, context: WheelScrubContext): readonly ScrubUpdate[] {
     this.expireSettling(at);
@@ -408,6 +417,13 @@ export function usePageTurnGestures({
   const idleTimer = useRef<number | undefined>(undefined);
   const discreteTravel = useRef(0);
   const discreteTimer = useRef<number | undefined>(undefined);
+  /**
+   * The notch that last turned a page, while the events after it may still be that
+   * gesture's inertia. A mouse notch is a single event; a trackpad flick is a
+   * decaying stream at about one event a frame, and its first events are as large
+   * as a notch. Without this, every event of a fast flick reads as its own notch.
+   */
+  const notchTail = useRef<{ deltaX: number; at: number } | null>(null);
   const [scrub] = useState(() => new WheelScrub());
 
   const zoneFor = useCallback(
@@ -479,6 +495,21 @@ export function usePageTurnGestures({
     discreteTimer.current = undefined;
   }, []);
 
+  /**
+   * Whether this event is the decaying tail of the notch that just turned a page.
+   * Inertia only ever decays and only ever travels one way, so a bigger event or
+   * a reversal is a new physical notch and turns again — which is what keeps a
+   * mouse wheel turning one page per click however fast it is spun.
+   */
+  const absorbNotchTail = useCallback((deltaX: number, at: number): boolean => {
+    const tail = notchTail.current;
+    if (!tail || at - tail.at > SCRUB_IDLE_MS) return false;
+    if (Math.sign(deltaX) !== Math.sign(tail.deltaX)) return false;
+    if (Math.abs(deltaX) >= Math.abs(tail.deltaX)) return false;
+    notchTail.current = { deltaX, at };
+    return true;
+  }, []);
+
   const armIdle = useCallback(() => {
     window.clearTimeout(idleTimer.current);
     idleTimer.current = window.setTimeout(() => {
@@ -496,6 +527,10 @@ export function usePageTurnGestures({
       const pageWidth = () =>
         (pageRef?.current ?? areaRef.current)?.getBoundingClientRect().width ?? 0;
       const timestamp = now();
+      // Read before `isDiscreteWheel`: the tail of a flick decays below the notch
+      // size partway through, and those events must not start a scrub either.
+      if (absorbNotchTail(wheel.deltaX, timestamp)) return true;
+      notchTail.current = null;
       if (isDiscreteWheel(wheel, mode, !scrub.isScrubbing(timestamp))) {
         const delta = normalizeWheelDelta(
           wheel.deltaX,
@@ -515,6 +550,7 @@ export function usePageTurnGestures({
           clearDiscreteWheel();
           if (latest.current.canTurn?.(direction) ?? true) {
             latest.current.onTurn(direction);
+            notchTail.current = { deltaX: wheel.deltaX, at: timestamp };
           }
         } else {
           window.clearTimeout(discreteTimer.current);
@@ -534,7 +570,7 @@ export function usePageTurnGestures({
       armIdle();
       return true;
     },
-    [areaRef, armIdle, clearDiscreteWheel, emit, pageRef, scrub],
+    [absorbNotchTail, areaRef, armIdle, clearDiscreteWheel, emit, pageRef, scrub],
   );
 
   useEffect(() => {
@@ -593,8 +629,13 @@ export function usePageTurnGestures({
 
   useEffect(() => {
     if (enabled) return;
-    // A reader that loses focus mid-scrub must not keep the page off its mark.
+    // A reader that loses focus mid-scrub must not keep the page off its mark: the
+    // viewer only undoes the displacement it applied when the scrub ends, so a
+    // dropped gesture has to be reported as a cancelled one. A turn already
+    // committed is left alone — it is settling, not dragging.
+    if (scrub.isDragging()) latest.current.onScrubEnd?.(0, null);
     scrub.reset();
+    notchTail.current = null;
     window.clearTimeout(idleTimer.current);
     idleTimer.current = undefined;
     clearDiscreteWheel();
@@ -1043,18 +1084,23 @@ export function animatePageTurn(
  * transformed and nothing is left behind. Aborting `signal` stops the motion
  * where it is, so a jump the reader asked for is never overwritten by a frame of
  * a slide they started before it.
+ *
+ * `from` starts the motion from a position the container is not at yet, which is
+ * how a second turn made during the first one's animation still travels a whole
+ * page: it lands where the first was heading rather than from half-way.
  */
 export function slideScroll(
   scroller: HTMLElement | null,
   delta: { left?: number; top?: number },
   duration = PAGE_SLIDE_MS,
   signal?: AbortSignal,
+  from?: { left?: number; top?: number } | undefined,
 ): Promise<void> {
   const left = delta.left ?? 0;
   const top = delta.top ?? 0;
   if (!scroller || (left === 0 && top === 0)) return Promise.resolve();
-  const fromLeft = scroller.scrollLeft;
-  const fromTop = scroller.scrollTop;
+  const fromLeft = from?.left ?? scroller.scrollLeft;
+  const fromTop = from?.top ?? scroller.scrollTop;
   if (typeof scroller.scrollTo !== 'function' || prefersReducedMotion()) {
     scroller.scrollTo({ left: fromLeft + left, top: fromTop + top });
     return Promise.resolve();

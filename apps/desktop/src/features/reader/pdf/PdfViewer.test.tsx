@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
+import { SCRUB_IDLE_MS } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
@@ -2028,6 +2029,169 @@ describe('PdfViewer', () => {
         pending.at(-1)?.resolve();
       });
       expect(readout).toHaveTextContent('Page 3 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+    } finally {
+      HTMLElement.prototype.animate = originalAnimate;
+    }
+  });
+
+  it('saves the page a two-page turn lands on, though the pane never scrolls', async () => {
+    const { backend, store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+    await pageElement(1);
+    const pane = await scroller();
+    expect(pane.scrollTop).toBe(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+    const readout = screen.getByTestId('reader-footer-readout');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('Page 3 of 5');
+    // Each staged spread starts at the top, so the turn writes 0 over 0 and no
+    // scroll event can carry the new page: the explicit report is what saves it.
+    expect(pane.scrollTop).toBe(0);
+    await waitFor(
+      () => {
+        const cursor = store.getState().documents[0]?.lastCursorAnchor as PdfAnchor | null;
+        expect(cursor?.pageIndex).toBe(2);
+      },
+      { timeout: 2000 },
+    );
+    view.unmount();
+
+    const reopened = await reopen(backend);
+    render(<Harness store={reopened} documentId={documentId} />);
+    await pageElement(2);
+    expect(screen.getByTestId('reader-footer-readout')).toHaveTextContent('Page 3 of 5');
+  });
+
+  it('lets a jump made during a slide win over the slide it interrupted', async () => {
+    const originalAnimate = HTMLElement.prototype.animate;
+    const pending: { resolve: () => void; cancel: ReturnType<typeof vi.fn<() => void>> }[] = [];
+    HTMLElement.prototype.animate = vi.fn(function () {
+      let resolveFinished: () => void = () => undefined;
+      let rejectFinished: (reason?: unknown) => void = () => undefined;
+      const finished = new Promise<Animation>((resolve, reject) => {
+        resolveFinished = () => resolve({} as Animation);
+        rejectFinished = reject;
+      });
+      const cancel = vi.fn(() => rejectFinished(new DOMException('AbortError', 'AbortError')));
+      pending.push({ resolve: resolveFinished, cancel });
+      return { id: '', finished, cancel } as unknown as Animation;
+    });
+
+    try {
+      window.localStorage.clear();
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(pending).toHaveLength(1);
+      const pageInput = screen.getByLabelText('Page number');
+      fireEvent.change(pageInput, { target: { value: '4' } });
+      fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+      expect(readout).toHaveTextContent('Page 4 of 5');
+      expect(pending[0]?.cancel).toHaveBeenCalledTimes(1);
+
+      // The interrupted slide must not drag the reader back to the page it wanted.
+      await act(async () => {
+        pending[0]?.resolve();
+      });
+      expect(readout).toHaveTextContent('Page 4 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+    } finally {
+      HTMLElement.prototype.animate = originalAnimate;
+    }
+  });
+
+  it('keeps zoomed stage slots from overlapping, so the neighbour never covers the page', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 125%
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 150%
+    expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent('150%');
+
+    const stage = screen.getByTestId('pdf-stage');
+    const boxes = [...stage.querySelectorAll<HTMLElement>('[data-stage-row]')].map((slot) => ({
+      row: Number(slot.dataset.stageRow),
+      left: Number.parseFloat(slot.style.left),
+      width: Number.parseFloat(slot.style.width),
+    }));
+    const current = boxes.find((box) => box.row === 0);
+    const next = boxes.find((box) => box.row === 1);
+    expect(current).toBeDefined();
+    expect(next).toBeDefined();
+    // A 612 px page at 150% is 918 px: wider than the 612 px pane.
+    expect(current?.width).toBeCloseTo(612 * 1.5, 0);
+    expect(next?.left).toBeGreaterThanOrEqual((current?.left ?? 0) + (current?.width ?? 0));
+    // The column scrolls the whole zoomed page, and still clips the neighbours.
+    expect(stage.parentElement?.style.width).toBe(`${Math.ceil(612 * 1.5 + 24)}px`);
+  });
+
+  it('settles a swipe with the configured transition instead of always sliding', async () => {
+    const originalAnimate = HTMLElement.prototype.animate;
+    const calls: Keyframe[][] = [];
+    HTMLElement.prototype.animate = vi.fn(function (keyframes: Keyframe[]) {
+      calls.push(keyframes);
+      return {
+        id: '',
+        finished: Promise.resolve({} as Animation),
+        cancel: vi.fn(),
+      } as unknown as Animation;
+    });
+
+    try {
+      window.localStorage.clear();
+      const { store, documentId } = await setup();
+      const view = render(
+        <Harness
+          store={store}
+          documentId={documentId}
+          preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'none' }}
+        />,
+      );
+      await pageElement(0);
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      const pane = await scroller();
+      vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+      fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('translateX(-160px)');
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, SCRUB_IDLE_MS + 30));
+      });
+      // None: the page is committed at once, and nothing animates.
+      expect(readout).toHaveTextContent('Page 2 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+      expect(calls).toHaveLength(0);
+
+      // Fade and stack play on the incoming page rather than sliding the strip.
+      view.rerender(
+        <Harness
+          store={store}
+          documentId={documentId}
+          preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'fade' }}
+        />,
+      );
+      fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+      fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, SCRUB_IDLE_MS + 30));
+      });
+      expect(readout).toHaveTextContent('Page 3 of 5');
+      expect(calls.at(-1)).toEqual([{ opacity: 0.2 }, { opacity: 1 }]);
       expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
     } finally {
       HTMLElement.prototype.animate = originalAnimate;

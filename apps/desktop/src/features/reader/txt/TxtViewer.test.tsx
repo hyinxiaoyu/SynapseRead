@@ -216,6 +216,25 @@ describe('TxtViewer', () => {
       expect(scroller().scrollTop).toBe(0);
     });
 
+    it('keeps both turns when a second page turn arrives during the first one', async () => {
+      const { store, documentId } = await setup(bytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('SynapseRead sample text');
+      const page = scroller();
+      const step = VIEWPORT_PX * 0.9;
+
+      // Two inputs before the first slide has drawn a frame. The second starts from
+      // where the first was heading, so the reader moves two pages, not one.
+      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      await waitFor(() => expect(page.scrollTop).toBe(step * 2));
+
+      // An explicit jump still wins over the slide it interrupts.
+      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      fireEvent.keyDown(page, { key: 'End', code: 'End' });
+      expect(page.scrollTop).toBe(ROW_PX * 10_000);
+    });
+
     it('virtualizes: renders only rows near the viewport', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);

@@ -1199,6 +1199,26 @@ function PdfPages({
     [rowWidth, width],
   );
 
+  const currentRow = rowOfPage(currentPageIndex);
+  /**
+   * The rows a paged mode keeps on screen: the one being read and the two either
+   * side of it. Rendering the neighbours is what makes the turn continuous — their
+   * canvases are already rasterized by pdf.js before the slide starts — and
+   * stopping at two keeps the live canvases bounded to three spreads.
+   */
+  const stageRows = paged
+    ? [currentRow - 1, currentRow, currentRow + 1].filter((row) => row >= 0 && row < rowCount)
+    : [];
+  /**
+   * How wide one slot on the stage is. A zoomed page can be wider than the pane, so
+   * this follows the widest row rather than the pane: a stride of the pane width
+   * would overlap the neighbours, and the later slot would paint and take pointer
+   * events over the page being read.
+   */
+  const stageCell = Math.max(contentWidth, ...stageRows.map(rowWidth), 1);
+  /** One page's worth of horizontal travel, the same for every slot. */
+  const stageStride = stageCell + PAGE_GAP_PX;
+
   // eslint-disable-next-line react-hooks/incompatible-library -- used only in this component, never memoized across renders.
   const virtualizer = useVirtualizer({
     count: rowCount,
@@ -1371,19 +1391,6 @@ function PdfPages({
    * offset that now belongs to another part of the document.
    */
   const layoutAnchor = useRef<PdfReturnLocation | null>(null);
-  const scrollToPageOffset = useCallback(
-    (pageIndex: number, offset: number) => {
-      setCurrentPageIndex(pageIndex);
-      scrollToOffset(offset);
-      const actualScrollTop = scrollRef.current?.scrollTop ?? offset;
-      lastScrollTop.current = actualScrollTop;
-      programmaticScrollRef.current = { pageIndex, scrollTop: actualScrollTop };
-      const height = pageHeight(pageIndex);
-      const fraction = height > 0 ? (offset - offsetWithin(pageIndex, 0)) / height : 0;
-      layoutAnchor.current = { pageIndex, fraction: Math.min(Math.max(fraction, 0), 0.99) };
-    },
-    [offsetWithin, pageHeight, scrollToOffset, setCurrentPageIndex],
-  );
   /**
    * The page and fraction at the top of the view when it is scrolled to `scrollTop`,
    * preferring `pageIndex` when it shares the row there.
@@ -1447,6 +1454,38 @@ function PdfPages({
       reportCursorRef.current();
     }, CURSOR_DEBOUNCE_MS);
   }, []);
+
+  /**
+   * Moves the reader to `pageIndex` at `offset`, and makes that the position every
+   * later report and layout change returns to.
+   */
+  const scrollToPageOffset = useCallback(
+    (pageIndex: number, offset: number) => {
+      // A jump the reader asked for wins over a turn still sliding to its own page:
+      // its completion would otherwise land on the page this one is leaving.
+      cancelActiveSlide();
+      setCurrentPageIndex(pageIndex);
+      scrollToOffset(offset);
+      const actualScrollTop = scrollRef.current?.scrollTop ?? offset;
+      lastScrollTop.current = actualScrollTop;
+      programmaticScrollRef.current = { pageIndex, scrollTop: actualScrollTop };
+      const height = pageHeight(pageIndex);
+      const fraction = height > 0 ? (offset - offsetWithin(pageIndex, 0)) / height : 0;
+      layoutAnchor.current = { pageIndex, fraction: Math.min(Math.max(fraction, 0), 0.99) };
+      // A paged mode never scrolls vertically between rows, so the scroll event
+      // that normally reports the position never fires and the turn would not be
+      // saved. Report it here instead, debounced like any other move.
+      scheduleCursorReport();
+    },
+    [
+      cancelActiveSlide,
+      offsetWithin,
+      pageHeight,
+      scheduleCursorReport,
+      scrollToOffset,
+      setCurrentPageIndex,
+    ],
+  );
 
   const currentScale = scaleOf(currentPageIndex);
   const zoomPercent = Math.round(currentScale * 100);
@@ -2232,10 +2271,10 @@ function PdfPages({
         secondValid ? rowHeight(secondRow) : 0,
         1,
       );
-      const left = SIDE_PADDING_PX + Math.max(0, (contentWidth - w) / 2);
+      const left = SIDE_PADDING_PX + Math.max(0, (stageCell - w) / 2);
       return { left, width: w, height: h };
     },
-    [contentWidth, rowCount, rowHeight, rowWidth],
+    [stageCell, rowCount, rowHeight, rowWidth],
   );
 
   const restoreStageSlots = (stage: HTMLElement) => {
@@ -2296,7 +2335,7 @@ function PdfPages({
   const curlLayoutRef = useRef({
     currentPageIndex,
     displayMode,
-    contentWidth,
+    stageCell,
     rowOfPage,
     pagesInRow,
     rowCount,
@@ -2306,7 +2345,7 @@ function PdfPages({
     curlLayoutRef.current = {
       currentPageIndex,
       displayMode,
-      contentWidth,
+      stageCell,
       rowOfPage,
       pagesInRow,
       rowCount,
@@ -2354,7 +2393,7 @@ function PdfPages({
       pending.incomingRow,
       box,
       layout.rowCount,
-      layout.contentWidth,
+      layout.stageCell,
     );
     if (!outgoingSlot) {
       restoreStageSlots(stage);
@@ -2476,7 +2515,7 @@ function PdfPages({
         incomingRow,
         box,
         rowCount,
-        contentWidth,
+        stageCell,
       );
       if (!outgoingSlot) return;
       const isSpread =
@@ -2488,7 +2527,8 @@ function PdfPages({
     },
     end: (_velocity: number, committed: TurnDirection | null) => {
       scrubbingRef.current = false;
-      if (effectivePreferences.pageTransition === 'curl') {
+      const transition = effectivePreferences.pageTransition;
+      if (transition === 'curl') {
         const { direction: dir, progress } = curlScrubRef.current;
         curlScrubRef.current = { direction: null, progress: 0 };
         const stage = stageRef.current;
@@ -2528,21 +2568,30 @@ function PdfPages({
         scrollToPageOffset(target, offsetWithin(target, 0));
         return;
       }
-      if (committed === null) {
-        settleStage(0, PAGE_SPRING_BACK_MS);
+      const target = committed === null ? null : turnTarget(committed);
+      if (transition === 'slide') {
+        if (committed === null || target === null) {
+          settleStage(0, PAGE_SPRING_BACK_MS);
+          return;
+        }
+        settleStage(
+          -committed * stageStride,
+          PAGE_SLIDE_MS,
+          () => scrollToPageOffset(target, offsetWithin(target, 0)),
+          target,
+        );
         return;
       }
-      const target = turnTarget(committed);
-      if (target === null) {
-        settleStage(0, PAGE_SPRING_BACK_MS);
-        return;
+      // None, fade and stack do not own the strip: the page is committed at once
+      // and the configured motion, if any, plays on the incoming page.
+      settleStage(0, 0);
+      if (committed === null || target === null) return;
+      scrollToPageOffset(target, offsetWithin(target, 0));
+      if (transition !== 'none') {
+        animatePageTurn(pageContentRef.current, committed, transition, turnShadowRef.current, {
+          spread: displayMode === 'two-page',
+        });
       }
-      settleStage(
-        -committed * stageStride,
-        PAGE_SLIDE_MS,
-        () => scrollToPageOffset(target, offsetWithin(target, 0)),
-        target,
-      );
     },
   };
 
@@ -2756,23 +2805,12 @@ function PdfPages({
     return pages;
   }, [effectiveHighlights, search.results, search.activeIndex, activeSearchMatch]);
 
-  /**
-   * The rows a paged mode keeps on screen: the one being read and the two either
-   * side of it. Rendering the neighbours is what makes the turn continuous — their
-   * canvases are already rasterized by pdf.js before the slide starts — and
-   * stopping at two keeps the live canvases bounded to three spreads.
-   */
-  const currentRow = rowOfPage(currentPageIndex);
-  const stageRows = paged
-    ? [currentRow - 1, currentRow, currentRow + 1].filter((row) => row >= 0 && row < rowCount)
-    : [];
-  /** One page's worth of horizontal travel, the same for every slot. */
-  const stageStride = contentWidth + PAGE_GAP_PX;
-  const stageHeight = paged ? Math.max(...stageRows.map(rowHeight), 1) : virtualizer.getTotalSize();
+  /** The rows the virtualizer renders in a continuous mode, and the widest of them. */
   const virtualItems = paged ? [] : virtualizer.getVirtualItems();
   const maxRowWidth = paged
     ? Math.max(...stageRows.map(rowWidth), 1)
     : virtualItems.reduce((max, item) => Math.max(max, rowWidth(item.index)), rowWidth(currentRow));
+  const stageHeight = paged ? Math.max(...stageRows.map(rowHeight), 1) : virtualizer.getTotalSize();
   const innerMinWidth =
     width > 0 && maxRowWidth > contentWidth + 1
       ? `${Math.ceil(maxRowWidth + SIDE_PADDING_PX * 2)}px`
@@ -3143,7 +3181,7 @@ function PdfPages({
                       const slotLeft =
                         SIDE_PADDING_PX +
                         (row - currentRow) * stageStride +
-                        Math.max(0, (contentWidth - itemWidth) / 2);
+                        Math.max(0, (stageCell - itemWidth) / 2);
                       return (
                         <div
                           key={`${displayMode}-${row}`}

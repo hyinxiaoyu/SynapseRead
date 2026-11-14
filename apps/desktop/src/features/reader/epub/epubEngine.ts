@@ -75,6 +75,18 @@ export interface EpubInternalLink {
 }
 
 /**
+ * One chapter view as epub.js' default view manager holds it. `destroy` is the
+ * only teardown that disconnects the chapter's `ResizeObserver`, removes its
+ * listeners and revokes its blob URL, so the seam hold has to keep the view
+ * itself, not just its element.
+ */
+interface ChapterView {
+  element?: HTMLElement;
+  displayed?: boolean;
+  destroy?: () => void;
+}
+
+/**
  * The parts of epub.js' default view manager a continuous page turn touches. The
  * strip is the container that holds the chapter's columns; `delta` is how far one
  * page turn moves it, and `views` is the collection whose `clear()` would empty
@@ -84,9 +96,11 @@ interface PaginatedManager {
   container: HTMLElement;
   layout?: { delta?: number };
   views?: {
-    _views?: { element?: HTMLElement }[];
+    _views?: ChapterView[];
     length: number;
+    container?: HTMLElement;
     clear: () => void;
+    destroy: (view: ChapterView) => void;
   };
 }
 
@@ -945,6 +959,9 @@ export async function openEpubDocument(
       .catch(() => undefined);
 
   const display = async (target?: string) => {
+    // A newer navigation owns the strip: a slide still running would keep writing
+    // its old page offset into the chapter this display is about to load.
+    settleSlide();
     clearCurlStage();
     const resolved = resolveTarget(target);
     const epoch = beginNavigation();
@@ -1136,7 +1153,7 @@ export async function openEpubDocument(
    * destroying them: their iframes stay painted in the strip, one page away from
    * the incoming chapter, and the turn slides across the seam between them.
    */
-  const seam = { armed: false, held: [] as HTMLElement[] };
+  const seam = { armed: false, held: [] as ChapterView[] };
   let seamViews: PaginatedManager['views'];
   let clearViews: (() => void) | undefined;
 
@@ -1160,7 +1177,7 @@ export async function openEpubDocument(
           for (const frame of held.querySelectorAll('iframe')) {
             frame.style.visibility = 'visible';
           }
-          seam.held.push(held);
+          seam.held.push(view);
         }
       }
       views._views = [];
@@ -1171,21 +1188,42 @@ export async function openEpubDocument(
     return true;
   };
 
+  /**
+   * Runs epub.js' own teardown for a view the seam hold kept painted. Removing
+   * only the element would leave the chapter's `ResizeObserver` connected, its
+   * listeners attached and its blob URL alive, once per seam turn.
+   */
+  const destroyHeldView = (view: ChapterView) => {
+    const element = view.element;
+    const views = seamViews;
+    // `Views.destroy` takes the element out of its own container, so it only
+    // applies while the element is still there.
+    if (views && element && views.container && element.parentElement === views.container) {
+      views.destroy(view);
+      return;
+    }
+    view.destroy?.();
+    element?.remove();
+  };
+
   /** Arms the hold, and returns what settles it once the new chapter is up. */
   const armSeam = (): ((direction: TurnDirection) => Promise<void>) | null => {
     if (!ensureSeamHold()) return null;
     seam.armed = true;
     seam.held = [];
+    // The turn this seam belongs to. A newer navigation — a contents jump, a link,
+    // a relayout — owns the strip from then on, and this one must not write to it.
+    const epoch = navigation;
     return async (direction) => {
       seam.armed = false;
       const held = seam.held;
       seam.held = [];
-      const current = strip();
+      const current = epoch === navigation ? strip() : null;
       let finalScrollLeft: number | null = null;
       try {
         if (current && held.length > 0) {
           const { container, stride } = current;
-          const heldWidth = held.reduce((sum, element) => sum + element.offsetWidth, 0);
+          const heldWidth = held.reduce((sum, view) => sum + (view.element?.offsetWidth ?? 0), 0);
           if (direction > 0) {
             const start = Math.max(0, heldWidth - stride);
             container.scrollLeft = start;
@@ -1200,8 +1238,8 @@ export async function openEpubDocument(
           }
         }
       } finally {
-        for (const element of held) element.remove();
-        if (current && finalScrollLeft !== null) {
+        for (const view of held) destroyHeldView(view);
+        if (current && finalScrollLeft !== null && epoch === navigation) {
           current.container.scrollLeft = finalScrollLeft;
           (rendition as unknown as { reportLocation?: () => void }).reportLocation?.();
         }
@@ -1479,16 +1517,21 @@ export async function openEpubDocument(
     const current = strip();
     if (!current) return;
     settleSlide();
+    // Only `slide` settles by moving the strip. `none`, `fade` and `stack` land at
+    // once and play their own motion on the incoming page, as a turn does.
+    const slides = transition === undefined || transition === 'slide';
+    const settleMs = slides ? PAGE_SLIDE_MS : 0;
+    const springMs = slides ? PAGE_SPRING_BACK_MS : 0;
     if (committed === null) {
-      await slideStrip(scrubBase, PAGE_SPRING_BACK_MS);
+      await slideStrip(scrubBase, springMs);
       return;
     }
     if (inPlace) {
-      await slideStrip(scrubBase + committed * current.stride, PAGE_SLIDE_MS);
+      await slideStrip(scrubBase + committed * current.stride, settleMs);
       return;
     }
     // The fingers reached the chapter's edge: settle back, then cross the seam.
-    await slideStrip(scrubBase, PAGE_SPRING_BACK_MS);
+    await slideStrip(scrubBase, springMs);
     await turn(committed, transition === 'slide', transition, spread);
   };
 
@@ -1663,6 +1706,9 @@ export async function openEpubDocument(
     endScrub,
     async setReadingMode(mode) {
       if (mode === currentMode) return;
+      // A relayout replaces the strip's chapter, so a slide in flight must land
+      // before epub.js re-displays, not keep writing into the new one.
+      settleSlide();
       clearCurlStage();
       currentMode = mode;
       const epoch = beginNavigation();
@@ -1690,6 +1736,9 @@ export async function openEpubDocument(
 
     setColumns(columns) {
       if (columns === currentColumns) return;
+      // The column count changes the stride, so a slide in flight is already
+      // measured in the wrong units.
+      settleSlide();
       clearCurlStage();
       const before = spreadFor(currentMode, currentColumns);
       currentColumns = columns;
@@ -1837,6 +1886,7 @@ export async function openEpubDocument(
     resize: (width, height) => {
       // A resize clears epub.js' views. Restore the jump in flight, or the current
       // location, rather than the stale location epub.js last reported (#41).
+      settleSlide();
       clearCurlStage();
       resizeTo(width, height, pendingTarget ?? currentCfi);
     },
