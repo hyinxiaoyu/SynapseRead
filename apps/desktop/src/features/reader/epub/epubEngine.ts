@@ -20,8 +20,13 @@ import {
   type ViewportRect,
 } from '@/features/reader/markup/geometry';
 import {
+  easeOut,
   isOverContent,
+  PAGE_SLIDE_MS,
+  PAGE_SPRING_BACK_MS,
   type PageGestureSample,
+  prefersReducedMotion,
+  type TurnDirection,
   type WheelSample,
 } from '@/features/reader/paging/pageTurn';
 import {
@@ -62,6 +67,22 @@ export interface EpubSearchMatch extends DocumentSearchResultItem {
 export interface EpubInternalLink {
   noteref: boolean;
   rect: ViewportRect | null;
+}
+
+/**
+ * The parts of epub.js' default view manager a continuous page turn touches. The
+ * strip is the container that holds the chapter's columns; `delta` is how far one
+ * page turn moves it, and `views` is the collection whose `clear()` would empty
+ * the strip before the next chapter has loaded.
+ */
+interface PaginatedManager {
+  container: HTMLElement;
+  layout?: { delta?: number };
+  views?: {
+    _views?: { element?: HTMLElement }[];
+    length: number;
+    clear: () => void;
+  };
 }
 
 export interface EpubSelection {
@@ -134,6 +155,20 @@ export interface EpubHandle {
   displayChapterFraction(index: number, fraction: number): Promise<void>;
   next(): Promise<void>;
   previous(): Promise<void>;
+  /**
+   * A page turn. With `animate` the strip slides across a whole page — or across
+   * a chapter seam — so both pages stay on screen; otherwise the next page or
+   * chapter is shown straight away. Resolves once the turn has settled.
+   */
+  turnPage(direction: TurnDirection, options?: { animate?: boolean }): Promise<void>;
+  /** Whether the current chapter has another page that way, without leaving it. */
+  canTurnInPlace(direction: TurnDirection): boolean;
+  /** Starts a live scrub from where the strip is now. */
+  beginScrub(): void;
+  /** Follows the fingers: px of travel, signed, from where the scrub began. */
+  scrubTo(displacement: number): void;
+  /** Settles on the committed page, or springs back to where the scrub began. */
+  endScrub(committed: TurnDirection | null): Promise<void>;
   setReadingMode(mode: EpubReadingMode): Promise<void>;
   /**
    * How many pages Two pages shows. The viewer decides from the reading measure;
@@ -875,6 +910,215 @@ export async function openEpubDocument(
     }
   };
 
+  // ---- The paginated strip: continuous page turns ---------------------------
+
+  /**
+   * epub.js builds its view manager on its own render queue, so it does not exist
+   * when this engine is created: every use asks for it again.
+   */
+  const viewManager = () => (rendition as unknown as { manager?: PaginatedManager }).manager;
+
+  /**
+   * The strip epub.js lays a chapter out on: the whole chapter in CSS columns,
+   * stepped by `container.scrollLeft`. Sliding that offset instead of jumping it
+   * keeps the outgoing and incoming pages on screen together at full opacity,
+   * which is the whole difference between a page turn and a cut.
+   */
+  const strip = (): { container: HTMLElement; stride: number } | null => {
+    if (currentMode === 'scroll') return null;
+    const manager = viewManager();
+    const container = manager?.container;
+    if (!container || container.clientWidth <= 0) return null;
+    const stride = manager?.layout?.delta ?? container.clientWidth;
+    return stride > 0 ? { container, stride } : null;
+  };
+
+  /**
+   * The strip's own slide. It is driven from script rather than handed to
+   * `slideScroll`, because a second turn has to be able to take over: the frame
+   * loop is cancelled and the strip put where the first turn was heading, so a
+   * turn never starts from half-way between two pages — and a slide never keeps
+   * writing offsets into a chapter that has already been replaced.
+   */
+  let slideFrame = 0;
+  let slideTarget = 0;
+  let slideDone: (() => void) | null = null;
+
+  const cancelSlide = () => {
+    if (slideFrame !== 0) {
+      cancelAnimationFrame(slideFrame);
+      slideFrame = 0;
+    }
+    const done = slideDone;
+    slideDone = null;
+    if (done) done();
+  };
+
+  /** Puts the strip where the slide in flight was heading, if one is running. */
+  const settleSlide = () => {
+    const inFlight = slideFrame !== 0 || slideDone !== null;
+    cancelSlide();
+    // Without this, a finished slide's target would be re-applied to a chapter
+    // that has since been replaced, and the strip would jump to the old page.
+    if (!inFlight) return;
+    const current = strip();
+    if (current) current.container.scrollLeft = slideTarget;
+  };
+
+  const slideStrip = (target: number, duration: number): Promise<void> =>
+    new Promise((resolve) => {
+      const current = strip();
+      if (!current) {
+        resolve();
+        return;
+      }
+      cancelSlide();
+      const { container } = current;
+      slideTarget = target;
+      if (prefersReducedMotion()) {
+        container.scrollLeft = target;
+        resolve();
+        return;
+      }
+      const from = container.scrollLeft;
+      const started = performance.now();
+      slideDone = resolve;
+      const step = () => {
+        const progress = Math.min((performance.now() - started) / duration, 1);
+        container.scrollLeft = from + (target - from) * easeOut(progress);
+        if (progress < 1) {
+          slideFrame = requestAnimationFrame(step);
+        } else {
+          slideFrame = 0;
+          slideDone = null;
+          resolve();
+        }
+      };
+      slideFrame = requestAnimationFrame(step);
+    });
+
+  /** Whether the chapter has another page that way, as epub.js itself decides. */
+  const canTurnInPlace = (direction: TurnDirection): boolean => {
+    const current = strip();
+    if (!current) return false;
+    const { container, stride } = current;
+    return direction > 0
+      ? container.scrollLeft + container.offsetWidth + stride <= container.scrollWidth + 1
+      : container.scrollLeft > 1;
+  };
+
+  /**
+   * epub.js empties the container before the next chapter's iframe has loaded, so
+   * a turn across a spine seam shows a blank page for as long as the parse takes.
+   * While a seam turn is armed, `views.clear()` forgets its views instead of
+   * destroying them: their iframes stay painted in the strip, one page away from
+   * the incoming chapter, and the turn slides across the seam between them.
+   */
+  const seam = { armed: false, held: [] as HTMLElement[] };
+  let seamViews: PaginatedManager['views'];
+  let clearViews: (() => void) | undefined;
+
+  /** Installs the hold on epub.js' view collection, once that collection exists. */
+  const ensureSeamHold = (): boolean => {
+    if (clearViews !== undefined) return true;
+    const views = viewManager()?.views;
+    if (!views) return false;
+    const original = views.clear.bind(views);
+    views.clear = () => {
+      if (!seam.armed) {
+        original();
+        return;
+      }
+      for (const view of views._views ?? []) {
+        const held = view.element;
+        if (held?.parentElement) seam.held.push(held);
+      }
+      views._views = [];
+      views.length = 0;
+    };
+    seamViews = views;
+    clearViews = original;
+    return true;
+  };
+
+  /** Arms the hold, and returns what settles it once the new chapter is up. */
+  const armSeam = (): ((direction: TurnDirection) => Promise<void>) | null => {
+    if (!ensureSeamHold()) return null;
+    seam.armed = true;
+    seam.held = [];
+    return async (direction) => {
+      seam.armed = false;
+      const held = seam.held;
+      seam.held = [];
+      const current = strip();
+      if (current && held.length > 0) {
+        const { container, stride } = current;
+        // The incoming chapter sits one page past the one still painted.
+        const target =
+          direction > 0 ? container.scrollLeft + stride : container.scrollLeft - stride;
+        await slideStrip(target, PAGE_SLIDE_MS);
+      }
+      for (const element of held) element.remove();
+    };
+  };
+
+  const turn = async (direction: TurnDirection, animate: boolean) => {
+    // A turn starts from a whole page, so a slide still running is finished first.
+    settleSlide();
+    beginNavigation();
+    pendingTarget = undefined;
+    if (currentMode === 'scroll') {
+      const scroller = element.querySelector<HTMLElement>('.epub-container');
+      if (scroller && scroller.clientHeight > 0) {
+        const step = Math.max(Math.floor(scroller.clientHeight * 0.85), 100);
+        if (direction > 0) {
+          if (scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 4) {
+            scroller.scrollTop = Math.min(
+              scroller.scrollTop + step,
+              scroller.scrollHeight - scroller.clientHeight,
+            );
+            return;
+          }
+        } else if (scroller.scrollTop > 4) {
+          scroller.scrollTop = Math.max(scroller.scrollTop - step, 0);
+          return;
+        }
+      }
+    } else if (animate && canTurnInPlace(direction)) {
+      const current = strip();
+      if (current) {
+        await slideStrip(current.container.scrollLeft + direction * current.stride, PAGE_SLIDE_MS);
+        return;
+      }
+    }
+    const settleSeam = animate ? armSeam() : null;
+    try {
+      await (direction > 0 ? rendition.next() : rendition.prev());
+    } finally {
+      if (settleSeam) await settleSeam(direction);
+    }
+  };
+
+  /** Where the strip sat when the fingers landed; a cancelled scrub returns here. */
+  let scrubBase = 0;
+
+  const endScrub = async (committed: TurnDirection | null) => {
+    const current = strip();
+    if (!current) return;
+    settleSlide();
+    if (committed === null) {
+      await slideStrip(scrubBase, PAGE_SPRING_BACK_MS);
+      return;
+    }
+    if (canTurnInPlace(committed)) {
+      await slideStrip(scrubBase + committed * current.stride, PAGE_SLIDE_MS);
+      return;
+    }
+    // The fingers reached the chapter's edge: settle back, then cross the seam.
+    await slideStrip(scrubBase, PAGE_SPRING_BACK_MS);
+    await turn(committed, true);
+  };
+
   const spineIndexOf = (href: string) => {
     const path = href.split('#')[0] ?? '';
     if (!path.replace(/^(\.\/|\/)+/, '')) return -1;
@@ -980,40 +1224,21 @@ export async function openEpubDocument(
       );
       await display(cfi ?? href);
     },
-    async next() {
-      beginNavigation();
-      pendingTarget = undefined;
-      if (currentMode === 'scroll') {
-        const scroller = element.querySelector<HTMLElement>('.epub-container');
-        if (
-          scroller &&
-          scroller.clientHeight > 0 &&
-          scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 4
-        ) {
-          scroller.scrollTop = Math.min(
-            scroller.scrollTop + Math.max(Math.floor(scroller.clientHeight * 0.85), 100),
-            scroller.scrollHeight - scroller.clientHeight,
-          );
-          return;
-        }
-      }
-      await (rendition.next() as unknown as Promise<void>);
+    next: () => turn(1, false),
+    previous: () => turn(-1, false),
+    turnPage: (direction, options) => turn(direction, options?.animate ?? true),
+    canTurnInPlace,
+    beginScrub() {
+      scrubBase = strip()?.container.scrollLeft ?? 0;
     },
-    async previous() {
-      beginNavigation();
-      pendingTarget = undefined;
-      if (currentMode === 'scroll') {
-        const scroller = element.querySelector<HTMLElement>('.epub-container');
-        if (scroller && scroller.clientHeight > 0 && scroller.scrollTop > 4) {
-          scroller.scrollTop = Math.max(
-            scroller.scrollTop - Math.max(Math.floor(scroller.clientHeight * 0.85), 100),
-            0,
-          );
-          return;
-        }
-      }
-      await (rendition.prev() as unknown as Promise<void>);
+    scrubTo(displacement) {
+      const current = strip();
+      if (!current) return;
+      // A scrub takes over from a slide rather than fighting it for the offset.
+      cancelSlide();
+      current.container.scrollLeft = scrubBase + displacement;
     },
+    endScrub,
     async setReadingMode(mode) {
       if (mode === currentMode) return;
       currentMode = mode;
@@ -1215,6 +1440,9 @@ export async function openEpubDocument(
       }
     },
     destroy() {
+      cancelSlide();
+      // The seam hold shadows one method on the manager; leave it as we found it.
+      if (seamViews && clearViews) seamViews.clear = clearViews;
       book.destroy();
     },
   };
