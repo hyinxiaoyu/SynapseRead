@@ -425,6 +425,18 @@ describe('UnifiedToolbar', () => {
         vi.advanceTimersToNextFrame();
       });
       expect(centerSlot.style.left).toBe('72px');
+
+      // Narrowing into the flex fallback keeps horizontal padding on the side groups
+      // rather than `<header>`, so `@container/toolbar` inline size stays invariant.
+      trailingLeft = 600;
+      act(() => {
+        triggerResize?.();
+      });
+      expect(header.className).toContain('flex ');
+      expect(header.className).not.toContain('px-2');
+      expect(header.style.paddingLeft).toBe('');
+      expect(leading.className).toContain('pl-2');
+      expect(trailing.parentElement?.className).toContain('pr-2');
     } finally {
       vi.unstubAllGlobals();
     }
