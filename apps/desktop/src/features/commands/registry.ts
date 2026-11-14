@@ -200,6 +200,37 @@ export function isBrowserOnlyShortcut(
   return BROWSER_ONLY_SHORTCUTS[platform].some((shortcut) => shortcutMatches(event, shortcut));
 }
 
+/**
+ * Keys a text field answers itself: the editing and clipboard keys a field owns even
+ * where an app command happens to share one (`edit.undoDelete` owns ⌘Z). Neither the
+ * command nor the browser guard may take them away from the field.
+ */
+const TEXT_FIELD_SHORTCUTS = [
+  'CmdOrCtrl+Z',
+  'CmdOrCtrl+Y',
+  'Shift+CmdOrCtrl+Z',
+  'CmdOrCtrl+A',
+  'CmdOrCtrl+C',
+  'CmdOrCtrl+V',
+  'CmdOrCtrl+X',
+] as const;
+
+/** The modifier a browser's own shortcuts use: ⌘ on macOS, Ctrl elsewhere. */
+function hasPrimaryModifier(event: KeyboardEvent, platform: Platform): boolean {
+  return platform === 'mac' ? event.metaKey : event.ctrlKey;
+}
+
+/**
+ * Whether the webview, not the app, would act on this key. A text field keeps the
+ * key from its command, but the webview must not answer it either: with a note
+ * focused, `Ctrl+R` would reload the app and `Ctrl+F` would open Edge's Find bar.
+ */
+function isBrowserAction(event: KeyboardEvent, platform: Platform): boolean {
+  if (isBrowserOnlyShortcut(event, platform)) return true;
+  if (TEXT_FIELD_SHORTCUTS.some((shortcut) => shortcutMatches(event, shortcut))) return false;
+  return hasPrimaryModifier(event, platform);
+}
+
 /** A key that carries a command's modifier, rather than a bare key the page owns. */
 function isModified(event: KeyboardEvent): boolean {
   return event.metaKey || event.ctrlKey || event.altKey;
@@ -228,13 +259,20 @@ export function dispatchCommandKeydown(event: KeyboardEvent): boolean {
 }
 
 function dispatchToCommand(event: KeyboardEvent): KeydownResult {
+  const platform = detectPlatform();
   for (const id of COMMAND_IDS) {
-    const definition = commandDefinition(id);
+    const definition = commandDefinition(id, platform);
     const binding = commandBindings(definition).find((candidate) =>
       shortcutMatches(event, candidate),
     );
     if (binding === undefined) continue;
-    if (blocksShortcut(event, definition)) return 'passed';
+    if (blocksShortcut(event, definition)) {
+      // The field owns the key, but it still must not reach the webview: `Ctrl+R`
+      // and `Ctrl+F` would reload the app or open Edge's Find bar over the note
+      // being edited. Editing and clipboard keys stay the field's.
+      if (isBrowserAction(event, platform)) event.preventDefault();
+      return 'passed';
+    }
     if (binding !== definition.shortcut && resolve(id)?.nativeAliases) return 'passed';
     if (runCommand(id, 'keyboard')) {
       event.preventDefault();

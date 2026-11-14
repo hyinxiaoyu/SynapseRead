@@ -262,6 +262,51 @@ describe('EPUB navigation', () => {
     expect(fake.rendition.location?.start.href).toBe('chapter1.xhtml');
   });
 
+  it('forwards a right click in a chapter frame, once per document', async () => {
+    const handle = await open();
+    const rightClick = vi.fn();
+    handle.onContextMenu(rightClick);
+    const chapterDoc = document.implementation.createHTMLDocument('');
+    chapterDoc.body.innerHTML = '<p id="text">A paragraph</p>';
+    const hook = fake.state.renditionHooks[0];
+    const contents = {
+      document: chapterDoc,
+      window,
+      expand: vi.fn<() => void>(),
+      sectionIndex: 0,
+    } as unknown as Parameters<NonNullable<typeof hook>>[0];
+    // A re-rendered view runs the hook again on the same document.
+    hook?.(contents);
+    hook?.(contents);
+    const click = () => {
+      const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      chapterDoc.getElementById('text')?.dispatchEvent(event);
+      return event;
+    };
+    click();
+    expect(rightClick).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops listening to a chapter once the reader is destroyed', async () => {
+    const handle = await open();
+    const rightClick = vi.fn();
+    handle.onContextMenu(rightClick);
+    const jump = handle.display('chapter1.xhtml');
+    fake.settle('chapter1.xhtml');
+    await jump;
+    const chapterDoc = fake.state.contents[0]?.document;
+    const click = () => {
+      const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      chapterDoc?.body.dispatchEvent(event);
+    };
+    click();
+    expect(rightClick).toHaveBeenCalledTimes(1);
+
+    handle.destroy();
+    click();
+    expect(rightClick).toHaveBeenCalledTimes(1);
+  });
+
   it('resolves a link against its chapter, not the frame, and says if it is a noteref', async () => {
     const handle = await open();
     const links: [string, boolean][] = [];

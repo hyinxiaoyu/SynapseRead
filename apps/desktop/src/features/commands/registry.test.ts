@@ -251,6 +251,47 @@ describe('command registry', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it('keeps browser actions out of a text field, and its editing keys in it', () => {
+    const rotate = vi.fn();
+    const find = vi.fn();
+    register(() => ({
+      'view.rotateRight': { run: rotate, enabled: false },
+      'edit.find': { run: find },
+    }));
+    document.body.innerHTML = `<textarea id="note"></textarea>`;
+    const note = document.getElementById('note');
+
+    // A note has the focus, so the command is blocked — but reloading the app or
+    // opening Edge's Find bar over the note is worse than doing nothing.
+    for (const init of [
+      { key: 'r', code: 'KeyR', ctrlKey: true },
+      { key: 'f', code: 'KeyF', ctrlKey: true },
+      { key: 'F5', code: 'F5' },
+    ]) {
+      const event = key({ ...init, bubbles: true });
+      note?.dispatchEvent(event);
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(true);
+    }
+    expect(rotate).not.toHaveBeenCalled();
+    expect(find).not.toHaveBeenCalled();
+
+    // The field keeps its own keys: editing, clipboard, and the caret keys.
+    for (const init of [
+      { key: 'z', code: 'KeyZ', ctrlKey: true },
+      { key: 'a', code: 'KeyA', ctrlKey: true },
+      { key: 'c', code: 'KeyC', ctrlKey: true },
+      { key: 'v', code: 'KeyV', ctrlKey: true },
+      { key: 'x', code: 'KeyX', ctrlKey: true },
+      { key: 'ArrowRight', code: 'ArrowRight' },
+      // ⌥↑ moves the caret by paragraph on macOS; it is not the browser's.
+      { key: 'ArrowUp', code: 'ArrowUp', altKey: true },
+    ]) {
+      const event = key({ ...init, bubbles: true });
+      note?.dispatchEvent(event);
+      expect(event.defaultPrevented, JSON.stringify(init)).toBe(false);
+    }
+  });
+
   it('dispatches window keydowns, preventing the default', () => {
     const run = vi.fn();
     register(() => ({ 'bookmarks.toggle': { run } }));

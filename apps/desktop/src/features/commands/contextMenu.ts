@@ -12,17 +12,38 @@ export function keepsNativeContextMenu(target: EventTarget | null): boolean {
   return isEditableShortcutTarget(target);
 }
 
+/** Hides the webview's menu for one right click, unless a text field owns it. */
+export function suppressContextMenu(event: MouseEvent) {
+  if (keepsNativeContextMenu(event.target)) return;
+  event.preventDefault();
+}
+
+/**
+ * Whether the window listener below is installed. A chapter frame asks at the moment
+ * of the right click, because the guard is installed after the frame is mounted.
+ */
+let guarding = false;
+
 /**
  * Hides the webview's default context menu outside text fields. Returns the
  * cleanup, so a caller can stop listening again.
  */
 export function suppressDefaultContextMenu(): () => void {
-  const onContextMenu = (event: MouseEvent) => {
-    if (keepsNativeContextMenu(event.target)) return;
-    event.preventDefault();
+  window.addEventListener('contextmenu', suppressContextMenu);
+  guarding = true;
+  return () => {
+    window.removeEventListener('contextmenu', suppressContextMenu);
+    guarding = false;
   };
-  window.addEventListener('contextmenu', onContextMenu);
-  return () => window.removeEventListener('contextmenu', onContextMenu);
+}
+
+/**
+ * For a document the window listener cannot see: an EPUB chapter is a frame, and its
+ * `contextmenu` never reaches the window that listened above.
+ */
+export function suppressFrameContextMenu(event: MouseEvent) {
+  if (!guarding) return;
+  suppressContextMenu(event);
 }
 
 /**

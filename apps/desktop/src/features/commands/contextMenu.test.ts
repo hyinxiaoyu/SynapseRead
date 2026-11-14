@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   keepsNativeContextMenu,
   suppressDefaultContextMenu,
+  suppressFrameContextMenu,
 } from '@/features/commands/contextMenu';
 
 const cleanups: (() => void)[] = [];
@@ -55,5 +56,41 @@ describe('the webview context menu', () => {
     expect(keepsNativeContextMenu(document.getElementById('note'))).toBe(true);
     expect(keepsNativeContextMenu(document.getElementById('page'))).toBe(false);
     expect(keepsNativeContextMenu(null)).toBe(false);
+  });
+});
+
+describe('a chapter frame', () => {
+  /** A real frame document, as an EPUB chapter is. */
+  function chapterFrame(): Document {
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const frameDocument = frame.contentDocument;
+    if (!frameDocument) throw new Error('the frame has no document');
+    frameDocument.body.innerHTML = '<p id="text">A paragraph</p>';
+    return frameDocument;
+  }
+
+  function rightClickIn(frameDocument: Document): MouseEvent {
+    const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+    frameDocument.getElementById('text')?.dispatchEvent(event);
+    return event;
+  }
+
+  it('never reaches the window listener, which is why the reader forwards it', () => {
+    cleanups.push(suppressDefaultContextMenu());
+    expect(rightClickIn(chapterFrame()).defaultPrevented).toBe(false);
+  });
+
+  it('is guarded once the reader forwards it', () => {
+    cleanups.push(suppressDefaultContextMenu());
+    const event = rightClickIn(chapterFrame());
+    suppressFrameContextMenu(event);
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('is left alone while the guard is not installed', () => {
+    const event = rightClickIn(chapterFrame());
+    suppressFrameContextMenu(event);
+    expect(event.defaultPrevented).toBe(false);
   });
 });

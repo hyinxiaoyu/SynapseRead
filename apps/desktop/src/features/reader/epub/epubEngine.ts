@@ -167,6 +167,11 @@ export interface EpubHandle {
   onPointer(listener: (down: boolean) => void): void;
   onLocation(listener: (location: EpubLocation) => void): void;
   onKeyDown(listener: (event: KeyboardEvent) => void): void;
+  /**
+   * Right clicks in a chapter frame. A frame is a document of its own, so its
+   * `contextmenu` never reaches the window the rest of the app listens on.
+   */
+  onContextMenu(listener: (event: MouseEvent) => void): void;
   /** Pointer events in a chapter frame, in the top window's coordinates. */
   onGesture(listener: (sample: PageGestureSample) => void): void;
   /** Wheel events in a chapter frame; the listener reports whether it used one. */
@@ -600,12 +605,15 @@ export async function openEpubDocument(
   let locationListener: (location: EpubLocation) => void = () => undefined;
   let internalLinkListener: (href: string, link: EpubInternalLink) => void = () => undefined;
   let keyDownListener: (event: KeyboardEvent) => void = () => undefined;
+  let contextMenuListener: (event: MouseEvent) => void = () => undefined;
   let gestureListener: (sample: PageGestureSample) => void = () => undefined;
   let wheelListener: (wheel: WheelSample) => boolean = () => false;
   let markClickListener: (annotationId: string, rect: ViewportRect | null) => void = () =>
     undefined;
   let pointerListener: (down: boolean) => void = () => undefined;
   let frameCursor = '';
+  /** One listener for every chapter document, so it can be removed again by identity. */
+  const onChapterContextMenu = (event: MouseEvent) => contextMenuListener(event);
 
   rendition.hooks.content.register((contents: Contents) => {
     contents.document.body?.classList.toggle('epubjs-scrolled', currentMode === 'scroll');
@@ -651,6 +659,10 @@ export async function openEpubDocument(
     contents.document.addEventListener('keydown', (event: KeyboardEvent) => {
       keyDownListener(event);
     });
+    // The app guards the webview's own context menu on the window, and a chapter is
+    // a frame: its right clicks never reach that listener. The same function serves
+    // every chapter, so a re-rendered document gets one listener, not two.
+    contents.document.addEventListener('contextmenu', onChapterContextMenu);
     // Page turns are decided outside the frame, in the top window's coordinates.
     const chapterDoc = contents.document;
     const offset = () => {
@@ -1201,6 +1213,9 @@ export async function openEpubDocument(
     onKeyDown(listener) {
       keyDownListener = listener;
     },
+    onContextMenu(listener) {
+      contextMenuListener = listener;
+    },
     onGesture(listener) {
       gestureListener = listener;
     },
@@ -1215,6 +1230,11 @@ export async function openEpubDocument(
       }
     },
     destroy() {
+      // A view epub.js has already thrown away took its document with it; the rest
+      // still carry the listener the chapter hook added.
+      for (const contents of contentsList()) {
+        contents.document.removeEventListener('contextmenu', onChapterContextMenu);
+      }
       book.destroy();
     },
   };
