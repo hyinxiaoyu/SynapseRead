@@ -4,9 +4,11 @@ mod access;
 mod commands;
 mod error;
 mod menu;
+#[cfg(not(target_os = "macos"))]
+mod menu_bar;
 mod state;
 
-use tauri::{Builder, Manager, Runtime};
+use tauri::{Builder, Manager, Runtime, Url};
 
 use state::AppState;
 
@@ -79,6 +81,14 @@ pub fn run() {
                     let _ = tauri::Emitter::emit(&app, access::DOCUMENTS_DROPPED_EVENT, &payload);
                 });
             }
+            // Full screen has no window event of its own: entering and leaving it
+            // both arrive as a resize.
+            #[cfg(not(target_os = "macos"))]
+            {
+                if matches!(event, tauri::WindowEvent::Resized(_)) {
+                    menu_bar::follow_fullscreen(window);
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("failed to run SynapseRead");
@@ -86,12 +96,25 @@ pub fn run() {
 
 /// The window is created here rather than from `tauri.conf.json` so that only
 /// macOS gets the unified title bar: the toolbar draws under the traffic lights,
-/// while Windows and Linux keep their standard frame.
+/// while Windows and Linux keep their standard frame. It is also where the webview
+/// is kept inside the app: no second window, and no navigation off the app's own
+/// content (#84).
 fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     let Some(config) = app.config().app.windows.first().cloned() else {
         return Ok(());
     };
-    let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+    // Only a dev build loads from the Vite server. A release build refuses it even
+    // though the embedded config still names it.
+    let dev_server = if cfg!(debug_assertions) {
+        app.config().build.dev_url.clone()
+    } else {
+        None
+    };
+    let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?
+        // A document link or `window.open` must not open a second webview: the
+        // app's own tabs are the only way to another document.
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+        .on_navigation(move |url| is_app_navigation(url, dev_server.as_ref()));
     #[cfg(target_os = "macos")]
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
@@ -101,5 +124,29 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Whether the main webview may follow `url`.
+///
+/// Only the app's own content may replace it. `about:` covers the `srcdoc` frames
+/// EPUB chapters are rendered into, and `blob:` and `data:` the URLs PDF.js and
+/// packaged images draw from; none of them leaves the app. A remote page,
+/// `view-source:`, or `javascript:` is refused, so a stray link or a browser
+/// accelerator cannot navigate away from the app.
+fn is_app_navigation(url: &Url, dev_server: Option<&Url>) -> bool {
+    match url.scheme() {
+        // The bundled app: `tauri://localhost`, and the asset protocol it serves
+        // documents and captures from.
+        "tauri" | "asset" => true,
+        "http" | "https" => {
+            matches!(url.host_str(), Some("tauri.localhost" | "asset.localhost"))
+                || dev_server.is_some_and(|dev| dev.origin() == url.origin())
+        }
+        "about" | "blob" | "data" => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod ipc_tests;
+
+#[cfg(test)]
+mod window_tests;

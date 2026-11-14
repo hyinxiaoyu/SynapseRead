@@ -9,6 +9,7 @@ import {
   SEARCH_HIGHLIGHT_ID,
   searchMatchId,
 } from '@/features/reader/DocumentSearch';
+import { suppressDefaultContextMenu } from '@/features/commands/contextMenu';
 import type { PageGestureSample, WheelSample } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
@@ -64,6 +65,7 @@ const engine = vi.hoisted(() => ({
   /** The engine's link peek; null leaves it out, so every link jumps. */
   peek: null as ((href: string, link: { noteref: boolean }) => Promise<string | null>) | null,
   emitKeyDown: (() => undefined) as (event: KeyboardEvent) => void,
+  emitContextMenu: (() => undefined) as (event: MouseEvent) => void,
   emitGesture: (() => undefined) as (sample: PageGestureSample) => void,
   emitWheel: (() => false) as (wheel: WheelSample) => boolean,
   emitMarkClick: (() => undefined) as (annotationId: string, rect: null) => void,
@@ -179,6 +181,9 @@ vi.mock('./epubEngine', () => ({
     },
     onKeyDown(listener: (event: KeyboardEvent) => void) {
       engine.emitKeyDown = listener;
+    },
+    onContextMenu(listener: (event: MouseEvent) => void) {
+      engine.emitContextMenu = listener;
     },
     onGesture(listener: (sample: PageGestureSample) => void) {
       engine.emitGesture = listener;
@@ -568,6 +573,22 @@ describe('EpubViewer', () => {
     view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
     fireEvent.keyDown(window, { key: 'ArrowRight' });
     expect(engine.next).toHaveBeenCalledTimes(3);
+  });
+
+  it('hides the webview menu for a right click inside a chapter', async () => {
+    const stop = suppressDefaultContextMenu();
+    try {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+      // A chapter frame's right click never reaches the window, so the engine
+      // forwards it to the viewer (#84).
+      const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      act(() => engine.emitContextMenu(event));
+      expect(event.defaultPrevented).toBe(true);
+    } finally {
+      stop();
+    }
   });
 
   it('defaults to two-page spread mode and switches between reading modes', async () => {

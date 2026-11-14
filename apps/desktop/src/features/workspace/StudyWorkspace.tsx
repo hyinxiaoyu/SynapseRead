@@ -5,6 +5,7 @@ import { usePanelRef } from 'react-resizable-panels';
 import { Button } from '@/components/ui/button';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { KeyboardShortcutsDialog } from '@/features/commands/KeyboardShortcutsDialog';
+import { useDefaultContextMenuGuard } from '@/features/commands/contextMenu';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/commands/registry';
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
@@ -67,6 +68,11 @@ export function StudyWorkspace() {
   useEffect(() => {
     void initialize();
   }, [initialize]);
+
+  // The webview's own context menu is a browser's, not the app's: it acts on the
+  // document the app is showing. The browser preview keeps it, which is a
+  // development tool there (#84).
+  useDefaultContextMenuGuard(backendKind === 'tauri' || !import.meta.env.DEV);
 
   useNativeMenu(onMenuCommand, setMenuItemStates);
 
