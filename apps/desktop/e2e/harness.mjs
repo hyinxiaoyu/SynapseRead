@@ -10,19 +10,23 @@ import { extname, join, normalize, resolve, sep } from 'node:path';
 
 const DIST = resolve(import.meta.dirname, '../dist');
 const TAURI_CONFIG = resolve(import.meta.dirname, '../src-tauri/tauri.conf.json');
-const CHROME_CANDIDATES = [
-  process.env.CHROME_PATH,
+const WINDOWS_PROGRAM_DIRS = [
+  process.env.PROGRAMFILES,
+  process.env['PROGRAMFILES(X86)'],
+  process.env.LOCALAPPDATA,
+].filter(Boolean);
+
+// Prefer Chrome across all Windows install scopes (system and per-user) before falling back to Edge.
+const DISCOVERY_CANDIDATES = [
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
   '/usr/bin/google-chrome',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  ...[process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA]
-    .filter(Boolean)
-    .flatMap((dir) => [
-      join(dir, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      join(dir, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-    ]),
-].filter(Boolean);
+  ...WINDOWS_PROGRAM_DIRS.map((dir) => join(dir, 'Google', 'Chrome', 'Application', 'chrome.exe')),
+  ...WINDOWS_PROGRAM_DIRS.map((dir) => join(dir, 'Microsoft', 'Edge', 'Application', 'msedge.exe')),
+];
+
+let lastWorkingCandidate = null;
 
 const MIME = {
   '.html': 'text/html',
@@ -686,21 +690,56 @@ export async function warmUp(url) {
   return Date.now() - started;
 }
 
+function browserCandidates() {
+  const explicit = process.env.CHROME_PATH?.trim();
+  if (explicit) {
+    if (!existsSync(explicit)) {
+      throw new Error(`CHROME_PATH does not exist: ${explicit}`);
+    }
+    return { explicit: true, candidates: [explicit] };
+  }
+  const ordered = lastWorkingCandidate
+    ? [lastWorkingCandidate, ...DISCOVERY_CANDIDATES]
+    : DISCOVERY_CANDIDATES;
+  const candidates = [...new Set(ordered)].filter((candidate) => existsSync(candidate));
+  if (candidates.length === 0) {
+    throw new Error('No Chromium found. Set CHROME_PATH to a Chromium-based browser.');
+  }
+  return { explicit: false, candidates };
+}
+
 export async function launchPage(
   url,
   { width = 1440, height = 900, devtoolsTimeoutMs = DEVTOOLS_TIMEOUT_MS, retries = 1 } = {},
 ) {
-  const chrome = CHROME_CANDIDATES.find((candidate) => existsSync(candidate));
-  if (!chrome) throw new Error('No Chromium found. Set CHROME_PATH to a Chromium-based browser.');
+  const { explicit, candidates } = browserCandidates();
+  const errors = [];
 
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await launchPageOnce(chrome, url, { width, height, devtoolsTimeoutMs });
-    } catch (error) {
-      if (attempt >= retries) throw error;
-      console.warn(`     Chromium launch failed (${error.message}); retrying once`);
+  for (let index = 0; index < candidates.length; index += 1) {
+    const chrome = candidates[index];
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        const launched = await launchPageOnce(chrome, url, { width, height, devtoolsTimeoutMs });
+        if (!explicit) lastWorkingCandidate = chrome;
+        return launched;
+      } catch (error) {
+        errors.push(`${chrome}: ${error.message}`);
+        if (attempt < retries) {
+          console.warn(`     Chromium launch failed (${chrome}: ${error.message}); retrying once`);
+        } else if (index + 1 < candidates.length) {
+          console.warn(
+            `     Chromium launch failed (${chrome}: ${error.message}); trying next candidate`,
+          );
+        }
+      }
     }
   }
+
+  throw new Error(
+    candidates.length === 1
+      ? errors.at(-1)
+      : `No Chromium candidate started:\n${errors.join('\n')}`,
+  );
 }
 
 async function launchPageOnce(chrome, url, { width, height, devtoolsTimeoutMs }) {
@@ -740,6 +779,8 @@ async function launchPageOnce(chrome, url, { width, height, devtoolsTimeoutMs })
         '--headless=new',
         '--no-sandbox',
         '--disable-gpu',
+        '--no-first-run',
+        '--no-default-browser-check',
         // Nothing but the flow: no component downloads or background requests to
         // compete with it (or change the browser) while it runs.
         '--disable-component-update',
