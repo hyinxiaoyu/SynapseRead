@@ -11,6 +11,7 @@ import {
   computePaperCurl,
   directionOf,
   easeOut,
+  normalizeWheelDelta,
   PAGE_CURL_MS,
   PAGE_TURN_ANIMATION_ID,
   type PageTurnGestures,
@@ -20,7 +21,9 @@ import {
   SCRUB_COMMIT_VELOCITY,
   SCRUB_IDLE_MS,
   slideScroll,
+  SWIPE_THRESHOLD_PX,
   usePageTurnGestures,
+  WHEEL_LINE_PX,
   WheelScrub,
   zoneAt,
 } from './pageTurn';
@@ -50,6 +53,16 @@ describe('rubberBand', () => {
     expect(rubberBand(-1000, 100)).toBeGreaterThan(-100);
     // A page with no width cannot be dragged anywhere.
     expect(rubberBand(50, 0)).toBe(0);
+  });
+});
+
+describe('normalizeWheelDelta', () => {
+  it('converts pixel, line, and page wheel deltas to CSS pixels', () => {
+    expect(normalizeWheelDelta(25, undefined, 600)).toBe(25);
+    expect(normalizeWheelDelta(-40, 0, 600)).toBe(-40);
+    expect(normalizeWheelDelta(2, 1, 600)).toBe(2 * WHEEL_LINE_PX);
+    expect(normalizeWheelDelta(-1, 2, 600)).toBe(-600);
+    expect(normalizeWheelDelta(1, 2, 0)).toBe(800);
   });
 });
 
@@ -214,6 +227,39 @@ describe('WheelScrub', () => {
       scrub.push(10, event * 16, { pageWidth, canTurn: () => true });
     }
     expect(pageWidth).toHaveBeenCalledTimes(1);
+  });
+
+  it('commits an isolated single-sample swipe past SWIPE_THRESHOLD_PX', () => {
+    const notch = make();
+    push(notch, SWIPE_THRESHOLD_PX + 10, 0);
+    expect(notch.release(SCRUB_IDLE_MS)).toEqual([{ kind: 'end', velocity: 0, committed: 1 }]);
+
+    const short = make();
+    push(short, SWIPE_THRESHOLD_PX - 20, 0);
+    expect(short.release(SCRUB_IDLE_MS)).toEqual([{ kind: 'end', velocity: 0, committed: null }]);
+  });
+
+  it('returns to idle after a release commit so a later same-speed swipe still turns', () => {
+    const scrub = make();
+    const first = run(
+      scrub,
+      Array.from({ length: 8 }, () => 30),
+      0,
+    );
+    expect(scrub.release(first.at + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: 1 },
+    ]);
+
+    const secondStart = first.at + SCRUB_IDLE_MS + 50;
+    const second = run(
+      scrub,
+      Array.from({ length: 8 }, () => 30),
+      secondStart,
+    );
+    expect(second.updates[0]).toEqual({ kind: 'start' });
+    expect(scrub.release(second.at + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: 1 },
+    ]);
   });
 });
 
@@ -448,6 +494,72 @@ describe('usePageTurnGestures', () => {
     expect(last).toBeLessThan(1000 * 0.35);
     act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
     expect(scrub.end).toHaveBeenLastCalledWith(expect.any(Number), null);
+  });
+
+  it('turns once per discrete Windows pixel notch while idle without scrubbing', () => {
+    const { onTurn, scrub, gestures } = mount();
+    act(() => {
+      expect(gestures().handleWheel({ deltaX: 120, deltaY: 0, deltaMode: 0, ctrlKey: false })).toBe(
+        true,
+      );
+      expect(
+        gestures().handleWheel({ deltaX: -100, deltaY: 0, deltaMode: 0, ctrlKey: false }),
+      ).toBe(true);
+    });
+    expect(scrub.start).not.toHaveBeenCalled();
+    expect(onTurn).toHaveBeenNthCalledWith(1, 1);
+    expect(onTurn).toHaveBeenNthCalledWith(2, -1);
+  });
+
+  it('normalizes line-mode wheel events and accumulates sub-line ticks', () => {
+    vi.useFakeTimers();
+    const { onTurn, scrub, gestures } = mount();
+    act(() => {
+      expect(gestures().handleWheel({ deltaX: 1, deltaY: 0, deltaMode: 1, ctrlKey: false })).toBe(
+        true,
+      );
+    });
+    expect(scrub.start).not.toHaveBeenCalled();
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenLastCalledWith(1);
+
+    act(() => {
+      gestures().handleWheel({ deltaX: -0.5, deltaY: 0, deltaMode: 1, ctrlKey: false });
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    act(() => {
+      gestures().handleWheel({ deltaX: -0.5, deltaY: 0, deltaMode: 1, ctrlKey: false });
+    });
+    expect(onTurn).toHaveBeenCalledTimes(2);
+    expect(onTurn).toHaveBeenLastCalledWith(-1);
+
+    // An abandoned partial tick expires after idle silence.
+    act(() => {
+      gestures().handleWheel({ deltaX: 0.5, deltaY: 0, deltaMode: 1, ctrlKey: false });
+    });
+    act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
+    act(() => {
+      gestures().handleWheel({ deltaX: 0.5, deltaY: 0, deltaMode: 1, ctrlKey: false });
+    });
+    expect(onTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it('normalizes page-mode wheel events and respects boundaries', () => {
+    const allowed = mount();
+    act(() => {
+      expect(
+        allowed.gestures().handleWheel({ deltaX: 1, deltaY: 0, deltaMode: 2, ctrlKey: false }),
+      ).toBe(true);
+    });
+    expect(allowed.onTurn).toHaveBeenCalledWith(1);
+
+    const atEnd = mount(true, (direction) => direction < 0);
+    act(() => {
+      expect(
+        atEnd.gestures().handleWheel({ deltaX: 1, deltaY: 0, deltaMode: 2, ctrlKey: false }),
+      ).toBe(true);
+    });
+    expect(atEnd.onTurn).not.toHaveBeenCalled();
   });
 });
 

@@ -1969,4 +1969,68 @@ describe('PdfViewer', () => {
       nowSpy.mockRestore();
     }
   });
+
+  it('commits rapid successive turns and reversals cleanly in slide mode', async () => {
+    const originalAnimate = HTMLElement.prototype.animate;
+    const pending: {
+      resolve: () => void;
+      cancel: ReturnType<typeof vi.fn<() => void>>;
+    }[] = [];
+    HTMLElement.prototype.animate = vi.fn(function () {
+      let resolveFinished: () => void = () => undefined;
+      let rejectFinished: (reason?: unknown) => void = () => undefined;
+      const finished = new Promise<Animation>((resolve, reject) => {
+        resolveFinished = () => resolve({} as Animation);
+        rejectFinished = reject;
+      });
+      const cancel = vi.fn(() => {
+        rejectFinished(new DOMException('AbortError', 'AbortError'));
+      });
+      const entry = { resolve: resolveFinished, cancel };
+      pending.push(entry);
+      return {
+        id: '',
+        finished,
+        cancel,
+      } as unknown as Animation;
+    });
+
+    try {
+      window.localStorage.clear();
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout); // Page 1 of 5
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      const nextButton = screen.getByRole('button', { name: 'Next Page' });
+      const prevButton = screen.getByRole('button', { name: 'Previous Page' });
+
+      // Rapid double Next Page before the first slide settles -> Page 3 of 5.
+      fireEvent.click(nextButton);
+      fireEvent.click(nextButton);
+      expect(pending).toHaveLength(2);
+      expect(pending[0]?.cancel).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        pending.at(-1)?.resolve();
+      });
+      expect(readout).toHaveTextContent('Page 3 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+
+      // Rapid Next Page then immediate Previous Page reversal -> back to Page 3 of 5.
+      fireEvent.click(nextButton);
+      fireEvent.click(prevButton);
+      expect(pending).toHaveLength(4);
+      expect(pending[2]?.cancel).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        pending.at(-1)?.resolve();
+      });
+      expect(readout).toHaveTextContent('Page 3 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+    } finally {
+      HTMLElement.prototype.animate = originalAnimate;
+    }
+  });
 });

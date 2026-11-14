@@ -344,6 +344,9 @@ describe('EpubViewer', () => {
     engine.cursor = '';
     engine.measure = null;
     engine.peek = null;
+    engine.inPlace = true;
+    engine.scrubs = [];
+    engine.scrubEnds = [];
     window.localStorage.clear();
     engine.next.mockClear();
     engine.previous.mockClear();
@@ -1108,6 +1111,79 @@ describe('EpubViewer', () => {
     click(1050);
     expect(engine.next).toHaveBeenCalledTimes(3);
     expect(screen.queryByRole('button', { name: 'Next Page' })).not.toBeInTheDocument();
+  });
+
+  it('turns across chapter seams with slide and fade swipes while rubber-banding at book edges', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    vi.spyOn(screen.getByTestId('epub-host'), 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(100, 0, 1000, 800),
+    );
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 2,
+        totalPages: 2,
+        chapterIndex: 0,
+        totalChapters: 2,
+        fraction: 0.4,
+      }),
+    );
+
+    // At the chapter seam in `slide` mode, forward crosses to Chapter Two while
+    // backward at Chapter One rubber-bands without leaving the book.
+    engine.inPlace = false;
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        engine.emitWheel({ deltaX: 30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1]));
+    expect(engine.next).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        engine.emitWheel({ deltaX: -30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1, null]));
+    expect(engine.previous).not.toHaveBeenCalled();
+
+    // Switch to `Fade`: backward crosses from Chapter Two to Chapter One, while
+    // forward at the final chapter rubber-bands.
+    fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Fade' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+    act(() =>
+      engine.emitLocation({
+        cfi: FAR_CFI,
+        href: 'OEBPS/chapter2.xhtml',
+        page: 1,
+        totalPages: 2,
+        chapterIndex: 1,
+        totalChapters: 2,
+        fraction: 0.5,
+      }),
+    );
+
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        engine.emitWheel({ deltaX: -30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1, null, -1]));
+    expect(engine.previous).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        engine.emitWheel({ deltaX: 30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1, null, -1, null]));
+    expect(engine.next).toHaveBeenCalledTimes(1);
   });
 
   it('goes by chapter with Option-arrows and to chapter edges with Home and End', async () => {

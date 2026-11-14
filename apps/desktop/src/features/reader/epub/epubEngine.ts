@@ -1090,12 +1090,12 @@ export async function openEpubDocument(
       cancelSlide();
       const { container } = current;
       slideTarget = target;
-      if (prefersReducedMotion()) {
+      const from = container.scrollLeft;
+      if (prefersReducedMotion() || duration <= 0 || Math.abs(target - from) < 0.5) {
         container.scrollLeft = target;
         resolve();
         return;
       }
-      const from = container.scrollLeft;
       const started = performance.now();
       slideDone = resolve;
       const step = () => {
@@ -1112,14 +1112,21 @@ export async function openEpubDocument(
       slideFrame = requestAnimationFrame(step);
     });
 
+  /** Where the strip sat when the fingers landed; a cancelled scrub returns here. */
+  let scrubbing = false;
+  let scrubBase = 0;
+  let scrubTransition: PageTransition | undefined;
+  let scrubSpread = false;
+
   /** Whether the chapter has another page that way, as epub.js itself decides. */
   const canTurnInPlace = (direction: TurnDirection): boolean => {
     const current = strip();
     if (!current) return false;
     const { container, stride } = current;
+    const base = scrubbing ? scrubBase : container.scrollLeft;
     return direction > 0
-      ? container.scrollLeft + container.offsetWidth + stride <= container.scrollWidth + 1
-      : container.scrollLeft > 1;
+      ? base + container.offsetWidth + stride <= container.scrollWidth + 1
+      : base > 1;
   };
 
   /**
@@ -1146,7 +1153,15 @@ export async function openEpubDocument(
       }
       for (const view of views._views ?? []) {
         const held = view.element;
-        if (held?.parentElement) seam.held.push(held);
+        if (held?.parentElement) {
+          // `manager.clear()` calls `views.hide()` before `views.clear()`, hiding
+          // both the view wrapper and its iframe before we hold them for the slide.
+          held.style.visibility = 'visible';
+          for (const frame of held.querySelectorAll('iframe')) {
+            frame.style.visibility = 'visible';
+          }
+          seam.held.push(held);
+        }
       }
       views._views = [];
       views.length = 0;
@@ -1166,14 +1181,31 @@ export async function openEpubDocument(
       const held = seam.held;
       seam.held = [];
       const current = strip();
-      if (current && held.length > 0) {
-        const { container, stride } = current;
-        // The incoming chapter sits one page past the one still painted.
-        const target =
-          direction > 0 ? container.scrollLeft + stride : container.scrollLeft - stride;
-        await slideStrip(target, PAGE_SLIDE_MS);
+      let finalScrollLeft: number | null = null;
+      try {
+        if (current && held.length > 0) {
+          const { container, stride } = current;
+          const heldWidth = held.reduce((sum, element) => sum + element.offsetWidth, 0);
+          if (direction > 0) {
+            const start = Math.max(0, heldWidth - stride);
+            container.scrollLeft = start;
+            finalScrollLeft = 0;
+            await slideStrip(start + stride, PAGE_SLIDE_MS);
+          } else {
+            const incomingWidth = Math.max(0, container.scrollWidth - heldWidth);
+            container.scrollLeft = incomingWidth;
+            const target = Math.max(0, incomingWidth - stride);
+            finalScrollLeft = target;
+            await slideStrip(target, PAGE_SLIDE_MS);
+          }
+        }
+      } finally {
+        for (const element of held) element.remove();
+        if (current && finalScrollLeft !== null) {
+          current.container.scrollLeft = finalScrollLeft;
+          (rendition as unknown as { reportLocation?: () => void }).reportLocation?.();
+        }
       }
-      for (const element of held) element.remove();
     };
   };
 
@@ -1191,6 +1223,9 @@ export async function openEpubDocument(
     cancelCurl?.();
     cancelCurl = null;
     scrubCurl = null;
+    scrubbing = false;
+    scrubTransition = undefined;
+    scrubSpread = false;
     resetPaperCurl(curlHost, curlShadow);
     if (curlHost) {
       curlHost.style.visibility = 'hidden';
@@ -1374,11 +1409,14 @@ export async function openEpubDocument(
     }
   };
 
-  /** Where the strip sat when the fingers landed; a cancelled scrub returns here. */
-  let scrubBase = 0;
-
   const endScrub = async (committed: TurnDirection | null) => {
     const activeCurl = scrubCurl;
+    const transition = scrubTransition;
+    const spread = scrubSpread;
+    const inPlace = committed !== null && canTurnInPlace(committed);
+    scrubbing = false;
+    scrubTransition = undefined;
+    scrubSpread = false;
     scrubCurl = null;
     if (activeCurl) {
       const current = strip();
@@ -1387,8 +1425,7 @@ export async function openEpubDocument(
         return;
       }
       current.container.scrollLeft = scrubBase;
-      const inPlace =
-        committed !== null && committed === activeCurl.direction && canTurnInPlace(committed);
+      const inPlaceCurl = committed !== null && committed === activeCurl.direction && inPlace;
       if (committed === null || committed !== activeCurl.direction) {
         await runCurlAnimation({
           from: activeCurl.progress,
@@ -1401,7 +1438,7 @@ export async function openEpubDocument(
         return;
       }
       const duration = Math.max(120, Math.round((1 - activeCurl.progress) * PAGE_CURL_MS));
-      if (inPlace) {
+      if (inPlaceCurl) {
         current.container.scrollLeft = scrubBase + committed * current.stride;
         await runCurlAnimation({
           from: activeCurl.progress,
@@ -1446,13 +1483,13 @@ export async function openEpubDocument(
       await slideStrip(scrubBase, PAGE_SPRING_BACK_MS);
       return;
     }
-    if (canTurnInPlace(committed)) {
+    if (inPlace) {
       await slideStrip(scrubBase + committed * current.stride, PAGE_SLIDE_MS);
       return;
     }
     // The fingers reached the chapter's edge: settle back, then cross the seam.
     await slideStrip(scrubBase, PAGE_SPRING_BACK_MS);
-    await turn(committed, true);
+    await turn(committed, transition === 'slide', transition, spread);
   };
 
   const spineIndexOf = (href: string) => {
@@ -1574,7 +1611,10 @@ export async function openEpubDocument(
       // A scrub starts from a whole page, never from half of a slide or curl.
       settleSlide();
       clearCurlStage();
+      scrubbing = true;
       scrubBase = strip()?.container.scrollLeft ?? 0;
+      scrubTransition = options?.transition;
+      scrubSpread = options?.spread ?? false;
       if (
         options?.transition === 'curl' &&
         currentMode !== 'scroll' &&

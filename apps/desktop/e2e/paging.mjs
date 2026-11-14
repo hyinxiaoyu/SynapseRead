@@ -15,6 +15,52 @@ const visibleScroller = `[...document.querySelectorAll('[data-testid="pdf-scroll
 const sampleTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === 'sample'`;
 const openEpub = (page) => page.openUntil(`${visibleHost} && ${sampleTitle}`, 'the EPUB');
 const pageField = `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value`;
+const chapterIs = (title) =>
+  `[...(${visibleHost}?.querySelectorAll('iframe') ?? [])].some((view) => view.contentDocument?.querySelector('h1')?.textContent === '${title}')`;
+
+const waitForEpubSettle = async (page) => {
+  await page.evaluate('delete window.__epubSettle');
+  await page.waitFor(
+    `(() => {
+      const container = ${strip};
+      const left = container?.scrollLeft ?? 0;
+      const views = ${visibleHost}?.querySelectorAll('iframe').length ?? 0;
+      const now = performance.now();
+      const state = (window.__epubSettle ??= { left, views, since: now });
+      if (state.left !== left || state.views !== views) {
+        state.left = left;
+        state.views = views;
+        state.since = now;
+        return false;
+      }
+      return views <= 1 && now - state.since > 200;
+    })()`,
+    'the EPUB turn to settle',
+  );
+};
+
+const clickVisibleButtonTwice = (name) => `(() => {
+  const button = [...document.querySelectorAll('button')].find(
+    (b) => (b.getAttribute('aria-label') ?? b.textContent).trim() === ${JSON.stringify(name)}
+      && !b.disabled && b.checkVisibility({ visibilityProperty: true }),
+  );
+  if (!button) return false;
+  button.click();
+  button.click();
+  return true;
+})()`;
+
+const waitForPdfPageSettled = (page, expectedPage) =>
+  page.waitFor(
+    `(() => {
+      const stage = ${visibleScroller}?.querySelector('[data-testid="pdf-stage"]');
+      const animations = stage?.getAnimations?.() ?? [];
+      return ${pageField} === ${JSON.stringify(expectedPage)}
+        && animations.length === 0
+        && (stage?.style.transform ?? '') === '';
+    })()`,
+    `the PDF to settle on page ${expectedPage}`,
+  );
 
 /** Clears the selection an earlier excerpt left, which would swallow the click. */
 const clearFrameSelection = `(() => {
@@ -148,6 +194,54 @@ export async function pagingFlow(page) {
   );
   await page.emulateMedia(ANIMATED);
 
+  // ---- An EPUB slide swipe crosses a chapter seam cleanly in either direction ----
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const atSeam = await page.evaluate(`(() => {
+      const container = ${strip};
+      if (!container) return false;
+      return container.scrollLeft + container.offsetWidth + container.clientWidth > container.scrollWidth + 1;
+    })()`);
+    if (atSeam) break;
+    const beforeStep = await page.evaluate(scrollLeft);
+    await page.clickButton('Next Page');
+    await page.waitFor(
+      `${scrollLeft} > ${beforeStep}`,
+      'the EPUB strip to advance toward the chapter seam',
+    );
+    await waitForEpubSettle(page);
+  }
+  assert(
+    await page.evaluate(chapterIs('Chapter One')),
+    'must reach the seam still inside Chapter One',
+  );
+  await page.evaluate(`(() => {
+    const target = ${visibleHost};
+    for (let step = 0; step < 6; step += 1) {
+      target.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: 40, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+    }
+    return true;
+  })()`);
+  await page.waitFor(chapterIs('Chapter Two'), 'a forward swipe across the EPUB chapter seam');
+  await waitForEpubSettle(page);
+  const chapterTwoLeft = await page.evaluate(scrollLeft);
+  assert(
+    chapterTwoLeft === 0,
+    `forward seam swipe must land at start of Chapter Two, saw scrollLeft=${chapterTwoLeft}`,
+  );
+  await page.evaluate(`(() => {
+    const target = ${visibleHost};
+    for (let step = 0; step < 6; step += 1) {
+      target.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: -40, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+    }
+    return true;
+  })()`);
+  await page.waitFor(chapterIs('Chapter One'), 'a backward swipe across the EPUB chapter seam');
+  await waitForEpubSettle(page);
+
   // ---- A PDF page turn slides the staged spread, with the next one already drawn ----
   await page.openUntil(`${visibleScroller} && ${sampleTitle}`, 'the PDF');
   await page.evaluate(
@@ -188,6 +282,46 @@ export async function pagingFlow(page) {
     stage.pages.length <= 3,
     `a paged stage keeps at most three spreads live, saw ${stage.pages.length} pages`,
   );
+
+  // ---- Rapid back-to-back slide turns commit both steps without getting stuck ----
+  assert(
+    await page.evaluate(clickVisibleButtonTwice('Next Page')),
+    'visible Next Page button must be clickable for rapid turns',
+  );
+  await waitForPdfPageSettled(page, '4');
+  assert(
+    await page.evaluate(clickVisibleButtonTwice('Previous Page')),
+    'visible Previous Page button must be clickable for rapid turns',
+  );
+  await waitForPdfPageSettled(page, '2');
+
+  // ---- Discrete pixel notches and line-mode wheel events turn one page immediately ----
+  await page.evaluate(`(() => {
+    ${visibleScroller}?.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaX: 120,
+        deltaY: 0,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    return true;
+  })()`);
+  await waitForPdfPageSettled(page, '3');
+  await page.evaluate(`(() => {
+    ${visibleScroller}?.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaX: -3,
+        deltaY: 0,
+        deltaMode: WheelEvent.DOM_DELTA_LINE,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    return true;
+  })()`);
+  await waitForPdfPageSettled(page, '2');
 
   // ---- A spread's curl: the fold on the turning half, the cast shadow on the
   // half that stays put, each confined to its own side of the spine ----

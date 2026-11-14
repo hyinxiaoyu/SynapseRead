@@ -1099,9 +1099,45 @@ function PdfPages({
 
   const [initialCursor] = useState(() => asPdfAnchor(document.lastCursorAnchor));
   const [initialJump] = useState(jumpRequest);
-  const [currentPageIndex, setCurrentPageIndex] = useState(() =>
+  const [currentPageIndex, setRawPageIndex] = useState(() =>
     initialCursor && initialCursor.pageIndex < engine.pageCount ? initialCursor.pageIndex : 0,
   );
+  const committedPageRef = useRef(currentPageIndex);
+  const latestPageRef = useRef(currentPageIndex);
+  const renderedRowRef = useRef(-1);
+  const scrubbingRef = useRef(false);
+  const activeSlideRef = useRef<{
+    target: number;
+    to: number;
+    cancel: () => void;
+    settle: () => void;
+  } | null>(null);
+
+  const setCurrentPageIndex = useCallback((pageIndex: number) => {
+    committedPageRef.current = pageIndex;
+    latestPageRef.current = pageIndex;
+    setRawPageIndex(pageIndex);
+  }, []);
+
+  const effectivePageIndex = useCallback(
+    () => activeSlideRef.current?.target ?? latestPageRef.current,
+    [],
+  );
+
+  const cancelActiveSlide = useCallback(() => {
+    const active = activeSlideRef.current;
+    if (!active) return;
+    activeSlideRef.current = null;
+    latestPageRef.current = committedPageRef.current;
+    active.cancel();
+  }, []);
+
+  const settleActiveSlide = useCallback(() => {
+    const active = activeSlideRef.current;
+    if (!active) return;
+    activeSlideRef.current = null;
+    active.settle();
+  }, []);
   const [pageInput, setPageInput] = useState(() => String(currentPageIndex + 1));
   const currentPageLabel = pageLabelOf(pageLabels, currentPageIndex);
   const [pageInputInvalid, setPageInputInvalid] = useState(false);
@@ -1346,7 +1382,7 @@ function PdfPages({
       const fraction = height > 0 ? (offset - offsetWithin(pageIndex, 0)) / height : 0;
       layoutAnchor.current = { pageIndex, fraction: Math.min(Math.max(fraction, 0), 0.99) };
     },
-    [offsetWithin, pageHeight, scrollToOffset],
+    [offsetWithin, pageHeight, scrollToOffset, setCurrentPageIndex],
   );
   /**
    * The page and fraction at the top of the view when it is scrolled to `scrollTop`,
@@ -1380,8 +1416,8 @@ function PdfPages({
       const { pageIndex } = programmaticScrollRef.current;
       return anchor?.pageIndex === pageIndex ? anchor : { pageIndex, fraction: 0 };
     }
-    return locationAt(lastScrollTop.current, currentPageIndex);
-  }, [locationAt, currentPageIndex]);
+    return locationAt(lastScrollTop.current, effectivePageIndex());
+  }, [effectivePageIndex, locationAt]);
 
   const reportCursor = useCallback(() => {
     if (!restored.current) return;
@@ -1417,11 +1453,13 @@ function PdfPages({
 
   const applyZoom = useCallback(
     (nextMode: PdfZoomMode, nextScale?: number) => {
+      settleActiveSlide();
+      scrubbingRef.current = false;
       pendingZoomTarget.current = currentReturnLocation();
       setZoomMode(nextMode);
       if (nextScale !== undefined) setCustomScale(clampZoomScale(nextScale));
     },
-    [currentReturnLocation],
+    [currentReturnLocation, settleActiveSlide],
   );
 
   const stepZoom = useCallback(
@@ -1479,6 +1517,7 @@ function PdfPages({
       pagesInRow,
       rowLeft,
       rowOfPage,
+      setCurrentPageIndex,
       virtualizer,
       zoomMode,
     ],
@@ -1501,23 +1540,29 @@ function PdfPages({
   const applyDisplayMode = useCallback(
     (nextMode: PdfDisplayMode) => {
       if (nextMode === displayMode) return;
+      settleActiveSlide();
+      scrubbingRef.current = false;
       pendingZoomTarget.current = currentReturnLocation();
       setDisplayMode(nextMode);
     },
-    [currentReturnLocation, displayMode],
+    [currentReturnLocation, displayMode, settleActiveSlide],
   );
 
   const toggleCoverPageAlone = useCallback(() => {
+    settleActiveSlide();
+    scrubbingRef.current = false;
     pendingZoomTarget.current = currentReturnLocation();
     setCoverPageAlone((alone) => !alone);
-  }, [currentReturnLocation]);
+  }, [currentReturnLocation, settleActiveSlide]);
 
   const rotateBy = useCallback(
     (degrees: 90 | -90) => {
+      settleActiveSlide();
+      scrubbingRef.current = false;
       pendingZoomTarget.current = currentReturnLocation();
       setRotation((prev) => ((prev + degrees + 360) % 360) as PdfRotation);
     },
-    [currentReturnLocation],
+    [currentReturnLocation, settleActiveSlide],
   );
   const rotateClockwise = useCallback(() => rotateBy(90), [rotateBy]);
 
@@ -1597,6 +1642,7 @@ function PdfPages({
     scrollToOffset,
     clearPinchPreview,
     scheduleCursorReport,
+    setCurrentPageIndex,
   ]);
 
   useLayoutEffect(() => {
@@ -1612,7 +1658,7 @@ function PdfPages({
     scrollToOffset(nextTop);
     lastScrollTop.current = scrollRef.current?.scrollTop ?? nextTop;
     restored.current = true;
-  }, [engine, initialCursor, offsetWithin, scrollToOffset, sizes, width]);
+  }, [engine, initialCursor, offsetWithin, scrollToOffset, setCurrentPageIndex, sizes, width]);
 
   // ---- Reporting the reading position --------------------------------------
 
@@ -2061,6 +2107,8 @@ function PdfPages({
         pushHistory(previous);
       }
     }
+    cancelActiveSlide();
+    scrubbingRef.current = false;
     setCurrentPageIndex(jumpAnchor.pageIndex);
     const top = offsetWithin(jumpAnchor.pageIndex, jumpAnchor.rects[0]?.y ?? 0);
     scrollToOffset(Math.max(top - (viewportHeight ?? 0) / 3, 0));
@@ -2086,7 +2134,7 @@ function PdfPages({
 
   /** The page a turn would land on, or null at either end of the document. */
   const turnTarget = (direction: TurnDirection): number | null => {
-    const row = rowOfPage(currentPageIndex) + direction;
+    const row = rowOfPage(effectivePageIndex()) + direction;
     if (row < 0 || row >= rowCount) return null;
     return pagesInRow(row)[0] ?? null;
   };
@@ -2096,7 +2144,7 @@ function PdfPages({
    * stage is rebuilt around the new row, so nothing stays transformed and selection
    * geometry is exact again as soon as the motion ends.
    */
-  const settleStage = (to: number, duration: number, done?: () => void) => {
+  const settleStage = (to: number, duration: number, done?: () => void, targetPage?: number) => {
     const stage = stageRef.current;
     if (!stage) {
       if (done) done();
@@ -2108,10 +2156,30 @@ function PdfPages({
     // back to where it started when the animation finishes. The layout effect below
     // clears it once the new row is the one rendered, in the same frame.
     stage.style.transform = target;
-    const finish = () => {
-      // A cancelled scrub ends where it began, which is no transform at all.
-      if (to === 0) stage.style.transform = '';
+    let settled = false;
+    let activeEntry: {
+      target: number;
+      to: number;
+      cancel: () => void;
+      settle: () => void;
+    } | null = null;
+    const finish = (preserveTransformForNextTurn = false) => {
+      if (settled) return;
+      settled = true;
+      if (activeEntry && activeSlideRef.current === activeEntry) {
+        activeSlideRef.current = null;
+      }
       if (done) done();
+      if (preserveTransformForNextTurn) {
+        // The next turn starts immediately from the newly committed page's own frame.
+        stage.style.transform = '';
+      } else if (
+        to === 0 ||
+        (targetPage !== undefined && rowOfPage(targetPage) === renderedRowRef.current)
+      ) {
+        // Either a cancelled scrub returned to 0, or React stays on the same row.
+        stage.style.transform = '';
+      }
     };
     if (typeof stage.animate !== 'function' || prefersReducedMotion() || duration <= 0) {
       finish();
@@ -2123,7 +2191,31 @@ function PdfPages({
       easing: PAGE_SLIDE_EASING,
     });
     animation.id = PAGE_TURN_ANIMATION_ID;
-    void animation.finished.then(finish).catch(() => undefined);
+    if (targetPage !== undefined) {
+      latestPageRef.current = targetPage;
+    }
+    activeEntry = {
+      target: targetPage ?? committedPageRef.current,
+      to,
+      cancel: () => {
+        if (settled) return;
+        settled = true;
+        cancelPageTurn(stage);
+        if (typeof stage.getAnimations !== 'function') animation.cancel();
+        stage.style.transform = '';
+      },
+      settle: () => {
+        cancelPageTurn(stage);
+        if (typeof stage.getAnimations !== 'function') animation.cancel();
+        finish(true);
+      },
+    };
+    activeSlideRef.current = activeEntry;
+    void animation.finished
+      .then(() => finish(false))
+      .catch(() => {
+        // Cancelled animations clean up synchronously in `cancel` or `settle`.
+      });
   };
 
   const curlBoxFor = useCallback(
@@ -2228,7 +2320,16 @@ function PdfPages({
   // slot and sweeps its conical crease to completion.
   useLayoutEffect(() => {
     const stage = stageRef.current;
-    if (stage) stage.style.transform = '';
+    const layout = curlLayoutRef.current;
+    renderedRowRef.current = layout.rowOfPage(currentPageIndex);
+    const activeSlide = activeSlideRef.current;
+    if (stage) {
+      stage.style.transform = activeSlide
+        ? `translateX(${activeSlide.to}px)`
+        : scrubbingRef.current
+          ? stage.style.transform
+          : '';
+    }
     cancelCurlRef.current?.();
     cancelCurlRef.current = null;
     if (stage) restoreStageSlots(stage);
@@ -2240,7 +2341,6 @@ function PdfPages({
       return;
     }
 
-    const layout = curlLayoutRef.current;
     if (layout.rowOfPage(layout.currentPageIndex) !== pending.incomingRow) {
       resetPaperCurl(null, turnShadowRef.current);
       return;
@@ -2284,28 +2384,34 @@ function PdfPages({
 
   useEffect(() => {
     return () => {
+      cancelActiveSlide();
       cancelCurlRef.current?.();
       cancelCurlRef.current = null;
     };
-  }, []);
+  }, [cancelActiveSlide]);
 
   const turnPage = (direction: TurnDirection) => {
     backChip.dismiss();
+    scrubbingRef.current = false;
+    settleActiveSlide();
     const target = turnTarget(direction);
     if (target === null) return;
     cancelCurlRef.current?.();
     cancelCurlRef.current = null;
     const transition = effectivePreferences.pageTransition;
     if (paged && transition === 'slide') {
-      settleStage(-direction * stageStride, PAGE_SLIDE_MS, () =>
-        scrollToPageOffset(target, offsetWithin(target, 0)),
+      settleStage(
+        -direction * stageStride,
+        PAGE_SLIDE_MS,
+        () => scrollToPageOffset(target, offsetWithin(target, 0)),
+        target,
       );
       return;
     }
     if (paged && transition === 'curl') {
       if (!prefersReducedMotion() && stageRef.current) {
         pendingCurlRef.current = {
-          outgoingRow: rowOfPage(currentPageIndex),
+          outgoingRow: rowOfPage(effectivePageIndex()),
           incomingRow: rowOfPage(target),
           direction,
           fromProgress: 0,
@@ -2333,6 +2439,8 @@ function PdfPages({
 
   const scrub = {
     start: () => {
+      settleActiveSlide();
+      scrubbingRef.current = true;
       cancelCurlRef.current?.();
       cancelCurlRef.current = null;
       pendingCurlRef.current = null;
@@ -2353,7 +2461,7 @@ function PdfPages({
         return;
       }
       const dir: TurnDirection = displacement < 0 ? -1 : 1;
-      const outgoingRow = rowOfPage(currentPageIndex);
+      const outgoingRow = rowOfPage(effectivePageIndex());
       const incomingRow = outgoingRow + dir;
       const hasIncoming = incomingRow >= 0 && incomingRow < rowCount;
       const box = curlBoxFor(outgoingRow, hasIncoming ? incomingRow : outgoingRow);
@@ -2379,6 +2487,7 @@ function PdfPages({
       curlScrubRef.current = { direction: dir, progress };
     },
     end: (_velocity: number, committed: TurnDirection | null) => {
+      scrubbingRef.current = false;
       if (effectivePreferences.pageTransition === 'curl') {
         const { direction: dir, progress } = curlScrubRef.current;
         curlScrubRef.current = { direction: null, progress: 0 };
@@ -2387,7 +2496,7 @@ function PdfPages({
           resetPaperCurl(null, turnShadowRef.current);
           return;
         }
-        const outgoingRow = rowOfPage(currentPageIndex);
+        const outgoingRow = rowOfPage(effectivePageIndex());
         const target = committed !== null ? turnTarget(committed) : null;
         if (committed === null || committed !== dir || target === null) {
           const outgoingSlot = stage.querySelector<HTMLElement>(
@@ -2428,8 +2537,11 @@ function PdfPages({
         settleStage(0, PAGE_SPRING_BACK_MS);
         return;
       }
-      settleStage(-committed * stageStride, PAGE_SLIDE_MS, () =>
-        scrollToPageOffset(target, offsetWithin(target, 0)),
+      settleStage(
+        -committed * stageStride,
+        PAGE_SLIDE_MS,
+        () => scrollToPageOffset(target, offsetWithin(target, 0)),
+        target,
       );
     },
   };
@@ -2523,7 +2635,7 @@ function PdfPages({
       return !scroller || scroller.scrollWidth <= scroller.clientWidth + 1;
     },
     canTurn: (direction) => {
-      const row = rowOfPage(currentPageIndex) + direction;
+      const row = rowOfPage(effectivePageIndex()) + direction;
       return row >= 0 && row < rowCount;
     },
     onScrubStart: scrub.start,

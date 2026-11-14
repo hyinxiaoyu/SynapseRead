@@ -654,3 +654,123 @@ describe('EPUB paper curl engine', () => {
     }
   });
 });
+
+describe('EPUB slide seam scrubbing', () => {
+  it('uses scrubBase for seam detection and restores visibility + scroll across held views', async () => {
+    const frames: FrameRequestCallback[] = [];
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+    const container = document.createElement('div');
+    let containerScrollWidth = 1280;
+    let containerScrollLeft = 0;
+    Object.defineProperty(container, 'clientWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'offsetWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'scrollWidth', {
+      get: () => containerScrollWidth,
+      configurable: true,
+    });
+    Object.defineProperty(container, 'scrollLeft', {
+      get: () => containerScrollLeft,
+      set: (value: number) => {
+        containerScrollLeft = value;
+      },
+      configurable: true,
+    });
+
+    const heldView = document.createElement('div');
+    heldView.className = 'epub-view';
+    Object.defineProperty(heldView, 'offsetWidth', { value: 1280, configurable: true });
+    const heldFrame = document.createElement('iframe');
+    heldView.appendChild(heldFrame);
+    container.appendChild(heldView);
+
+    const originalClear = vi.fn();
+    const viewsCollection = {
+      _views: [{ element: heldView }],
+      length: 1,
+      clear: originalClear,
+    };
+    const reportLocation = vi.fn();
+    Reflect.set(fake.rendition, 'manager', {
+      container,
+      layout: { delta: 640 },
+      views: viewsCollection,
+    });
+    Reflect.set(fake.rendition, 'reportLocation', reportLocation);
+
+    const prevSpy = vi.spyOn(fake.rendition, 'prev').mockImplementation(async () => undefined);
+    const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(async () => {
+      // Simulate epub.js `manager.clear()` hiding the outgoing view before `views.clear()`.
+      heldView.style.visibility = 'hidden';
+      heldFrame.style.visibility = 'hidden';
+      viewsCollection.clear();
+      containerScrollLeft = 0;
+      const incomingView = document.createElement('div');
+      incomingView.className = 'epub-view';
+      Object.defineProperty(incomingView, 'offsetWidth', { value: 640, configurable: true });
+      container.appendChild(incomingView);
+      containerScrollWidth = 1920;
+    });
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const host = document.createElement('div');
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+
+      // 1. Backward seam scrub from page 1 (`scrubBase = 0`) still sees `!canTurnInPlace(-1)`
+      // even after `scrubTo` moves `scrollLeft > 1`.
+      handle.beginScrub({ transition: 'slide', spread: false });
+      handle.scrubTo(80);
+      expect(container.scrollLeft).toBe(80);
+      expect(handle.canTurnInPlace(-1)).toBe(false);
+      const prevPromise = handle.endScrub(-1);
+      // Spring-back from 80 -> 0 completes when rAF advances.
+      clock = 500;
+      frames.shift()?.(clock);
+      await Promise.resolve();
+      await prevPromise;
+      expect(prevSpy).toHaveBeenCalledTimes(1);
+
+      // 2. Forward seam scrub from the last page (`scrollLeft = 640`) of a 2-page chapter
+      // holds the outgoing view visibly, slides past it, removes it, and resets to 0.
+      containerScrollLeft = 640;
+      handle.beginScrub({ transition: 'slide', spread: false });
+      handle.scrubTo(160);
+      containerScrollLeft = 640;
+      expect(handle.canTurnInPlace(1)).toBe(false);
+      const nextPromise = handle.endScrub(1);
+      for (let tick = 0; tick < 4; tick += 1) {
+        await Promise.resolve();
+      }
+      expect(nextSpy).toHaveBeenCalledTimes(1);
+      expect(heldView.style.visibility).toBe('visible');
+      expect(heldFrame.style.visibility).toBe('visible');
+      expect(containerScrollLeft).toBe(640);
+
+      clock = 1500;
+      frames.shift()?.(clock);
+      await nextPromise;
+      expect(heldView.isConnected).toBe(false);
+      expect(containerScrollLeft).toBe(0);
+      expect(reportLocation).toHaveBeenCalled();
+
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      Reflect.set(fake.rendition, 'reportLocation', undefined);
+      prevSpy.mockRestore();
+      nextSpy.mockRestore();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+});

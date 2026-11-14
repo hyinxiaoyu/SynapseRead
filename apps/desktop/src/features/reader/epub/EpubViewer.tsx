@@ -1273,7 +1273,20 @@ export function EpubViewer({
     start: () => handle?.beginScrub({ transition: paged ? transition : 'none', spread }),
     move: (displacement: number) => handle?.scrubTo(displacement),
     end: (_velocity: number, committed: TurnDirection | null) => {
-      void handle?.endScrub(committed).catch(() => undefined);
+      if (committed !== null) backChip.dismiss();
+      if (!handle) return;
+      const fadeSeam =
+        committed !== null && paged && transition === 'fade' && !handle.canTurnInPlace(committed);
+      void handle
+        .endScrub(committed)
+        .then(() => {
+          if (fadeSeam) {
+            animatePageTurn(hostRef.current, committed, transition, turnShadowRef.current, {
+              spread,
+            });
+          }
+        })
+        .catch(() => undefined);
     },
   };
 
@@ -1358,8 +1371,7 @@ export function EpubViewer({
     onTurn: turnPage,
     canTurn: (direction) =>
       (handle?.canTurnInPlace(direction) ?? false) ||
-      (transition === 'curl' &&
-        chapterCount > 0 &&
+      (chapterCount > 0 &&
         (direction > 0 ? currentChapterIndex < chapterCount - 1 : currentChapterIndex > 0)),
     onScrubStart: scrub.start,
     onScrubMove: scrub.move,

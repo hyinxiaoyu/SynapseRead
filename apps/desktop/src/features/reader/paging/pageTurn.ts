@@ -20,6 +20,21 @@ export const SCRUB_COMMIT_VELOCITY = 0.45;
 export const RUBBER_BAND_LIMIT_FRACTION = 0.35;
 /** Wheel silence that ends a scrub: the fingers lifted without a commit. */
 export const SCRUB_IDLE_MS = 90;
+/** Minimum travel for an isolated single-sample horizontal swipe/notch to turn a page. */
+export const SWIPE_THRESHOLD_PX = 50;
+/** Standard pixel size for one line-mode horizontal wheel click (e.g. tilt wheel). */
+export const WHEEL_LINE_PX = 40;
+/** Page size assumed for `DOM_DELTA_PAGE` wheel events when no layout width exists. */
+const FALLBACK_PAGE_PX = 800;
+const DOM_DELTA_PIXEL = 0;
+const DOM_DELTA_LINE = 1;
+const DOM_DELTA_PAGE = 2;
+/**
+ * Standard Windows mouse horizontal wheel notches report pixel deltas of ±100 or
+ * ±120 with zero vertical component. Below this, single pixel ticks keep flowing
+ * through live continuous scrub.
+ */
+const DISCRETE_PIXEL_WHEEL_PX = 100;
 /**
  * A wheel event this much faster than the one before it is a new physical flick,
  * not the decaying inertial tail of the one before. Trackpads keep emitting
@@ -96,7 +111,24 @@ export type PageGestureSample =
 export interface WheelSample {
   deltaX: number;
   deltaY: number;
+  deltaMode?: number | undefined;
   ctrlKey: boolean;
+}
+
+/** Converts a wheel delta in pixel, line, or page units into CSS pixels. */
+export function normalizeWheelDelta(
+  delta: number,
+  deltaMode: number | undefined,
+  pageSize: number,
+): number {
+  if (deltaMode === DOM_DELTA_LINE) return delta * WHEEL_LINE_PX;
+  if (deltaMode === DOM_DELTA_PAGE) return delta * (pageSize > 0 ? pageSize : FALLBACK_PAGE_PX);
+  return delta;
+}
+
+function isDiscreteWheel(wheel: WheelSample, mode: number, scrubIdle: boolean): boolean {
+  if (mode === DOM_DELTA_LINE || mode === DOM_DELTA_PAGE) return true;
+  return scrubIdle && wheel.deltaY === 0 && Math.abs(wheel.deltaX) >= DISCRETE_PIXEL_WHEEL_PX;
 }
 
 /** What the page should do next about one wheel gesture. */
@@ -158,14 +190,23 @@ export class WheelScrub {
   private width = 0;
   private lastDeltaX = 0;
   private lastAbs = 0;
+  private lastAt = 0;
   private context: WheelScrubContext | null = null;
+
+  /** Whether a continuous scrub or active inertial tail is still in progress. */
+  isScrubbing(at = this.lastAt): boolean {
+    this.expireSettling(at);
+    return this.phase !== IDLE;
+  }
 
   /** Feeds one horizontal wheel event, and says what the page should do. */
   push(deltaX: number, at: number, context: WheelScrubContext): readonly ScrubUpdate[] {
+    this.expireSettling(at);
     if (this.phase === SETTLING) {
       if (!this.isNewFlick(deltaX)) {
         this.lastDeltaX = deltaX;
         this.lastAbs = Math.abs(deltaX);
+        this.lastAt = at;
         return [];
       }
       return this.start(deltaX, at, context);
@@ -184,12 +225,11 @@ export class WheelScrub {
     if (this.phase === IDLE) return [];
     const velocity = this.velocity(at);
     const committed = this.commitDirection(velocity);
-    if (committed === null) {
-      this.phase = IDLE;
-      this.travel = 0;
-      return [{ kind: 'end', velocity, committed: null }];
-    }
-    return this.finish(velocity, committed);
+    // `release` only runs after `SCRUB_IDLE_MS` of silence, so a commit here ends
+    // the gesture directly instead of entering `SETTLING` with no timer to clear it.
+    this.phase = IDLE;
+    this.travel = 0;
+    return [{ kind: 'end', velocity, committed }];
   }
 
   /** Forgets any gesture, as when the reader is deactivated mid-scrub. */
@@ -199,7 +239,15 @@ export class WheelScrub {
     this.samples = [];
     this.lastDeltaX = 0;
     this.lastAbs = 0;
+    this.lastAt = 0;
     this.context = null;
+  }
+
+  private expireSettling(at: number): void {
+    if (this.phase === SETTLING && at - this.lastAt >= SCRUB_IDLE_MS) {
+      this.phase = IDLE;
+      this.travel = 0;
+    }
   }
 
   private start(deltaX: number, at: number, context: WheelScrubContext): readonly ScrubUpdate[] {
@@ -208,6 +256,7 @@ export class WheelScrub {
     this.samples = [];
     this.lastDeltaX = 0;
     this.lastAbs = 0;
+    this.lastAt = at;
     this.context = context;
     // One layout read per gesture, not one per wheel event.
     this.width = Math.max(context.pageWidth(), 1);
@@ -220,11 +269,12 @@ export class WheelScrub {
     if (this.samples.length > 32) this.samples.shift();
     this.lastDeltaX = deltaX;
     this.lastAbs = Math.abs(deltaX);
+    this.lastAt = at;
     const direction = directionOf(this.travel);
     if (Math.abs(this.travel) >= this.width && this.canTurn(direction)) {
       // A whole page has been dragged: the turn is made under the fingers, and
       // everything after this in the same gesture is inertia.
-      return this.finish(this.velocity(at), direction);
+      return this.finish(this.velocity(at), direction, at);
     }
     return [{ kind: 'move', displacement: this.displacement() }];
   }
@@ -242,6 +292,10 @@ export class WheelScrub {
     const direction = directionOf(this.travel);
     if (!this.canTurn(direction)) return null;
     if (Math.abs(this.travel) >= this.width * SCRUB_COMMIT_FRACTION) return direction;
+    // Isolated single-sample flicks or notches have no time span for velocity.
+    if (this.samples.length === 1 && Math.abs(this.travel) >= SWIPE_THRESHOLD_PX) {
+      return direction;
+    }
     // A short but fast flick still turns, as it does in Books.
     if (Math.abs(velocity) >= SCRUB_COMMIT_VELOCITY && directionOf(velocity) === direction) {
       return direction;
@@ -249,9 +303,10 @@ export class WheelScrub {
     return null;
   }
 
-  private finish(velocity: number, committed: TurnDirection): readonly ScrubUpdate[] {
+  private finish(velocity: number, committed: TurnDirection, at: number): readonly ScrubUpdate[] {
     this.phase = SETTLING;
     this.travel = 0;
+    this.lastAt = at;
     return [{ kind: 'end', velocity, committed }];
   }
 
@@ -351,6 +406,8 @@ export function usePageTurnGestures({
   });
   const press = useRef<{ x: number; y: number; hadSelection: boolean } | null>(null);
   const idleTimer = useRef<number | undefined>(undefined);
+  const discreteTravel = useRef(0);
+  const discreteTimer = useRef<number | undefined>(undefined);
   const [scrub] = useState(() => new WheelScrub());
 
   const zoneFor = useCallback(
@@ -416,6 +473,12 @@ export function usePageTurnGestures({
     }
   }, []);
 
+  const clearDiscreteWheel = useCallback(() => {
+    discreteTravel.current = 0;
+    window.clearTimeout(discreteTimer.current);
+    discreteTimer.current = undefined;
+  }, []);
+
   const armIdle = useCallback(() => {
     window.clearTimeout(idleTimer.current);
     idleTimer.current = window.setTimeout(() => {
@@ -429,19 +492,49 @@ export function usePageTurnGestures({
       if (!on || wheel.ctrlKey) return false;
       if (Math.abs(wheel.deltaX) <= Math.abs(wheel.deltaY) * 1.5) return false;
       if (swipeAllowed && !swipeAllowed()) return false;
+      const mode = wheel.deltaMode ?? DOM_DELTA_PIXEL;
+      const pageWidth = () =>
+        (pageRef?.current ?? areaRef.current)?.getBoundingClientRect().width ?? 0;
+      const timestamp = now();
+      if (isDiscreteWheel(wheel, mode, !scrub.isScrubbing(timestamp))) {
+        const delta = normalizeWheelDelta(
+          wheel.deltaX,
+          mode,
+          mode === DOM_DELTA_PAGE ? pageWidth() : 0,
+        );
+        if (delta === 0) return false;
+        if (
+          discreteTravel.current !== 0 &&
+          Math.sign(delta) !== Math.sign(discreteTravel.current)
+        ) {
+          discreteTravel.current = 0;
+        }
+        discreteTravel.current += delta;
+        if (Math.abs(discreteTravel.current) >= WHEEL_LINE_PX) {
+          const direction = directionOf(discreteTravel.current);
+          clearDiscreteWheel();
+          if (latest.current.canTurn?.(direction) ?? true) {
+            latest.current.onTurn(direction);
+          }
+        } else {
+          window.clearTimeout(discreteTimer.current);
+          discreteTimer.current = window.setTimeout(clearDiscreteWheel, SCRUB_IDLE_MS);
+        }
+        return true;
+      }
+      clearDiscreteWheel();
       // Built here, in the event, so nothing that reads a ref is handed to the
       // tracker while React is rendering.
       emit(
-        scrub.push(wheel.deltaX, now(), {
-          pageWidth: () =>
-            (pageRef?.current ?? areaRef.current)?.getBoundingClientRect().width ?? 0,
+        scrub.push(wheel.deltaX, timestamp, {
+          pageWidth,
           canTurn: (direction) => latest.current.canTurn?.(direction) ?? true,
         }),
       );
       armIdle();
       return true;
     },
-    [areaRef, armIdle, emit, pageRef, scrub],
+    [areaRef, armIdle, clearDiscreteWheel, emit, pageRef, scrub],
   );
 
   useEffect(() => {
@@ -504,10 +597,14 @@ export function usePageTurnGestures({
     scrub.reset();
     window.clearTimeout(idleTimer.current);
     idleTimer.current = undefined;
-  }, [enabled, scrub]);
+    clearDiscreteWheel();
+  }, [clearDiscreteWheel, enabled, scrub]);
 
   useEffect(() => {
-    return () => window.clearTimeout(idleTimer.current);
+    return () => {
+      window.clearTimeout(idleTimer.current);
+      window.clearTimeout(discreteTimer.current);
+    };
   }, []);
 
   return { zone: enabled ? zone : null, handleSample, handleWheel };
