@@ -16,7 +16,11 @@ use crate::access::{grant_all, register_and_grant, register_dropped_paths, relin
 use crate::state::AppState;
 
 /// Where bundled app content is served from on the mock runtime.
-const LOCAL_ORIGIN: &str = "tauri://localhost";
+const LOCAL_ORIGIN: &str = if cfg!(any(windows, target_os = "android")) {
+    "http://tauri.localhost"
+} else {
+    "tauri://localhost"
+};
 
 struct Harness {
     app: App<MockRuntime>,
@@ -347,9 +351,13 @@ fn asset_grants_treat_paths_as_literals() {
     let h = Harness::new();
     let hidden = h.dir.path().join(".hidden");
     std::fs::create_dir(&hidden).unwrap();
-    let wildcard = hidden.join("[a]*.pdf");
+    let wildcard = hidden.join(if cfg!(windows) { "[a].pdf" } else { "[a]*.pdf" });
     std::fs::write(&wildcard, "wild").unwrap();
-    let matched_by_glob = hidden.join("a-other.pdf");
+    let matched_by_glob = hidden.join(if cfg!(windows) {
+        "a.pdf"
+    } else {
+        "a-other.pdf"
+    });
     std::fs::write(&matched_by_glob, "other").unwrap();
     let unicode = h.dir.path().join("汉字 notes.txt");
     std::fs::write(&unicode, "text").unwrap();

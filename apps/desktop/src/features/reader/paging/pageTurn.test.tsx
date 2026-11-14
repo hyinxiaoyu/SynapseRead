@@ -1,4 +1,4 @@
-import { act, cleanup, render } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { useRef } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,6 +10,7 @@ import {
   usePageTurnGestures,
   zoneAt,
 } from './pageTurn';
+import { PageTurnChevrons } from './PageTurnChevrons';
 
 describe('zoneAt', () => {
   const page = { left: 100, width: 1000 };
@@ -271,5 +272,35 @@ describe('animatePageTurn', () => {
 
   it('tolerates a page that is not mounted', () => {
     expect(() => animatePageTurn(null, 1, 'flip')).not.toThrow();
+  });
+});
+
+describe('PageTurnChevrons', () => {
+  afterEach(cleanup);
+
+  it('keeps vertical centering and gates hover/press transforms on motion-safe', () => {
+    render(<PageTurnChevrons onPrevious={vi.fn()} onNext={vi.fn()} />);
+
+    const previous = screen.getByRole('button', { name: 'Previous Page' });
+    const next = screen.getByRole('button', { name: 'Next Page' });
+
+    expect(previous).toHaveClass(
+      '-translate-y-1/2',
+      'motion-safe:hover:-translate-x-[2px]',
+      'motion-safe:active:scale-95',
+    );
+    expect(next).toHaveClass(
+      '-translate-y-1/2',
+      'motion-safe:hover:translate-x-[2px]',
+      'motion-safe:active:scale-95',
+    );
+    expect(previous).not.toHaveClass('hover:-translate-x-[2px]');
+    expect(next).not.toHaveClass('hover:translate-x-[2px]');
+
+    for (const button of [previous, next]) {
+      expect(button).not.toHaveClass('active:scale-95');
+      expect(button).not.toHaveClass('motion-reduce:translate-none');
+      expect(button).not.toHaveClass('motion-reduce:scale-none');
+    }
   });
 });

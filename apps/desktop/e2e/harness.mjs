@@ -16,6 +16,12 @@ const CHROME_CANDIDATES = [
   '/usr/bin/chromium-browser',
   '/usr/bin/google-chrome',
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  ...[process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA]
+    .filter(Boolean)
+    .flatMap((dir) => [
+      join(dir, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(dir, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    ]),
 ].filter(Boolean);
 
 const MIME = {
@@ -156,9 +162,11 @@ const CONTRAST_PROBE = `(rootSelector) => {
 
 export class Page {
   errors = [];
+  #defaultViewport;
 
-  constructor(cdp) {
+  constructor(cdp, { width = 1440, height = 900 } = {}) {
     this.cdp = cdp;
+    this.#defaultViewport = { width, height };
     cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) =>
       this.errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text),
     );
@@ -198,15 +206,23 @@ export class Page {
    * Resizes the viewport, as dragging the window edge would, and waits past the
    * readers' debounced re-layout (150 ms).
    */
-  async setViewport(width, height = 900) {
+  async setViewport(width, height = this.#defaultViewport.height) {
     await this.cdp.send('Emulation.setDeviceMetricsOverride', {
       width,
       height,
       deviceScaleFactor: 1,
       mobile: false,
     });
-    await this.waitFor(`window.innerWidth === ${width}`, `a ${width} px viewport`);
+    await this.waitFor(
+      `window.innerWidth === ${width} && window.innerHeight === ${height}`,
+      `a ${width}x${height} viewport`,
+    );
     await new Promise((done) => setTimeout(done, 600));
+  }
+
+  /** Restores the initial viewport instead of clearing the override (which Win32 clamps). */
+  async resetViewport() {
+    await this.setViewport(this.#defaultViewport.width, this.#defaultViewport.height);
   }
 
   /**
@@ -761,9 +777,15 @@ async function launchPageOnce(chrome, url, { width, height, devtoolsTimeoutMs })
     const target = targets.find((candidate) => candidate.type === 'page');
     if (!target) throw new Error('Chromium reported no page target.');
     cdp = await Cdp.connect(target.webSocketDebuggerUrl);
-    const page = new Page(cdp);
+    const page = new Page(cdp, { width, height });
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width,
+      height,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: CLICK_GUARD });
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: `window.__cspViolations = [];

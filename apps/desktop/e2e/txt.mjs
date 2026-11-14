@@ -457,7 +457,7 @@ export async function txtFlow(page) {
     `${documentWidth} <= 480 && ${visibleScroller}.scrollWidth <= ${visibleScroller}.clientWidth`,
     'TXT Full width fits a narrow pane',
   );
-  await page.cdp.send('Emulation.clearDeviceMetricsOverride');
+  await page.resetViewport();
 
   // Focus mode (#45): page turns leave the toolbar hidden, and Esc leaves.
   await page.enterFocusMode(visibleScroller);

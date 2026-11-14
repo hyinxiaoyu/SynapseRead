@@ -23,7 +23,7 @@ jobs:
 
   desktop:
     name: Clippy and test (${{ matrix.target }})
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -31,10 +31,15 @@ jobs:
         # x86_64 test binaries through Rosetta only when it is installed, so the
         # Intel target is compile-checked and tests run natively on aarch64.
         include:
-          - target: aarch64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
             run_tests: true
-          - target: x86_64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
             run_tests: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            run_tests: true
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install
@@ -46,6 +51,7 @@ jobs:
 
       # tauri::generate_context! requires frontendDist to exist at compile time.
       - name: Create placeholder frontend dist
+        shell: bash
         run: mkdir -p apps/desktop/dist
 
       - name: Clippy
@@ -56,13 +62,14 @@ jobs:
         run: cargo test --workspace --target ${{ matrix.target }}
 
   core-cross-platform:
-    # Windows is a future target: keep the platform-neutral core building there.
+    # Windows runs full workspace clippy and tests in `desktop`; Ubuntu without
+    # webview system packages keeps checking the platform-neutral core.
     name: Core tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v7
       - run: rustup toolchain install
