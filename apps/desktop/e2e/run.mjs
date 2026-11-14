@@ -8,6 +8,7 @@ import { goToFlow } from './goTo.mjs';
 import { launchPage, serveDist, warmUp } from './harness.mjs';
 import { keyboardFlow } from './keyboard.mjs';
 import { linkPeekFlow } from './linkPeek.mjs';
+import { pagingFlow } from './paging.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
 import { txtFlow } from './txt.mjs';
 import { toolbarTitleFlow } from './toolbarTitle.mjs';
@@ -28,6 +29,7 @@ const FLOWS = {
   'txt-chapters': txtChaptersFlow,
   'go-to': goToFlow,
   'link-peek': linkPeekFlow,
+  paging: pagingFlow,
   'toolbar-title': toolbarTitleFlow,
 };
 

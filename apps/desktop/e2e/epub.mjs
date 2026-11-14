@@ -5,7 +5,34 @@ const visibleHost = `[...document.querySelectorAll('[data-testid="epub-host"]')]
 const frame = `${visibleHost}?.querySelector('iframe')`;
 const frameDocument = `${frame}?.contentDocument`;
 const scroller = `${visibleHost}?.querySelector('.epub-container')`;
+const stripLeft = `(${scroller}?.scrollLeft ?? 0)`;
 const excerptEnabled = `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`;
+
+/**
+ * Waits until the paginated strip has stopped travelling. A turn slides the strip
+ * from script rather than with a Web Animation, so `getAnimations()` is empty while
+ * it is still moving and text measured then would land under the drag elsewhere.
+ * A turn across a chapter seam also holds the outgoing chapter's frame beside the
+ * incoming one until the slide is done, so the frame count is part of the check.
+ */
+const waitForTurnToSettle = (page) =>
+  page.waitFor(
+    `(() => {
+      const container = ${scroller};
+      const left = container?.scrollLeft ?? 0;
+      const views = ${visibleHost}?.querySelectorAll('iframe').length ?? 0;
+      const now = performance.now();
+      const state = (window.__stripSettle ??= { left, views, since: now });
+      if (state.left !== left || state.views !== views) {
+        state.left = left;
+        state.views = views;
+        state.since = now;
+        return false;
+      }
+      return now - state.since > 200;
+    })()`,
+    'the page turn to settle',
+  );
 
 /** The text `measureCharWidth` samples; see `appearance/measure.ts`. */
 const MEASURE_SAMPLE =
@@ -20,7 +47,8 @@ const openEpub = (page) => page.openUntil(`${visibleHost} && ${sampleTitle}`, 't
 
 const statusIs = (value) =>
   `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '${value}'`;
-const chapterIs = (title) => `${frameDocument}?.querySelector('h1')?.textContent === '${title}'`;
+const chapterIs = (title) =>
+  `[...(${visibleHost}?.querySelectorAll('iframe') ?? [])].some((view) => view.contentDocument?.querySelector('h1')?.textContent === '${title}')`;
 
 /** Where text in the book's frame sits on screen, for a real mouse drag. */
 const textPoints = (page, text) => page.waitFor(textPointsOf(text), `text in the book: ${text}`);
@@ -156,11 +184,17 @@ export async function epubFlow(page) {
     if (await page.evaluate(chapterIs('Chapter Two'))) break;
     if (attempt % 2 === 0) await page.press(' ', 'Space');
     else await page.clickButton('Next Page');
-    await new Promise((done) => setTimeout(done, 120));
+    // A turn slides the strip for a moment; the next one starts from a whole page.
+    await waitForTurnToSettle(page);
   }
   await page.waitFor(chapterIs('Chapter Two'), 'the second chapter');
-  // The page slides in as it turns; text moves until the transition ends.
-  await page.waitFor(`${visibleHost}.getAnimations().length === 0`, 'the page turn to settle');
+  // The turn that reached the chapter may have carried on a page, and the page
+  // slides in as it turns: turn back to the chapter's first page.
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if ((await page.evaluate(stripLeft)) === 0) break;
+    await page.press('ArrowLeft');
+    await waitForTurnToSettle(page);
+  }
   await excerpt(page, 'final target sentence');
 
   // Jump across chapters: the frame's chapter changes, and the highlight pulses.

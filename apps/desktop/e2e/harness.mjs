@@ -273,6 +273,24 @@ export class Page {
     });
   }
 
+  /**
+   * A real horizontal trackpad swipe: the `wheel` events a two-finger pan sends, one
+   * per step, so the page can follow them frame by frame.
+   */
+  async swipe({ x, y }, deltaX, { steps = 1, gapMs = 0 } = {}) {
+    for (let step = 0; step < steps; step += 1) {
+      await this.cdp.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x,
+        y,
+        deltaX,
+        deltaY: 0,
+        modifiers: 0,
+      });
+      if (gapMs > 0) await new Promise((done) => setTimeout(done, gapMs));
+    }
+  }
+
   async click({ x, y }) {
     await this.mouse('mouseMoved', x, y);
     await this.mouse('mousePressed', x, y);
