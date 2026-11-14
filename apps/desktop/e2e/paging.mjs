@@ -95,33 +95,23 @@ export async function pagingFlow(page) {
   assert(settled.transform === 'none', `the page must not stay transformed: ${settled.transform}`);
   assert(settled.left > before, 'the turn must move to the next page');
 
-  // ---- With reduced motion a turn is instantaneous ----
-  await page.emulateMedia(REDUCED);
-  const beforeReduced = await page.evaluate(scrollLeft);
-  await sampleTurn(page, { frames: 20 });
-  await page.click(edge);
-  await page.waitFor(`${scrollLeft} > ${beforeReduced}`, 'the reduced-motion turn');
-  await new Promise((done) => setTimeout(done, 300));
-  const reduced = await turnSamples(page);
-  assert(
-    distinctPositions(reduced) <= 2,
-    `reduced motion must turn at once, saw ${distinctPositions(reduced)} positions`,
-  );
-  await page.emulateMedia(ANIMATED);
-
-  // ---- A two-finger swipe scrubs the strip, then commits ----
-  const pageBox = await page.evaluate(`(() => {
-    const r = ${visibleHost}.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-  })()`);
+  // ---- A two-finger swipe scrubs the strip 1:1, then commits ----
   const beforeSwipe = await page.evaluate(scrollLeft);
-  // Fingers moving right scroll the strip forward, and each event must move it.
-  // Back to back, as a flick's events arrive: a gap longer than the idle window
-  // would end the gesture between two of them and turn the flick into several.
-  await page.swipe(pageBox, 20, { steps: 6 });
+  // Six events in one task, as one flick: a DevTools round trip between them can
+  // outlast the idle window on a slow runner and split the flick into several
+  // gestures, each of which springs back before the next one starts.
+  await page.evaluate(`(() => {
+    const target = ${visibleHost};
+    for (let step = 0; step < 6; step += 1) {
+      target.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: 20, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+    }
+    return true;
+  })()`);
   const scrubbed = await page.evaluate(scrollLeft);
   assert(
-    scrubbed > beforeSwipe + 40,
+    scrubbed >= beforeSwipe + 100,
     `a swipe must scrub the strip with the fingers: ${beforeSwipe} → ${scrubbed}`,
   );
   // The release is only known once the wheel has been quiet, and the strip then
@@ -135,6 +125,25 @@ export async function pagingFlow(page) {
     })()`,
     'the swipe to settle on a page boundary',
   );
+
+  // ---- With reduced motion a turn is instantaneous ----
+  const leftEdge = await page.evaluate(`(() => {
+    const r = ${visibleHost}.getBoundingClientRect();
+    return { x: r.left + 6, y: r.top + r.height - 12 };
+  })()`);
+  await page.emulateMedia(REDUCED);
+  const beforeReduced = await page.evaluate(scrollLeft);
+  await sampleTurn(page, { frames: 20 });
+  // Turn back, so the reduced-motion check has a page to reach either way.
+  await page.click(leftEdge);
+  await page.waitFor(`${scrollLeft} < ${beforeReduced}`, 'the reduced-motion turn');
+  await new Promise((done) => setTimeout(done, 300));
+  const reduced = await turnSamples(page);
+  assert(
+    distinctPositions(reduced) <= 2,
+    `reduced motion must turn at once, saw ${distinctPositions(reduced)} positions`,
+  );
+  await page.emulateMedia(ANIMATED);
 
   // ---- A PDF page turn slides the staged spread, with the next one already drawn ----
   await page.openUntil(`${visibleScroller} && ${sampleTitle}`, 'the PDF');
