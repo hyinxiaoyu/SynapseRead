@@ -1374,5 +1374,83 @@ describe('TxtViewer', () => {
       fireEvent.keyDown(scroller(), { key: 'End', code: 'End' });
       expect(scroller().scrollTop).toBe(ROW_PX * 10_000);
     });
+
+    it('captures an inert curl snapshot stripped of virtualizer/annotation attributes and cleans up on settle', async () => {
+      const lines = Array.from({ length: 120 }, (_, i) => `Line ${i + 1} of the plain text book.`);
+      const { store, documentId } = await setup(new TextEncoder().encode(lines.join('\n')));
+      await store.getState().updateReadingPreferences({ pageTransition: 'curl' });
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('Line 1 of the plain text book.');
+
+      const scroll = scroller();
+      Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
+      scroll.scrollBy = vi.fn(({ top }: ScrollToOptions = {}) => {
+        scroll.scrollTop += top ?? 0;
+      }) as unknown as HTMLElement['scrollBy'];
+
+      const curlHost = screen.getByTestId('txt-curl-host');
+      const turnShadow = screen.getByTestId('page-turn-shadow');
+      const column = screen.getByRole('document');
+      const hostParent = curlHost.parentElement!;
+      const colRectSpy = vi
+        .spyOn(column, 'getBoundingClientRect')
+        .mockReturnValue(new DOMRect(20, 0, 620, 600));
+      const parentRectSpy = vi
+        .spyOn(hostParent, 'getBoundingClientRect')
+        .mockReturnValue(new DOMRect(10, 0, 640, 600));
+
+      const frames: FrameRequestCallback[] = [];
+      let clock = 0;
+      const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+        frames.push(cb);
+        return frames.length;
+      });
+      const cancelSpy = vi
+        .spyOn(window, 'cancelAnimationFrame')
+        .mockImplementation(() => undefined);
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+      try {
+        fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+
+        const leaf = turnShadow.querySelector<HTMLElement>('[data-curl-part="leaf"]')!;
+
+        expect(curlHost.hasAttribute('inert')).toBe(true);
+        expect(curlHost.childElementCount).toBeGreaterThan(0);
+        // Cloned rows must not expose virtualizer or annotation attributes.
+        expect(curlHost.querySelector('[data-index]')).toBeNull();
+        expect(curlHost.querySelector('[data-annotation-id]')).toBeNull();
+        expect(curlHost.querySelector('[data-unit]')).toBeNull();
+        expect(curlHost.style.left).toBe('10px');
+        expect(curlHost.style.width).toBe('620px');
+        expect(curlHost.style.transform).toBe('none');
+        expect(curlHost.style.translate).toBe('none');
+        expect(turnShadow.style.translate).toBe('none');
+
+        clock = 40;
+        act(() => {
+          frames.shift()?.(clock);
+        });
+        expect(curlHost.style.clipPath).toContain('polygon(');
+        expect(Number(leaf.style.opacity)).toBeGreaterThan(0.5);
+
+        clock = 500;
+        act(() => {
+          frames.shift()?.(clock);
+        });
+        expect(curlHost.childElementCount).toBe(0);
+        expect(curlHost.style.clipPath).toBe('');
+        expect(curlHost.style.visibility).toBe('hidden');
+        expect(curlHost.style.translate).toBe('');
+        expect(turnShadow.style.translate).toBe('');
+        expect(leaf.style.opacity).toBe('0');
+      } finally {
+        colRectSpy.mockRestore();
+        parentRectSpy.mockRestore();
+        rafSpy.mockRestore();
+        cancelSpy.mockRestore();
+        nowSpy.mockRestore();
+      }
+    });
   });
 });

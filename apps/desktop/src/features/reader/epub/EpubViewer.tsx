@@ -53,6 +53,7 @@ import {
   PAGE_PALETTES,
   pageFooterStyle,
   pageSurfaceStyle,
+  PAPER_CURL_PALETTES,
 } from '@/features/reader/appearance/themes';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
@@ -278,6 +279,7 @@ export function EpubViewer({
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
+  const curlHostRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
   const readerAreaRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
@@ -1221,17 +1223,31 @@ export function EpubViewer({
   /** A two-page spread hinges at its spine; a single page on its leading edge. */
   const spread = readingMode === 'spread' && layout.columns === 2;
 
+  useEffect(() => {
+    if (!handle?.setCurlElements) return;
+    handle.setCurlElements({
+      curlHost: curlHostRef.current,
+      shadow: turnShadowRef.current,
+    });
+    return () => {
+      handle.setCurlElements?.({ curlHost: null, shadow: null });
+    };
+  }, [handle]);
+
   const turnPage = (direction: TurnDirection) => {
     if (!handle) return;
     backChip.dismiss();
     // `slide` is the strip's own motion: the engine moves both pages across the
     // page width, so the incoming page is never nudged after the outgoing one is
-    // gone. The other modes have no second buffer to move with them.
+    // gone. For `curl`, the engine captures the outgoing spread and sweeps a
+    // conical crease over the stationary incoming spread.
     const slides = paged && transition === 'slide';
+    const engineCurls =
+      paged && transition === 'curl' && typeof handle.setCurlElements === 'function';
     void handle
-      .turnPage(direction, { animate: slides })
+      .turnPage(direction, { animate: slides, transition: paged ? transition : 'none', spread })
       .then(() => {
-        if (paged && !slides && transition !== 'none') {
+        if (paged && !slides && !engineCurls && transition !== 'none') {
           animatePageTurn(hostRef.current, direction, transition, turnShadowRef.current, {
             spread,
           });
@@ -1243,7 +1259,7 @@ export function EpubViewer({
   // ---- A two-finger swipe scrubs the strip the chapter is laid out on ----
 
   const scrub = {
-    start: () => handle?.beginScrub(),
+    start: () => handle?.beginScrub({ transition: paged ? transition : 'none', spread }),
     move: (displacement: number) => handle?.scrubTo(displacement),
     end: (_velocity: number, committed: TurnDirection | null) => {
       void handle?.endScrub(committed).catch(() => undefined);
@@ -1329,7 +1345,11 @@ export function EpubViewer({
     areaRef,
     pageRef: hostRef,
     onTurn: turnPage,
-    canTurn: (direction) => handle?.canTurnInPlace(direction) ?? false,
+    canTurn: (direction) =>
+      (handle?.canTurnInPlace(direction) ?? false) ||
+      (transition === 'curl' &&
+        chapterCount > 0 &&
+        (direction > 0 ? currentChapterIndex < chapterCount - 1 : currentChapterIndex > 0)),
     onScrubStart: scrub.start,
     onScrubMove: scrub.move,
     onScrubEnd: scrub.end,
@@ -1579,33 +1599,44 @@ export function EpubViewer({
               ...(toolbarMargin ? { paddingTop: TOOLBAR_HEIGHT_PX } : undefined),
             }}
           >
-            <PageTurnShadow
-              shadowRef={turnShadowRef}
-              color={PAGE_PALETTES[theme].spine}
-              paper={PAGE_PALETTES[theme].background}
-              className={availableWidth > 0 ? 'inset-y-0 left-1/2 -translate-x-1/2' : 'inset-0'}
-              style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
-            />
             <div
-              ref={hostRef}
-              tabIndex={-1}
-              data-testid="epub-host"
-              className={cn('relative h-full overflow-hidden', availableWidth === 0 && 'w-full')}
-              style={{
-                ...pageSurfaceStyle(theme),
-                ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
-              }}
-            />
-            {readingMode === 'spread' && layout.columns === 2 && (
+              className={cn('relative h-full', availableWidth === 0 && 'w-full')}
+              style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
+            >
               <div
-                aria-hidden="true"
-                data-testid="epub-spine"
-                className="pointer-events-none absolute inset-y-3 left-1/2 w-12 -translate-x-1/2"
+                ref={hostRef}
+                tabIndex={-1}
+                data-testid="epub-host"
+                className={cn('relative h-full overflow-hidden', availableWidth === 0 && 'w-full')}
                 style={{
-                  background: `linear-gradient(to right, transparent, ${PAGE_PALETTES[theme].spine} 50%, transparent)`,
+                  ...pageSurfaceStyle(theme),
+                  ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
                 }}
               />
-            )}
+              <div
+                ref={curlHostRef}
+                inert
+                aria-hidden="true"
+                data-testid="epub-curl-host"
+                className="pointer-events-none invisible absolute inset-0 z-10 overflow-hidden"
+                style={pageSurfaceStyle(theme)}
+              />
+              {readingMode === 'spread' && layout.columns === 2 && (
+                <div
+                  aria-hidden="true"
+                  data-testid="epub-spine"
+                  className="pointer-events-none absolute inset-y-3 left-1/2 z-[15] w-12 -translate-x-1/2"
+                  style={{
+                    background: `linear-gradient(to right, transparent, ${PAGE_PALETTES[theme].spine} 50%, transparent)`,
+                  }}
+                />
+              )}
+              <PageTurnShadow
+                shadowRef={turnShadowRef}
+                palette={PAPER_CURL_PALETTES[theme]}
+                className="inset-0"
+              />
+            </div>
             {paged && (
               <PageTurnChevrons
                 disabled={!handle}

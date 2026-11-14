@@ -1,22 +1,25 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
-import { useRef } from 'react';
+import { createRef, useRef } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { PAPER_CURL_PALETTES } from '@/features/reader/appearance/themes';
+import { PageTurnShadow } from './PageTurnShadow';
 import {
   animatePageTurn,
-  CURL_BULGE,
-  curlBackClip,
-  curlFoldClip,
+  animatePaperCurl,
+  applyPaperCurl,
+  computePaperCurl,
   directionOf,
   easeOut,
+  PAGE_CURL_MS,
   PAGE_TURN_ANIMATION_ID,
   type PageTurnGestures,
+  resetPaperCurl,
   rubberBand,
   SCRUB_COMMIT_FRACTION,
   SCRUB_COMMIT_VELOCITY,
   SCRUB_IDLE_MS,
   slideScroll,
-  turningLeafSides,
   usePageTurnGestures,
   WheelScrub,
   zoneAt,
@@ -448,59 +451,227 @@ describe('usePageTurnGestures', () => {
   });
 });
 
-/** The x of each point in a `polygon()` clip, in percent. */
-const clipXs = (clip: string) =>
+/** Parses `[x, y]` percent pairs from a `polygon(...)` clip path. */
+const clipPoints = (clip: string): [number, number][] =>
   clip
     .replace(/^polygon\(|\)$/g, '')
     .split(', ')
-    .map((point) => Number.parseFloat(point.split(' ')[0] ?? '0'));
+    .map((point) => {
+      const [rawX = '0', rawY = '0'] = point.split(' ');
+      return [Number.parseFloat(rawX), Number.parseFloat(rawY)];
+    });
 
-describe('curlFoldClip', () => {
-  it('is the page rectangle when nothing is curled', () => {
-    const flat = clipXs(curlFoldClip(1, 0));
-    // The corners and every point of the right edge sit on the edge itself.
-    expect(flat.filter((x) => x === 100)).toHaveLength(flat.length - 2);
-    expect(flat[0]).toBe(0);
-    expect(flat.at(-1)).toBe(0);
-  });
-
-  it('pulls the middle of the free edge in, and leaves the corners alone', () => {
-    const forward = clipXs(curlFoldClip(1, CURL_BULGE));
-    // The curve starts and ends on the edge, and is deepest half-way down it.
-    const curve = forward.slice(1, -1);
-    expect(curve[0]).toBeCloseTo(100, 2);
-    expect(curve.at(-1)).toBeCloseTo(100, 2);
-    const deepest = Math.min(...curve);
-    expect(deepest).toBeCloseTo(100 - CURL_BULGE * 100, 1);
-    // A back turn bends the other edge the other way.
-    const backward = clipXs(curlFoldClip(-1, CURL_BULGE));
-    expect(backward[0]).toBe(100);
-    expect(Math.max(...backward.slice(1, -1))).toBeCloseTo(CURL_BULGE * 100, 1);
-  });
-
-  it('keeps the same number of points at every bulge, so it can interpolate', () => {
-    for (const direction of [1, -1] as const) {
-      const flat = curlFoldClip(direction, 0).split(', ').length;
-      expect(curlFoldClip(direction, CURL_BULGE).split(', ').length).toBe(flat);
-      expect(curlFoldClip(direction, CURL_BULGE / 2).split(', ').length).toBe(flat);
+describe('computePaperCurl', () => {
+  it('stays inactive at flat endpoints 0 and 1, collapsing outgoing at end', () => {
+    for (const p of [0, 0.0005]) {
+      const curl = computePaperCurl(p, 1, { spread: true });
+      expect(curl.active).toBe(false);
+      expect(curl.unpeeledClip).toBe('none');
+      expect(curl.leafClip).toBe('none');
+      expect(curl.castClip).toBe('none');
+      expect(curl.underClip).toBe('none');
+      expect(curl.leafOpacity).toBe(0);
+      expect(curl.castOpacity).toBe(0);
+      expect(curl.underOpacity).toBe(0);
+      expect(curl.spineOpacity).toBe(0);
+      expect(curl.spineBackground).toBe('none');
     }
+
+    for (const p of [0.9995, 1]) {
+      const fwd = computePaperCurl(p, 1, { spread: true });
+      expect(fwd.active).toBe(false);
+      expect(fwd.unpeeledClip).toBe('polygon(0% 0%, 0% 0%, 0% 100%, 0% 100%)');
+      expect(fwd.leafClip).toBe('none');
+      expect(fwd.castClip).toBe('none');
+      expect(fwd.underClip).toBe('none');
+      expect(fwd.leafOpacity).toBe(0);
+      expect(fwd.castOpacity).toBe(0);
+      expect(fwd.underOpacity).toBe(0);
+      expect(fwd.spineOpacity).toBe(0);
+      expect(fwd.spineBackground).toBe('none');
+
+      const bwd = computePaperCurl(p, -1, { spread: true });
+      expect(bwd.active).toBe(false);
+      expect(bwd.unpeeledClip).toBe('polygon(100% 0%, 100% 0%, 100% 100%, 100% 100%)');
+    }
+  });
+
+  it('sweeps the crease monotonically, leads at the lower corner, and mirrors directions', () => {
+    const samples = [0.15, 0.5, 0.85].map((p) => computePaperCurl(p, 1));
+    const midpointsFwd = samples.map(
+      (curl) => clipPoints(curl.unpeeledClip).slice(1, -1)[5]?.[0] ?? 0,
+    );
+    expect(midpointsFwd[0]).toBeGreaterThan(midpointsFwd[1] ?? 0);
+    expect(midpointsFwd[1]).toBeGreaterThan(midpointsFwd[2] ?? 0);
+
+    const midFwdCrease = clipPoints(samples[1]!.unpeeledClip).slice(1, -1);
+    const midBwd = computePaperCurl(0.5, -1);
+    const midBwdCrease = clipPoints(midBwd.unpeeledClip).slice(1, -1);
+
+    // Lower outer corner leads top outer corner.
+    expect(midFwdCrease[0]![0]).toBeGreaterThan(midFwdCrease.at(-1)![0]);
+    expect(midBwdCrease[0]![0]).toBeLessThan(midBwdCrease.at(-1)![0]);
+
+    // Direction -1 mirrors direction 1 horizontally.
+    for (let i = 0; i < midFwdCrease.length; i += 1) {
+      expect((midFwdCrease[i]?.[0] ?? 0) + (midBwdCrease[i]?.[0] ?? 0)).toBeCloseTo(100, 1);
+      expect(midFwdCrease[i]?.[1]).toBeCloseTo(midBwdCrease[i]?.[1] ?? 0, 2);
+    }
+  });
+
+  it('flares the conical backside wider at the bottom and shares crease vertices', () => {
+    const curl = computePaperCurl(0.45, 1);
+    const unpeeledCrease = clipPoints(curl.unpeeledClip).slice(1, -1);
+    const leafPoints = clipPoints(curl.leafClip);
+    const count = unpeeledCrease.length;
+    expect(leafPoints).toHaveLength(count * 2);
+
+    // First half of `leafClip` shares the exact crease vertices with `unpeeledClip`.
+    for (let i = 0; i < count; i += 1) {
+      expect(leafPoints[i]?.[0]).toBeCloseTo(unpeeledCrease[i]?.[0] ?? 0, 2);
+      expect(leafPoints[i]?.[1]).toBeCloseTo(unpeeledCrease[i]?.[1] ?? 0, 2);
+    }
+
+    // Second half runs upward along the lifted free edge, flared wider near the bottom.
+    const freeEdgeUp = leafPoints.slice(count).reverse();
+    const topWidth = Math.abs((unpeeledCrease[0]?.[0] ?? 0) - (freeEdgeUp[0]?.[0] ?? 0));
+    const bottomWidth = Math.abs((unpeeledCrease.at(-1)?.[0] ?? 0) - (freeEdgeUp.at(-1)?.[0] ?? 0));
+    expect(bottomWidth).toBeGreaterThan(topWidth);
+  });
+
+  it('emits 4-layer CSS tokens and activates spine valley only in two-page spreads', () => {
+    const single = computePaperCurl(0.5, 1, { spread: false });
+    expect(single.leafBackground).toContain('--page-turn-rim');
+    expect(single.leafBackground).toContain('--page-turn-highlight');
+    expect(single.leafBackground).toContain('--page-turn-roll-shade');
+    expect(single.leafBackground).toContain('repeating-linear-gradient');
+    expect(single.leafBackground).toContain('--page-turn-bleed');
+    expect(single.leafBackground).toContain('--page-turn-paper');
+    expect(single.castBackground).toContain('--page-turn-cast');
+    expect(single.underBackground).toContain('--page-turn-under');
+    expect(single.spineOpacity).toBe(0);
+    expect(single.spineBackground).toBe('none');
+
+    const edgeSpread = computePaperCurl(0.15, 1, { spread: true });
+    const midSpread = computePaperCurl(0.5, 1, { spread: true });
+    expect(midSpread.spineBackground).toContain('--page-turn-spine');
+    expect(midSpread.spineOpacity).toBeGreaterThan(edgeSpread.spineOpacity);
   });
 });
 
-describe('turningLeafSides', () => {
-  const whole = { top: '0', right: '0', bottom: '0', left: '0' };
+describe('applyPaperCurl and animatePaperCurl', () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
-  it('splits a spread at its spine and leaves a single page whole', () => {
-    expect(turningLeafSides(1, true)).toEqual({
-      leaf: { ...whole, left: '50%' },
-      rest: { ...whole, right: '50%' },
+  const mountShadow = () => {
+    const shadowRef = createRef<HTMLDivElement>();
+    const utils = render(
+      <PageTurnShadow
+        shadowRef={shadowRef}
+        palette={PAPER_CURL_PALETTES.light}
+        className="inset-0"
+      />,
+    );
+    const outgoing = document.createElement('div');
+    const shadow = shadowRef.current!;
+    const layer = (part: 'leaf' | 'cast-shadow' | 'under-shadow' | 'spine') =>
+      shadow.querySelector<HTMLElement>(`[data-curl-part="${part}"]`)!;
+    return { ...utils, outgoing, shadow, layer };
+  };
+
+  it('applies conical clip + shading layers and clears every residual style on reset', () => {
+    const { outgoing, shadow, layer } = mountShadow();
+    const expected = computePaperCurl(0.45, 1, { spread: true });
+    applyPaperCurl(outgoing, shadow, 0.45, 1, { spread: true });
+
+    expect(outgoing.style.clipPath).toBe(expected.unpeeledClip);
+    expect(Number(layer('leaf').style.opacity)).toBeGreaterThan(0.5);
+    expect(layer('leaf').style.clipPath).toBe(expected.leafClip);
+    expect(Number(layer('cast-shadow').style.opacity)).toBeGreaterThan(0.2);
+    expect(Number(layer('under-shadow').style.opacity)).toBeGreaterThan(0.2);
+    expect(Number(layer('spine').style.opacity)).toBeGreaterThan(0.3);
+
+    resetPaperCurl(outgoing, shadow);
+    expect(outgoing.style.clipPath).toBe('');
+    for (const part of ['leaf', 'cast-shadow', 'under-shadow', 'spine'] as const) {
+      expect(layer(part).style.opacity).toBe('0');
+      expect(layer(part).style.clipPath).toBe('');
+      expect(layer(part).style.backgroundImage).toBe('');
+    }
+  });
+
+  it('interpolates multiple rAF frames and cleans up on finish or cancel', () => {
+    let nextId = 1;
+    const queue = new Map<number, FrameRequestCallback>();
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      const id = nextId++;
+      queue.set(id, cb);
+      return id;
     });
-    expect(turningLeafSides(-1, true)).toEqual({
-      leaf: { ...whole, right: '50%' },
-      rest: { ...whole, left: '50%' },
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      queue.delete(id);
     });
-    expect(turningLeafSides(1, false)).toEqual({ leaf: whole, rest: whole });
-    expect(turningLeafSides(-1, false)).toEqual({ leaf: whole, rest: whole });
+    let clock = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+    const flushFrame = (dt: number) => {
+      clock += dt;
+      const entries = [...queue.entries()];
+      queue.clear();
+      for (const [, cb] of entries) cb(clock);
+    };
+
+    const { outgoing, shadow, layer } = mountShadow();
+    const onFinish = vi.fn();
+    animatePaperCurl({ outgoing, shadow, direction: 1, spread: true, onFinish });
+
+    const seenClips = new Set<string>([layer('leaf').style.clipPath]);
+    flushFrame(60);
+    seenClips.add(layer('leaf').style.clipPath);
+    flushFrame(100);
+    seenClips.add(layer('leaf').style.clipPath);
+    flushFrame(100);
+    seenClips.add(layer('leaf').style.clipPath);
+    expect(seenClips.size).toBeGreaterThan(3);
+    expect(outgoing.style.clipPath).not.toBe('');
+
+    // At t = 0.93, easeOut(t) > 0.999 while t < 1; keep outgoing clipped to 0 area so it
+    // never flashes back before `onFinish` swaps/hides it.
+    flushFrame(Math.round(PAGE_CURL_MS * 0.93) - 260);
+    expect(onFinish).not.toHaveBeenCalled();
+    expect(outgoing.style.clipPath).toBe('polygon(0% 0%, 0% 0%, 0% 100%, 0% 100%)');
+
+    flushFrame(PAGE_CURL_MS);
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(outgoing.style.clipPath).toBe('');
+    expect(layer('leaf').style.opacity).toBe('0');
+
+    // Preempting / cancelling clears residual geometry immediately without firing onFinish.
+    const onCancelled = vi.fn();
+    const cancel = animatePaperCurl({ outgoing, shadow, direction: -1, onFinish: onCancelled });
+    flushFrame(80);
+    expect(outgoing.style.clipPath).not.toBe('');
+    cancel();
+    expect(onCancelled).not.toHaveBeenCalled();
+    expect(outgoing.style.clipPath).toBe('');
+    expect(layer('leaf').style.opacity).toBe('0');
+  });
+
+  it('settles synchronously without scheduling rAF under reduced motion', () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce') }));
+    const raf = vi.fn();
+    vi.stubGlobal('requestAnimationFrame', raf);
+    const { outgoing, shadow, layer } = mountShadow();
+    const onFinish = vi.fn();
+
+    animatePaperCurl({ outgoing, shadow, direction: 1, onFinish });
+    expect(onFinish).toHaveBeenCalledTimes(1);
+    expect(raf).not.toHaveBeenCalled();
+    expect(outgoing.style.clipPath).toBe('');
+    expect(layer('leaf').style.opacity).toBe('0');
   });
 });
 
@@ -517,25 +688,24 @@ describe('animatePageTurn', () => {
     return { element, animate };
   };
 
-  /** The curl overlay the viewers render, with each layer's animations recorded. */
+  /** The 4-layer curl overlay the viewers render. */
   const mountShadow = () => {
-    const shadow = document.createElement('div');
-    const layer = (name: 'back' | 'fold' | 'cast') => {
-      const element = document.createElement('div');
-      element.dataset.pageTurnLayer = name;
-      const animate = vi.fn<Animate>();
-      animate.mockReturnValue(fakeAnimation());
-      element.animate = animate as unknown as HTMLElement['animate'];
-      shadow.append(element);
-      return { element, animate };
-    };
-    const back = layer('back');
-    const fold = layer('fold');
-    const cast = layer('cast');
-    return { shadow, back, fold, cast };
+    const shadowRef = createRef<HTMLDivElement>();
+    render(
+      <PageTurnShadow
+        shadowRef={shadowRef}
+        palette={PAPER_CURL_PALETTES.light}
+        className="inset-0"
+      />,
+    );
+    const shadow = shadowRef.current!;
+    const layer = (part: 'leaf' | 'cast-shadow' | 'under-shadow' | 'spine') =>
+      shadow.querySelector<HTMLElement>(`[data-curl-part="${part}"]`)!;
+    return { shadow, layer };
   };
 
   afterEach(() => {
+    cleanup();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -563,55 +733,61 @@ describe('animatePageTurn', () => {
     expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 200 });
   });
 
-  it('curls around the leading edge, bending the free one', () => {
+  it('drives the 4-layer curl overlay without rotateY-transforming the element', () => {
+    let frame = 0;
+    const callbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      frame += 1;
+      callbacks.push(cb);
+      return frame;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    let clock = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
     const { element, animate } = mountPage();
-    animatePageTurn(element, 1, 'curl');
-    expect(animate.mock.calls[0]?.[0]).toEqual([
-      {
-        transform: 'perspective(1200px) rotateY(-26deg)',
-        transformOrigin: '0% 50%',
-        clipPath: curlFoldClip(1, CURL_BULGE),
-      },
-      {
-        transform: 'perspective(1200px) rotateY(0deg)',
-        transformOrigin: '0% 50%',
-        clipPath: curlFoldClip(1, 0),
-      },
-    ]);
-    animatePageTurn(element, -1, 'curl');
-    expect(animate.mock.calls[1]?.[0]).toEqual([
-      {
-        transform: 'perspective(1200px) rotateY(26deg)',
-        transformOrigin: '100% 50%',
-        clipPath: curlFoldClip(-1, CURL_BULGE),
-      },
-      {
-        transform: 'perspective(1200px) rotateY(0deg)',
-        transformOrigin: '100% 50%',
-        clipPath: curlFoldClip(-1, 0),
-      },
-    ]);
-    expect(animate.mock.calls[1]?.[1]).toMatchObject({ duration: 420 });
+    const cancelTurn = vi.fn();
+    element.getAnimations = vi.fn(() => [
+      { id: PAGE_TURN_ANIMATION_ID, cancel: cancelTurn },
+    ]) as unknown as HTMLElement['getAnimations'];
+    const { shadow, layer } = mountShadow();
+
+    animatePageTurn(element, 1, 'curl', shadow, { spread: true });
+    expect(animate).not.toHaveBeenCalled();
+    expect(cancelTurn).toHaveBeenCalledTimes(1);
+
+    clock = 40;
+    callbacks.shift()?.(clock);
+    expect(Number(layer('leaf').style.opacity)).toBeGreaterThan(0.5);
+    expect(layer('leaf').style.clipPath).toContain('polygon(');
+    expect(Number(layer('cast-shadow').style.opacity)).toBeGreaterThan(0.2);
+    expect(Number(layer('under-shadow').style.opacity)).toBeGreaterThan(0.2);
+    expect(Number(layer('spine').style.opacity)).toBeGreaterThan(0.3);
+
+    // Settles back to hidden.
+    clock = PAGE_CURL_MS + 10;
+    callbacks.shift()?.(clock);
+    expect(layer('leaf').style.opacity).toBe('0');
   });
 
-  it('hinges a two-page spread at its centre spine, without dimming the paper', () => {
-    const { element, animate } = mountPage();
-    animatePageTurn(element, 1, 'curl', null, { spread: true });
-    expect(animate.mock.calls[0]?.[0]).toEqual([
-      {
-        transform: 'perspective(1500px) rotateY(-12deg)',
-        transformOrigin: '50% 50%',
-        clipPath: curlFoldClip(1, CURL_BULGE),
-      },
-      {
-        transform: 'perspective(1500px) rotateY(0deg)',
-        transformOrigin: '50% 50%',
-        clipPath: curlFoldClip(1, 0),
-      },
-    ]);
-    for (const frame of animate.mock.calls[0]?.[0] ?? []) {
-      expect(frame).not.toHaveProperty('opacity');
-    }
+  it('keeps the spine valley inactive in single-page curl mode', () => {
+    let clock = 0;
+    const callbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      callbacks.push(cb);
+      return callbacks.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+    const { element } = mountPage();
+    const { shadow, layer } = mountShadow();
+    animatePageTurn(element, 1, 'curl', shadow, { spread: false });
+
+    clock = 40;
+    callbacks.shift()?.(clock);
+    expect(Number(layer('leaf').style.opacity)).toBeGreaterThan(0.5);
+    expect(layer('spine').style.opacity).toBe('0');
   });
 
   it('raises the incoming page from behind', () => {
@@ -648,10 +824,10 @@ describe('animatePageTurn', () => {
 
   it('tags its animation, and never fills forwards', () => {
     const { element, animate } = mountPage();
-    for (const mode of ['slide', 'fade', 'curl', 'stack'] as const) {
+    for (const mode of ['slide', 'fade', 'stack'] as const) {
       animatePageTurn(element, 1, mode);
     }
-    expect(animate).toHaveBeenCalledTimes(4);
+    expect(animate).toHaveBeenCalledTimes(3);
     for (const call of animate.mock.calls) {
       expect(call[1]?.fill).toBeUndefined();
     }
@@ -659,101 +835,30 @@ describe('animatePageTurn', () => {
     expect((animate.mock.results[0]?.value as Animation).id).toBe(PAGE_TURN_ANIMATION_ID);
   });
 
-  it('curls a spread: the fold on the turning half, the cast shadow on the other', () => {
-    const { element } = mountPage();
-    const { shadow, back, fold, cast } = mountShadow();
-
-    animatePageTurn(element, 1, 'curl', shadow, { spread: true });
-    // Each layer covers only its own side of the spine, so none spills across.
-    expect(fold.element.style.left).toBe('50%');
-    expect(fold.element.style.right).toBe('0px');
-    expect(back.element.style.left).toBe('50%');
-    expect(cast.element.style.right).toBe('50%');
-    expect(cast.element.style.left).toBe('0px');
-    // The folded-over strip is the paper's reverse, lit at its free edge.
-    expect(back.element.style.backgroundImage).toContain('--page-turn-paper');
-    expect(back.element.style.backgroundPosition).toBe('100% 0px');
-    expect(back.animate.mock.calls[0]?.[0]).toEqual([
-      { opacity: 0, clipPath: curlBackClip(1, CURL_BULGE) },
-      { opacity: 1, clipPath: curlBackClip(1, CURL_BULGE), offset: 0.2 },
-      { opacity: 0, clipPath: curlBackClip(1, 0) },
-    ]);
-    // The fold shadow hugs the fold at the free edge; the cast shadow darkens
-    // toward the spine on the other half.
-    expect(fold.element.style.backgroundImage).toContain('to left');
-    expect(cast.element.style.backgroundImage).toContain('to left');
-    expect(cast.element.style.transformOrigin).toBe('right center');
-    // The fold is clipped by the same curve as the page, and flattens with it.
-    expect(fold.animate.mock.calls[0]?.[0]).toEqual([
-      { opacity: 0, clipPath: curlFoldClip(1, CURL_BULGE) },
-      { opacity: 1, clipPath: curlFoldClip(1, CURL_BULGE), offset: 0.25 },
-      { opacity: 0, clipPath: curlFoldClip(1, 0) },
-    ]);
-    expect(cast.animate.mock.calls[0]?.[0]).toEqual([
-      { opacity: 0, transform: 'scaleX(0.6)' },
-      { opacity: 0.75, transform: 'scaleX(1)', offset: 0.42 },
-      { opacity: 0, transform: 'scaleX(1.1)' },
-    ]);
-    for (const call of [fold.animate.mock.calls[0], cast.animate.mock.calls[0]]) {
-      expect(call?.[1]).toMatchObject({ duration: 420 });
-      expect(call?.[1]?.fill).toBeUndefined();
-    }
-
-    // Back turns mirror both the sides and the shading.
-    animatePageTurn(element, -1, 'curl', shadow, { spread: true });
-    expect(fold.element.style.right).toBe('50%');
-    expect(fold.element.style.left).toBe('0px');
-    expect(cast.element.style.left).toBe('50%');
-    expect(cast.element.style.right).toBe('0px');
-    expect(fold.element.style.backgroundImage).toContain('to right');
-    expect(cast.element.style.backgroundImage).toContain('to right');
-    expect(back.element.style.backgroundPosition).toBe('0px 0px');
-    expect(back.animate).toHaveBeenCalledTimes(2);
-    expect(fold.animate).toHaveBeenCalledTimes(2);
-    expect(cast.animate).toHaveBeenCalledTimes(2);
-  });
-
-  it('curls a single page on its leading edge, with no page under it to shade', () => {
-    const { element } = mountPage();
-    const { shadow, back, fold, cast } = mountShadow();
-
-    animatePageTurn(element, 1, 'curl', shadow);
-    expect(fold.element.style.left).toBe('0px');
-    expect(fold.element.style.right).toBe('0px');
-    expect(fold.element.style.backgroundImage).toContain('to left');
-    expect(fold.animate).toHaveBeenCalledTimes(1);
-    // A single page is still a leaf, so it still folds over; only the shadow it
-    // would throw on the page beneath has nowhere to fall.
-    expect(back.animate).toHaveBeenCalledTimes(1);
-    expect(cast.animate).not.toHaveBeenCalled();
-    expect(cast.element.style.opacity).toBe('0');
-
-    animatePageTurn(element, -1, 'curl', shadow);
-    expect(fold.element.style.backgroundImage).toContain('to right');
-  });
-
   it('leaves the shadow alone for every other mode', () => {
     const { element } = mountPage();
-    const { shadow, back, fold, cast } = mountShadow();
+    const { shadow, layer } = mountShadow();
     for (const mode of ['slide', 'fade', 'stack'] as const) {
       animatePageTurn(element, 1, mode, shadow, { spread: true });
     }
-    expect(fold.animate).not.toHaveBeenCalled();
-    expect(cast.animate).not.toHaveBeenCalled();
-    expect(back.animate).not.toHaveBeenCalled();
+    expect(layer('leaf').style.opacity).toBe('');
+    expect(layer('cast-shadow').style.opacity).toBe('');
+    expect(layer('under-shadow').style.opacity).toBe('');
+    expect(layer('spine').style.opacity).toBe('');
   });
 
   it('turns instantly with reduced motion', () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce') }));
+    const raf = vi.fn();
+    vi.stubGlobal('requestAnimationFrame', raf);
     const { element, animate } = mountPage();
-    const { shadow, back, fold, cast } = mountShadow();
+    const { shadow, layer } = mountShadow();
     for (const mode of ['slide', 'fade', 'curl', 'stack'] as const) {
       animatePageTurn(element, 1, mode, shadow, { spread: true });
     }
     expect(animate).not.toHaveBeenCalled();
-    expect(fold.animate).not.toHaveBeenCalled();
-    expect(cast.animate).not.toHaveBeenCalled();
-    expect(back.animate).not.toHaveBeenCalled();
+    expect(raf).not.toHaveBeenCalled();
+    expect(layer('leaf').style.opacity).toBe('');
   });
 
   it('tolerates a page that is not mounted', () => {

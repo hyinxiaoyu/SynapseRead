@@ -498,3 +498,114 @@ describe('resolveChapterLink', () => {
     }
   });
 });
+
+describe('EPUB paper curl engine', () => {
+  it('captures an inert curl stage, drives [data-curl-part], and empties curlHost on settle', async () => {
+    const frames: FrameRequestCallback[] = [];
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const nextSpy = vi.spyOn(fake.rendition, 'next');
+
+    try {
+      const container = document.createElement('div');
+      Object.defineProperty(container, 'clientWidth', { value: 640, configurable: true });
+      Object.defineProperty(container, 'offsetWidth', { value: 640, configurable: true });
+      Object.defineProperty(container, 'scrollWidth', { value: 1920, configurable: true });
+      Object.defineProperty(container, 'scrollLeft', {
+        value: 0,
+        writable: true,
+        configurable: true,
+      });
+      Reflect.set(fake.rendition, 'manager', { container, layout: { delta: 640 } });
+
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const host = document.createElement('div');
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+      const chapterDoc = document.implementation.createHTMLDocument('');
+      chapterDoc.body.innerHTML = '<p id="dup" data-annotation-id="a1">Outgoing page</p>';
+      fake.state.contents = [{ document: chapterDoc, window, expand: vi.fn() }];
+
+      const curlHost = document.createElement('div');
+      const shadow = document.createElement('div');
+      const leaf = document.createElement('div');
+      leaf.dataset.curlPart = 'leaf';
+      const spine = document.createElement('div');
+      spine.dataset.curlPart = 'spine';
+      shadow.append(leaf, spine);
+
+      handle.setCurlElements?.({ curlHost, shadow });
+
+      const turnPromise = handle.turnPage(1, {
+        animate: false,
+        transition: 'curl',
+        spread: true,
+      });
+
+      // Wait a microtask for `rendition.next()` to resolve and enter `runCurlAnimation`.
+      await Promise.resolve();
+      expect(curlHost.childElementCount).toBeGreaterThan(0);
+      expect(curlHost.querySelector('#dup')).toBeNull();
+      expect(curlHost.querySelector('[data-annotation-id]')).toBeNull();
+
+      clock = 40;
+      frames.shift()?.(clock);
+      expect(curlHost.style.clipPath).toContain('polygon(');
+      expect(Number(leaf.style.opacity)).toBeGreaterThan(0.5);
+      expect(Number(spine.style.opacity)).toBeGreaterThan(0.2);
+
+      clock = 500;
+      frames.shift()?.(clock);
+      await turnPromise;
+      expect(container.scrollLeft).toBe(640);
+      expect(curlHost.childElementCount).toBe(0);
+      expect(curlHost.style.clipPath).toBe('');
+      expect(leaf.style.opacity).toBe('0');
+
+      // Live scrub updates curl progress 1:1 and springs back cleanly on cancel.
+      handle.beginScrub({ transition: 'curl', spread: true });
+      handle.scrubTo(192);
+      expect(Number(leaf.style.opacity)).toBeGreaterThan(0.4);
+      expect(container.scrollLeft).toBe(1280);
+
+      const scrubEndPromise = handle.endScrub(null);
+      expect(container.scrollLeft).toBe(640);
+      clock = 1000;
+      frames.shift()?.(clock);
+      await scrubEndPromise;
+      expect(curlHost.childElementCount).toBe(0);
+      expect(leaf.style.opacity).toBe('0');
+
+      // Cross-chapter seam fallback when `!canTurnInPlace`: invokes `rendition.next()`.
+      container.scrollLeft = 1280;
+      nextSpy.mockClear();
+      const seamPromise = handle.turnPage(1, {
+        animate: false,
+        transition: 'curl',
+        spread: true,
+      });
+      await Promise.resolve();
+      expect(nextSpy).toHaveBeenCalledTimes(1);
+      expect(curlHost.childElementCount).toBeGreaterThan(0);
+
+      clock = 2000;
+      frames.shift()?.(clock);
+      await seamPromise;
+      expect(curlHost.childElementCount).toBe(0);
+
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      nextSpy.mockRestore();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+});

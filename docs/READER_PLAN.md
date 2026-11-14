@@ -238,18 +238,19 @@ hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` pagina
   strip across a whole page at `opacity: 1`, and a turn across a spine seam holds the
   outgoing chapter's frame in the strip until the incoming one is up, so no turn shows a
   blank page; PDF `single` and `two-page` render a three-slot stage whose neighbouring
-  spreads are already rasterized (bounded to `<= 3` spreads / `<= 6` canvases); `curl` is
-  a simulated paper curl — it hinges at the `50%` spine of a two-page spread, and the
-  leaf's own free edge bends: an animated `polygon()` clip pulls that edge in by `8%` on
-  a half-sine and straightens it as the leaf settles, so the page keeps every pixel and
-  loses its straight silhouette. A `back` layer fills the strip the fold pulled away
-  from with the paper's reverse, lit at its free edge and dark at the fold; a `fold`
-  layer, clipped by the same curve, shades the leaf's own face; and a `cast` layer
-  shadows the half that stays put. Every layer is confined to its own side of the spine.
-  Nothing is rasterized — no WebGL, no canvas, no `foreignObject` — so live text is never
-  sampled, and the clip is gone once the turn settles; and TXT slides along its vertical
-  reading axis instead of nudging the rows sideways. No turn leaves a persistent
-  transform, and `prefers-reduced-motion: reduce` still turns instantaneously.
+  spreads are already rasterized (bounded to `<= 3` spreads / `<= 6` canvases); `curl` uses
+  a stationary dual-page conical paper-curl peel across PDF, EPUB (via an inert
+  `sandbox="allow-same-origin"` mirror), and TXT — both outgoing and incoming pages stay
+  pinned at `(0, 0)` (zero `rotateY`), an animated or 1:1-scrubbed lower-corner-leading
+  crease `polygon()` clips the outgoing surface (`unpeeledClip`), and `PageTurnShadow`
+  renders four coordinated CSS layers calibrated to Light/Sepia/Dark/untinted palettes:
+  a conical folded paper backside (`leaf` with cylinder highlight, roll-off, rim bevel, and
+  faint line bleed), `cast-shadow` onto the revealed page, `under-shadow` occlusion ahead
+  of the free edge, and a center `spine` valley for spreads. Nothing is rasterized — no
+  WebGL, no canvas, no `foreignObject` — so live text is never sampled, and every clip and
+  curl mirror is cleared once the turn settles; and TXT slides along its vertical reading
+  axis instead of nudging the rows sideways. No turn leaves a persistent transform, and
+  `prefers-reduced-motion: reduce` still turns instantaneously.
 - **PDF layout/zoom and long-document maps (`#51`, `#52`)**: migration
   `0009_pdf_document_layout.sql` persisting per-PDF `displayMode`, `zoomMode`, `scale`,
   `rotation`, and `coverPageAlone`, printed PDF page labels in `Go To`, and GPU-previewed

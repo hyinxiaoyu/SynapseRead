@@ -42,6 +42,85 @@ export const PAGE_PALETTES: Record<ResolvedReadingTheme, PagePalette> = {
   },
 };
 
+/** Coordinated surface and optical shadow tokens for a simulated conical paper curl. */
+export interface PaperCurlPalette {
+  /** Backside paper stock of the folded leaf. */
+  paper: string;
+  /** Cylindrical 3D specular sheen near the curved fold. */
+  highlight: string;
+  /** Shaded roll-off where the cylinder curves into the crease. */
+  rollShade: string;
+  /** Crisp cut-paper rim bevel along the lifted free edge. */
+  rim: string;
+  /** Faint reverse-side printed line bleed-through. */
+  bleed: string;
+  /** Soft optical shadow cast onto the revealed incoming page. */
+  cast: string;
+  /** Tight ambient-occlusion shadow ahead of the lifted free edge on the outgoing page. */
+  under: string;
+  /** Center 50% binding gutter valley in two-page spreads. */
+  spine: string;
+}
+
+export const PAPER_CURL_PALETTES: Record<ResolvedReadingTheme, PaperCurlPalette> = {
+  light: {
+    paper: '#f7f5ef',
+    highlight: 'rgba(255, 255, 255, 0.92)',
+    rollShade: 'rgba(38, 32, 24, 0.17)',
+    rim: 'rgba(255, 255, 255, 0.96)',
+    bleed: 'rgba(28, 25, 23, 0.048)',
+    cast: 'rgba(20, 16, 12, 0.25)',
+    under: 'rgba(20, 16, 12, 0.18)',
+    spine: 'rgba(28, 25, 23, 0.16)',
+  },
+  sepia: {
+    paper: '#efe5cd',
+    highlight: 'rgba(255, 251, 240, 0.80)',
+    rollShade: 'rgba(67, 52, 34, 0.22)',
+    rim: 'rgba(255, 250, 238, 0.90)',
+    bleed: 'rgba(67, 52, 34, 0.055)',
+    cast: 'rgba(48, 35, 18, 0.28)',
+    under: 'rgba(48, 35, 18, 0.22)',
+    spine: 'rgba(67, 52, 34, 0.20)',
+  },
+  dark: {
+    paper: '#232329',
+    highlight: 'rgba(255, 255, 255, 0.12)',
+    rollShade: 'rgba(0, 0, 0, 0.55)',
+    rim: 'rgba(255, 255, 255, 0.22)',
+    bleed: 'rgba(228, 228, 231, 0.038)',
+    cast: 'rgba(0, 0, 0, 0.64)',
+    under: 'rgba(0, 0, 0, 0.48)',
+    spine: 'rgba(0, 0, 0, 0.68)',
+  },
+};
+
+/** Neutral white paper-curl palette for untinted PDF pages. */
+export const PDF_UNTINTED_CURL_PALETTE: PaperCurlPalette = {
+  paper: '#f8f8f6',
+  highlight: 'rgba(255, 255, 255, 0.95)',
+  rollShade: 'rgba(24, 24, 27, 0.16)',
+  rim: 'rgba(255, 255, 255, 0.98)',
+  bleed: 'rgba(24, 24, 27, 0.042)',
+  cast: 'rgba(15, 15, 18, 0.26)',
+  under: 'rgba(15, 15, 18, 0.19)',
+  spine: 'rgba(15, 15, 18, 0.18)',
+};
+
+/** Maps a paper-curl palette onto the CSS variables `PageTurnShadow` layers consume. */
+export function paperCurlVariables(palette: PaperCurlPalette): Record<string, string> {
+  return {
+    '--page-turn-paper': palette.paper,
+    '--page-turn-highlight': palette.highlight,
+    '--page-turn-roll-shade': palette.rollShade,
+    '--page-turn-rim': palette.rim,
+    '--page-turn-bleed': palette.bleed,
+    '--page-turn-cast': palette.cast,
+    '--page-turn-under': palette.under,
+    '--page-turn-spine': palette.spine,
+  };
+}
+
 /** The design tokens `index.css` defines, which reader chrome overrides per theme. */
 export interface ChromePalette {
   background: string;

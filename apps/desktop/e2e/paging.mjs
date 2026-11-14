@@ -65,6 +65,9 @@ export async function pagingFlow(page) {
   await page.clickButton('Show inspector');
   await openEpub(page);
   await page.waitForReaderLayout();
+  await page.evaluate(
+    `document.querySelector('[aria-label="Open documents"] [role="tab"][aria-selected="true"]').dataset.e2e = 'paging-epub'`,
+  );
 
   // ---- An EPUB page turn moves the strip, and never dims the paper ----
   const edge = await page.evaluate(`(() => {
@@ -212,22 +215,29 @@ export async function pagingFlow(page) {
     const viewer = [...document.querySelectorAll('[data-testid="pdf-viewer"]')]
       .find((element) => element.checkVisibility({ visibilityProperty: true }));
     const shadow = viewer?.querySelector('[data-testid="page-turn-shadow"]');
-    const layer = (name) => shadow?.querySelector('[data-page-turn-layer="' + name + '"]');
-    const fold = layer('fold');
-    const back = layer('back');
-    const cast = layer('cast');
-    // The leaf itself: its outline is what bends.
-    const leaf = viewer?.querySelector('[data-testid="pdf-stage"]')?.parentElement;
+    const part = (name) => shadow?.querySelector('[data-curl-part="' + name + '"]');
+    const stage = viewer?.querySelector('[data-testid="pdf-stage"]');
     window.__curlSamples = [];
     let frames = 0;
     const step = () => {
+      const leaf = part('leaf');
+      const cast = part('cast-shadow');
+      const under = part('under-shadow');
+      const spine = part('spine');
+      const slots = [...(stage?.querySelectorAll('[data-stage-row]') ?? [])];
+      const clippedSlot = slots.find((slot) => getComputedStyle(slot).clipPath !== 'none');
+      const outgoingUnclippedOnTop = slots.some(
+        (slot) => slot.style.zIndex === '2' && getComputedStyle(slot).clipPath === 'none',
+      );
       window.__curlSamples.push({
-        fold: fold ? Number(getComputedStyle(fold).opacity) : 0,
-        back: back ? Number(getComputedStyle(back).opacity) : 0,
+        leaf: leaf ? Number(getComputedStyle(leaf).opacity) : 0,
         cast: cast ? Number(getComputedStyle(cast).opacity) : 0,
-        foldLeft: fold ? fold.style.left : '',
-        castRight: cast ? cast.style.right : '',
+        under: under ? Number(getComputedStyle(under).opacity) : 0,
+        spine: spine ? Number(getComputedStyle(spine).opacity) : 0,
         leafClip: leaf ? getComputedStyle(leaf).clipPath : 'none',
+        slotClip: clippedSlot ? getComputedStyle(clippedSlot).clipPath : 'none',
+        outgoingUnclippedOnTop,
+        stageTransform: stage ? getComputedStyle(stage).transform : 'none',
       });
       frames += 1;
       if (frames < 40) requestAnimationFrame(step);
@@ -239,59 +249,248 @@ export async function pagingFlow(page) {
   await new Promise((done) => setTimeout(done, 700));
   const curl = await page.evaluate('window.__curlSamples');
   assert(
-    curl.some((sample) => sample.fold > 0.3),
-    'the turning leaf has to be shaded while it curls',
+    curl.some((sample) => sample.leaf > 0.5),
+    'the conical paper backside leaf must light up while curling',
   );
   assert(
-    curl.some((sample) => sample.back > 0.3),
-    "the folded-over strip has to show the paper's reverse",
+    curl.some((sample) => sample.cast > 0.15),
+    'the revealed incoming spread must catch the cast shadow',
   );
   assert(
-    curl.some((sample) => sample.cast > 0.3),
-    "the half that stays put has to catch the leaf's shadow",
+    curl.some((sample) => sample.under > 0.1),
+    'the outgoing spread must show under-edge ambient occlusion',
   );
-  // A curl bends the leaf's own outline; a rotation alone would leave it straight.
-  // The outline is only bent while the fold is visible, so that is the window to
-  // read it in: before the turn and after it settles there is nothing to clip.
-  const curling = curl.filter((sample) => sample.fold > 0.1);
-  assert(curling.length > 0, 'the turn has to be in progress for at least a frame');
   assert(
-    curling.every((sample) => sample.leafClip !== 'none'),
-    'the leaf has to be clipped while it curls',
+    curl.some((sample) => sample.spine > 0.15),
+    'a two-page curl must shade the center binding spine valley',
   );
-  const outlines = new Set(curling.map((sample) => sample.leafClip));
   assert(
-    outlines.size > 3,
-    `the leaf's outline has to bend over several frames, saw ${outlines.size} shapes`,
+    curl.every((sample) => sample.stageTransform === 'none'),
+    'the PDF stage must stay stationary (zero slide/rotateY) during a paper curl',
   );
-  const shaded = curl.filter((sample) => sample.fold > 0 || sample.cast > 0);
-  assert(shaded.length > 0, 'the turn has to shade the page at all');
-  for (const sample of shaded) {
-    // Each layer covers only its own side of the spine, so neither spills across.
-    assert(
-      sample.foldLeft === '50%',
-      `the fold must stay on the turning half: left is ${sample.foldLeft}`,
-    );
-    assert(
-      sample.castRight === '50%',
-      `the cast shadow must stay on the other half: right is ${sample.castRight}`,
-    );
-  }
+  const firstClippedIndex = curl.findIndex((sample) => sample.slotClip !== 'none');
+  assert(firstClippedIndex >= 0, 'the curl turn must clip the outgoing PDF slot');
+  assert(
+    curl.slice(firstClippedIndex).every((sample) => !sample.outgoingUnclippedOnTop),
+    'once peeling begins, the top outgoing PDF slot must stay clipped until settled',
+  );
+  const curling = curl.filter((sample) => sample.leaf > 0.1);
+  assert(curling.length > 0, 'the curl turn has to be active for at least a frame');
+  assert(
+    curling.every((sample) => sample.slotClip !== 'none' && sample.leafClip !== 'none'),
+    'both the outgoing slot and folded leaf must stay clipped while curling',
+  );
+  const slotOutlines = new Set(curling.map((sample) => sample.slotClip));
+  const leafOutlines = new Set(curling.map((sample) => sample.leafClip));
+  assert(
+    slotOutlines.size > 3,
+    `the outgoing slot crease must sweep over several frames, saw ${slotOutlines.size} shapes`,
+  );
+  assert(
+    leafOutlines.size > 3,
+    `the conical backside leaf must reshape over several frames, saw ${leafOutlines.size} shapes`,
+  );
   const settledCurl = curl.at(-1);
   assert(
-    settledCurl.fold === 0 && settledCurl.cast === 0,
-    `the curl must fade out: ${JSON.stringify(settledCurl)}`,
+    settledCurl.leaf === 0 &&
+      settledCurl.cast === 0 &&
+      settledCurl.under === 0 &&
+      settledCurl.spine === 0,
+    `all four curl layers must settle to 0 opacity: ${JSON.stringify(settledCurl)}`,
   );
   const afterCurl = await page.evaluate(`(() => {
-    const content = ${visibleScroller}?.querySelector('[data-testid="pdf-stage"]')?.parentElement;
-    if (!content) return { transform: 'none', clipPath: 'none' };
-    const style = getComputedStyle(content);
-    return { transform: style.transform, clipPath: style.clipPath };
+    const stage = ${visibleScroller}?.querySelector('[data-testid="pdf-stage"]');
+    const content = stage?.parentElement;
+    const slots = [...(stage?.querySelectorAll('[data-stage-row]') ?? [])];
+    return {
+      stageTransform: stage ? getComputedStyle(stage).transform : 'none',
+      contentTransform: content ? getComputedStyle(content).transform : 'none',
+      contentClipPath: content ? getComputedStyle(content).clipPath : 'none',
+      anySlotClipped: slots.some((slot) => getComputedStyle(slot).clipPath !== 'none'),
+      anySlotTransformed: slots.some((slot) => getComputedStyle(slot).transform !== 'none'),
+    };
   })()`);
   assert(
-    afterCurl.transform === 'none',
-    `a curl must not stay transformed: ${afterCurl.transform}`,
+    afterCurl.stageTransform === 'none' && afterCurl.contentTransform === 'none',
+    `a PDF curl must leave zero transform: ${JSON.stringify(afterCurl)}`,
   );
-  // The fold is a clip on the leaf, so it has to be gone once the page is flat.
-  assert(afterCurl.clipPath === 'none', `a curl must not stay clipped: ${afterCurl.clipPath}`);
+  assert(
+    afterCurl.contentClipPath === 'none' &&
+      !afterCurl.anySlotClipped &&
+      !afterCurl.anySlotTransformed,
+    `a PDF curl must leave zero residual clip/transform on slots: ${JSON.stringify(afterCurl)}`,
+  );
+
+  // ---- A horizontal trackpad swipe scrubs the PDF curl 1:1, then settles cleanly ----
+  const duringScrub = await page.evaluate(`(() => {
+    const scroller = ${visibleScroller};
+    const viewer = scroller?.closest('[data-testid="pdf-viewer"]');
+    const leaf = viewer?.querySelector('[data-curl-part="leaf"]');
+    for (let step = 0; step < 6; step += 1) {
+      scroller?.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: -25, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+    }
+    const slots = [...(viewer?.querySelectorAll('[data-stage-row]') ?? [])];
+    return {
+      leafOpacity: leaf ? Number(getComputedStyle(leaf).opacity) : 0,
+      hasClippedSlot: slots.some((slot) => getComputedStyle(slot).clipPath !== 'none'),
+    };
+  })()`);
+  assert(
+    duringScrub.leafOpacity > 0.2,
+    `horizontal scrub must drive the curl leaf 1:1, saw opacity ${duringScrub.leafOpacity}`,
+  );
+  assert(duringScrub.hasClippedSlot, 'horizontal scrub must clip the outgoing PDF stage slot');
+  await page.waitFor(
+    `(() => {
+      const viewer = [...document.querySelectorAll('[data-testid="pdf-viewer"]')]
+        .find((element) => element.checkVisibility({ visibilityProperty: true }));
+      const leaf = viewer?.querySelector('[data-curl-part="leaf"]');
+      const slots = [...(viewer?.querySelectorAll('[data-stage-row]') ?? [])];
+      return Number(leaf ? getComputedStyle(leaf).opacity : 0) === 0 &&
+        slots.every((slot) => getComputedStyle(slot).clipPath === 'none');
+    })()`,
+    'the PDF curl scrub to settle cleanly',
+  );
+
+  // ---- Switching back to the EPUB tab exercises the inert curl mirror with zero rotateY ----
+  await page.evaluate(
+    `document.querySelector('[aria-label="Open documents"] [role="tab"][data-e2e="paging-epub"]')?.click()`,
+  );
+  await page.waitFor(visibleHost, 'the EPUB tab to return for curl check');
+  await page.waitForReaderLayout();
+  await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const wrapper = host?.parentElement;
+    const curlHost = wrapper?.querySelector('[data-testid="epub-curl-host"]');
+    const leaf = wrapper?.querySelector('[data-curl-part="leaf"]');
+    window.__epubCurlSamples = [];
+    let frames = 0;
+    const step = () => {
+      window.__epubCurlSamples.push({
+        children: curlHost ? curlHost.childElementCount : 0,
+        visibility: curlHost ? getComputedStyle(curlHost).visibility : 'hidden',
+        clipPath: curlHost ? getComputedStyle(curlHost).clipPath : 'none',
+        hostTransform: host ? getComputedStyle(host).transform : 'none',
+        leafOpacity: leaf ? Number(getComputedStyle(leaf).opacity) : 0,
+        mirrorCompat: curlHost?.querySelector('iframe')?.contentDocument?.compatMode ?? null,
+      });
+      frames += 1;
+      if (frames < 40) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    return true;
+  })()`);
+  await page.clickButton('Next Page');
+  await new Promise((done) => setTimeout(done, 700));
+  const epubCurl = await page.evaluate('window.__epubCurlSamples');
+  assert(
+    epubCurl.some((sample) => sample.children > 0),
+    'an EPUB curl turn must mirror the outgoing spread inside epub-curl-host',
+  );
+  const mirrorCompats = epubCurl.map((sample) => sample.mirrorCompat).filter(Boolean);
+  assert(
+    mirrorCompats.length > 0 && mirrorCompats.every((mode) => mode === 'CSS1Compat'),
+    `EPUB curl mirror iframe must render in Standards Mode (CSS1Compat), saw ${JSON.stringify(mirrorCompats)}`,
+  );
+  assert(
+    epubCurl.some((sample) => sample.leafOpacity > 0.5),
+    'an EPUB curl turn must light up the conical backside leaf',
+  );
+  assert(
+    epubCurl.every((sample) => sample.hostTransform === 'none'),
+    'epub-host must remain stationary (no rotateY) during curl',
+  );
+  const firstEpubClipIndex = epubCurl.findIndex((sample) => sample.clipPath !== 'none');
+  assert(firstEpubClipIndex >= 0, 'EPUB curl must clip epub-curl-host while peeling');
+  assert(
+    epubCurl
+      .slice(firstEpubClipIndex)
+      .every((sample) => sample.visibility !== 'visible' || sample.clipPath !== 'none'),
+    'once EPUB peeling begins, visible epub-curl-host must never flash unclipped',
+  );
+  const epubCurling = epubCurl.filter((sample) => sample.leafOpacity > 0.1);
+  assert(epubCurling.length > 0, 'EPUB curl animation must be observed for at least one frame');
+  const epubOutlines = new Set(
+    epubCurling.map((sample) => sample.clipPath).filter((clip) => clip !== 'none'),
+  );
+  assert(
+    epubOutlines.size > 3,
+    `epub-curl-host must sweep across several polygon shapes, saw ${epubOutlines.size}`,
+  );
+  await page.waitFor(
+    `(() => {
+      const host = ${visibleHost};
+      const wrapper = host?.parentElement;
+      const curlHost = wrapper?.querySelector('[data-testid="epub-curl-host"]');
+      const leaf = wrapper?.querySelector('[data-curl-part="leaf"]');
+      return (
+        curlHost?.childElementCount === 0 &&
+        getComputedStyle(curlHost).clipPath === 'none' &&
+        getComputedStyle(host).transform === 'none' &&
+        Number(leaf ? getComputedStyle(leaf).opacity : 0) === 0
+      );
+    })()`,
+    'EPUB curl host and overlay to empty and reset after settle',
+  );
+
+  // ---- A TXT curl keeps the snapshot and shadow aligned with the text column ----
+  const visibleTxtDoc = `[...document.querySelectorAll('[data-testid="txt-scroll"] [role="document"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
+  await page.evaluate(`(() => {
+    const doc = [...document.querySelectorAll('[data-testid="txt-scroll"] [role="document"]')]
+      .find((e) => e.textContent.includes('SynapseRead sample text'));
+    const panelId = doc?.closest('[role="tabpanel"]')?.id;
+    document.querySelector('[aria-label="Open documents"] [role="tab"][aria-controls="' + panelId + '"]')?.click();
+  })()`);
+  await page.waitFor(visibleTxtDoc, 'the TXT tab to return for curl check');
+  await page.waitForReaderLayout();
+  await page.evaluate(`(() => {
+    const doc = ${visibleTxtDoc};
+    const stage = doc?.closest('[data-testid="txt-scroll"]')?.parentElement;
+    const curlHost = stage?.querySelector('[data-testid="txt-curl-host"]');
+    const shadow = stage?.querySelector('[data-testid="page-turn-shadow"]');
+    const leaf = shadow?.querySelector('[data-curl-part="leaf"]');
+    window.__txtCurlSamples = [];
+    let frames = 0;
+    const step = () => {
+      const curlVisible = curlHost && getComputedStyle(curlHost).visibility === 'visible';
+      const docRect = doc?.getBoundingClientRect();
+      const curlRect = curlHost?.getBoundingClientRect();
+      const shadowRect = shadow?.getBoundingClientRect();
+      window.__txtCurlSamples.push({
+        children: curlHost ? curlHost.childElementCount : 0,
+        visibility: curlHost ? getComputedStyle(curlHost).visibility : 'hidden',
+        clipPath: curlHost ? getComputedStyle(curlHost).clipPath : 'none',
+        leafOpacity: leaf ? Number(getComputedStyle(leaf).opacity) : 0,
+        deltaLeft:
+          curlVisible && docRect && curlRect ? Math.abs(curlRect.left - docRect.left) : 0,
+        shadowDeltaLeft:
+          curlVisible && docRect && shadowRect ? Math.abs(shadowRect.left - docRect.left) : 0,
+      });
+      frames += 1;
+      if (frames < 40) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    return true;
+  })()`);
+  await page.clickButton('Next Page');
+  await new Promise((done) => setTimeout(done, 700));
+  const txtCurl = await page.evaluate('window.__txtCurlSamples');
+  assert(
+    txtCurl.some((sample) => sample.children > 0 && sample.leafOpacity > 0.5),
+    'a TXT curl turn must capture and animate the text snapshot',
+  );
+  const firstTxtClipIndex = txtCurl.findIndex((sample) => sample.clipPath !== 'none');
+  assert(firstTxtClipIndex >= 0, 'TXT curl must clip txt-curl-host while peeling');
+  assert(
+    txtCurl
+      .slice(firstTxtClipIndex)
+      .every((sample) => sample.visibility !== 'visible' || sample.clipPath !== 'none'),
+    'once TXT peeling begins, visible txt-curl-host must never flash unclipped',
+  );
+  assert(
+    txtCurl.every((sample) => sample.deltaLeft < 0.5 && sample.shadowDeltaLeft < 0.5),
+    `txt-curl-host and shadow must align with the text column, saw max deltas (${Math.max(...txtCurl.map((s) => s.deltaLeft))}, ${Math.max(...txtCurl.map((s) => s.shadowDeltaLeft))})`,
+  );
 }

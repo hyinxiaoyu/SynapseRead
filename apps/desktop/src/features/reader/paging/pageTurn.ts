@@ -532,6 +532,8 @@ export function prefersReducedMotion(): boolean {
 export const PAGE_SLIDE_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
 /** How long a committed slide takes to cross the page. */
 export const PAGE_SLIDE_MS = 260;
+/** How long a committed conical paper curl takes to sweep across the page. */
+export const PAGE_CURL_MS = 360;
 /** How long a cancelled scrub takes to spring back. */
 export const PAGE_SPRING_BACK_MS = 200;
 
@@ -542,70 +544,329 @@ export interface PageTurnMotion {
   keyframes: (direction: TurnDirection, spread?: boolean) => Keyframe[];
 }
 
-/**
- * The edge the incoming page curls around: its leading edge, or the centre spine
- * of a two-page spread, where the turning leaf is hinged.
- */
-function curlOrigin(direction: TurnDirection, spread: boolean): string {
-  if (spread) return '50% 50%';
-  return direction > 0 ? '0% 50%' : '100% 50%';
+/** Points sampled vertically to draw the curved crease and conical leaf outline. */
+const CURL_STEPS = 10;
+
+/** Computed CSS geometry and multi-layer shading for one frame of a paper curl. */
+export interface PaperCurlGeometry {
+  active: boolean;
+  progress: number;
+  direction: TurnDirection;
+  unpeeledClip: string;
+  leafClip: string;
+  leafBackground: string;
+  leafOpacity: number;
+  castClip: string;
+  castBackground: string;
+  castOpacity: number;
+  underClip: string;
+  underBackground: string;
+  underOpacity: number;
+  spineBackground: string;
+  spineOpacity: number;
 }
 
-/** Points that approximate the fold curve. More is smoother, not slower. */
-const CURL_STEPS = 12;
-/**
- * How far the fold pulls the free edge in, as a fraction of the page width. Live
- * text cannot be deformed without rasterizing it (`ADR 0005`), so the fold is the
- * page's own outline bending: the leaf keeps its pixels and loses its straight
- * edge, which is what the eye reads as paper.
- */
-export const CURL_BULGE = 0.08;
-
-/** The free edge a curl bends: the page's trailing edge, away from its hinge. */
-function curledEdge(direction: TurnDirection): number {
-  return direction > 0 ? 100 : 0;
+function clampPct(value: number): number {
+  return Math.min(Math.max(value, 0), 100);
 }
 
-/** How far the fold pulls the edge in at `at` (0 top, 1 bottom), in percent. */
-function foldOffset(direction: TurnDirection, bulge: number, at: number): number {
-  return (direction > 0 ? -1 : 1) * Math.sin(at * Math.PI) * bulge * 100;
+function formatPolygon(points: readonly (readonly [number, number])[]): string {
+  return `polygon(${points.map(([x, y]) => `${x.toFixed(2)}% ${y.toFixed(2)}%`).join(', ')})`;
 }
 
-/**
- * The outline of a page whose free edge is curling, as a clip path. The curve is a
- * half-sine, so the corners stay where they are and the middle of the edge bends.
- * At `bulge` 0 this is the page's own rectangle, which is where the turn ends.
- */
-export function curlFoldClip(direction: TurnDirection, bulge: number): string {
-  const edge = curledEdge(direction);
-  const curve = Array.from({ length: CURL_STEPS + 1 }, (_, step) => {
-    const at = step / CURL_STEPS;
-    return `${(edge + foldOffset(direction, bulge, at)).toFixed(2)}% ${(at * 100).toFixed(2)}%`;
-  });
-  const corner = direction > 0 ? '0% 0%' : '100% 0%';
-  const foot = direction > 0 ? '0% 100%' : '100% 100%';
-  return `polygon(${[corner, ...curve, foot].join(', ')})`;
-}
-
-/** The folded-over strip itself: the part of the page beyond the fold. */
-export function curlBackClip(direction: TurnDirection, bulge: number): string {
-  const edge = curledEdge(direction);
-  const curve = Array.from({ length: CURL_STEPS + 1 }, (_, step) => {
-    const at = 1 - step / CURL_STEPS;
-    return `${(edge + foldOffset(direction, bulge, at)).toFixed(2)}% ${(at * 100).toFixed(2)}%`;
-  });
-  return `polygon(${[`${edge}% 0%`, `${edge}% 100%`, ...curve].join(', ')})`;
+function normalizedStop(start: number, end: number, fraction: number): string {
+  const span = Math.max(end - start, 0.05);
+  return `${(start + span * fraction).toFixed(2)}%`;
 }
 
 /**
- * How each mode draws the incoming page. Durations and easings are starting
- * points to tune by eye; the shape of each motion is not.
+ * Computes the geometry and optical shading for a conical paper-curl peel at
+ * `progress` (`0` = flat outgoing page, `1` = completely peeled away).
  *
- * `slide` here is the fallback for a page that has no second buffer to move with
- * it — an EPUB chapter seam or a TXT row. It nudges the incoming page without
- * touching opacity, so no turn ever flashes the page dimmer. The viewers that do
- * have a strip (EPUB within a chapter, PDF in a paged mode) move both pages
- * together themselves and never use this.
+ * Both the outgoing and incoming pages stay stationary at `(0, 0)`. An angled,
+ * gently arched crease sweeps across the page with the lower outer corner
+ * leading naturally, clipping the outgoing page (`unpeeledClip`) while painting
+ * a flared conical paper backside (`leaf`), soft cast shadow onto the incoming
+ * page (`cast-shadow`), tight ambient occlusion ahead of the lifted edge
+ * (`under-shadow`), and a center `50%` spine valley for two-page spreads.
+ */
+export function computePaperCurl(
+  progress: number,
+  direction: TurnDirection,
+  { spread = false }: { spread?: boolean | undefined } = {},
+): PaperCurlGeometry {
+  const p = Math.min(Math.max(progress, 0), 1);
+  if (p <= 0.001 || p >= 0.999) {
+    const hingeX = direction > 0 ? 0 : 100;
+    // Keep the outgoing page collapsed at 0 area through tail rAF frames (easeOut reaches 0.999
+    // before t = 1) so it never flashes back full-screen right before `resetPaperCurl`.
+    const unpeeledClip =
+      p >= 0.999
+        ? `polygon(${hingeX}% 0%, ${hingeX}% 0%, ${hingeX}% 100%, ${hingeX}% 100%)`
+        : 'none';
+    return {
+      active: false,
+      progress: p,
+      direction,
+      unpeeledClip,
+      leafClip: 'none',
+      leafBackground: 'none',
+      leafOpacity: 0,
+      castClip: 'none',
+      castBackground: 'none',
+      castOpacity: 0,
+      underClip: 'none',
+      underBackground: 'none',
+      underOpacity: 0,
+      spineBackground: 'none',
+      spineOpacity: 0,
+    };
+  }
+
+  const s = Math.sin(Math.PI * p);
+  const tilt = 6.0 * s;
+  const arch = 1.6 * s;
+  const curlSpan = 21 * s;
+
+  const ys: number[] = [];
+  const creaseXs: number[] = [];
+  const freeXs: number[] = [];
+  const castXs: number[] = [];
+  const underXs: number[] = [];
+
+  for (let step = 0; step <= CURL_STEPS; step += 1) {
+    const y = step / CURL_STEPS;
+    const sineY = Math.sin(Math.PI * y);
+    const fwdCrease = clampPct((1 - p) * 100 + tilt * (1 - 2 * y) - arch * sineY);
+    const crease = direction > 0 ? fwdCrease : 100 - fwdCrease;
+    const leafWidth = curlSpan * (0.76 + 0.4 * y + 0.08 * sineY);
+    const free = clampPct(crease - direction * leafWidth);
+    const castWidth = s * (8.5 + 8.5 * y);
+    const cast = clampPct(crease + direction * castWidth);
+    const underWidth = s * (3.2 + 2.2 * y);
+    const under = clampPct(free - direction * underWidth);
+
+    ys.push(y * 100);
+    creaseXs.push(crease);
+    freeXs.push(free);
+    castXs.push(cast);
+    underXs.push(under);
+  }
+
+  const anchorX = direction > 0 ? 0 : 100;
+  const unpeeledPoints: [number, number][] = [
+    [anchorX, 0],
+    ...ys.map((y, index): [number, number] => [creaseXs[index] ?? anchorX, y]),
+    [anchorX, 100],
+  ];
+  const unpeeledClip = formatPolygon(unpeeledPoints);
+
+  const traceBand = (left: readonly number[], right: readonly number[]): string => {
+    const down = ys.map((y, index): [number, number] => [left[index] ?? 0, y]);
+    const up: [number, number][] = [];
+    for (let index = CURL_STEPS; index >= 0; index -= 1) {
+      up.push([right[index] ?? 0, ys[index] ?? 0]);
+    }
+    return formatPolygon([...down, ...up]);
+  };
+
+  const leafClip = traceBand(creaseXs, freeXs);
+  const castClip = traceBand(creaseXs, castXs);
+  const underClip = traceBand(underXs, freeXs);
+
+  const midIndex = CURL_STEPS / 2;
+  const cMid = creaseXs[midIndex] ?? 50;
+  const fMid = freeXs[midIndex] ?? 50;
+  const castMid = castXs[midIndex] ?? 50;
+  const underMid = underXs[midIndex] ?? 50;
+
+  const tiltDeg = (Math.atan2(2 * tilt, 100) * 180) / Math.PI;
+  const gradAngle = direction > 0 ? 90 + tiltDeg : 270 - tiltDeg;
+  const axisPct = (x: number) => (direction > 0 ? x : 100 - x);
+
+  const leafStart = axisPct(fMid);
+  const leafEnd = axisPct(cMid);
+  const sheenLayer = `linear-gradient(${gradAngle.toFixed(1)}deg, transparent ${normalizedStop(leafStart, leafEnd, -0.02)}, var(--page-turn-rim, rgba(255, 255, 255, 0.96)) ${normalizedStop(leafStart, leafEnd, 0)}, var(--page-turn-rim, rgba(255, 255, 255, 0.96)) ${normalizedStop(leafStart, leafEnd, 0.04)}, transparent ${normalizedStop(leafStart, leafEnd, 0.09)}, transparent ${normalizedStop(leafStart, leafEnd, 0.54)}, var(--page-turn-highlight, rgba(255, 255, 255, 0.92)) ${normalizedStop(leafStart, leafEnd, 0.74)}, transparent ${normalizedStop(leafStart, leafEnd, 0.87)}, var(--page-turn-roll-shade, rgba(38, 32, 24, 0.17)) ${normalizedStop(leafStart, leafEnd, 1)})`;
+  const bleedAngle = (180 - direction * 2 * tiltDeg).toFixed(1);
+  const bleedLayer = `repeating-linear-gradient(${bleedAngle}deg, transparent 0px, transparent 15px, var(--page-turn-bleed, rgba(28, 25, 23, 0.048)) 15px, var(--page-turn-bleed, rgba(28, 25, 23, 0.048)) 20px, transparent 20px, transparent 26px)`;
+  const stockLayer = `linear-gradient(${gradAngle.toFixed(1)}deg, var(--page-turn-paper, #f7f5ef), var(--page-turn-paper, #f7f5ef))`;
+  const leafBackground = `${sheenLayer}, ${bleedLayer}, ${stockLayer}`;
+
+  const castStart = axisPct(cMid);
+  const castEnd = axisPct(castMid);
+  const castBackground = `linear-gradient(${gradAngle.toFixed(1)}deg, var(--page-turn-cast, rgba(20, 16, 12, 0.25)) ${normalizedStop(castStart, castEnd, 0)}, color-mix(in srgb, var(--page-turn-cast, rgba(20, 16, 12, 0.25)) 32%, transparent) ${normalizedStop(castStart, castEnd, 0.42)}, transparent ${normalizedStop(castStart, castEnd, 1)})`;
+
+  const underStart = axisPct(underMid);
+  const underEnd = axisPct(fMid);
+  const underBackground = `linear-gradient(${gradAngle.toFixed(1)}deg, transparent ${normalizedStop(underStart, underEnd, 0)}, color-mix(in srgb, var(--page-turn-under, rgba(20, 16, 12, 0.18)) 40%, transparent) ${normalizedStop(underStart, underEnd, 0.55)}, var(--page-turn-under, rgba(20, 16, 12, 0.18)) ${normalizedStop(underStart, underEnd, 1)})`;
+
+  const spineOpacity = spread
+    ? Number((s * (0.35 + 0.65 * Math.exp(-Math.pow((p - 0.5) / 0.28, 2)))).toFixed(3))
+    : 0;
+  const spineBackground = spread
+    ? 'linear-gradient(to right, transparent, var(--page-turn-spine, rgba(28, 25, 23, 0.16)) 50%, transparent)'
+    : 'none';
+
+  return {
+    active: true,
+    progress: p,
+    direction,
+    unpeeledClip,
+    leafClip,
+    leafBackground,
+    leafOpacity: Number(Math.min(1, s * 6).toFixed(3)),
+    castClip,
+    castBackground,
+    castOpacity: Number((0.95 * s).toFixed(3)),
+    underClip,
+    underBackground,
+    underOpacity: Number((0.9 * s).toFixed(3)),
+    spineBackground,
+    spineOpacity,
+  };
+}
+
+function curlPart(shadow: HTMLElement | null, name: string): HTMLElement | null {
+  return shadow?.querySelector<HTMLElement>(`[data-curl-part="${name}"]`) ?? null;
+}
+
+function applyCurlLayer(
+  layer: HTMLElement | null,
+  clip: string,
+  background: string,
+  opacity: number,
+): void {
+  if (!layer) return;
+  layer.style.clipPath = clip === 'none' ? '' : clip;
+  layer.style.backgroundImage = background === 'none' ? '' : background;
+  layer.style.opacity = String(opacity);
+}
+
+/**
+ * Applies one frame of `computePaperCurl` to a stationary outgoing surface and
+ * its sibling `PageTurnShadow` overlay.
+ */
+export function applyPaperCurl(
+  outgoing: HTMLElement | null,
+  shadow: HTMLElement | null,
+  progress: number,
+  direction: TurnDirection,
+  options: { spread?: boolean | undefined } = {},
+): PaperCurlGeometry {
+  const curl = computePaperCurl(progress, direction, options);
+  if (outgoing) {
+    outgoing.style.clipPath = curl.unpeeledClip === 'none' ? '' : curl.unpeeledClip;
+  }
+  applyCurlLayer(curlPart(shadow, 'leaf'), curl.leafClip, curl.leafBackground, curl.leafOpacity);
+  applyCurlLayer(
+    curlPart(shadow, 'cast-shadow'),
+    curl.castClip,
+    curl.castBackground,
+    curl.castOpacity,
+  );
+  applyCurlLayer(
+    curlPart(shadow, 'under-shadow'),
+    curl.underClip,
+    curl.underBackground,
+    curl.underOpacity,
+  );
+  const spine = curlPart(shadow, 'spine');
+  if (spine) {
+    spine.style.backgroundImage = curl.spineBackground === 'none' ? '' : curl.spineBackground;
+    spine.style.opacity = String(curl.spineOpacity);
+  }
+  return curl;
+}
+
+/** Clears every curl clip and shading layer so zero geometry state remains after settle. */
+export function resetPaperCurl(outgoing: HTMLElement | null, shadow: HTMLElement | null): void {
+  if (outgoing) outgoing.style.clipPath = '';
+  for (const name of ['leaf', 'cast-shadow', 'under-shadow', 'spine'] as const) {
+    const layer = curlPart(shadow, name);
+    if (!layer) continue;
+    layer.style.opacity = '0';
+    layer.style.clipPath = '';
+    layer.style.backgroundImage = '';
+  }
+}
+
+const activeCurlAnimations = new WeakMap<HTMLElement, () => void>();
+
+/**
+ * Runs a rAF-interpolated conical paper curl between `from` and `to`, returning
+ * an idempotent cancel handle. Resolves immediately to flat under reduced motion.
+ */
+export function animatePaperCurl({
+  outgoing = null,
+  shadow,
+  direction,
+  from = 0,
+  to = 1,
+  duration = PAGE_CURL_MS,
+  spread = false,
+  onFinish,
+}: {
+  outgoing?: HTMLElement | null | undefined;
+  shadow: HTMLElement | null;
+  direction: TurnDirection;
+  from?: number | undefined;
+  to?: number | undefined;
+  duration?: number | undefined;
+  spread?: boolean | undefined;
+  onFinish?: (() => void) | undefined;
+}): () => void {
+  const key = outgoing ?? shadow;
+  if (key) activeCurlAnimations.get(key)?.();
+
+  let frame = 0;
+  let finished = false;
+  const finish = (notify: boolean) => {
+    if (finished) return;
+    finished = true;
+    if (frame !== 0) {
+      window.cancelAnimationFrame(frame);
+      frame = 0;
+    }
+    if (key) activeCurlAnimations.delete(key);
+    resetPaperCurl(outgoing, shadow);
+    if (notify) onFinish?.();
+  };
+
+  if (
+    (!outgoing && !shadow) ||
+    prefersReducedMotion() ||
+    duration <= 0 ||
+    Math.abs(to - from) < 0.001 ||
+    typeof window.requestAnimationFrame !== 'function'
+  ) {
+    finish(true);
+    return () => undefined;
+  }
+
+  const cancel = () => finish(false);
+  if (key) activeCurlAnimations.set(key, cancel);
+
+  applyPaperCurl(outgoing, shadow, from, direction, { spread });
+  const started = performance.now();
+  const step = () => {
+    if (finished) return;
+    const t = Math.min((performance.now() - started) / duration, 1);
+    const current = from + (to - from) * easeOut(t);
+    if (t >= 1) {
+      finish(true);
+      return;
+    }
+    applyPaperCurl(outgoing, shadow, current, direction, { spread });
+    frame = window.requestAnimationFrame(step);
+  };
+  frame = window.requestAnimationFrame(step);
+  return cancel;
+}
+
+/**
+ * How each single-surface fallback mode draws the incoming page (`slide`, `fade`,
+ * `stack`). `curl` is driven across stationary dual-page surfaces by `animatePaperCurl`
+ * rather than rotating the page with `rotateY`.
  */
 export const PAGE_TURN_MOTION = {
   slide: {
@@ -621,38 +882,6 @@ export const PAGE_TURN_MOTION = {
     easing: 'cubic-bezier(0.2, 0, 0, 1)',
     keyframes: (): Keyframe[] => [{ opacity: 0.2 }, { opacity: 1 }],
   },
-  curl: {
-    duration: 420,
-    easing: PAGE_SLIDE_EASING,
-    keyframes: (direction: TurnDirection, spread = false): Keyframe[] => {
-      // Both frames carry the origin so it never has to be written to the
-      // element and then restored.
-      const transformOrigin = curlOrigin(direction, spread);
-      // A spread hinges at its own spine, so the leaf lifts instead of the whole
-      // spread swinging like a plank. No opacity: the paper never goes grey.
-      // The angle stays small because a spread is one element: the half that is
-      // not turning cannot be exempted from its transform, so most of the curl
-      // has to come from the fold in the leaf's own outline.
-      const angle = spread ? 12 : 26;
-      const perspective = spread ? 1500 : 1200;
-      // The leaf's free edge bends as it lifts and straightens as it settles. The
-      // clip is what makes this a curl rather than a card rotating: the page keeps
-      // every pixel it had and loses its straight edge, which is the shape paper
-      // takes. Both frames carry the same number of points, so it interpolates.
-      return [
-        {
-          transform: `perspective(${perspective}px) rotateY(${direction * -angle}deg)`,
-          transformOrigin,
-          clipPath: curlFoldClip(direction, CURL_BULGE),
-        },
-        {
-          transform: `perspective(${perspective}px) rotateY(0deg)`,
-          transformOrigin,
-          clipPath: curlFoldClip(direction, 0),
-        },
-      ];
-    },
-  },
   stack: {
     duration: 240,
     easing: PAGE_SLIDE_EASING,
@@ -661,7 +890,7 @@ export const PAGE_TURN_MOTION = {
       { transform: 'scale(1) translateX(0)', opacity: 1 },
     ],
   },
-} satisfies Record<Exclude<PageTransition, 'none'>, PageTurnMotion>;
+} satisfies Record<Exclude<PageTransition, 'none' | 'curl'>, PageTurnMotion>;
 
 /**
  * Stops the turn still running on an element, so fast keyboard repeats replace
@@ -675,133 +904,10 @@ export function cancelPageTurn(element: HTMLElement): void {
   }
 }
 
-/** One side of the overlay, as the four insets that place a layer on it. */
-export interface LeafSides {
-  top: string;
-  right: string;
-  bottom: string;
-  left: string;
-}
-
-const WHOLE_PAGE: LeafSides = { top: '0', right: '0', bottom: '0', left: '0' };
-
-/**
- * Which part of the overlay a turning leaf occupies, and which part it leaves
- * behind. A spread turns its right half going forward and its left half going
- * back; a single page is its own leaf, so both cover the whole page.
- *
- * The layers are placed on their side rather than clipped to it, because a
- * gradient is drawn across its own box: a full-width layer clipped to one half
- * would show only the end of its gradient, which is already transparent.
- */
-export function turningLeafSides(
-  direction: TurnDirection,
-  spread: boolean,
-): { leaf: LeafSides; rest: LeafSides } {
-  if (!spread) return { leaf: WHOLE_PAGE, rest: WHOLE_PAGE };
-  return direction > 0
-    ? { leaf: { ...WHOLE_PAGE, left: '50%' }, rest: { ...WHOLE_PAGE, right: '50%' } }
-    : { leaf: { ...WHOLE_PAGE, right: '50%' }, rest: { ...WHOLE_PAGE, left: '50%' } };
-}
-
-/** Places a curl layer on one side of the overlay. */
-function placeLayer(layer: HTMLElement, sides: LeafSides): void {
-  layer.style.top = sides.top;
-  layer.style.right = sides.right;
-  layer.style.bottom = sides.bottom;
-  layer.style.left = sides.left;
-}
-
-/** Animates one curl layer, from nothing, through the fold, back to nothing. */
-function animateCurlLayer(layer: HTMLElement, keyframes: Keyframe[]): void {
-  if (typeof layer.animate !== 'function') return;
-  cancelPageTurn(layer);
-  const animation = layer.animate(keyframes, {
-    duration: PAGE_TURN_MOTION.curl.duration,
-    easing: 'ease-out',
-  });
-  animation.id = PAGE_TURN_ANIMATION_ID;
-}
-
-/**
- * The shading a `curl` lays over the page: the curvature of the turning leaf and
- * the shadow it throws on the half that stays put.
- *
- * Both layers are clipped to their own side of the spine, so neither can spill
- * across it, and both scale outwards from the hinge as the leaf settles — that
- * falloff, rather than any deformation of the text, is what makes the turn read
- * as paper curling. It lives beside the page, never inside it, so the EPUB
- * iframe and the PDF text layers are never transformed and only opacity and
- * scale move.
- */
-function animateTurnShadow(
-  shadow: HTMLElement | null,
-  direction: TurnDirection,
-  spread: boolean,
-): void {
-  const fold = shadow?.querySelector<HTMLElement>('[data-page-turn-layer="fold"]') ?? null;
-  if (!shadow || !fold) return;
-  const back = shadow.querySelector<HTMLElement>('[data-page-turn-layer="back"]');
-  const cast = shadow.querySelector<HTMLElement>('[data-page-turn-layer="cast"]');
-  const forward = direction > 0;
-  const { leaf, rest } = turningLeafSides(direction, spread);
-  const shade = 'var(--page-turn-shadow, rgb(0 0 0 / 0.28))';
-  const paper = 'var(--page-turn-paper, rgb(252 251 248))';
-  // The strip that has folded over: the paper's reverse, lit at its free edge and
-  // dark where it meets the fold. It fills exactly the part of the page the fold
-  // pulled away from, so the leaf reads as paper bent over rather than cut off.
-  if (back) {
-    placeLayer(back, leaf);
-    back.style.backgroundSize = `${(CURL_BULGE * 100 + 8).toFixed(1)}% 100%`;
-    back.style.backgroundPosition = forward ? '100% 0' : '0 0';
-    back.style.backgroundImage = `linear-gradient(to ${
-      forward ? 'right' : 'left'
-    }, ${shade}, ${paper} 72%)`;
-    animateCurlLayer(back, [
-      { opacity: 0, clipPath: curlBackClip(direction, CURL_BULGE) },
-      { opacity: 1, clipPath: curlBackClip(direction, CURL_BULGE), offset: 0.2 },
-      { opacity: 0, clipPath: curlBackClip(direction, 0) },
-    ]);
-  }
-  // The fold shadow sits just inside the fold, so it is a band whose darkest part
-  // is the bulge's width in from the free edge, not a wash from the edge itself.
-  // It is clipped by the same curve as the page, so the two can never disagree
-  // about where the paper ends, and it flattens as the leaf straightens.
-  placeLayer(fold, leaf);
-  fold.style.backgroundImage = `linear-gradient(to ${
-    forward ? 'left' : 'right'
-  }, transparent 2%, ${shade} ${(CURL_BULGE * 100 + 2).toFixed(1)}%, transparent 32%)`;
-  animateCurlLayer(fold, [
-    { opacity: 0, clipPath: curlFoldClip(direction, CURL_BULGE) },
-    { opacity: 1, clipPath: curlFoldClip(direction, CURL_BULGE), offset: 0.25 },
-    { opacity: 0, clipPath: curlFoldClip(direction, 0) },
-  ]);
-  if (!cast) return;
-  if (!spread) {
-    // A single page is its own leaf: there is no page underneath to catch a shadow.
-    cancelPageTurn(cast);
-    cast.style.opacity = '0';
-    return;
-  }
-  // The cast shadow lies on the half that stays put, darkest where it meets the
-  // spine and gone within a third of the page: a leaf this close to the paper
-  // under it shades the gutter, not the whole page.
-  placeLayer(cast, rest);
-  cast.style.transformOrigin = forward ? 'right center' : 'left center';
-  cast.style.backgroundImage = `linear-gradient(to ${
-    forward ? 'left' : 'right'
-  }, ${shade}, transparent 38%)`;
-  animateCurlLayer(cast, [
-    { opacity: 0, transform: 'scaleX(0.6)' },
-    { opacity: 0.75, transform: 'scaleX(1)', offset: 0.42 },
-    { opacity: 0, transform: 'scaleX(1.1)' },
-  ]);
-}
-
 /**
  * Shows which way the page turned: the new page slides in from that side, fades
- * in, curls in around its leading edge or spine, or rises from behind. Instant
- * with reduced motion, and never delays the turn itself.
+ * in, curls across a stationary surface, or rises from behind. Instant with
+ * reduced motion, and never delays the turn itself.
  *
  * `shadow` is the overlay the viewer owns beside the page; only `curl` uses it.
  * Nothing fills forwards, so hit-testing and selection geometry are accurate
@@ -812,18 +918,22 @@ export function animatePageTurn(
   direction: TurnDirection,
   transition: PageTransition,
   shadow: HTMLElement | null = null,
-  { spread = false }: { spread?: boolean } = {},
+  { spread = false }: { spread?: boolean | undefined } = {},
 ): void {
-  if (!element || transition === 'none' || prefersReducedMotion()) return;
-  if (typeof element.animate !== 'function') return;
+  if (transition === 'none' || prefersReducedMotion()) return;
+  if (transition === 'curl') {
+    if (element) cancelPageTurn(element);
+    if (shadow) animatePaperCurl({ shadow, direction, spread });
+    return;
+  }
+  if (!element || typeof element.animate !== 'function') return;
   const motion = PAGE_TURN_MOTION[transition];
   cancelPageTurn(element);
-  const animation = element.animate(motion.keyframes(direction, spread), {
+  const animation = element.animate(motion.keyframes(direction), {
     duration: motion.duration,
     easing: motion.easing,
   });
   animation.id = PAGE_TURN_ANIMATION_ID;
-  if (transition === 'curl') animateTurnShadow(shadow, direction, spread);
 }
 
 /**

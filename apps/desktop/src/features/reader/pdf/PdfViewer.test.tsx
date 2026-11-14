@@ -1900,4 +1900,73 @@ describe('PdfViewer', () => {
     expect(page0Canvas.width).toBe(0);
     expect(page0Canvas.height).toBe(0);
   });
+
+  it('peels stationary stage slots in curl mode, tracks horizontal scrubs, and resets on settle', async () => {
+    const { store, documentId } = await setup();
+    render(
+      <Harness
+        store={store}
+        documentId={documentId}
+        preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'curl' }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId('pdf-mode-two-page'));
+    await pageElement(0);
+    const scroll = await scroller();
+    const stage = screen.getByTestId('pdf-stage');
+
+    const frames: FrameRequestCallback[] = [];
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+
+      const outgoingSlot = stage.querySelector<HTMLElement>('[data-stage-row="0"]')!;
+      const incomingSlot = stage.querySelector<HTMLElement>('[data-stage-row="1"]')!;
+      const shadow = screen.getByTestId('page-turn-shadow');
+      const leaf = shadow.querySelector<HTMLElement>('[data-curl-part="leaf"]')!;
+      const spine = shadow.querySelector<HTMLElement>('[data-curl-part="spine"]')!;
+
+      // Initial curl frame starts cleanly; mid-turn frame clips outgoing slot without rotateY.
+      clock = 40;
+      act(() => {
+        frames.shift()?.(clock);
+      });
+      expect(stage.style.transform).toBe('');
+      expect(outgoingSlot.style.zIndex).toBe('2');
+      expect(incomingSlot.style.zIndex).toBe('1');
+      expect(outgoingSlot.style.clipPath).toContain('polygon(');
+      expect(Number(leaf.style.opacity)).toBeGreaterThan(0.5);
+      expect(Number(spine.style.opacity)).toBeGreaterThan(0.2);
+
+      // Finishing the rAF loop clears clipPath, zIndex overrides, and shadow opacity.
+      clock = 500;
+      act(() => {
+        frames.shift()?.(clock);
+      });
+      expect(outgoingSlot.style.clipPath).toBe('');
+      expect(outgoingSlot.style.zIndex).toBe('');
+      expect(leaf.style.opacity).toBe('0');
+
+      // Horizontal trackpad wheel scrubs the curl 1:1 from the landed spread before release.
+      vi.spyOn(scroll, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+      act(() => {
+        fireEvent.wheel(scroll, { deltaX: -80, deltaY: 0 });
+      });
+      const scrubbingSlot = stage.querySelector<HTMLElement>('[data-stage-row="1"]')!;
+      expect(scrubbingSlot.style.clipPath).toContain('polygon(');
+      expect(Number(leaf.style.opacity)).toBeGreaterThan(0.1);
+    } finally {
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
 });

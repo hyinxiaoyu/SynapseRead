@@ -20,12 +20,16 @@ import {
   type ViewportRect,
 } from '@/features/reader/markup/geometry';
 import {
+  animatePaperCurl,
+  applyPaperCurl,
   easeOut,
   isOverContent,
+  PAGE_CURL_MS,
   PAGE_SLIDE_MS,
   PAGE_SPRING_BACK_MS,
   type PageGestureSample,
   prefersReducedMotion,
+  resetPaperCurl,
   type TurnDirection,
   type WheelSample,
 } from '@/features/reader/paging/pageTurn';
@@ -34,6 +38,7 @@ import {
   DEFAULT_READING_PREFERENCES,
   type DocumentSource,
   type EpubReadingMode,
+  type PageTransition,
   type ReadingPreferences,
 } from '@/types/domain';
 
@@ -155,16 +160,29 @@ export interface EpubHandle {
   displayChapterFraction(index: number, fraction: number): Promise<void>;
   next(): Promise<void>;
   previous(): Promise<void>;
+  /** Registers the inert outgoing curl mirror host and stationary shadow overlay. */
+  setCurlElements?(elements: { curlHost: HTMLElement | null; shadow: HTMLElement | null }): void;
   /**
    * A page turn. With `animate` the strip slides across a whole page — or across
-   * a chapter seam — so both pages stay on screen; otherwise the next page or
-   * chapter is shown straight away. Resolves once the turn has settled.
+   * a chapter seam — so both pages stay on screen; in `curl` mode the outgoing
+   * spread stays pinned and peels away via conical clip; otherwise the next page
+   * or chapter is shown straight away. Resolves once the turn has settled.
    */
-  turnPage(direction: TurnDirection, options?: { animate?: boolean }): Promise<void>;
+  turnPage(
+    direction: TurnDirection,
+    options?: {
+      animate?: boolean | undefined;
+      transition?: PageTransition | undefined;
+      spread?: boolean | undefined;
+    },
+  ): Promise<void>;
   /** Whether the current chapter has another page that way, without leaving it. */
   canTurnInPlace(direction: TurnDirection): boolean;
   /** Starts a live scrub from where the strip is now. */
-  beginScrub(): void;
+  beginScrub(options?: {
+    transition?: PageTransition | undefined;
+    spread?: boolean | undefined;
+  }): void;
   /** Follows the fingers: px of travel, signed, from where the scrub began. */
   scrubTo(displacement: number): void;
   /** Settles on the committed page, or springs back to where the scrub began. */
@@ -571,6 +589,90 @@ function isSpinePath(item: { href: string; canonical?: string }, path: string): 
   );
 }
 
+function stripCloneIdentifiers(root: Element, removeScripts = false): void {
+  if (removeScripts) {
+    for (const script of root.querySelectorAll('script')) script.remove();
+  }
+  for (const candidate of [root, ...root.querySelectorAll('*')]) {
+    candidate.removeAttribute('id');
+    candidate.removeAttribute('data-annotation-id');
+    candidate.classList.remove('anchor-pulse');
+  }
+}
+
+function inlineStyleSheets(srcDoc: Document, dstDoc: Document): void {
+  for (const base of srcDoc.head?.querySelectorAll('base') ?? []) {
+    dstDoc.head?.appendChild(dstDoc.importNode(base, true));
+  }
+  for (const sheet of Array.from(srcDoc.styleSheets)) {
+    try {
+      const cssText = Array.from(sheet.cssRules)
+        .map((rule) => rule.cssText)
+        .join('\n');
+      if (cssText) {
+        const style = dstDoc.createElement('style');
+        style.textContent = cssText;
+        dstDoc.head?.appendChild(style);
+      }
+    } catch {
+      const owner = sheet.ownerNode;
+      if (
+        owner &&
+        (owner instanceof HTMLStyleElement ||
+          (owner instanceof HTMLLinkElement && owner.rel === 'stylesheet'))
+      ) {
+        dstDoc.head?.appendChild(dstDoc.importNode(owner, true));
+      }
+    }
+  }
+}
+
+function mirrorLiveFrame(view: HTMLElement, viewClone: HTMLElement, doc: Document): void {
+  const liveFrame = view.querySelector('iframe');
+  const liveDoc = liveFrame?.contentDocument;
+  if (!liveFrame || !liveDoc) return;
+
+  // ADR 0005: inert read-only mirror (`allow-same-origin` only, never `allow-scripts`).
+  const mirrorFrame = doc.createElement('iframe');
+  mirrorFrame.setAttribute('sandbox', 'allow-same-origin');
+  mirrorFrame.setAttribute('aria-hidden', 'true');
+  mirrorFrame.tabIndex = -1;
+  if (liveFrame.width) mirrorFrame.width = liveFrame.width;
+  if (liveFrame.height) mirrorFrame.height = liveFrame.height;
+  mirrorFrame.style.cssText = `${liveFrame.style.cssText};pointer-events:none;border:0;`;
+  viewClone.appendChild(mirrorFrame);
+
+  let mirrorDoc = mirrorFrame.contentDocument;
+  if (!mirrorDoc) return;
+  // XHTML chapter docs run in CSS1Compat even when `liveDoc.doctype` is null,
+  // whereas fresh `about:blank` iframes start in BackCompat (Quirks Mode).
+  if (liveDoc.compatMode === 'CSS1Compat' && mirrorDoc.compatMode !== 'CSS1Compat') {
+    try {
+      mirrorDoc.open();
+      mirrorDoc.write('<!DOCTYPE html><html><head></head><body></body></html>');
+      mirrorDoc.close();
+      mirrorDoc = mirrorFrame.contentDocument;
+    } catch {
+      // Keep default blank document if the host restricts document.open().
+    }
+  }
+  if (!mirrorDoc) return;
+  const srcRoot = liveDoc.documentElement;
+  const dstRoot = mirrorDoc.documentElement;
+  dstRoot.className = srcRoot.className;
+  dstRoot.style.cssText = srcRoot.style.cssText;
+  if (srcRoot.lang) dstRoot.lang = srcRoot.lang;
+  if (srcRoot.dir) dstRoot.dir = srcRoot.dir;
+
+  inlineStyleSheets(liveDoc, mirrorDoc);
+
+  if (liveDoc.body) {
+    const bodyClone = mirrorDoc.importNode(liveDoc.body, true);
+    for (const script of bodyClone.querySelectorAll('script')) script.remove();
+    mirrorDoc.body.replaceWith(bodyClone);
+  }
+}
+
 export async function openEpubDocument(
   source: DocumentSource,
   element: HTMLElement,
@@ -831,6 +933,7 @@ export async function openEpubDocument(
       .catch(() => undefined);
 
   const display = async (target?: string) => {
+    clearCurlStage();
     const resolved = resolveTarget(target);
     const epoch = beginNavigation();
     if (resolved !== undefined) currentCfi = resolved;
@@ -1062,9 +1165,135 @@ export async function openEpubDocument(
     };
   };
 
-  const turn = async (direction: TurnDirection, animate: boolean) => {
-    // A turn starts from a whole page, so a slide still running is finished first.
+  let curlHost: HTMLElement | null = null;
+  let curlShadow: HTMLElement | null = null;
+  let cancelCurl: (() => void) | null = null;
+  let scrubCurl: {
+    spread: boolean;
+    direction: TurnDirection | null;
+    progress: number;
+    captured: boolean;
+  } | null = null;
+
+  const clearCurlStage = () => {
+    cancelCurl?.();
+    cancelCurl = null;
+    scrubCurl = null;
+    resetPaperCurl(curlHost, curlShadow);
+    if (curlHost) {
+      curlHost.style.visibility = 'hidden';
+      curlHost.replaceChildren();
+    }
+  };
+
+  const runCurlAnimation = (params: {
+    from: number;
+    to: number;
+    duration: number;
+    direction: TurnDirection;
+    spread: boolean;
+    captured: boolean;
+  }): Promise<void> =>
+    new Promise((resolve) => {
+      let settledRun = false;
+      const settleRun = () => {
+        if (settledRun) return;
+        settledRun = true;
+        cancelCurl = null;
+        if (curlHost) {
+          curlHost.style.visibility = 'hidden';
+          curlHost.replaceChildren();
+        }
+        resolve();
+      };
+      const cancelAnim = animatePaperCurl({
+        outgoing: params.captured ? curlHost : null,
+        shadow: curlShadow,
+        direction: params.direction,
+        from: params.from,
+        to: params.to,
+        duration: params.duration,
+        spread: params.spread,
+        onFinish: settleRun,
+      });
+      if (!settledRun) {
+        cancelCurl = () => {
+          cancelAnim();
+          settleRun();
+        };
+      }
+    });
+
+  /**
+   * Captures the currently visible EPUB views inside an inert mirror above the
+   * live strip so `curlHost` can peel away at (0, 0) without moving `epub-host`
+   * or promoting multi-thousand-pixel `.epub-view` layers to the GPU.
+   */
+  const captureOutgoingSpread = (): boolean => {
+    if (!curlHost || currentMode === 'scroll') return false;
+    curlHost.replaceChildren();
+    const current = strip();
+    const container = current?.container ?? element;
+    const scrollLeft = current?.container.scrollLeft ?? 0;
+    const viewportWidth = current?.container.clientWidth ?? element.clientWidth;
+    const doc = curlHost.ownerDocument;
+
+    for (const view of container.querySelectorAll<HTMLElement>('.epub-view')) {
+      const viewLeft = view.offsetLeft;
+      const viewWidth = view.offsetWidth;
+      if (viewportWidth > 0 && viewWidth > 0) {
+        if (viewLeft + viewWidth <= scrollLeft - 1 || viewLeft >= scrollLeft + viewportWidth + 1) {
+          continue;
+        }
+      }
+      const viewClone = doc.createElement('div');
+      viewClone.style.position = 'absolute';
+      viewClone.style.top = `${view.offsetTop}px`;
+      viewClone.style.left = `${viewLeft - scrollLeft}px`;
+      viewClone.style.width = view.style.width || `${viewWidth}px`;
+      viewClone.style.height = view.style.height || `${view.offsetHeight}px`;
+      viewClone.style.overflow = 'hidden';
+      viewClone.style.pointerEvents = 'none';
+      curlHost.appendChild(viewClone);
+
+      mirrorLiveFrame(view, viewClone, doc);
+
+      for (const child of Array.from(view.children)) {
+        if (child.tagName.toLowerCase() !== 'svg') continue;
+        const svgClone = doc.importNode(child, true) as SVGSVGElement;
+        stripCloneIdentifiers(svgClone);
+        svgClone.style.pointerEvents = 'none';
+        viewClone.appendChild(svgClone);
+      }
+    }
+
+    // JSDOM fallback when `epubjs` views are mocked without `.epub-view` nodes.
+    const fallbackDoc = contentsList()[0]?.document;
+    if (curlHost.childElementCount === 0 && fallbackDoc?.body) {
+      const cloneBox = doc.createElement('div');
+      cloneBox.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden;';
+      for (const node of Array.from(fallbackDoc.body.childNodes)) {
+        const imported = doc.importNode(node, true);
+        if (imported instanceof Element) stripCloneIdentifiers(imported, true);
+        cloneBox.appendChild(imported);
+      }
+      curlHost.appendChild(cloneBox);
+    }
+
+    if (curlHost.childElementCount === 0) return false;
+    curlHost.style.visibility = 'visible';
+    return true;
+  };
+
+  const turn = async (
+    direction: TurnDirection,
+    animate: boolean,
+    transition?: PageTransition,
+    spread = false,
+  ) => {
+    // A turn starts from a whole page, so any slide or curl still running settles first.
     settleSlide();
+    clearCurlStage();
     beginNavigation();
     pendingTarget = undefined;
     if (currentMode === 'scroll') {
@@ -1084,6 +1313,40 @@ export async function openEpubDocument(
           return;
         }
       }
+    } else if (transition === 'curl' && !prefersReducedMotion() && (curlHost || curlShadow)) {
+      const captured = captureOutgoingSpread();
+      if (canTurnInPlace(direction)) {
+        const current = strip();
+        if (current) {
+          if (captured) applyPaperCurl(curlHost, curlShadow, 0, direction, { spread });
+          current.container.scrollLeft += direction * current.stride;
+          await runCurlAnimation({
+            from: 0,
+            to: 1,
+            duration: PAGE_CURL_MS,
+            direction,
+            spread,
+            captured,
+          });
+          return;
+        }
+      }
+      if (captured) applyPaperCurl(curlHost, curlShadow, 0, direction, { spread });
+      try {
+        await (direction > 0 ? rendition.next() : rendition.prev());
+      } catch (err) {
+        clearCurlStage();
+        throw err;
+      }
+      await runCurlAnimation({
+        from: 0,
+        to: 1,
+        duration: PAGE_CURL_MS,
+        direction,
+        spread,
+        captured,
+      });
+      return;
     } else if (animate && canTurnInPlace(direction)) {
       const current = strip();
       if (current) {
@@ -1103,6 +1366,67 @@ export async function openEpubDocument(
   let scrubBase = 0;
 
   const endScrub = async (committed: TurnDirection | null) => {
+    const activeCurl = scrubCurl;
+    scrubCurl = null;
+    if (activeCurl) {
+      const current = strip();
+      if (!current || activeCurl.direction === null) {
+        clearCurlStage();
+        return;
+      }
+      current.container.scrollLeft = scrubBase;
+      const inPlace =
+        committed !== null && committed === activeCurl.direction && canTurnInPlace(committed);
+      if (committed === null || committed !== activeCurl.direction) {
+        await runCurlAnimation({
+          from: activeCurl.progress,
+          to: 0,
+          duration: PAGE_SPRING_BACK_MS,
+          direction: activeCurl.direction,
+          spread: activeCurl.spread,
+          captured: activeCurl.captured,
+        });
+        return;
+      }
+      const duration = Math.max(120, Math.round((1 - activeCurl.progress) * PAGE_CURL_MS));
+      if (inPlace) {
+        current.container.scrollLeft = scrubBase + committed * current.stride;
+        await runCurlAnimation({
+          from: activeCurl.progress,
+          to: 1,
+          duration,
+          direction: committed,
+          spread: activeCurl.spread,
+          captured: activeCurl.captured,
+        });
+        return;
+      }
+      applyPaperCurl(
+        activeCurl.captured ? curlHost : null,
+        curlShadow,
+        activeCurl.progress,
+        committed,
+        {
+          spread: activeCurl.spread,
+        },
+      );
+      try {
+        await (committed > 0 ? rendition.next() : rendition.prev());
+      } catch (err) {
+        clearCurlStage();
+        throw err;
+      }
+      await runCurlAnimation({
+        from: activeCurl.progress,
+        to: 1,
+        duration,
+        direction: committed,
+        spread: activeCurl.spread,
+        captured: activeCurl.captured,
+      });
+      return;
+    }
+
     const current = strip();
     if (!current) return;
     settleSlide();
@@ -1226,23 +1550,68 @@ export async function openEpubDocument(
     },
     next: () => turn(1, false),
     previous: () => turn(-1, false),
-    turnPage: (direction, options) => turn(direction, options?.animate ?? true),
+    setCurlElements({ curlHost: nextHost, shadow }) {
+      clearCurlStage();
+      curlHost = nextHost;
+      curlShadow = shadow;
+    },
+    turnPage: (direction, options) =>
+      turn(direction, options?.animate ?? true, options?.transition, options?.spread),
     canTurnInPlace,
-    beginScrub() {
-      // A scrub starts from a whole page, never from half of a slide.
+    beginScrub(options) {
+      // A scrub starts from a whole page, never from half of a slide or curl.
       settleSlide();
+      clearCurlStage();
       scrubBase = strip()?.container.scrollLeft ?? 0;
+      if (
+        options?.transition === 'curl' &&
+        currentMode !== 'scroll' &&
+        !prefersReducedMotion() &&
+        (curlHost || curlShadow)
+      ) {
+        scrubCurl = {
+          spread: options.spread ?? false,
+          direction: null,
+          progress: 0,
+          captured: false,
+        };
+      }
     },
     scrubTo(displacement) {
       const current = strip();
       if (!current) return;
       // A scrub takes over from a slide rather than fighting it for the offset.
       cancelSlide();
+      if (scrubCurl) {
+        if (displacement === 0) return;
+        const dir: TurnDirection = displacement < 0 ? -1 : 1;
+        if (!scrubCurl.captured) {
+          current.container.scrollLeft = scrubBase;
+          scrubCurl.captured = captureOutgoingSpread();
+        }
+        if (scrubCurl.direction !== dir) {
+          current.container.scrollLeft = scrubBase;
+          if (canTurnInPlace(dir)) {
+            current.container.scrollLeft = scrubBase + dir * current.stride;
+          }
+          scrubCurl.direction = dir;
+        }
+        const progress = Math.min(
+          Math.max(Math.abs(displacement) / Math.max(current.stride, 1), 0.005),
+          0.995,
+        );
+        scrubCurl.progress = progress;
+        applyPaperCurl(scrubCurl.captured ? curlHost : null, curlShadow, progress, dir, {
+          spread: scrubCurl.spread,
+        });
+        return;
+      }
       current.container.scrollLeft = scrubBase + displacement;
     },
     endScrub,
     async setReadingMode(mode) {
       if (mode === currentMode) return;
+      clearCurlStage();
       currentMode = mode;
       const epoch = beginNavigation();
       const target = pendingTarget ?? currentCfi;
@@ -1269,6 +1638,7 @@ export async function openEpubDocument(
 
     setColumns(columns) {
       if (columns === currentColumns) return;
+      clearCurlStage();
       const before = spreadFor(currentMode, currentColumns);
       currentColumns = columns;
       const after = spreadFor(currentMode, columns);
@@ -1412,10 +1782,12 @@ export async function openEpubDocument(
     onPointer(listener) {
       pointerListener = listener;
     },
-    resize: (width, height) =>
+    resize: (width, height) => {
       // A resize clears epub.js' views. Restore the jump in flight, or the current
       // location, rather than the stale location epub.js last reported (#41).
-      resizeTo(width, height, pendingTarget ?? currentCfi),
+      clearCurlStage();
+      resizeTo(width, height, pendingTarget ?? currentCfi);
+    },
     onSelection(listener) {
       selectionListener = listener;
     },
@@ -1443,6 +1815,7 @@ export async function openEpubDocument(
     },
     destroy() {
       cancelSlide();
+      clearCurlStage();
       // The seam hold shadows one method on the manager; leave it as we found it.
       if (seamViews && clearViews) seamViews.clear = clearViews;
       book.destroy();

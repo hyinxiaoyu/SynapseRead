@@ -15,8 +15,9 @@ const excerptEnabled = `![...document.querySelectorAll('button')].find((b) => b.
  * A turn across a chapter seam also holds the outgoing chapter's frame beside the
  * incoming one until the slide is done, so the frame count is part of the check.
  */
-const waitForTurnToSettle = (page) =>
-  page.waitFor(
+const waitForTurnToSettle = async (page) => {
+  await page.evaluate('delete window.__stripSettle');
+  await page.waitFor(
     `(() => {
       const container = ${scroller};
       const left = container?.scrollLeft ?? 0;
@@ -29,10 +30,11 @@ const waitForTurnToSettle = (page) =>
         state.since = now;
         return false;
       }
-      return now - state.since > 200;
+      return views <= 1 && now - state.since > 200;
     })()`,
     'the page turn to settle',
   );
+};
 
 /** The text `measureCharWidth` samples; see `appearance/measure.ts`. */
 const MEASURE_SAMPLE =
