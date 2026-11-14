@@ -10,6 +10,7 @@ import {
 } from 'react';
 
 import { type SegmentedOption, SegmentedControl } from '@/components/ui/segmented-control';
+import { suppressFrameContextMenu } from '@/features/commands/contextMenu';
 import { dispatchEscape } from '@/features/commands/escape';
 import { dispatchCommandKeydown } from '@/features/commands/registry';
 import {
@@ -1080,6 +1081,16 @@ export function EpubViewer({
     // The store drops the selection on a tab switch; keep the frame in step.
     if (handle && !isActive) handle.clearSelection();
   }, [handle, isActive]);
+
+  useLayoutEffect(() => {
+    if (!handle) return;
+    // A right click in a chapter is a right click in another document, so the
+    // window's context-menu guard never sees it (#84).
+    handle.onContextMenu(suppressFrameContextMenu);
+    return () => {
+      handle.onContextMenu(() => undefined);
+    };
+  }, [handle]);
 
   useEffect(() => {
     const host = hostRef.current;
