@@ -923,9 +923,12 @@ describe('PdfViewer', () => {
     expect(readout).toHaveTextContent('Page 2 of 5');
     fireEvent.keyDown(pane, { key: 'PageUp', code: 'PageUp' });
     expect(readout).toHaveTextContent('Page 1 of 5');
+    // A swipe drags the strip live, and turns the page when the fingers lift.
     fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
     fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
-    expect(readout).toHaveTextContent('Page 2 of 5');
+    expect(screen.getByTestId('pdf-stage').style.transform).toBe('translateX(-160px)');
+    await waitFor(() => expect(readout).toHaveTextContent('Page 2 of 5'));
+    expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
     fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
     expect(readout).toHaveTextContent('Page 3 of 5');
 
@@ -1842,8 +1845,12 @@ describe('PdfViewer', () => {
     fireEvent.click(screen.getByTestId('pdf-mode-single'));
     expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'single');
     expect(pageInput).toHaveValue('3');
-    expect(document.querySelectorAll('[data-page-index]')).toHaveLength(1);
+    // The paged stage keeps the pages either side rendered, so a turn never has to
+    // wait for a canvas: three slots, and no more.
+    expect(document.querySelectorAll('[data-page-index]')).toHaveLength(3);
+    expect(document.querySelector('[data-page-index="1"]')).not.toBeNull();
     expect(document.querySelector('[data-page-index="2"]')).not.toBeNull();
+    expect(document.querySelector('[data-page-index="3"]')).not.toBeNull();
 
     fireEvent.click(screen.getByTestId('pdf-mode-two-page'));
     expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'two-page');
