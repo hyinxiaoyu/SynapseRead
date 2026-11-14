@@ -2126,7 +2126,11 @@ function PdfPages({
     }
     scrollToPageOffset(target, offsetWithin(target, 0));
     if (paged && transition !== 'none') {
-      animatePageTurn(pageContentRef.current, direction, transition, turnShadowRef.current);
+      // Two pages is a spread, so a flip hinges at its spine and shades the
+      // turning half; a single page hinges on its leading edge.
+      animatePageTurn(pageContentRef.current, direction, transition, turnShadowRef.current, {
+        spread: displayMode === 'two-page',
+      });
     }
   };
 

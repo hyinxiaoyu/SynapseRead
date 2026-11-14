@@ -237,10 +237,12 @@ hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` pagina
   strip across a whole page at `opacity: 1`, and a turn across a spine seam holds the
   outgoing chapter's frame in the strip until the incoming one is up, so no turn shows a
   blank page; PDF `single` and `two-page` render a three-slot stage whose neighbouring
-  spreads are already rasterized (bounded to `<= 3` spreads / `<= 6` canvases); `flip`
-  hinges at the `50%` spine of a two-page spread instead of tilting the whole spread from
-  its outer edge; and TXT slides along its vertical reading axis instead of nudging the
-  rows sideways. No turn leaves a persistent transform, and `prefers-reduced-motion:
+  spreads are already rasterized (bounded to `<= 3` spreads / `<= 6` canvases); `flip` is
+  a simulated paper curl — it hinges at the `50%` spine of a two-page spread, shades the
+  turning half with a fold gradient and throws a cast shadow on the half that stays put,
+  each layer confined to its own side of the spine and both falling off as the leaf
+  settles, with nothing rasterized so live text is never sampled; and TXT slides along
+  its vertical reading axis instead of nudging the rows sideways. No turn leaves a persistent transform, and `prefers-reduced-motion:
 reduce` still turns instantaneously.
 - **PDF layout/zoom and long-document maps (`#51`, `#52`)**: migration
   `0009_pdf_document_layout.sql` persisting per-PDF `displayMode`, `zoomMode`, `scale`,

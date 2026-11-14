@@ -13,6 +13,7 @@ import {
   SCRUB_COMMIT_VELOCITY,
   SCRUB_IDLE_MS,
   slideScroll,
+  turningLeafSides,
   usePageTurnGestures,
   WheelScrub,
   zoneAt,
@@ -443,6 +444,23 @@ describe('usePageTurnGestures', () => {
   });
 });
 
+describe('turningLeafSides', () => {
+  const whole = { top: '0', right: '0', bottom: '0', left: '0' };
+
+  it('splits a spread at its spine and leaves a single page whole', () => {
+    expect(turningLeafSides(1, true)).toEqual({
+      leaf: { ...whole, left: '50%' },
+      rest: { ...whole, right: '50%' },
+    });
+    expect(turningLeafSides(-1, true)).toEqual({
+      leaf: { ...whole, right: '50%' },
+      rest: { ...whole, left: '50%' },
+    });
+    expect(turningLeafSides(1, false)).toEqual({ leaf: whole, rest: whole });
+    expect(turningLeafSides(-1, false)).toEqual({ leaf: whole, rest: whole });
+  });
+});
+
 describe('animatePageTurn', () => {
   type Animate = (keyframes: Keyframe[], options?: KeyframeAnimationOptions) => Animation;
   const fakeAnimation = () => ({ id: '' }) as unknown as Animation;
@@ -454,6 +472,23 @@ describe('animatePageTurn', () => {
     animate.mockReturnValue(fakeAnimation());
     element.animate = animate as unknown as HTMLElement['animate'];
     return { element, animate };
+  };
+
+  /** The curl overlay the viewers render, with each layer's animations recorded. */
+  const mountShadow = () => {
+    const shadow = document.createElement('div');
+    const layer = (name: 'fold' | 'cast') => {
+      const element = document.createElement('div');
+      element.dataset.pageTurnLayer = name;
+      const animate = vi.fn<Animate>();
+      animate.mockReturnValue(fakeAnimation());
+      element.animate = animate as unknown as HTMLElement['animate'];
+      shadow.append(element);
+      return { element, animate };
+    };
+    const fold = layer('fold');
+    const cast = layer('cast');
+    return { shadow, fold, cast };
   };
 
   afterEach(() => {
@@ -488,23 +523,32 @@ describe('animatePageTurn', () => {
     const { element, animate } = mountPage();
     animatePageTurn(element, 1, 'flip');
     expect(animate.mock.calls[0]?.[0]).toEqual([
-      { transform: 'perspective(1400px) rotateY(-18deg)', transformOrigin: '0% 50%' },
-      { transform: 'perspective(1400px) rotateY(0deg)', transformOrigin: '0% 50%' },
+      {
+        transform: 'perspective(1400px) rotateY(-20deg) scaleX(0.99)',
+        transformOrigin: '0% 50%',
+      },
+      { transform: 'perspective(1400px) rotateY(0deg) scaleX(1)', transformOrigin: '0% 50%' },
     ]);
     animatePageTurn(element, -1, 'flip');
     expect(animate.mock.calls[1]?.[0]).toEqual([
-      { transform: 'perspective(1400px) rotateY(18deg)', transformOrigin: '100% 50%' },
-      { transform: 'perspective(1400px) rotateY(0deg)', transformOrigin: '100% 50%' },
+      {
+        transform: 'perspective(1400px) rotateY(20deg) scaleX(0.99)',
+        transformOrigin: '100% 50%',
+      },
+      { transform: 'perspective(1400px) rotateY(0deg) scaleX(1)', transformOrigin: '100% 50%' },
     ]);
-    expect(animate.mock.calls[1]?.[1]).toMatchObject({ duration: 300 });
+    expect(animate.mock.calls[1]?.[1]).toMatchObject({ duration: 320 });
   });
 
   it('hinges a two-page spread at its centre spine, without dimming the paper', () => {
     const { element, animate } = mountPage();
     animatePageTurn(element, 1, 'flip', null, { spread: true });
     expect(animate.mock.calls[0]?.[0]).toEqual([
-      { transform: 'perspective(1600px) rotateY(-8deg)', transformOrigin: '50% 50%' },
-      { transform: 'perspective(1600px) rotateY(0deg)', transformOrigin: '50% 50%' },
+      {
+        transform: 'perspective(1800px) rotateY(-9deg) scaleX(0.994)',
+        transformOrigin: '50% 50%',
+      },
+      { transform: 'perspective(1800px) rotateY(0deg) scaleX(1)', transformOrigin: '50% 50%' },
     ]);
     for (const frame of animate.mock.calls[0]?.[0] ?? []) {
       expect(frame).not.toHaveProperty('opacity');
@@ -556,47 +600,87 @@ describe('animatePageTurn', () => {
     expect((animate.mock.results[0]?.value as Animation).id).toBe(PAGE_TURN_ANIMATION_ID);
   });
 
-  it('moves only the shadow of a flip, from the hinge inward', () => {
+  it('curls a spread: the fold on the turning half, the cast shadow on the other', () => {
     const { element } = mountPage();
-    const shadow = document.createElement('div');
-    const animateShadow = vi.fn<Animate>();
-    animateShadow.mockReturnValue(fakeAnimation());
-    shadow.animate = animateShadow as unknown as HTMLElement['animate'];
+    const { shadow, fold, cast } = mountShadow();
+
+    animatePageTurn(element, 1, 'flip', shadow, { spread: true });
+    // Each layer covers only its own side of the spine, so neither spills across.
+    expect(fold.element.style.left).toBe('50%');
+    expect(fold.element.style.right).toBe('0px');
+    expect(cast.element.style.right).toBe('50%');
+    expect(cast.element.style.left).toBe('0px');
+    // The fold darkens away from the hinge; the cast shadow darkens toward it.
+    expect(fold.element.style.backgroundImage).toContain('to right');
+    expect(cast.element.style.backgroundImage).toContain('to left');
+    expect(fold.element.style.transformOrigin).toBe('left center');
+    expect(cast.element.style.transformOrigin).toBe('right center');
+    // Both fall off as the leaf settles: out from the hinge, then away.
+    expect(fold.animate.mock.calls[0]?.[0]).toEqual([
+      { opacity: 0, transform: 'scaleX(0.55)' },
+      { opacity: 1, transform: 'scaleX(1)', offset: 0.3 },
+      { opacity: 0, transform: 'scaleX(1.18)' },
+    ]);
+    expect(cast.animate.mock.calls[0]?.[0]).toEqual([
+      { opacity: 0, transform: 'scaleX(0.6)' },
+      { opacity: 0.9, transform: 'scaleX(1)', offset: 0.42 },
+      { opacity: 0, transform: 'scaleX(1.1)' },
+    ]);
+    for (const call of [fold.animate.mock.calls[0], cast.animate.mock.calls[0]]) {
+      expect(call?.[1]).toMatchObject({ duration: 320 });
+      expect(call?.[1]?.fill).toBeUndefined();
+    }
+
+    // Back turns mirror both the sides and the shading.
+    animatePageTurn(element, -1, 'flip', shadow, { spread: true });
+    expect(fold.element.style.right).toBe('50%');
+    expect(fold.element.style.left).toBe('0px');
+    expect(cast.element.style.left).toBe('50%');
+    expect(cast.element.style.right).toBe('0px');
+    expect(fold.element.style.backgroundImage).toContain('to left');
+    expect(cast.element.style.backgroundImage).toContain('to right');
+    expect(fold.animate).toHaveBeenCalledTimes(2);
+    expect(cast.animate).toHaveBeenCalledTimes(2);
+  });
+
+  it('curls a single page on its leading edge, with no page under it to shade', () => {
+    const { element } = mountPage();
+    const { shadow, fold, cast } = mountShadow();
 
     animatePageTurn(element, 1, 'flip', shadow);
-    expect(animateShadow).toHaveBeenCalledTimes(1);
-    expect(animateShadow.mock.calls[0]?.[0]).toEqual([
-      { opacity: 0 },
-      { opacity: 1, offset: 0.35 },
-      { opacity: 0 },
-    ]);
-    expect(shadow.style.backgroundImage).toContain('to right');
+    expect(fold.element.style.left).toBe('0px');
+    expect(fold.element.style.right).toBe('0px');
+    expect(fold.element.style.backgroundImage).toContain('to right');
+    expect(fold.animate).toHaveBeenCalledTimes(1);
+    // A single page is its own leaf: the cast layer stays out of the way.
+    expect(cast.animate).not.toHaveBeenCalled();
+    expect(cast.element.style.opacity).toBe('0');
 
     animatePageTurn(element, -1, 'flip', shadow);
-    expect(shadow.style.backgroundImage).toContain('to left');
+    expect(fold.element.style.backgroundImage).toContain('to left');
+    expect(fold.element.style.transformOrigin).toBe('right center');
+  });
 
-    // A spread's shadow falls away from the spine on both sides.
-    animatePageTurn(element, 1, 'flip', shadow, { spread: true });
-    expect(shadow.style.backgroundImage).toContain('transparent, var(--page-turn-shadow');
-    expect(shadow.style.backgroundImage).toContain('50%, transparent');
-
-    // Every other mode leaves the shadow alone.
-    animatePageTurn(element, 1, 'stack', shadow);
-    animatePageTurn(element, 1, 'slide', shadow);
-    expect(animateShadow).toHaveBeenCalledTimes(3);
+  it('leaves the shadow alone for every other mode', () => {
+    const { element } = mountPage();
+    const { shadow, fold, cast } = mountShadow();
+    for (const mode of ['slide', 'fade', 'stack'] as const) {
+      animatePageTurn(element, 1, mode, shadow, { spread: true });
+    }
+    expect(fold.animate).not.toHaveBeenCalled();
+    expect(cast.animate).not.toHaveBeenCalled();
   });
 
   it('turns instantly with reduced motion', () => {
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce') }));
     const { element, animate } = mountPage();
-    const shadow = document.createElement('div');
-    const animateShadow = vi.fn();
-    shadow.animate = animateShadow as unknown as HTMLElement['animate'];
+    const { shadow, fold, cast } = mountShadow();
     for (const mode of ['slide', 'fade', 'flip', 'stack'] as const) {
-      animatePageTurn(element, 1, mode, shadow);
+      animatePageTurn(element, 1, mode, shadow, { spread: true });
     }
     expect(animate).not.toHaveBeenCalled();
-    expect(animateShadow).not.toHaveBeenCalled();
+    expect(fold.animate).not.toHaveBeenCalled();
+    expect(cast.animate).not.toHaveBeenCalled();
   });
 
   it('tolerates a page that is not mounted', () => {

@@ -176,4 +176,83 @@ export async function pagingFlow(page) {
     stage.pages.length <= 3,
     `a paged stage keeps at most three spreads live, saw ${stage.pages.length} pages`,
   );
+
+  // ---- A spread's flip is a curl: the fold on the turning half, the cast shadow
+  // on the half that stays put, both clipped at the spine ----
+  await page.evaluate(
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="pdf-mode-two-page"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.displayMode === 'two-page'`,
+    'two pages, so a flip has a spine to hinge on',
+  );
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'the PDF appearance popover',
+  );
+  await page.clickButton('Flip');
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'the appearance popover to close',
+  );
+
+  await page.evaluate(`(() => {
+    // The EPUB tab is still open behind this one, so name the visible viewer's shadow.
+    const viewer = [...document.querySelectorAll('[data-testid="pdf-viewer"]')]
+      .find((element) => element.checkVisibility({ visibilityProperty: true }));
+    const shadow = viewer?.querySelector('[data-testid="page-turn-shadow"]');
+    const layer = (name) => shadow?.querySelector('[data-page-turn-layer="' + name + '"]');
+    const fold = layer('fold');
+    const cast = layer('cast');
+    window.__curlSamples = [];
+    let frames = 0;
+    const step = () => {
+      window.__curlSamples.push({
+        fold: fold ? Number(getComputedStyle(fold).opacity) : 0,
+        cast: cast ? Number(getComputedStyle(cast).opacity) : 0,
+        foldLeft: fold ? fold.style.left : '',
+        castRight: cast ? cast.style.right : '',
+      });
+      frames += 1;
+      if (frames < 40) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    return true;
+  })()`);
+  await page.clickButton('Next Page');
+  await new Promise((done) => setTimeout(done, 700));
+  const curl = await page.evaluate('window.__curlSamples');
+  assert(
+    curl.some((sample) => sample.fold > 0.3),
+    'the turning leaf has to be shaded while it curls',
+  );
+  assert(
+    curl.some((sample) => sample.cast > 0.3),
+    "the half that stays put has to catch the leaf's shadow",
+  );
+  const shaded = curl.filter((sample) => sample.fold > 0 || sample.cast > 0);
+  assert(shaded.length > 0, 'the turn has to shade the page at all');
+  for (const sample of shaded) {
+    // Each layer covers only its own side of the spine, so neither spills across.
+    assert(
+      sample.foldLeft === '50%',
+      `the fold must stay on the turning half: left is ${sample.foldLeft}`,
+    );
+    assert(
+      sample.castRight === '50%',
+      `the cast shadow must stay on the other half: right is ${sample.castRight}`,
+    );
+  }
+  const settledCurl = curl.at(-1);
+  assert(
+    settledCurl.fold === 0 && settledCurl.cast === 0,
+    `the curl must fade out: ${JSON.stringify(settledCurl)}`,
+  );
+  const afterFlip = await page.evaluate(`(() => {
+    const content = ${visibleScroller}?.querySelector('[data-testid="pdf-stage"]')?.parentElement;
+    return content ? getComputedStyle(content).transform : 'none';
+  })()`);
+  assert(afterFlip === 'none', `a flip must not stay transformed: ${afterFlip}`);
 }

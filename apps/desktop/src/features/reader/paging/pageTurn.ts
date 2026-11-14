@@ -576,7 +576,7 @@ export const PAGE_TURN_MOTION = {
     keyframes: (): Keyframe[] => [{ opacity: 0.2 }, { opacity: 1 }],
   },
   flip: {
-    duration: 300,
+    duration: 320,
     easing: PAGE_SLIDE_EASING,
     keyframes: (direction: TurnDirection, spread = false): Keyframe[] => {
       // Both frames carry the origin so it never has to be written to the
@@ -584,14 +584,25 @@ export const PAGE_TURN_MOTION = {
       const transformOrigin = flipOrigin(direction, spread);
       // A spread hinges at its own spine, so the leaf lifts instead of the whole
       // spread swinging like a plank. No opacity: the paper never goes grey.
-      const angle = spread ? 8 : 18;
-      const perspective = spread ? 1600 : 1400;
+      // The angle stays small because a spread is one element: the half that is
+      // not turning cannot be exempted from its transform, so the curl has to
+      // read from the shading rather than from a large swing.
+      const angle = spread ? 9 : 20;
+      const perspective = spread ? 1800 : 1400;
+      // A leaf settling also pinches a little into its hinge, as paper under
+      // tension does. It is a transform, so nothing is rasterized.
+      const pinch = spread ? 0.994 : 0.99;
       return [
         {
-          transform: `perspective(${perspective}px) rotateY(${direction * -angle}deg)`,
+          transform: `perspective(${perspective}px) rotateY(${
+            direction * -angle
+          }deg) scaleX(${pinch})`,
           transformOrigin,
         },
-        { transform: `perspective(${perspective}px) rotateY(0deg)`, transformOrigin },
+        {
+          transform: `perspective(${perspective}px) rotateY(0deg) scaleX(1)`,
+          transformOrigin,
+        },
       ];
     },
   },
@@ -617,30 +628,105 @@ export function cancelPageTurn(element: HTMLElement): void {
   }
 }
 
+/** One side of the overlay, as the four insets that place a layer on it. */
+export interface LeafSides {
+  top: string;
+  right: string;
+  bottom: string;
+  left: string;
+}
+
+const WHOLE_PAGE: LeafSides = { top: '0', right: '0', bottom: '0', left: '0' };
+
 /**
- * The shadow a `flip` casts from its hinge. It lives beside the page, not
- * inside it, so the EPUB iframe and the PDF text layers are never transformed,
- * and only its opacity moves.
+ * Which part of the overlay a turning leaf occupies, and which part it leaves
+ * behind. A spread turns its right half going forward and its left half going
+ * back; a single page is its own leaf, so both cover the whole page.
+ *
+ * The layers are placed on their side rather than clipped to it, because a
+ * gradient is drawn across its own box: a full-width layer clipped to one half
+ * would show only the end of its gradient, which is already transparent.
+ */
+export function turningLeafSides(
+  direction: TurnDirection,
+  spread: boolean,
+): { leaf: LeafSides; rest: LeafSides } {
+  if (!spread) return { leaf: WHOLE_PAGE, rest: WHOLE_PAGE };
+  return direction > 0
+    ? { leaf: { ...WHOLE_PAGE, left: '50%' }, rest: { ...WHOLE_PAGE, right: '50%' } }
+    : { leaf: { ...WHOLE_PAGE, right: '50%' }, rest: { ...WHOLE_PAGE, left: '50%' } };
+}
+
+/** Places a curl layer on one side of the overlay. */
+function placeLayer(layer: HTMLElement, sides: LeafSides): void {
+  layer.style.top = sides.top;
+  layer.style.right = sides.right;
+  layer.style.bottom = sides.bottom;
+  layer.style.left = sides.left;
+}
+
+/** Animates one curl layer, from nothing, through the fold, back to nothing. */
+function animateCurlLayer(layer: HTMLElement, keyframes: Keyframe[]): void {
+  if (typeof layer.animate !== 'function') return;
+  cancelPageTurn(layer);
+  const animation = layer.animate(keyframes, {
+    duration: PAGE_TURN_MOTION.flip.duration,
+    easing: 'ease-out',
+  });
+  animation.id = PAGE_TURN_ANIMATION_ID;
+}
+
+/**
+ * The shading a `flip` lays over the page: the curvature of the turning leaf and
+ * the shadow it throws on the half that stays put.
+ *
+ * Both layers are clipped to their own side of the spine, so neither can spill
+ * across it, and both scale outwards from the hinge as the leaf settles — that
+ * falloff, rather than any deformation of the text, is what makes the turn read
+ * as paper curling. It lives beside the page, never inside it, so the EPUB
+ * iframe and the PDF text layers are never transformed and only opacity and
+ * scale move.
  */
 function animateTurnShadow(
   shadow: HTMLElement | null,
   direction: TurnDirection,
   spread: boolean,
 ): void {
-  if (!shadow || typeof shadow.animate !== 'function') return;
-  // A spread's shadow falls away from the centre spine on both sides; a single
-  // page's falls away from the edge it is hinged on.
-  shadow.style.backgroundImage = spread
-    ? 'linear-gradient(to right, transparent, var(--page-turn-shadow, rgb(0 0 0 / 0.28)) 50%, transparent)'
-    : `linear-gradient(to ${
-        direction > 0 ? 'right' : 'left'
-      }, var(--page-turn-shadow, rgb(0 0 0 / 0.28)), transparent 55%)`;
-  cancelPageTurn(shadow);
-  const animation = shadow.animate([{ opacity: 0 }, { opacity: 1, offset: 0.35 }, { opacity: 0 }], {
-    duration: PAGE_TURN_MOTION.flip.duration,
-    easing: 'ease-out',
-  });
-  animation.id = PAGE_TURN_ANIMATION_ID;
+  const fold = shadow?.querySelector<HTMLElement>('[data-page-turn-layer="fold"]') ?? null;
+  if (!shadow || !fold) return;
+  const cast = shadow.querySelector<HTMLElement>('[data-page-turn-layer="cast"]');
+  const forward = direction > 0;
+  const { leaf, rest } = turningLeafSides(direction, spread);
+  const shade = 'var(--page-turn-shadow, rgb(0 0 0 / 0.28))';
+  // The fold is darkest at the hinge and fades across the turning half; the cast
+  // shadow lies on the other half, darkest where it meets the spine.
+  placeLayer(fold, leaf);
+  fold.style.transformOrigin = forward ? 'left center' : 'right center';
+  fold.style.backgroundImage = `linear-gradient(to ${
+    forward ? 'right' : 'left'
+  }, ${shade}, transparent ${spread ? '55%' : '48%'})`;
+  animateCurlLayer(fold, [
+    { opacity: 0, transform: 'scaleX(0.55)' },
+    { opacity: 1, transform: 'scaleX(1)', offset: 0.3 },
+    { opacity: 0, transform: 'scaleX(1.18)' },
+  ]);
+  if (!cast) return;
+  if (!spread) {
+    // A single page is its own leaf: there is no page underneath to catch a shadow.
+    cancelPageTurn(cast);
+    cast.style.opacity = '0';
+    return;
+  }
+  placeLayer(cast, rest);
+  cast.style.transformOrigin = forward ? 'right center' : 'left center';
+  cast.style.backgroundImage = `linear-gradient(to ${
+    forward ? 'left' : 'right'
+  }, ${shade}, transparent 62%)`;
+  animateCurlLayer(cast, [
+    { opacity: 0, transform: 'scaleX(0.6)' },
+    { opacity: 0.9, transform: 'scaleX(1)', offset: 0.42 },
+    { opacity: 0, transform: 'scaleX(1.1)' },
+  ]);
 }
 
 /**

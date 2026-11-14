@@ -99,8 +99,9 @@ for task IDs, acceptance evidence, and measurements.
       inertial tail instead of locking out rapid flicks; EPUB slides its own column
       strip across a whole page and holds the outgoing chapter across a spine seam;
       PDF `single`/`two-page` keep a three-slot stage of already-rasterized spreads;
-      `flip` hinges at the spine of a two-page spread; and TXT slides along its
-      vertical reading axis.
+      `flip` is a simulated paper curl hinged at the spine of a two-page spread, with
+      the fold and the cast shadow confined to their own halves; and TXT slides along
+      its vertical reading axis.
 
 ## M3: Card operations (after reader experience)
 
