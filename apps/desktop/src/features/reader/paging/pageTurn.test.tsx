@@ -18,8 +18,11 @@ import {
   resetPaperCurl,
   rubberBand,
   SCRUB_COMMIT_FRACTION,
+  SCRUB_COMMIT_MAX_PX,
+  SCRUB_COMMIT_MIN_PX,
   SCRUB_COMMIT_VELOCITY,
   SCRUB_IDLE_MS,
+  scrubCommitDistance,
   slideScroll,
   SWIPE_THRESHOLD_PX,
   usePageTurnGestures,
@@ -66,10 +69,26 @@ describe('normalizeWheelDelta', () => {
   });
 });
 
+describe('scrubCommitDistance', () => {
+  it('clamps 18% of the page width to 50–160 px', () => {
+    expect(scrubCommitDistance(200)).toBe(SCRUB_COMMIT_MIN_PX);
+    expect(scrubCommitDistance(277)).toBe(SCRUB_COMMIT_MIN_PX);
+    expect(scrubCommitDistance(600)).toBe(108);
+    expect(scrubCommitDistance(889)).toBe(SCRUB_COMMIT_MAX_PX);
+    expect(scrubCommitDistance(2000)).toBe(SCRUB_COMMIT_MAX_PX);
+    // A page with no measured width still needs the minimum drag.
+    expect(scrubCommitDistance(0)).toBe(SCRUB_COMMIT_MIN_PX);
+  });
+});
+
 describe('WheelScrub', () => {
   const WIDTH = 1000;
   const context = (canTurn: (direction: 1 | -1) => boolean = () => true) => ({
     pageWidth: () => WIDTH,
+    canTurn,
+  });
+  const contextOf = (width: number, canTurn: (direction: 1 | -1) => boolean = () => true) => ({
+    pageWidth: () => width,
     canTurn,
   });
   const make = () => new WheelScrub();
@@ -115,8 +134,75 @@ describe('WheelScrub', () => {
     );
     const released = scrub.release(at + SCRUB_IDLE_MS);
     expect(released).toEqual([{ kind: 'end', velocity: expect.any(Number), committed: 1 }]);
-    // 200 px of 1000 is past the 18% the release needs.
+    // 200 px of 1000 is past the 160 px the clamped release needs.
     expect(SCRUB_COMMIT_FRACTION * WIDTH).toBeLessThan(200);
+  });
+
+  it('commits a 200 px drag on a 2000 px page, because the threshold is clamped to 160 px', () => {
+    const scrub = make();
+    const wide = contextOf(2000);
+    let at = 0;
+    for (let event = 0; event < 10; event += 1) {
+      scrub.push(20, at, wide);
+      at += 50;
+    }
+    // 200 px of travel released 90 ms after the last event. The measured release
+    // speed is 0.4 px/ms, under the velocity threshold, so only the clamped
+    // distance can commit it: unclamped, 18% of 2000 px would need 360 px.
+    const [end] = scrub.release(at - 50 + SCRUB_IDLE_MS);
+    expect(end).toMatchObject({ kind: 'end', committed: 1 });
+    if (end?.kind === 'end') expect(end.velocity).toBeCloseTo(0.4);
+  });
+
+  it('raises the release distance to 50 px on a page narrower than 278 px', () => {
+    const narrow = contextOf(200);
+    // 18% of 200 px is 36 px, below the clamp: 40 px of slow travel must not turn.
+    const short = make();
+    for (let event = 0; event < 5; event += 1) short.push(8, event * 20, narrow);
+    expect(short.release(80 + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: null },
+    ]);
+
+    // 56 px is past the clamp, and still slow enough that only distance commits it.
+    const long = make();
+    for (let event = 0; event < 7; event += 1) long.push(8, event * 20, narrow);
+    expect(long.release(120 + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: 1 },
+    ]);
+  });
+
+  it('uses 18% of the width between the clamps', () => {
+    const page = contextOf(600);
+    // 18% of 600 px is 108 px: 100 px of slow travel is short of it...
+    const short = make();
+    for (let event = 0; event < 10; event += 1) short.push(10, event * 30, page);
+    expect(short.release(270 + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: null },
+    ]);
+
+    // ...and 110 px reaches it.
+    const reached = make();
+    for (let event = 0; event < 11; event += 1) reached.push(10, event * 30, page);
+    expect(reached.release(300 + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: 1 },
+    ]);
+  });
+
+  it('caps the release distance at 160 px on a wide page', () => {
+    const wide = contextOf(2000);
+    // 150 px of slow travel is short of the 160 px cap...
+    const short = make();
+    for (let event = 0; event < 15; event += 1) short.push(10, event * 30, wide);
+    expect(short.release(420 + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: null },
+    ]);
+
+    // ...and 160 px reaches it, even though 18% of 2000 px would be 360 px.
+    const reached = make();
+    for (let event = 0; event < 16; event += 1) reached.push(10, event * 30, wide);
+    expect(reached.release(450 + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: 1 },
+    ]);
   });
 
   it('springs back when the fingers stop short of the threshold', () => {

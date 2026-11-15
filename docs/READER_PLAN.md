@@ -231,7 +231,8 @@ hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` pagina
 - **Continuous page turns and trackpad scrubbing (`#86`)**: a `WheelScrub` state
   machine in `paging/pageTurn.ts` reports every horizontal wheel event, so the page
   follows the fingers 1:1, rubber-bands exponentially at either end of the document,
-  commits on an `18%` drag or a `0.45 px/ms` release, and springs back over `200 ms`;
+  commits on an `18%` drag (clamped to `50–160 px`) or a `0.45 px/ms` release, and
+  springs back over `200 ms`;
   after a commit it absorbs the decaying inertial tail a mac trackpad keeps sending and
   starts a new scrub on a velocity spike or a direction reversal, so rapid flicks no
   longer wait out a `300 ms` silence lockout. EPUB turns slide the chapter's own column
