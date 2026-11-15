@@ -960,8 +960,19 @@ export async function pdfZoomFlow(page) {
         return samples;
       };
     })()`);
-    await page.wheel(point, -100, 2);
-    await page.wheel(point, -100, 2);
+    // Both notches go out at once: awaiting one round trip before sending the next
+    // lets a loaded runner handle them more than the idle window apart, which splits
+    // one pinch into two gestures. The intermediate zoom can then be clamped where
+    // the final one would not be — a spread that still fits the pane has nothing to
+    // scroll — and the point under the pointer drifts for a reason the flow is not
+    // testing.
+    await Promise.all([page.wheel(point, -100, 2), page.wheel(point, -100, 2)]);
+    // The sends return once the browser has taken the events, not once the page has
+    // handled them, so wait for the samples rather than reading them straight away.
+    await page.waitFor(
+      'window.__pinchSamples.length >= 2',
+      `${label}: both wheel notches reached the page`,
+    );
     const samples = await page.evaluate('window.__stopPinchSamples()');
     assert(samples.length === 2, `${label}: both wheel notches reached the page`);
     const [first, second] = samples;
