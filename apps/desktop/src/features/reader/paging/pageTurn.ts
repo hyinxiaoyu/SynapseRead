@@ -422,8 +422,9 @@ export function usePageTurnGestures({
    * gesture's inertia. A mouse notch is a single event; a trackpad flick is a
    * decaying stream at about one event a frame, and its first events are as large
    * as a notch. Without this, every event of a fast flick reads as its own notch.
+   * `peak` is the magnitude the gesture started at, which inertia never exceeds.
    */
-  const notchTail = useRef<{ deltaX: number; at: number } | null>(null);
+  const notchTail = useRef<{ deltaX: number; peak: number; at: number } | null>(null);
   const [scrub] = useState(() => new WheelScrub());
 
   const zoneFor = useCallback(
@@ -497,16 +498,19 @@ export function usePageTurnGestures({
 
   /**
    * Whether this event is the decaying tail of the notch that just turned a page.
-   * Inertia only ever decays and only ever travels one way, so a bigger event or
-   * a reversal is a new physical notch and turns again — which is what keeps a
-   * mouse wheel turning one page per click however fast it is spun.
+   * Inertia only ever decays and only ever travels one way, so a reversal is a new
+   * physical notch and turns again. A tail does wobble by a few pixels as it dies
+   * away, so the comparison is against the magnitude the gesture started at rather
+   * than the sample before: a wobble stays under the peak and is absorbed, while an
+   * event at or above it is a new impulse — which is what keeps a mouse wheel
+   * turning one page per click however fast it is spun.
    */
   const absorbNotchTail = useCallback((deltaX: number, at: number): boolean => {
     const tail = notchTail.current;
     if (!tail || at - tail.at > SCRUB_IDLE_MS) return false;
     if (Math.sign(deltaX) !== Math.sign(tail.deltaX)) return false;
-    if (Math.abs(deltaX) >= Math.abs(tail.deltaX)) return false;
-    notchTail.current = { deltaX, at };
+    if (Math.abs(deltaX) >= tail.peak) return false;
+    notchTail.current = { deltaX, peak: tail.peak, at };
     return true;
   }, []);
 
@@ -550,7 +554,11 @@ export function usePageTurnGestures({
           clearDiscreteWheel();
           if (latest.current.canTurn?.(direction) ?? true) {
             latest.current.onTurn(direction);
-            notchTail.current = { deltaX: wheel.deltaX, at: timestamp };
+            notchTail.current = {
+              deltaX: wheel.deltaX,
+              peak: Math.abs(wheel.deltaX),
+              at: timestamp,
+            };
           }
         } else {
           window.clearTimeout(discreteTimer.current);

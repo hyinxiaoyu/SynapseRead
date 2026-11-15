@@ -235,6 +235,28 @@ describe('TxtViewer', () => {
       expect(page.scrollTop).toBe(ROW_PX * 10_000);
     });
 
+    it('clamps a turn at either end so reversing it still moves the reader', async () => {
+      const { store, documentId } = await setup(bytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('SynapseRead sample text');
+      const page = scroller();
+      const step = VIEWPORT_PX * 0.9;
+      const end = ROW_PX * 10_000 - VIEWPORT_PX;
+
+      // At the end, Next Page cannot move; the Previous Page that follows it must
+      // still move back, which it cannot if the unreachable destination was kept.
+      scrollTo(end);
+      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      fireEvent.keyDown(page, { key: 'PageUp', code: 'PageUp' });
+      await waitFor(() => expect(page.scrollTop).toBe(end - step));
+
+      // The same in reverse at the start of the file.
+      scrollTo(0);
+      fireEvent.keyDown(page, { key: 'PageUp', code: 'PageUp' });
+      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      await waitFor(() => expect(page.scrollTop).toBe(step));
+    });
+
     it('virtualizes: renders only rows near the viewport', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);

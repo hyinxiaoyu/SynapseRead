@@ -867,13 +867,19 @@ export function TxtViewer({
   const slideTo = (top: number) => {
     const scroller = scrollRef.current;
     if (!scroller) return;
-    const from = slideBase();
+    const limit = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    // A turn past either end is clamped here, not only by the browser. Keeping the
+    // unclamped destination would start the next turn from a position the rows can
+    // never reach, so a reversal at the end would not move them back at all.
+    const clamp = (value: number) => Math.min(Math.max(value, 0), limit);
+    const from = clamp(slideBase());
     cancelSlide();
-    const delta = top - from;
+    const target = clamp(top);
+    const delta = target - from;
     if (delta === 0) return;
     const controller = new AbortController();
     slideAbort.current = controller;
-    slideTarget.current = top;
+    slideTarget.current = target;
     void slideScroll(scroller, { top: delta }, PAGE_SLIDE_MS, controller.signal, {
       top: from,
     }).finally(() => {

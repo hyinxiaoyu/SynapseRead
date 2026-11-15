@@ -546,6 +546,36 @@ describe('usePageTurnGestures', () => {
     expect(scrub.end).not.toHaveBeenCalled();
   });
 
+  it('absorbs a tail that wobbles back up a little, without turning again', () => {
+    vi.useFakeTimers();
+    const { onTurn, scrub, gestures } = mount();
+    // Real inertia is not monotonic: it dies away with small upward wobbles. The
+    // 2 px bump from 110 to 112 is still the same flick, not a second notch.
+    act(() => {
+      for (const deltaX of [120, 110, 112, 100, 90, 65, 40]) {
+        expect(gestures().handleWheel({ deltaX, deltaY: 0, deltaMode: 0, ctrlKey: false })).toBe(
+          true,
+        );
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenCalledWith(1);
+    expect(scrub.start).not.toHaveBeenCalled();
+  });
+
+  it('turns again when an event overtakes the peak the gesture started at', () => {
+    vi.useFakeTimers();
+    const { onTurn, gestures } = mount();
+    act(() => {
+      gestures().handleWheel({ deltaX: 120, deltaY: 0, deltaMode: 0, ctrlKey: false });
+      vi.advanceTimersByTime(16);
+      // Inertia never grows past its own peak, so this is a new physical notch.
+      gestures().handleWheel({ deltaX: 130, deltaY: 0, deltaMode: 0, ctrlKey: false });
+    });
+    expect(onTurn).toHaveBeenCalledTimes(2);
+  });
+
   it('turns a page for each genuine wheel notch, however fast it is spun', () => {
     vi.useFakeTimers();
     const { onTurn, gestures } = mount();
