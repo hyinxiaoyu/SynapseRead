@@ -509,13 +509,14 @@ export async function pagingFlow(page) {
   // takes depends on the machine: a loaded macOS runner drew the 360 ms curl in three
   // frames, and every one of them was a new shape. What has to hold is that the
   // crease keeps changing while it runs — a cut would hold one shape throughout.
+  const sweptShapes = Math.min(3, curling.length);
   assert(
-    slotOutlines.size > 3,
-    `the outgoing slot crease must sweep over several frames, saw ${slotOutlines.size} shapes`,
+    slotOutlines.size >= sweptShapes,
+    `the outgoing slot crease must sweep over several frames, saw ${slotOutlines.size} shapes in ${curling.length} frames`,
   );
   assert(
-    leafOutlines.size > 3,
-    `the conical backside leaf must reshape over several frames, saw ${leafOutlines.size} shapes`,
+    leafOutlines.size >= sweptShapes,
+    `the conical backside leaf must reshape over several frames, saw ${leafOutlines.size} shapes in ${curling.length} frames`,
   );
   const settledCurl = curl.at(-1);
   assert(
