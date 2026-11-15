@@ -14,6 +14,13 @@ const CLICK_SLOP_PX = 4;
  * the fingers lift, as a page dragged past its own edge would.
  */
 export const SCRUB_COMMIT_FRACTION = 0.18;
+/**
+ * The release distance is clamped to this range: below it a narrow page would
+ * turn on a twitch, and above it a wide page would need a drag longer than a
+ * comfortable two-finger swipe.
+ */
+export const SCRUB_COMMIT_MIN_PX = 50;
+export const SCRUB_COMMIT_MAX_PX = 160;
 /** Release speed, in px/ms, that commits a turn however short the travel was. */
 export const SCRUB_COMMIT_VELOCITY = 0.45;
 /** How far a scrub may be dragged past the end of the document, as a fraction. */
@@ -151,6 +158,15 @@ export function rubberBand(displacement: number, limit: number): number {
 /** The direction a displacement of the strip means: positive travels forward. */
 export function directionOf(displacement: number): TurnDirection {
   return displacement < 0 ? -1 : 1;
+}
+
+/**
+ * The release travel, in px, that commits a scrub on a page `pageWidth` wide:
+ * `18%` of the width, kept within `SCRUB_COMMIT_MIN_PX`–`SCRUB_COMMIT_MAX_PX`.
+ */
+export function scrubCommitDistance(pageWidth: number): number {
+  const fraction = Math.max(pageWidth, 0) * SCRUB_COMMIT_FRACTION;
+  return Math.min(Math.max(fraction, SCRUB_COMMIT_MIN_PX), SCRUB_COMMIT_MAX_PX);
 }
 
 const IDLE = 0;
@@ -300,7 +316,7 @@ export class WheelScrub {
   private commitDirection(velocity: number): TurnDirection | null {
     const direction = directionOf(this.travel);
     if (!this.canTurn(direction)) return null;
-    if (Math.abs(this.travel) >= this.width * SCRUB_COMMIT_FRACTION) return direction;
+    if (Math.abs(this.travel) >= scrubCommitDistance(this.width)) return direction;
     // Isolated single-sample flicks or notches have no time span for velocity.
     if (this.samples.length === 1 && Math.abs(this.travel) >= SWIPE_THRESHOLD_PX) {
       return direction;
