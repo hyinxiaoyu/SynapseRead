@@ -51,6 +51,9 @@ const statusIs = (value) =>
   `document.querySelector('[data-testid="unified-toolbar"] [data-testid="search-status"]')?.textContent === '${value}'`;
 const chapterIs = (title) =>
   `[...(${visibleHost}?.querySelectorAll('iframe') ?? [])].some((view) => view.contentDocument?.querySelector('h1')?.textContent === '${title}')`;
+/** The chapter the reader reports as its location, which the toolbar names. */
+const chapterNamed = (title) =>
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-subtitle"]')?.textContent === '${title}'`;
 
 /** Where text in the book's frame sits on screen, for a real mouse drag. */
 const textPoints = (page, text) => page.waitFor(textPointsOf(text), `text in the book: ${text}`);
@@ -632,6 +635,10 @@ export async function epubFlow(page) {
   await page.showSidebarTab('Table of Contents');
   await page.clickTreeItem('Two');
   await page.waitFor(chapterIs('Chapter Two'), 'returning to Chapter Two after the folding checks');
+  // The frame renders a moment before the reader reports the new location, and the
+  // bookmark button reads that location. Waiting only for the frame let a bookmark
+  // taken in that window point at Chapter One.
+  await page.waitFor(chapterNamed('Two'), 'the reader to report Chapter Two');
   await page.leaveSearch();
   // Clearing the query puts the view back and leaves the sidebar open.
   await page.waitFor(
