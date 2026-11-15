@@ -323,6 +323,95 @@ export async function pagingFlow(page) {
   })()`);
   await waitForPdfPageSettled(page, '2');
 
+  // ---- A turn between pages of different heights keeps both pages whole ----
+  // Page 4 is 420x595 and page 5 is 612x792. The column clips to the page being read
+  // at rest, so its scroll range stays that page's own; while a turn runs it has to
+  // grow to the stage, or the taller page is cut off at the outgoing page's boundary
+  // until the turn commits and then pops in.
+  await page.clickButton('Actual size');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.zoomMode === 'actual-size'`,
+    'actual size, where page 4 is smaller than page 5',
+  );
+  await page.clickButton('Next Page');
+  await waitForPdfPageSettled(page, '3');
+  await page.clickButton('Next Page');
+  await waitForPdfPageSettled(page, '4');
+
+  /** Turns one page and checks the column never cuts off either page as it runs. */
+  const turnBetweenHeights = async (fromPage, toPage, label) => {
+    await page.evaluate(`(() => {
+      const scroller = ${visibleScroller};
+      const column = scroller?.firstElementChild;
+      const box = (element) => {
+        const r = element?.getBoundingClientRect();
+        return r ? { top: r.top, bottom: r.bottom, left: r.left, right: r.right } : null;
+      };
+      window.__heightSamples = [];
+      let frames = 0;
+      const step = () => {
+        window.__heightSamples.push({
+          column: box(column),
+          pane: box(scroller),
+          outgoing: box(scroller?.querySelector('[data-page-index="${fromPage}"]')),
+          incoming: box(scroller?.querySelector('[data-page-index="${toPage}"]')),
+          // The slide sets its own end state on the stage, so a non-empty transform
+          // is exactly the window in which the turn is in flight.
+          sliding: (scroller?.querySelector('[data-testid="pdf-stage"]')?.style.transform ?? '') !== '',
+        });
+        frames += 1;
+        if (frames < 40) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+      return true;
+    })()`);
+    await page.clickButton(toPage > fromPage ? 'Next Page' : 'Previous Page');
+    await waitForPdfPageSettled(page, String(toPage + 1));
+    const samples = await page.evaluate('window.__heightSamples');
+    const seen = samples.filter(
+      (sample) => sample.sliding && sample.column && sample.outgoing && sample.incoming,
+    );
+    assert(seen.length > 0, `${label}: the turn must be sampled while it runs`);
+    for (const sample of seen) {
+      assert(
+        sample.column.bottom >= sample.incoming.bottom - 1,
+        `${label}: the column must not cut off the incoming page (column ${sample.column.bottom}, page ${sample.incoming.bottom})`,
+      );
+      assert(
+        sample.column.bottom >= sample.outgoing.bottom - 1,
+        `${label}: the column must not cut off the outgoing page (column ${sample.column.bottom}, page ${sample.outgoing.bottom})`,
+      );
+    }
+    return seen;
+  };
+
+  const taller = await turnBetweenHeights(3, 4, 'page 4 to page 5');
+  assert(
+    taller.length > 0 && taller.at(-1).column.bottom >= taller.at(-1).incoming.bottom - 1,
+    'the taller incoming page has to be whole when the turn settles, not pop in',
+  );
+  // The other way: the taller page is now the one sliding away.
+  await turnBetweenHeights(4, 3, 'page 5 to page 4');
+  const resting = await page.evaluate(`(() => {
+    const scroller = ${visibleScroller};
+    const column = scroller?.firstElementChild;
+    const page = scroller?.querySelector('[data-page-index="3"]');
+    return { column: column?.offsetHeight ?? 0, page: page?.offsetHeight ?? 0 };
+  })()`);
+  assert(
+    Math.abs(resting.column - resting.page) < 2,
+    `at rest the column must be the page being read: ${JSON.stringify(resting)}`,
+  );
+  await page.clickButton('Fit width');
+  await page.waitFor(
+    `document.querySelector('[data-testid="pdf-viewer"]')?.dataset.zoomMode === 'fit-width'`,
+    'fit width again',
+  );
+  await page.clickButton('Previous Page');
+  await waitForPdfPageSettled(page, '3');
+  await page.clickButton('Previous Page');
+  await waitForPdfPageSettled(page, '2');
+
   // ---- A spread's curl: the fold on the turning half, the cast shadow on the
   // half that stays put, each confined to its own side of the spine ----
   await page.evaluate(
@@ -416,6 +505,10 @@ export async function pagingFlow(page) {
   );
   const slotOutlines = new Set(curling.map((sample) => sample.slotClip));
   const leafOutlines = new Set(curling.map((sample) => sample.leafClip));
+  // The curl is driven from script at the display's frame rate, so how many shapes it
+  // takes depends on the machine: a loaded macOS runner drew the 360 ms curl in three
+  // frames, and every one of them was a new shape. What has to hold is that the
+  // crease keeps changing while it runs — a cut would hold one shape throughout.
   assert(
     slotOutlines.size > 3,
     `the outgoing slot crease must sweep over several frames, saw ${slotOutlines.size} shapes`,

@@ -1112,6 +1112,13 @@ function PdfPages({
     cancel: () => void;
     settle: () => void;
   } | null>(null);
+  /**
+   * Whether a turn is in flight. The scrollable column clips to the page being read
+   * at rest, so its scroll range stays that page's own; while a turn runs it grows to
+   * the whole stage, or a taller page sliding in is cut off at the outgoing page's
+   * boundary until the turn commits.
+   */
+  const [turning, setTurning] = useState(false);
 
   const setCurrentPageIndex = useCallback((pageIndex: number) => {
     committedPageRef.current = pageIndex;
@@ -1216,6 +1223,8 @@ function PdfPages({
    * events over the page being read.
    */
   const stageCell = Math.max(contentWidth, ...stageRows.map(rowWidth), 1);
+  /** The tallest row on the stage, which the column only needs while a turn runs. */
+  const stageHeight = Math.max(...stageRows.map(rowHeight), 1);
   /** One page's worth of horizontal travel, the same for every slot. */
   const stageStride = stageCell + PAGE_GAP_PX;
 
@@ -2205,6 +2214,7 @@ function PdfPages({
     const finish = (preserveTransformForNextTurn = false) => {
       if (settled) return;
       settled = true;
+      setTurning(false);
       if (activeEntry && activeSlideRef.current === activeEntry) {
         activeSlideRef.current = null;
       }
@@ -2224,6 +2234,7 @@ function PdfPages({
       finish();
       return;
     }
+    setTurning(true);
     cancelPageTurn(stage);
     const animation = stage.animate([{ transform: from }, { transform: target }], {
       duration,
@@ -2239,6 +2250,7 @@ function PdfPages({
       cancel: () => {
         if (settled) return;
         settled = true;
+        setTurning(false);
         cancelPageTurn(stage);
         if (typeof stage.getAnimations !== 'function') animation.cancel();
         stage.style.transform = '';
@@ -2376,11 +2388,13 @@ function PdfPages({
     const pending = pendingCurlRef.current;
     pendingCurlRef.current = null;
     if (!pending || !stage) {
+      setTurning(false);
       resetPaperCurl(null, turnShadowRef.current);
       return;
     }
 
     if (layout.rowOfPage(layout.currentPageIndex) !== pending.incomingRow) {
+      setTurning(false);
       resetPaperCurl(null, turnShadowRef.current);
       return;
     }
@@ -2396,6 +2410,7 @@ function PdfPages({
       layout.contentWidth,
     );
     if (!outgoingSlot) {
+      setTurning(false);
       restoreStageSlots(stage);
       resetPaperCurl(null, turnShadowRef.current);
       return;
@@ -2416,6 +2431,7 @@ function PdfPages({
       spread: isSpread,
       onFinish: () => {
         cancelCurlRef.current = null;
+        setTurning(false);
         restoreStageSlots(stage);
       },
     });
@@ -2437,6 +2453,9 @@ function PdfPages({
     if (target === null) return;
     cancelCurlRef.current?.();
     cancelCurlRef.current = null;
+    // Whatever the previous turn was doing is over; each mode below says whether the
+    // column has to hold both pages again.
+    setTurning(false);
     const transition = effectivePreferences.pageTransition;
     if (paged && transition === 'slide') {
       settleStage(
@@ -2448,20 +2467,24 @@ function PdfPages({
       return;
     }
     if (paged && transition === 'curl') {
-      if (!prefersReducedMotion() && stageRef.current) {
-        pendingCurlRef.current = {
-          outgoingRow: rowOfPage(effectivePageIndex()),
-          incomingRow: rowOfPage(target),
-          direction,
-          fromProgress: 0,
-          duration: PAGE_CURL_MS,
-        };
-      } else if (!prefersReducedMotion()) {
-        animatePaperCurl({
-          shadow: turnShadowRef.current,
-          direction,
-          spread: displayMode === 'two-page',
-        });
+      if (!prefersReducedMotion()) {
+        setTurning(true);
+        if (stageRef.current) {
+          pendingCurlRef.current = {
+            outgoingRow: rowOfPage(effectivePageIndex()),
+            incomingRow: rowOfPage(target),
+            direction,
+            fromProgress: 0,
+            duration: PAGE_CURL_MS,
+          };
+        } else {
+          animatePaperCurl({
+            shadow: turnShadowRef.current,
+            direction,
+            spread: displayMode === 'two-page',
+            onFinish: () => setTurning(false),
+          });
+        }
       }
       scrollToPageOffset(target, offsetWithin(target, 0));
       return;
@@ -2480,6 +2503,9 @@ function PdfPages({
     start: () => {
       settleActiveSlide();
       scrubbingRef.current = true;
+      // The page follows the fingers, so the column has to hold both pages until the
+      // scrub settles.
+      setTurning(true);
       cancelCurlRef.current?.();
       cancelCurlRef.current = null;
       pendingCurlRef.current = null;
@@ -2533,6 +2559,7 @@ function PdfPages({
         curlScrubRef.current = { direction: null, progress: 0 };
         const stage = stageRef.current;
         if (!stage || dir === null) {
+          setTurning(false);
           resetPaperCurl(null, turnShadowRef.current);
           return;
         }
@@ -2553,6 +2580,7 @@ function PdfPages({
             spread: isSpread,
             onFinish: () => {
               cancelCurlRef.current = null;
+              setTurning(false);
               restoreStageSlots(stage);
             },
           });
@@ -2810,14 +2838,16 @@ function PdfPages({
   /**
    * The scrollable column is the page being read, never the neighbours staged beside
    * it: a smaller page between larger ones would otherwise scroll past its own edges
-   * into blank space, and its offset would report a fraction of nothing.
+   * into blank space, and its offset would report a fraction of nothing. While a turn
+   * runs it grows to the stage, so the taller page travelling across the pane is not
+   * cut off at the outgoing page's boundary before the turn commits.
    */
   const columnWidth = paged
-    ? Math.max(rowWidth(currentRow), 1)
+    ? Math.max(rowWidth(currentRow), turning ? stageCell : 0, 1)
     : virtualItems.reduce((max, item) => Math.max(max, rowWidth(item.index)), rowWidth(currentRow));
-  const columnHeight = paged ? Math.max(rowHeight(currentRow), 1) : virtualizer.getTotalSize();
-  /** The stage itself still spans the taller neighbours; the column clips them. */
-  const stageHeight = paged ? Math.max(...stageRows.map(rowHeight), 1) : columnHeight;
+  const columnHeight = paged
+    ? Math.max(rowHeight(currentRow), turning ? stageHeight : 0, 1)
+    : virtualizer.getTotalSize();
   const innerMinWidth =
     width > 0 && columnWidth > contentWidth + 1
       ? `${Math.ceil(columnWidth + SIDE_PADDING_PX * 2)}px`

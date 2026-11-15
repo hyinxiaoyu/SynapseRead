@@ -2163,6 +2163,62 @@ describe('PdfViewer', () => {
     expect(rows).toEqual([2, 3, 4]);
   });
 
+  it('lets a taller page paint during the turn, then bounds the column again', async () => {
+    const originalAnimate = HTMLElement.prototype.animate;
+    const pending: (() => void)[] = [];
+    HTMLElement.prototype.animate = vi.fn(function () {
+      let resolveFinished: () => void = () => undefined;
+      const finished = new Promise<Animation>((resolve) => {
+        resolveFinished = () => resolve({} as Animation);
+      });
+      pending.push(resolveFinished);
+      return { id: '', finished, cancel: vi.fn() } as unknown as Animation;
+    });
+
+    try {
+      window.localStorage.clear();
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Actual size' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 125%
+      const pageInput = screen.getByLabelText('Page number');
+      fireEvent.change(pageInput, { target: { value: '4' } });
+      fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+      await pageElement(3);
+
+      const stage = screen.getByTestId('pdf-stage');
+      const column = stage.parentElement as HTMLElement;
+      // Page 4 is 306 x 400, so 382 x 500 at 125%: narrower and shorter than the pane.
+      expect(column.style.height).toBe('500px');
+      expect(column.style.width).toBe('100%');
+
+      // Page 5 is 612 x 792, so 765 x 1000: the column holds it while the stage slides,
+      // or the part below page 4's boundary would be cut off until the turn commits.
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(column.style.height).toBe('1000px');
+      expect(column.style.width).toBe(`${Math.ceil(612 * 1.25 + 24)}px`);
+      await act(async () => {
+        pending.at(-1)?.();
+      });
+      // At rest the column is the page being read again: page 5, which is the tall one.
+      expect(column.style.height).toBe('1000px');
+
+      // Back the other way: the taller page is now the outgoing one, and the column
+      // must still hold it while it slides away.
+      fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
+      expect(column.style.height).toBe('1000px');
+      await act(async () => {
+        pending.at(-1)?.();
+      });
+      expect(column.style.height).toBe('500px');
+      expect(column.style.width).toBe('100%');
+    } finally {
+      HTMLElement.prototype.animate = originalAnimate;
+    }
+  });
+
   it('settles a swipe with the configured transition instead of always sliding', async () => {
     const originalAnimate = HTMLElement.prototype.animate;
     const calls: Keyframe[][] = [];
