@@ -31,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0008_annotation_style.sql"),
     include_str!("../migrations/0009_pdf_document_layout.sql"),
     include_str!("../migrations/0010_document_progress.sql"),
+    include_str!("../migrations/0011_page_transition_curl.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -2022,6 +2023,9 @@ mod tests {
             (Some("none"), crate::domain::PageTransition::None),
             (Some("slide"), crate::domain::PageTransition::Slide),
             (Some("fade"), crate::domain::PageTransition::Fade),
+            // The name this mode had before the rename, as an older build wrote it.
+            (Some("flip"), crate::domain::PageTransition::Curl),
+            (Some("curl"), crate::domain::PageTransition::Curl),
             (None, crate::domain::PageTransition::Slide),
         ];
         for (stored, expected) in cases {
@@ -2054,6 +2058,44 @@ mod tests {
             assert!(!prefs.tint_pdf_pages, "stored {row}");
             assert!(!prefs.focus_mode_full_screen, "stored {row}");
         }
+    }
+
+    #[test]
+    fn page_transition_migration_renames_flip_to_curl() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Bring the database to version 10, as the previous release left it.
+        for (version, sql) in (1_u32..).zip(&MIGRATIONS[..10]) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)",
+            params![
+                r#"{"theme":"dark","fontFamily":"mono","fontSize":100,"lineSpacing":1.75,"margins":"normal","pageWidth":"standard","justify":true,"dimImages":false,"epubReadingMode":"spread","pageTransition":"flip"}"#
+            ],
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let db = Database {
+            conn,
+            captures: None,
+        };
+
+        assert_eq!(
+            db.get_reading_preferences().unwrap().page_transition,
+            crate::domain::PageTransition::Curl
+        );
+        // The row is canonical now, not merely readable under the alias.
+        let stored: String = db
+            .conn
+            .query_row(
+                "SELECT preferences_json FROM reading_preferences WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(value["pageTransition"], serde_json::json!("curl"));
     }
 
     #[test]
@@ -2099,7 +2141,7 @@ mod tests {
             "justify": true,
             "dimImages": false,
             "epubReadingMode": "spread",
-            "pageTransition": "curl",
+            "pageTransition": "peel",
         });
         db.conn
             .execute(

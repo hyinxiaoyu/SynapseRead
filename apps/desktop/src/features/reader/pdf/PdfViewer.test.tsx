@@ -3,6 +3,7 @@ import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
+import { SCRUB_IDLE_MS } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
@@ -923,9 +924,12 @@ describe('PdfViewer', () => {
     expect(readout).toHaveTextContent('Page 2 of 5');
     fireEvent.keyDown(pane, { key: 'PageUp', code: 'PageUp' });
     expect(readout).toHaveTextContent('Page 1 of 5');
+    // A swipe drags the strip live, and turns the page when the fingers lift.
     fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
     fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
-    expect(readout).toHaveTextContent('Page 2 of 5');
+    expect(screen.getByTestId('pdf-stage').style.transform).toBe('translateX(-160px)');
+    await waitFor(() => expect(readout).toHaveTextContent('Page 2 of 5'));
+    expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
     fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
     expect(readout).toHaveTextContent('Page 3 of 5');
 
@@ -1355,7 +1359,8 @@ describe('PdfViewer', () => {
     expect(screen.getByLabelText('Page number')).toHaveValue('1');
     fireEvent.change(searchInput, { target: { value: 'Fox' } });
     await waitFor(() => expect(screen.getByTestId('search-status')).toHaveTextContent('1 of 1'));
-    expect(screen.getByLabelText('Page number')).toHaveValue('5');
+    // The turn to the match is its own commit, so the page box catches up after it.
+    await waitFor(() => expect(screen.getByLabelText('Page number')).toHaveValue('5'));
   });
 
   it('cancels an in-flight PDF search on explicit cancel or tab deactivation', async () => {
@@ -1842,8 +1847,12 @@ describe('PdfViewer', () => {
     fireEvent.click(screen.getByTestId('pdf-mode-single'));
     expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'single');
     expect(pageInput).toHaveValue('3');
-    expect(document.querySelectorAll('[data-page-index]')).toHaveLength(1);
+    // The paged stage keeps the pages either side rendered, so a turn never has to
+    // wait for a canvas: three slots, and no more.
+    expect(document.querySelectorAll('[data-page-index]')).toHaveLength(3);
+    expect(document.querySelector('[data-page-index="1"]')).not.toBeNull();
     expect(document.querySelector('[data-page-index="2"]')).not.toBeNull();
+    expect(document.querySelector('[data-page-index="3"]')).not.toBeNull();
 
     fireEvent.click(screen.getByTestId('pdf-mode-two-page'));
     expect(screen.getByTestId('pdf-viewer')).toHaveAttribute('data-display-mode', 'two-page');
@@ -1891,5 +1900,384 @@ describe('PdfViewer', () => {
     view.unmount();
     expect(page0Canvas.width).toBe(0);
     expect(page0Canvas.height).toBe(0);
+  });
+
+  it('peels stationary stage slots in curl mode, tracks horizontal scrubs, and resets on settle', async () => {
+    const { store, documentId } = await setup();
+    render(
+      <Harness
+        store={store}
+        documentId={documentId}
+        preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'curl' }}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId('pdf-mode-two-page'));
+    await pageElement(0);
+    const scroll = await scroller();
+    const stage = screen.getByTestId('pdf-stage');
+
+    const frames: FrameRequestCallback[] = [];
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      frames.push(cb);
+      return frames.length;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+
+      const outgoingSlot = stage.querySelector<HTMLElement>('[data-stage-row="0"]')!;
+      const incomingSlot = stage.querySelector<HTMLElement>('[data-stage-row="1"]')!;
+      const shadow = screen.getByTestId('page-turn-shadow');
+      const leaf = shadow.querySelector<HTMLElement>('[data-curl-part="leaf"]')!;
+      const spine = shadow.querySelector<HTMLElement>('[data-curl-part="spine"]')!;
+
+      // Initial curl frame starts cleanly; mid-turn frame clips outgoing slot without rotateY.
+      clock = 40;
+      act(() => {
+        frames.shift()?.(clock);
+      });
+      expect(stage.style.transform).toBe('');
+      expect(outgoingSlot.style.zIndex).toBe('2');
+      expect(incomingSlot.style.zIndex).toBe('1');
+      expect(outgoingSlot.style.clipPath).toContain('polygon(');
+      expect(Number(leaf.style.opacity)).toBeGreaterThan(0.5);
+      expect(Number(spine.style.opacity)).toBeGreaterThan(0.2);
+
+      // Finishing the rAF loop clears clipPath, zIndex overrides, and shadow opacity.
+      clock = 500;
+      act(() => {
+        frames.shift()?.(clock);
+      });
+      expect(outgoingSlot.style.clipPath).toBe('');
+      expect(outgoingSlot.style.zIndex).toBe('');
+      expect(leaf.style.opacity).toBe('0');
+
+      // Horizontal trackpad wheel scrubs the curl 1:1 from the landed spread before release.
+      vi.spyOn(scroll, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+      act(() => {
+        fireEvent.wheel(scroll, { deltaX: -80, deltaY: 0 });
+      });
+      const scrubbingSlot = stage.querySelector<HTMLElement>('[data-stage-row="1"]')!;
+      expect(scrubbingSlot.style.clipPath).toContain('polygon(');
+      expect(Number(leaf.style.opacity)).toBeGreaterThan(0.1);
+    } finally {
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('commits rapid successive turns and reversals cleanly in slide mode', async () => {
+    const originalAnimate = HTMLElement.prototype.animate;
+    const pending: {
+      resolve: () => void;
+      cancel: ReturnType<typeof vi.fn<() => void>>;
+    }[] = [];
+    HTMLElement.prototype.animate = vi.fn(function () {
+      let resolveFinished: () => void = () => undefined;
+      let rejectFinished: (reason?: unknown) => void = () => undefined;
+      const finished = new Promise<Animation>((resolve, reject) => {
+        resolveFinished = () => resolve({} as Animation);
+        rejectFinished = reject;
+      });
+      const cancel = vi.fn(() => {
+        rejectFinished(new DOMException('AbortError', 'AbortError'));
+      });
+      const entry = { resolve: resolveFinished, cancel };
+      pending.push(entry);
+      return {
+        id: '',
+        finished,
+        cancel,
+      } as unknown as Animation;
+    });
+
+    try {
+      window.localStorage.clear();
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout); // Page 1 of 5
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      const nextButton = screen.getByRole('button', { name: 'Next Page' });
+      const prevButton = screen.getByRole('button', { name: 'Previous Page' });
+
+      // Rapid double Next Page before the first slide settles -> Page 3 of 5.
+      fireEvent.click(nextButton);
+      fireEvent.click(nextButton);
+      expect(pending).toHaveLength(2);
+      expect(pending[0]?.cancel).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        pending.at(-1)?.resolve();
+      });
+      expect(readout).toHaveTextContent('Page 3 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+
+      // Rapid Next Page then immediate Previous Page reversal -> back to Page 3 of 5.
+      fireEvent.click(nextButton);
+      fireEvent.click(prevButton);
+      expect(pending).toHaveLength(4);
+      expect(pending[2]?.cancel).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        pending.at(-1)?.resolve();
+      });
+      expect(readout).toHaveTextContent('Page 3 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+    } finally {
+      HTMLElement.prototype.animate = originalAnimate;
+    }
+  });
+
+  it('saves the page a two-page turn lands on, though the pane never scrolls', async () => {
+    const { backend, store, documentId } = await setup();
+    const view = render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+    await pageElement(1);
+    const pane = await scroller();
+    expect(pane.scrollTop).toBe(0);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+    const readout = screen.getByTestId('reader-footer-readout');
+    fireEvent.click(readout);
+    expect(readout).toHaveTextContent('Page 3 of 5');
+    // Each staged spread starts at the top, so the turn writes 0 over 0 and no
+    // scroll event can carry the new page: the explicit report is what saves it.
+    expect(pane.scrollTop).toBe(0);
+    await waitFor(
+      () => {
+        const cursor = store.getState().documents[0]?.lastCursorAnchor as PdfAnchor | null;
+        expect(cursor?.pageIndex).toBe(2);
+      },
+      { timeout: 2000 },
+    );
+    view.unmount();
+
+    const reopened = await reopen(backend);
+    render(<Harness store={reopened} documentId={documentId} />);
+    await pageElement(2);
+    expect(screen.getByTestId('reader-footer-readout')).toHaveTextContent('Page 3 of 5');
+  });
+
+  it('lets a jump made during a slide win over the slide it interrupted', async () => {
+    const originalAnimate = HTMLElement.prototype.animate;
+    const pending: { resolve: () => void; cancel: ReturnType<typeof vi.fn<() => void>> }[] = [];
+    HTMLElement.prototype.animate = vi.fn(function () {
+      let resolveFinished: () => void = () => undefined;
+      let rejectFinished: (reason?: unknown) => void = () => undefined;
+      const finished = new Promise<Animation>((resolve, reject) => {
+        resolveFinished = () => resolve({} as Animation);
+        rejectFinished = reject;
+      });
+      const cancel = vi.fn(() => rejectFinished(new DOMException('AbortError', 'AbortError')));
+      pending.push({ resolve: resolveFinished, cancel });
+      return { id: '', finished, cancel } as unknown as Animation;
+    });
+
+    try {
+      window.localStorage.clear();
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(pending).toHaveLength(1);
+      const pageInput = screen.getByLabelText('Page number');
+      fireEvent.change(pageInput, { target: { value: '4' } });
+      fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+      expect(readout).toHaveTextContent('Page 4 of 5');
+      expect(pending[0]?.cancel).toHaveBeenCalledTimes(1);
+
+      // The interrupted slide must not drag the reader back to the page it wanted.
+      await act(async () => {
+        pending[0]?.resolve();
+      });
+      expect(readout).toHaveTextContent('Page 4 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+    } finally {
+      HTMLElement.prototype.animate = originalAnimate;
+    }
+  });
+
+  it('keeps zoomed stage slots from overlapping, so the neighbour never covers the page', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 125%
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 150%
+    expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent('150%');
+
+    const stage = screen.getByTestId('pdf-stage');
+    const boxes = [...stage.querySelectorAll<HTMLElement>('[data-stage-row]')].map((slot) => ({
+      row: Number(slot.dataset.stageRow),
+      left: Number.parseFloat(slot.style.left),
+      width: Number.parseFloat(slot.style.width),
+    }));
+    const current = boxes.find((box) => box.row === 0);
+    const next = boxes.find((box) => box.row === 1);
+    expect(current).toBeDefined();
+    expect(next).toBeDefined();
+    // A 612 px page at 150% is 918 px: wider than the 612 px pane.
+    expect(current?.width).toBeCloseTo(612 * 1.5, 0);
+    expect(next?.left).toBeGreaterThanOrEqual((current?.left ?? 0) + (current?.width ?? 0));
+    // The column scrolls the whole zoomed page, and still clips the neighbours.
+    expect(stage.parentElement?.style.width).toBe(`${Math.ceil(612 * 1.5 + 24)}px`);
+  });
+
+  it('bounds the scrollable column to a smaller page between larger ones', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 125%
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 150%
+    expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent('150%');
+
+    const pageInput = screen.getByLabelText('Page number');
+    fireEvent.change(pageInput, { target: { value: '4' } });
+    fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+    await pageElement(3);
+
+    const stage = screen.getByTestId('pdf-stage');
+    const column = stage.parentElement as HTMLElement;
+    // Page 4 is 306 x 400, so 459 x 600 at 150%; pages 3 and 5 are 918 x 1200. The
+    // column follows the page being read, so it cannot scroll into blank space.
+    expect(column.style.height).toBe('600px');
+    expect(column.style.width).toBe('100%');
+    // The larger neighbours are still staged, ready for the turn.
+    const rows = [...stage.querySelectorAll<HTMLElement>('[data-stage-row]')].map((slot) =>
+      Number(slot.dataset.stageRow),
+    );
+    expect(rows).toEqual([2, 3, 4]);
+  });
+
+  it('lets a taller page paint during the turn, then bounds the column again', async () => {
+    const originalAnimate = HTMLElement.prototype.animate;
+    const pending: (() => void)[] = [];
+    HTMLElement.prototype.animate = vi.fn(function () {
+      let resolveFinished: () => void = () => undefined;
+      const finished = new Promise<Animation>((resolve) => {
+        resolveFinished = () => resolve({} as Animation);
+      });
+      pending.push(resolveFinished);
+      return { id: '', finished, cancel: vi.fn() } as unknown as Animation;
+    });
+
+    try {
+      window.localStorage.clear();
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Actual size' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 125%
+      const pageInput = screen.getByLabelText('Page number');
+      fireEvent.change(pageInput, { target: { value: '4' } });
+      fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+      await pageElement(3);
+
+      const stage = screen.getByTestId('pdf-stage');
+      const column = stage.parentElement as HTMLElement;
+      // Page 4 is 306 x 400, so 382 x 500 at 125%: narrower and shorter than the pane.
+      expect(column.style.height).toBe('500px');
+      expect(column.style.width).toBe('100%');
+
+      // Page 5 is 612 x 792, so 765 x 1000: the column holds it while the stage slides,
+      // or the part below page 4's boundary would be cut off until the turn commits.
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(column.style.height).toBe('1000px');
+      expect(column.style.width).toBe(`${Math.ceil(612 * 1.25 + 24)}px`);
+      await act(async () => {
+        pending.at(-1)?.();
+      });
+      // At rest the column is the page being read again: page 5, which is the tall one.
+      expect(column.style.height).toBe('1000px');
+
+      // Back the other way: the taller page is now the outgoing one, and the column
+      // must still hold it while it slides away.
+      fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
+      expect(column.style.height).toBe('1000px');
+      await act(async () => {
+        pending.at(-1)?.();
+      });
+      expect(column.style.height).toBe('500px');
+      expect(column.style.width).toBe('100%');
+    } finally {
+      HTMLElement.prototype.animate = originalAnimate;
+    }
+  });
+
+  it('settles a swipe with the configured transition instead of always sliding', async () => {
+    const originalAnimate = HTMLElement.prototype.animate;
+    const calls: Keyframe[][] = [];
+    HTMLElement.prototype.animate = vi.fn(function (keyframes: Keyframe[]) {
+      calls.push(keyframes);
+      return {
+        id: '',
+        finished: Promise.resolve({} as Animation),
+        cancel: vi.fn(),
+      } as unknown as Animation;
+    });
+
+    try {
+      window.localStorage.clear();
+      const { store, documentId } = await setup();
+      const view = render(
+        <Harness
+          store={store}
+          documentId={documentId}
+          preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'none' }}
+        />,
+      );
+      await pageElement(0);
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      const pane = await scroller();
+      vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+      fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('translateX(-160px)');
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, SCRUB_IDLE_MS + 30));
+      });
+      // None: the page is committed at once, and nothing animates.
+      expect(readout).toHaveTextContent('Page 2 of 5');
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+      expect(calls).toHaveLength(0);
+
+      // Fade and stack play on the incoming page rather than sliding the strip.
+      view.rerender(
+        <Harness
+          store={store}
+          documentId={documentId}
+          preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'fade' }}
+        />,
+      );
+      fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+      fireEvent.wheel(pane, { deltaX: 80, deltaY: 0 });
+      await act(async () => {
+        await new Promise((resolve) => window.setTimeout(resolve, SCRUB_IDLE_MS + 30));
+      });
+      expect(readout).toHaveTextContent('Page 3 of 5');
+      expect(calls.at(-1)).toEqual([{ opacity: 0.2 }, { opacity: 1 }]);
+      expect(screen.getByTestId('pdf-stage').style.transform).toBe('');
+    } finally {
+      HTMLElement.prototype.animate = originalAnimate;
+    }
   });
 });

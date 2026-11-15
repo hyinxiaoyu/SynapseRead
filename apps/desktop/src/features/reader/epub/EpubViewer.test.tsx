@@ -76,6 +76,15 @@ const engine = vi.hoisted(() => ({
   measure: null as ((index: number) => Promise<{ characters: number; cjk: number } | null>) | null,
   next: vi.fn(async () => undefined),
   previous: vi.fn(async () => undefined),
+  /** A page turn, recorded as the `next`/`previous` the rest of the suite watches. */
+  turnPage: vi.fn(async (direction: 1 | -1) => {
+    if (direction > 0) await engine.next();
+    else await engine.previous();
+  }),
+  /** Whether the chapter has another page that way; the fixture chapter does. */
+  inPlace: true,
+  scrubs: [] as number[],
+  scrubEnds: [] as (1 | -1 | null)[],
   setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
   setPreferences: vi.fn(),
   setColumns: vi.fn<(columns: 1 | 2) => void>(),
@@ -128,6 +137,20 @@ vi.mock('./epubEngine', () => ({
     },
     next: engine.next,
     previous: engine.previous,
+    turnPage: engine.turnPage,
+    canTurnInPlace: () => engine.inPlace,
+    beginScrub: () => {
+      engine.scrubs.length = 0;
+    },
+    scrubTo: (displacement: number) => {
+      engine.scrubs.push(displacement);
+    },
+    endScrub: async (committed: 1 | -1 | null) => {
+      engine.scrubEnds.push(committed);
+      if (committed === null) return;
+      if (committed > 0) await engine.next();
+      else await engine.previous();
+    },
     setReadingMode: engine.setReadingMode,
     setPreferences: engine.setPreferences,
     setColumns: engine.setColumns,
@@ -321,6 +344,9 @@ describe('EpubViewer', () => {
     engine.cursor = '';
     engine.measure = null;
     engine.peek = null;
+    engine.inPlace = true;
+    engine.scrubs = [];
+    engine.scrubEnds = [];
     window.localStorage.clear();
     engine.next.mockClear();
     engine.previous.mockClear();
@@ -1062,7 +1088,7 @@ describe('EpubViewer', () => {
     act(() => engine.emitGesture({ kind: 'move', x: 1080, y: 300, overContent: true }));
     expect(engine.cursor).toBe('');
 
-    // One swipe turns one page, however many events its momentum sends.
+    // A swipe scrubs the strip live, and turns one page when the fingers lift.
     let used = false;
     act(() => {
       for (let event = 0; event < 8; event += 1) {
@@ -1070,6 +1096,8 @@ describe('EpubViewer', () => {
       }
     });
     expect(used).toBe(true);
+    expect(engine.scrubs.at(-1)).toBe(240);
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1]));
     expect(engine.next).toHaveBeenCalledTimes(2);
     expect(engine.emitWheel({ deltaX: 0, deltaY: 40, ctrlKey: false })).toBe(false);
 
@@ -1083,6 +1111,79 @@ describe('EpubViewer', () => {
     click(1050);
     expect(engine.next).toHaveBeenCalledTimes(3);
     expect(screen.queryByRole('button', { name: 'Next Page' })).not.toBeInTheDocument();
+  });
+
+  it('turns across chapter seams with slide and fade swipes while rubber-banding at book edges', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+    vi.spyOn(screen.getByTestId('epub-host'), 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(100, 0, 1000, 800),
+    );
+    act(() =>
+      engine.emitLocation({
+        cfi: CFI,
+        href: 'OEBPS/chapter1.xhtml',
+        page: 2,
+        totalPages: 2,
+        chapterIndex: 0,
+        totalChapters: 2,
+        fraction: 0.4,
+      }),
+    );
+
+    // At the chapter seam in `slide` mode, forward crosses to Chapter Two while
+    // backward at Chapter One rubber-bands without leaving the book.
+    engine.inPlace = false;
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        engine.emitWheel({ deltaX: 30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1]));
+    expect(engine.next).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        engine.emitWheel({ deltaX: -30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1, null]));
+    expect(engine.previous).not.toHaveBeenCalled();
+
+    // Switch to `Fade`: backward crosses from Chapter Two to Chapter One, while
+    // forward at the final chapter rubber-bands.
+    fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Fade' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+    act(() =>
+      engine.emitLocation({
+        cfi: FAR_CFI,
+        href: 'OEBPS/chapter2.xhtml',
+        page: 1,
+        totalPages: 2,
+        chapterIndex: 1,
+        totalChapters: 2,
+        fraction: 0.5,
+      }),
+    );
+
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        engine.emitWheel({ deltaX: -30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1, null, -1]));
+    expect(engine.previous).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      for (let event = 0; event < 8; event += 1) {
+        engine.emitWheel({ deltaX: 30, deltaY: 2, ctrlKey: false });
+      }
+    });
+    await waitFor(() => expect(engine.scrubEnds).toEqual([1, null, -1, null]));
+    expect(engine.next).toHaveBeenCalledTimes(1);
   });
 
   it('goes by chapter with Option-arrows and to chapter edges with Home and End', async () => {

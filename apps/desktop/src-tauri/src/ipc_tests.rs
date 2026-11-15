@@ -589,7 +589,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
     assert_eq!(h.ok("get_reading_preferences", json!({})), updated);
 
     // The newer modes survive the wire in both directions.
-    for mode in ["flip", "stack"] {
+    for mode in ["curl", "stack"] {
         let mut with_mode = updated.clone();
         with_mode["pageTransition"] = json!(mode);
         assert_eq!(
@@ -606,7 +606,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
     // silently stored default. Only a stored row written by a newer build is
     // tolerated, and that leniency lives in `get_reading_preferences`.
     let mut unknown_mode = updated.clone();
-    unknown_mode["pageTransition"] = json!("curl");
+    unknown_mode["pageTransition"] = json!("peel");
     assert!(
         h.call(
             "save_reading_preferences",

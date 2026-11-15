@@ -64,7 +64,7 @@ const PAGE_TRANSITIONS: readonly { value: PageTransition; label: string }[] = [
   { value: 'none', label: 'None' },
   { value: 'slide', label: 'Slide' },
   { value: 'fade', label: 'Fade' },
-  { value: 'flip', label: 'Flip' },
+  { value: 'curl', label: 'Curl' },
   { value: 'stack', label: 'Stack' },
 ];
 
