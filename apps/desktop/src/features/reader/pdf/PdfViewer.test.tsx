@@ -2136,6 +2136,33 @@ describe('PdfViewer', () => {
     expect(stage.parentElement?.style.width).toBe(`${Math.ceil(612 * 1.5 + 24)}px`);
   });
 
+  it('bounds the scrollable column to a smaller page between larger ones', async () => {
+    const { store, documentId } = await setup();
+    render(<Harness store={store} documentId={documentId} />);
+    await pageElement(0);
+    fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 125%
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 150%
+    expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent('150%');
+
+    const pageInput = screen.getByLabelText('Page number');
+    fireEvent.change(pageInput, { target: { value: '4' } });
+    fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+    await pageElement(3);
+
+    const stage = screen.getByTestId('pdf-stage');
+    const column = stage.parentElement as HTMLElement;
+    // Page 4 is 306 x 400, so 459 x 600 at 150%; pages 3 and 5 are 918 x 1200. The
+    // column follows the page being read, so it cannot scroll into blank space.
+    expect(column.style.height).toBe('600px');
+    expect(column.style.width).toBe('100%');
+    // The larger neighbours are still staged, ready for the turn.
+    const rows = [...stage.querySelectorAll<HTMLElement>('[data-stage-row]')].map((slot) =>
+      Number(slot.dataset.stageRow),
+    );
+    expect(rows).toEqual([2, 3, 4]);
+  });
+
   it('settles a swipe with the configured transition instead of always sliding', async () => {
     const originalAnimate = HTMLElement.prototype.animate;
     const calls: Keyframe[][] = [];

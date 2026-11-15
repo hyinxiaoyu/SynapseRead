@@ -627,4 +627,64 @@ export async function pagingFlow(page) {
     txtCurl.every((sample) => sample.deltaLeft < 0.5 && sample.shadowDeltaLeft < 0.5),
     `txt-curl-host and shadow must align with the text column, saw max deltas (${Math.max(...txtCurl.map((s) => s.deltaLeft))}, ${Math.max(...txtCurl.map((s) => s.shadowDeltaLeft))})`,
   );
+
+  // ---- A TXT page slide yields to a reader who scrolls by hand ----
+  // The animation writes its own scroll position every frame, so a reader's scroll
+  // has to win over the frame that would otherwise drag them back to the turn's
+  // target. The scroll is made inside the page, two frames into the slide, so the
+  // motion has already written a position of its own to compare against.
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'the TXT appearance popover',
+  );
+  // The text popover is taller than the PDF one, so Page turn may sit below the
+  // fold: click the radio directly rather than through the hit-tested helper.
+  const choseSlide = await page.evaluate(`(() => {
+    const popover = document.querySelector('[data-testid="appearance-popover"]');
+    const slide = [...(popover?.querySelectorAll('button') ?? [])].find(
+      (candidate) => candidate.textContent.trim() === 'Slide',
+    );
+    slide?.click();
+    return !!slide;
+  })()`);
+  assert(choseSlide, 'the TXT appearance popover must offer a Slide page turn');
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'the appearance popover to close',
+  );
+  const yielded = await page.evaluate(`(() => new Promise((resolve) => {
+    const scroller = ${visibleTxtDoc}?.closest('[data-testid="txt-scroll"]');
+    const button = [...document.querySelectorAll('button')].find(
+      (candidate) =>
+        (candidate.getAttribute('aria-label') ?? candidate.textContent).trim() === 'Next Page'
+        && !candidate.disabled
+        && candidate.checkVisibility({ visibilityProperty: true }),
+    );
+    if (!scroller || !button) {
+      resolve(null);
+      return;
+    }
+    scroller.scrollTop = 2000;
+    scroller.dispatchEvent(new Event('scroll'));
+    const start = scroller.scrollTop;
+    button.click();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const mid = scroller.scrollTop;
+      scroller.scrollTop = mid - 600;
+      scroller.dispatchEvent(new Event('scroll'));
+      const wanted = scroller.scrollTop;
+      setTimeout(() => resolve({ start, mid, wanted, end: scroller.scrollTop }), 600);
+    }));
+  }))()`);
+  assert(yielded !== null, 'the TXT page and its Next Page button must be visible');
+  assert(
+    yielded.mid > yielded.start,
+    `the TXT slide has to be running before the reader scrolls: ${yielded.start} → ${yielded.mid}`,
+  );
+  assert(
+    Math.abs(yielded.end - yielded.wanted) < 2,
+    `a TXT slide must stop where the reader scrolled: wanted ${yielded.wanted}, ended ${yielded.end}`,
+  );
 }

@@ -1098,10 +1098,15 @@ describe('slideScroll', () => {
 
   const mountScroller = () => {
     const scroller = document.createElement('div');
-    const scrollTo = vi.fn();
-    scroller.scrollTo = scrollTo as unknown as HTMLElement['scrollTo'];
     Object.defineProperty(scroller, 'scrollLeft', { value: 100, writable: true });
     Object.defineProperty(scroller, 'scrollTop', { value: 0, writable: true });
+    // As a real scroller does: the position follows what was asked for, so the
+    // motion can tell its own writes from a reader's scroll.
+    const scrollTo = vi.fn((options: ScrollToOptions) => {
+      scroller.scrollLeft = options.left ?? scroller.scrollLeft;
+      scroller.scrollTop = options.top ?? scroller.scrollTop;
+    });
+    scroller.scrollTo = scrollTo as unknown as HTMLElement['scrollTo'];
     return { scroller, scrollTo };
   };
 
@@ -1125,6 +1130,32 @@ describe('slideScroll', () => {
     expect((scrollTo.mock.calls[0]?.[0] as ScrollToOptions).left).toBeGreaterThan(100);
     expect((scrollTo.mock.calls[0]?.[0] as ScrollToOptions).left).toBeLessThan(600);
     expect(scrollTo.mock.calls.at(-1)?.[0]).toMatchObject({ left: 600 });
+  });
+
+  it('stops when the reader scrolls by hand, instead of dragging them back', async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    let clock = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const { scroller, scrollTo } = mountScroller();
+    scroller.scrollTop = 1000;
+
+    const slide = slideScroll(scroller, { top: 500 }, 260);
+    clock = 0;
+    frames.shift()?.(clock);
+    expect(scroller.scrollTop).toBe(1000);
+
+    // The reader scrolls up 600 px before the motion's next frame. The browser has
+    // already applied it, so the motion must stop there rather than overwrite it.
+    scroller.scrollTop = 400;
+    clock = 130;
+    frames.shift()?.(clock);
+    await slide;
+    expect(scroller.scrollTop).toBe(400);
+    expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 
   it('moves at once with reduced motion, and does nothing for no travel', async () => {

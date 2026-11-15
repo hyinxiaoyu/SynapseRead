@@ -1096,6 +1096,11 @@ export function animatePageTurn(
  * `from` starts the motion from a position the container is not at yet, which is
  * how a second turn made during the first one's animation still travels a whole
  * page: it lands where the first was heading rather than from half-way.
+ *
+ * A reader who scrolls by hand takes the container over: the browser applies their
+ * scroll before the next frame, so a position that no longer matches what this
+ * motion last wrote stops it there instead of dragging them back to the turn's
+ * target. Programmatic writes are the only ones that match, so they never cancel it.
  */
 export function slideScroll(
   scroller: HTMLElement | null,
@@ -1115,14 +1120,25 @@ export function slideScroll(
   }
   return new Promise((resolve) => {
     const started = performance.now();
+    /** What this motion last wrote; anything else moved the container. */
+    let written: { left: number; top: number } | null = null;
     const step = () => {
       if (signal?.aborted) {
         resolve();
         return;
       }
+      if (
+        written !== null &&
+        (Math.abs(scroller.scrollLeft - written.left) > 1 ||
+          Math.abs(scroller.scrollTop - written.top) > 1)
+      ) {
+        resolve();
+        return;
+      }
       const progress = Math.min((performance.now() - started) / duration, 1);
       const eased = easeOut(progress);
-      scroller.scrollTo({ left: fromLeft + left * eased, top: fromTop + top * eased });
+      written = { left: fromLeft + left * eased, top: fromTop + top * eased };
+      scroller.scrollTo(written);
       if (progress < 1) {
         window.requestAnimationFrame(step);
       } else {

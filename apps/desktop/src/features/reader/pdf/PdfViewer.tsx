@@ -1210,8 +1210,8 @@ function PdfPages({
     ? [currentRow - 1, currentRow, currentRow + 1].filter((row) => row >= 0 && row < rowCount)
     : [];
   /**
-   * How wide one slot on the stage is. A zoomed page can be wider than the pane, so
-   * this follows the widest row rather than the pane: a stride of the pane width
+   * How far apart adjacent slots sit. A zoomed page can be wider than the pane, so
+   * the pitch follows the widest row rather than the pane: a pitch of the pane width
    * would overlap the neighbours, and the later slot would paint and take pointer
    * events over the page being read.
    */
@@ -2271,10 +2271,10 @@ function PdfPages({
         secondValid ? rowHeight(secondRow) : 0,
         1,
       );
-      const left = SIDE_PADDING_PX + Math.max(0, (stageCell - w) / 2);
+      const left = SIDE_PADDING_PX + Math.max(0, (contentWidth - w) / 2);
       return { left, width: w, height: h };
     },
-    [stageCell, rowCount, rowHeight, rowWidth],
+    [contentWidth, rowCount, rowHeight, rowWidth],
   );
 
   const restoreStageSlots = (stage: HTMLElement) => {
@@ -2335,7 +2335,7 @@ function PdfPages({
   const curlLayoutRef = useRef({
     currentPageIndex,
     displayMode,
-    stageCell,
+    contentWidth,
     rowOfPage,
     pagesInRow,
     rowCount,
@@ -2345,7 +2345,7 @@ function PdfPages({
     curlLayoutRef.current = {
       currentPageIndex,
       displayMode,
-      stageCell,
+      contentWidth,
       rowOfPage,
       pagesInRow,
       rowCount,
@@ -2393,7 +2393,7 @@ function PdfPages({
       pending.incomingRow,
       box,
       layout.rowCount,
-      layout.stageCell,
+      layout.contentWidth,
     );
     if (!outgoingSlot) {
       restoreStageSlots(stage);
@@ -2515,7 +2515,7 @@ function PdfPages({
         incomingRow,
         box,
         rowCount,
-        stageCell,
+        contentWidth,
       );
       if (!outgoingSlot) return;
       const isSpread =
@@ -2805,15 +2805,22 @@ function PdfPages({
     return pages;
   }, [effectiveHighlights, search.results, search.activeIndex, activeSearchMatch]);
 
-  /** The rows the virtualizer renders in a continuous mode, and the widest of them. */
+  /** The rows the virtualizer renders in a continuous mode. */
   const virtualItems = paged ? [] : virtualizer.getVirtualItems();
-  const maxRowWidth = paged
-    ? Math.max(...stageRows.map(rowWidth), 1)
+  /**
+   * The scrollable column is the page being read, never the neighbours staged beside
+   * it: a smaller page between larger ones would otherwise scroll past its own edges
+   * into blank space, and its offset would report a fraction of nothing.
+   */
+  const columnWidth = paged
+    ? Math.max(rowWidth(currentRow), 1)
     : virtualItems.reduce((max, item) => Math.max(max, rowWidth(item.index)), rowWidth(currentRow));
-  const stageHeight = paged ? Math.max(...stageRows.map(rowHeight), 1) : virtualizer.getTotalSize();
+  const columnHeight = paged ? Math.max(rowHeight(currentRow), 1) : virtualizer.getTotalSize();
+  /** The stage itself still spans the taller neighbours; the column clips them. */
+  const stageHeight = paged ? Math.max(...stageRows.map(rowHeight), 1) : columnHeight;
   const innerMinWidth =
-    width > 0 && maxRowWidth > contentWidth + 1
-      ? `${Math.ceil(maxRowWidth + SIDE_PADDING_PX * 2)}px`
+    width > 0 && columnWidth > contentWidth + 1
+      ? `${Math.ceil(columnWidth + SIDE_PADDING_PX * 2)}px`
       : '100%';
 
   return (
@@ -3162,7 +3169,7 @@ function PdfPages({
                 className={cn('relative', paged && 'overflow-hidden')}
                 style={{
                   width: innerMinWidth,
-                  height: stageHeight,
+                  height: columnHeight,
                 }}
               >
                 {width > 0 && paged && (
@@ -3176,12 +3183,13 @@ function PdfPages({
                       const pages = pagesInRow(row);
                       const itemWidth = rowWidth(row);
                       const itemHeight = rowHeight(row);
-                      // Slots sit one page apart, each page centred in its slot, so a
-                      // slide of exactly one stride lands the neighbour where it was.
+                      // Slots sit one stride apart, each page placed where it would
+                      // sit as the current one, so a slide of exactly one stride lands
+                      // the neighbour where it was and nothing overlaps when zoomed.
                       const slotLeft =
                         SIDE_PADDING_PX +
                         (row - currentRow) * stageStride +
-                        Math.max(0, (stageCell - itemWidth) / 2);
+                        Math.max(0, (contentWidth - itemWidth) / 2);
                       return (
                         <div
                           key={`${displayMode}-${row}`}
