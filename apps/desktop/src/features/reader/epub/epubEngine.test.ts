@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_READING_PREFERENCES } from '@/types/domain';
 import {
   decorateWithNoteMarker,
+  type EpubSelection,
   openEpubDocument,
   type PaneMark,
   type RenditionAnnotation,
@@ -33,6 +34,7 @@ const fake = vi.hoisted(() => {
   interface FakeContents {
     document: Document;
     window: Window;
+    cfiFromRange: (range: Range) => string;
     expand: ReturnType<typeof vi.fn<() => void>>;
   }
   interface SpineSection {
@@ -48,6 +50,7 @@ const fake = vi.hoisted(() => {
     pending: [] as Pending[],
     spineHooks: [] as ((chapter: Document) => void)[],
     renditionHooks: [] as ((contents: FakeContents) => void)[],
+    listeners: {} as Record<string, (...args: unknown[]) => void>,
   };
   const hrefOf = (target: string | undefined) =>
     chapters.find((chapter) => chapter.href === target || chapter.cfi === target)?.href;
@@ -82,6 +85,9 @@ const fake = vi.hoisted(() => {
       const item: FakeContents = {
         document: frameDoc,
         window,
+        // epub.js computes the CFI of a range from the chapter's base; the fake
+        // returns the chapter's start, which is all the selection tests need.
+        cfiFromRange: () => chapters.find((chapter) => chapter.href === href)?.cfi ?? '',
         expand: vi.fn<() => void>(),
       };
       for (const hook of state.renditionHooks) hook(item);
@@ -104,7 +110,9 @@ const fake = vi.hoisted(() => {
           .then(() => task())
           .then(() => undefined),
     },
-    on: () => undefined,
+    on: (event: string, listener: (...args: unknown[]) => void) => {
+      state.listeners[event] = listener;
+    },
     getContents: () => state.contents,
     views: () => state.views,
     display: (target?: string) => {
@@ -185,6 +193,7 @@ describe('EPUB navigation', () => {
     fake.state.views = [];
     fake.state.spineHooks = [];
     fake.state.renditionHooks = [];
+    fake.state.listeners = {};
     for (const item of fake.spineItems) {
       delete item.document;
     }
@@ -208,6 +217,62 @@ describe('EPUB navigation', () => {
     await Promise.all([first, second]);
     expect(fake.state.displays).toEqual(['chapter1.xhtml', 'epubcfi(/6/4!/4/2/1:0)']);
     expect(fake.rendition.location?.start.href).toBe('chapter2.xhtml');
+  });
+
+  /** Opens the book and settles on Chapter One, with a rendered chapter document. */
+  const renderedChapter = async () => {
+    const handle = await open();
+    const jump = handle.display('epubcfi(/6/2!/4/2/1:0)');
+    fake.settle('epubcfi(/6/2!/4/2/1:0)');
+    await jump;
+    const contents = fake.state.contents.at(-1);
+    if (!contents) throw new Error('no rendered chapter');
+    return { handle, contents };
+  };
+
+  const selectionOf = (text: string) =>
+    ({
+      isCollapsed: false,
+      rangeCount: 1,
+      getRangeAt: () => document.createRange(),
+      toString: () => text,
+    }) as unknown as Selection;
+
+  it('reports the settled selection on release, not the partial one epub.js debounced', async () => {
+    const { handle, contents } = await renderedChapter();
+    const seen: (EpubSelection | null)[] = [];
+    handle.onSelection((selection) => seen.push(selection));
+
+    const getSelection = vi.spyOn(window, 'getSelection').mockReturnValue(selectionOf('汉字'));
+    try {
+      contents.document.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
+      expect(seen.at(-1)).toEqual({
+        cfiRange: 'epubcfi(/6/2!/4/2/1:0)',
+        chapterHref: 'chapter1.xhtml',
+        text: '汉字',
+      });
+      // epub.js' 250 ms debounce reports the same range again; it must not look
+      // like a fresh selection that re-opens a popover the reader dismissed.
+      fake.state.listeners.selected?.('epubcfi(/6/2!/4/2/1:0)', contents);
+      expect(seen).toHaveLength(1);
+    } finally {
+      getSelection.mockRestore();
+    }
+  });
+
+  it('does not report a click inside the selection as a new one', async () => {
+    const { handle, contents } = await renderedChapter();
+    const seen: (EpubSelection | null)[] = [];
+    handle.onSelection((selection) => seen.push(selection));
+
+    const getSelection = vi.spyOn(window, 'getSelection').mockReturnValue(selectionOf('汉字'));
+    try {
+      contents.document.dispatchEvent(new MouseEvent('pointerdown', { button: 0 }));
+      contents.document.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
+      expect(seen).toHaveLength(0);
+    } finally {
+      getSelection.mockRestore();
+    }
   });
 
   it('restores a jump in flight on resize, not the location epub.js reported last', async () => {
@@ -575,7 +640,9 @@ describe('EPUB paper curl engine', () => {
       const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
       const chapterDoc = document.implementation.createHTMLDocument('');
       chapterDoc.body.innerHTML = '<p id="dup" data-annotation-id="a1">Outgoing page</p>';
-      fake.state.contents = [{ document: chapterDoc, window, expand: vi.fn() }];
+      fake.state.contents = [
+        { document: chapterDoc, window, cfiFromRange: () => '', expand: vi.fn() },
+      ];
 
       const curlHost = document.createElement('div');
       const shadow = document.createElement('div');
