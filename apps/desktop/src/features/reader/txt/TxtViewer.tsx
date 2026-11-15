@@ -873,8 +873,12 @@ export function TxtViewer({
     // never reach, so a reversal at the end would not move them back at all.
     const clamp = (value: number) => Math.min(Math.max(value, 0), limit);
     const from = clamp(slideBase());
-    cancelSlide();
     const target = clamp(top);
+    // A repeated turn that clamps to the destination the slide in flight is already
+    // heading for leaves nothing to move: cancelling it there would strand the rows
+    // at whatever half-way point they had reached instead of the boundary.
+    if (target === from && slideTarget.current !== null) return;
+    cancelSlide();
     const delta = target - from;
     if (delta === 0) return;
     const controller = new AbortController();

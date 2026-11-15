@@ -257,6 +257,28 @@ describe('TxtViewer', () => {
       await waitFor(() => expect(page.scrollTop).toBe(step));
     });
 
+    it('keeps the slide in flight when a repeated turn clamps to the same boundary', async () => {
+      const { store, documentId } = await setup(bytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('SynapseRead sample text');
+      const page = scroller();
+      const end = ROW_PX * 10_000 - VIEWPORT_PX;
+
+      // 300 px before the end, two rapid Next Page inputs. The second clamps to the
+      // boundary the first is already heading for, so it must not stop that slide
+      // and leave the rows at the half-way point.
+      scrollTo(end - 300);
+      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      await waitFor(() => expect(page.scrollTop).toBe(end));
+
+      // The same at the start with Previous Page.
+      scrollTo(300);
+      fireEvent.keyDown(page, { key: 'PageUp', code: 'PageUp' });
+      fireEvent.keyDown(page, { key: 'PageUp', code: 'PageUp' });
+      await waitFor(() => expect(page.scrollTop).toBe(0));
+    });
+
     it('virtualizes: renders only rows near the viewport', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);
