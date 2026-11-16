@@ -91,17 +91,28 @@ export function applyReadableAuthorColors(doc: Document, theme: ReadingTheme): v
     // A dark paragraph on the book's own white callout box is readable there,
     // even though it would vanish on the Dark page; compare with that paper.
     const background = opaqueBackground(computed.backgroundColor) ?? inherited.background;
-    if (inherited.color === color || contrastOnPage(color, background) >= AA_TEXT) {
+    if (
+      (inherited.color === color && inherited.background === background) ||
+      contrastOnPage(color, background) >= AA_TEXT
+    ) {
       settled.set(element, { color, background });
       continue;
     }
+    // Against an author's own opaque background (such as a `#f2f2f2` code block in Dark
+    // mode), pick whichever of the theme ink or dark ink yields higher contrast.
+    const replacement =
+      background !== palette.background &&
+      contrastOnPage(PAGE_PALETTES.light.text, background) >
+        contrastOnPage(palette.text, background)
+        ? PAGE_PALETTES.light.text
+        : palette.text;
     const style = (element as HTMLElement).style;
     originalInline.set(element, {
       value: style.getPropertyValue('color'),
       priority: style.getPropertyPriority('color'),
     });
-    style.setProperty('color', palette.text, 'important');
+    style.setProperty('color', replacement, 'important');
     element.setAttribute(OVERRIDDEN, resolved);
-    settled.set(element, { color: palette.text, background });
+    settled.set(element, { color: replacement, background });
   }
 }

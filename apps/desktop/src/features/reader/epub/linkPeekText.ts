@@ -15,8 +15,20 @@ const NOTE_TYPES = ['footnote', 'endnote', 'rearnote', 'note'];
 const NOTE_ROLES = ['doc-footnote', 'doc-endnote'];
 /** Never part of a note's text: code, styling, embedded content, and the way back. */
 const SKIPPED = new Set(['script', 'style', 'template', 'noscript', 'svg', 'math', 'head']);
-/** Targets that start a part of the book, not a note, so a link to one jumps. */
-const STRUCTURAL = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'body', 'html', 'nav']);
+/** Targets that start a part of the book or a code listing, not a note, so a link to one jumps. */
+const STRUCTURAL = new Set([
+  'h1',
+  'h2',
+  'h3',
+  'h4',
+  'h5',
+  'h6',
+  'section',
+  'body',
+  'html',
+  'nav',
+  'pre',
+]);
 /**
  * Structural elements an inline target may stand for (`<h2><span id="sec2">…</span></h2>`),
  * unlike container roots (`section`, `body`, `html`) where climbing would read a whole chapter.

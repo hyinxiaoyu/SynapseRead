@@ -97,11 +97,13 @@ describe('noteTextAt', () => {
     expect(shown.length).toBeLessThanOrEqual(PEEK_MAX_CHARS + 1);
   });
 
-  it('jumps to headings and sections unless the target says it is a note', () => {
+  it('jumps to headings, sections, and pre code blocks unless the target says it is a note', () => {
     const doc = chapter(`<section id="part"><h2 id="title">Part Two</h2><p>Body.</p></section>
+      <pre id="listing"><code>const x = 1;</code></pre>
       <section id="notes" epub:type="endnote"><p>An endnote.</p></section>`);
     expect(noteTextAt(doc, 'title', { noteref: false })).toBeNull();
     expect(noteTextAt(doc, 'part', { noteref: false })).toBeNull();
+    expect(noteTextAt(doc, 'listing', { noteref: false })).toBeNull();
     expect(noteTextAt(doc, 'notes', { noteref: false })).toBe('An endnote.');
   });
 

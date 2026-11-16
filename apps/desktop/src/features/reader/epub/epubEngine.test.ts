@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_READING_PREFERENCES } from '@/types/domain';
 import {
   decorateWithNoteMarker,
+  type EpubCodeBlockHover,
   type EpubSelection,
   openEpubDocument,
   type PaneMark,
@@ -1501,5 +1502,218 @@ describe('EPUB slide seam scrubbing', () => {
       cancelSpy.mockRestore();
       nowSpy.mockRestore();
     }
+  });
+});
+
+describe('EPUB code blocks', () => {
+  beforeEach(() => {
+    fake.state.displays = [];
+    fake.state.resizes = [];
+    fake.state.pending = [];
+    fake.state.contents = [];
+    fake.state.views = [];
+    fake.state.spineHooks = [];
+    fake.state.renditionHooks = [];
+    fake.state.listeners = {};
+    for (const item of fake.spineItems) {
+      delete item.document;
+    }
+    fake.rendition.location = undefined;
+  });
+
+  const openRendered = async () => {
+    const host = document.createElement('div');
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 40, 800, 600));
+    fake.rendition.location = { start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' } };
+    const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+    const jump = handle.display('epubcfi(/6/2!/4/2/1:0)');
+    fake.settle('epubcfi(/6/2!/4/2/1:0)');
+    await jump;
+    const contents = fake.state.contents[0];
+    if (!contents) throw new Error('no rendered chapter');
+    return { host, handle, contents };
+  };
+
+  it('ignores Pandoc aria-hidden line anchors inside pre while keeping callout and regular links', async () => {
+    const { handle, contents } = await openRendered();
+    Reflect.set(contents, 'sectionIndex', 0);
+    const links: string[] = [];
+    handle.onInternalLink((href) => links.push(href));
+
+    contents.document.body.innerHTML = `
+      <pre id="cb1"><code><span id="cb1-1"><a id="pandoc-anchor" href="#cb1-1" aria-hidden="true" tabindex="-1"></a>let x = 1;</span><a id="callout-link" href="#co1">(1)</a></code></pre>
+      <a id="outside-hidden" href="#fn1" aria-hidden="true">*</a>
+    `;
+    const epubjsOnClick = vi.fn();
+    (contents.document.getElementById('pandoc-anchor') as HTMLElement).onclick = epubjsOnClick;
+
+    const click = (id: string) => {
+      const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+      contents.document.getElementById(id)?.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+
+    expect(click('pandoc-anchor')).toBe(true);
+    expect(links).toEqual([]);
+    expect(epubjsOnClick).not.toHaveBeenCalled();
+
+    expect(click('callout-link')).toBe(true);
+    expect(click('outside-hidden')).toBe(true);
+    expect(links).toEqual(['/chapter1.xhtml#co1', '/chapter1.xhtml#fn1']);
+    handle.destroy();
+  });
+
+  it('injects reflowable code-block typography and theme styles across light, sepia, and dark', async () => {
+    const { handle, contents } = await openRendered();
+
+    const typographyCss =
+      contents.document.querySelector('style[data-synapse-typography="true"]')?.textContent ?? '';
+    expect(typographyCss).toContain('overflow-wrap: anywhere');
+    expect(typographyCss).toContain('word-break: normal');
+    expect(typographyCss).toContain('text-indent: 2ch hanging each-line');
+    expect(typographyCss).toContain('margin: 0.9em 0;');
+    expect(typographyCss).not.toContain('margin: 0.9em 0 !important');
+    expect(typographyCss).not.toContain('figure, table, pre, blockquote');
+    expect(typographyCss).toContain('pre code {');
+
+    const prefCss = () =>
+      contents.document.querySelector('style[data-synapse-preferences="true"]')?.textContent ?? '';
+
+    expect(prefCss()).toContain('overflow: visible !important');
+    expect(prefCss()).toContain('break-inside: auto !important');
+    expect(prefCss()).toContain('div:has(> pre), figure:has(> pre), blockquote:has(> pre)');
+    expect(prefCss()).not.toContain('#ebe1c8');
+    expect(prefCss()).not.toContain('#202024');
+
+    handle.setPreferences({ ...DEFAULT_READING_PREFERENCES, theme: 'sepia' });
+    expect(prefCss()).toContain('#ebe1c8 !important');
+    expect(prefCss()).toContain('#433422 !important');
+    expect(prefCss()).toContain('div.sourceCode, .code-area-container');
+
+    handle.setPreferences({ ...DEFAULT_READING_PREFERENCES, theme: 'dark' });
+    expect(prefCss()).toContain('#202024 !important');
+    expect(prefCss()).toContain('#e4e4e7 !important');
+    expect(prefCss()).toContain('div.sourceCode, .code-area-container');
+
+    handle.destroy();
+  });
+
+  it('tracks hovered/focused copyable pre blocks, deduplicates rects, and clears on navigation/reset', async () => {
+    const { host, handle, contents } = await openRendered();
+    const seen: (EpubCodeBlockHover | null)[] = [];
+    handle.onCodeBlockHover?.((block) => seen.push(block));
+
+    contents.document.body.innerHTML = `
+      <p id="prose">Prose</p>
+      <pre id="code"><code id="inner">  const x = 1;\n</code></pre>
+      <pre id="gutter" class="linenos">1</pre>
+    `;
+    const prose = contents.document.getElementById('prose') as Element;
+    const pre = contents.document.getElementById('code') as Element;
+    const inner = contents.document.getElementById('inner') as Element;
+    const gutter = contents.document.getElementById('gutter') as Element;
+    const hostRectSpy = vi.spyOn(host, 'getBoundingClientRect');
+    let fragRect = new DOMRect(120, 100, 400, 80);
+    const clientRectsSpy = vi
+      .spyOn(pre, 'getClientRects')
+      .mockImplementation(() => [fragRect] as unknown as DOMRectList);
+
+    // Moving over prose does not trigger hover or layout reads.
+    prose.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 0 }));
+    expect(seen).toEqual([]);
+    expect(hostRectSpy).not.toHaveBeenCalled();
+    expect(clientRectsSpy).not.toHaveBeenCalled();
+
+    // Dragging (buttons !== 0) over code does not emit hover.
+    inner.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 1 }));
+    expect(seen).toEqual([]);
+
+    // Hovering over copyable pre emits stable id, clipped rect, and exact text getter.
+    inner.dispatchEvent(
+      new MouseEvent('pointermove', { bubbles: true, buttons: 0, clientX: 180, clientY: 120 }),
+    );
+    expect(seen).toHaveLength(1);
+    const first = seen[0];
+    expect(first?.id).toBe('code-1');
+    expect(first?.rect).toEqual({ left: 120, top: 100, right: 520, bottom: 180 });
+    expect(first?.getText()).toBe('  const x = 1;');
+
+    // Sub-pixel jitter that rounds to the same rect is deduplicated.
+    fragRect = new DOMRect(120.2, 100.3, 400, 80);
+    inner.dispatchEvent(
+      new MouseEvent('pointermove', { bubbles: true, buttons: 0, clientX: 185, clientY: 125 }),
+    );
+    expect(seen).toHaveLength(1);
+
+    // Moving to a gutter clears hover.
+    gutter.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 0 }));
+    expect(seen.at(-1)).toBeNull();
+
+    // Click when selection is collapsed emits hover with the same stable id.
+    fragRect = new DOMRect(120, 100, 400, 80);
+    const collapsed = { isCollapsed: true, rangeCount: 0 } as unknown as Selection;
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue(collapsed);
+    try {
+      inner.dispatchEvent(
+        new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: 150,
+          clientY: 110,
+        }),
+      );
+      expect(seen.at(-1)?.id).toBe('code-1');
+
+      // Non-collapsed selection ignores click.
+      seen.length = 0;
+      contents.document.documentElement.dispatchEvent(new MouseEvent('pointerleave'));
+      expect(seen).toEqual([null]);
+      getSelectionSpy.mockReturnValue({
+        isCollapsed: false,
+        rangeCount: 1,
+      } as unknown as Selection);
+      inner.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+      expect(seen).toEqual([null]);
+    } finally {
+      getSelectionSpy.mockRestore();
+    }
+
+    // focusin triggers hover, and lifecycle events clear it.
+    const focusAndClear = (clear: () => void) => {
+      seen.length = 0;
+      inner.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.id).toBe('code-1');
+      clear();
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toBeNull();
+    };
+
+    focusAndClear(() =>
+      contents.document.dispatchEvent(new MouseEvent('pointerdown', { button: 0 })),
+    );
+    focusAndClear(() =>
+      fake.state.listeners.relocated?.({
+        start: { cfi: 'epubcfi(/6/2!/4/2/1:0)', href: 'chapter1.xhtml' },
+        end: { cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      }),
+    );
+    focusAndClear(() => void handle.next());
+    focusAndClear(() => handle.beginScrub());
+    focusAndClear(() => handle.resize(640, 480));
+    focusAndClear(() => void handle.setReadingMode('scroll'));
+    focusAndClear(() => handle.setPreferences({ ...DEFAULT_READING_PREFERENCES, theme: 'dark' }));
+
+    // destroy clears active hover and ignores subsequent events.
+    seen.length = 0;
+    inner.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    expect(seen).toHaveLength(1);
+    handle.destroy();
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toBeNull();
+
+    inner.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 0 }));
+    expect(seen).toHaveLength(2);
   });
 });

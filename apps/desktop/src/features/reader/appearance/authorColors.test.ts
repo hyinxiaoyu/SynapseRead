@@ -111,4 +111,37 @@ describe('readable author colors', () => {
     expect(colorOf(doc, 'h1')).toBe(overridden);
     expect(doc.querySelectorAll('[data-synapse-readable-color]')).toHaveLength(1);
   });
+
+  it('rescues inherited Dark/Sepia text and low-contrast tokens inside opaque #f2f2f2 code blocks', () => {
+    const doc = chapter(`
+      <div class="outer-white" style="color: rgb(228, 228, 231)">
+        <div class="code-wrap" style="background-color: #f2f2f2">
+          <pre><code>plain <span class="tok-low" style="color: #eeeeee">pale</span> <span class="tok-dark" style="color: #000080">navy</span></code></pre>
+        </div>
+      </div>
+    `);
+
+    applyReadableAuthorColors(doc, 'dark');
+
+    expect(colorOf(doc, '.code-wrap')).toBe('rgb(28, 25, 23)');
+    expect(colorOf(doc, 'code')).toBe('rgb(28, 25, 23)');
+    expect(colorOf(doc, '.tok-low')).toBe('rgb(28, 25, 23)');
+    expect(colorOf(doc, '.tok-dark')).toBe('rgb(0, 0, 128)');
+    expect(contrastRatio(colorOf(doc, '.code-wrap'), '#f2f2f2')).toBeGreaterThanOrEqual(AA_TEXT);
+    expect(contrastRatio(colorOf(doc, '.tok-low'), '#f2f2f2')).toBeGreaterThanOrEqual(AA_TEXT);
+
+    // Re-settle in Sepia with a fresh low-contrast token on #f2f2f2.
+    const sepiaDoc = chapter(`
+      <div class="code-wrap" style="background-color: #f2f2f2">
+        <pre><code><span class="tok-pale" style="color: #fff7d6">pale</span> <span class="tok-dark" style="color: #000080">navy</span></code></pre>
+      </div>
+    `);
+    applyReadableAuthorColors(sepiaDoc, 'sepia');
+
+    expect(colorOf(sepiaDoc, '.tok-pale')).toBe('rgb(28, 25, 23)');
+    expect(colorOf(sepiaDoc, '.tok-dark')).toBe('rgb(0, 0, 128)');
+    expect(contrastRatio(colorOf(sepiaDoc, '.tok-pale'), '#f2f2f2')).toBeGreaterThanOrEqual(
+      AA_TEXT,
+    );
+  });
 });

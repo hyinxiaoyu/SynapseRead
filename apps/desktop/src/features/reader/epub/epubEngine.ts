@@ -42,6 +42,12 @@ import {
   type ReadingPreferences,
 } from '@/types/domain';
 
+import {
+  type EpubCodeBlockHover,
+  extractCodeBlockText,
+  isCopyableCodeBlock,
+  visibleCodeBlockRect,
+} from './codeBlocks';
 import { isNoteRef, noteTextAt } from './linkPeekText';
 import { sanitizeChapter } from './sanitizeChapter';
 import {
@@ -53,6 +59,7 @@ import {
 } from './textWeights';
 
 export type { EpubReadingMode } from '@/types/domain';
+export type { EpubCodeBlockHover } from './codeBlocks';
 
 export interface EpubTocItem {
   id: string;
@@ -243,6 +250,8 @@ export interface EpubHandle {
   onGesture(listener: (sample: PageGestureSample) => void): void;
   /** Wheel events in a chapter frame; the listener reports whether it used one. */
   onWheel(listener: (wheel: WheelSample) => boolean): void;
+  /** The copyable `<pre>` code block currently hovered or focused in a chapter frame, or null. */
+  onCodeBlockHover?(listener: (block: EpubCodeBlockHover | null) => void): void;
   /** The cursor over the chapter frames, such as a page-turn hint. */
   setCursor(cursor: string): void;
   destroy(): void;
@@ -302,7 +311,7 @@ h1, h2, h3, h4, h5, h6 {
   break-inside: avoid;
   page-break-inside: avoid;
 }
-img, svg, video, figure, table, pre, blockquote {
+img, svg, video, figure, table, blockquote {
   max-width: 100%;
   break-inside: avoid;
   page-break-inside: avoid;
@@ -317,8 +326,31 @@ pre, code {
   font-size: 0.9em;
 }
 pre {
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: 0.9em 0;
+  padding: 0.75em 0.9em;
+  border-radius: 6px;
+  line-height: 1.5;
+  tab-size: 4;
+  background-color: #f3f1eb;
+  border: 1px solid rgba(28, 25, 23, 0.12);
   white-space: pre-wrap;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  hyphens: none;
+  -webkit-hyphens: none;
+  text-indent: 2ch hanging each-line;
+}
+pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: inherit;
+  overflow-wrap: inherit;
+  word-break: inherit;
 }
 `;
 
@@ -360,6 +392,28 @@ ${imageRule}
   const alignment = preferences.justify
     ? 'p { text-align: justify; hyphens: auto; -webkit-hyphens: auto; }'
     : 'p { text-align: start !important; hyphens: manual !important; -webkit-hyphens: manual !important; }';
+  const codeThemeCss =
+    theme === 'sepia'
+      ? `
+pre {
+  background-color: #ebe1c8 !important;
+  border: 1px solid rgba(67, 52, 34, 0.2) !important;
+  color: #433422 !important;
+}
+div.sourceCode, .code-area-container {
+  background-color: transparent !important;
+}`
+      : theme === 'dark'
+        ? `
+pre {
+  background-color: #202024 !important;
+  border: 1px solid rgba(228, 228, 231, 0.16) !important;
+  color: #e4e4e7 !important;
+}
+div.sourceCode, .code-area-container {
+  background-color: transparent !important;
+}`
+        : '';
   return `
 html {
   color-scheme: ${palette.colorScheme};
@@ -384,6 +438,35 @@ a {
 blockquote {
   border-left-color: ${palette.border} !important;
 }
+pre {
+  overflow: visible !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+  font-size: 0.875em !important;
+  line-height: 1.5 !important;
+  white-space: pre-wrap !important;
+  overflow-wrap: anywhere !important;
+  word-break: normal !important;
+  hyphens: none !important;
+  -webkit-hyphens: none !important;
+  text-indent: 2ch hanging each-line !important;
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+pre code {
+  font-size: inherit !important;
+  line-height: inherit !important;
+  white-space: inherit !important;
+  overflow-wrap: inherit !important;
+  word-break: inherit !important;
+  background-color: transparent !important;
+}
+div:has(> pre), figure:has(> pre), blockquote:has(> pre) {
+  overflow: visible !important;
+  break-inside: auto !important;
+  page-break-inside: auto !important;
+}
+${codeThemeCss}
 ${imageRule}
 `;
 }
@@ -806,9 +889,46 @@ export async function openEpubDocument(
   let markClickListener: (annotationId: string, rect: ViewportRect | null) => void = () =>
     undefined;
   let pointerListener: (down: boolean) => void = () => undefined;
+  let codeBlockHoverListener: (block: EpubCodeBlockHover | null) => void = () => undefined;
+  let destroyed = false;
   let frameCursor = '';
   /** One listener for every chapter document, so it can be removed again by identity. */
   const onChapterContextMenu = (event: MouseEvent) => contextMenuListener(event);
+  const codeBlockIds = new WeakMap<Element, string>();
+  let nextCodeBlockId = 0;
+  const hoveredCodeDocs = new WeakSet<Document>();
+  let lastHoveredBlock: {
+    id: string;
+    top: number;
+    left: number;
+    bottom: number;
+    right: number;
+  } | null = null;
+  const zeroRect: DOMRectReadOnly = {
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: 0,
+    height: 0,
+    toJSON: () => ({}),
+  };
+  const blockIdOf = (pre: Element): string => {
+    let id = codeBlockIds.get(pre);
+    if (!id) {
+      nextCodeBlockId += 1;
+      id = `code-${nextCodeBlockId}`;
+      codeBlockIds.set(pre, id);
+    }
+    return id;
+  };
+  const clearCodeBlockHover = () => {
+    if (lastHoveredBlock === null) return;
+    lastHoveredBlock = null;
+    if (!destroyed) codeBlockHoverListener(null);
+  };
 
   rendition.hooks.content.register((contents: Contents) => {
     contents.document.body?.classList.toggle('epubjs-scrolled', currentMode === 'scroll');
@@ -823,6 +943,13 @@ export async function openEpubDocument(
         if (event.button !== 0) return;
         const target = event.target as Element | null;
         const anchor = target?.closest?.('a[href]') ?? null;
+        // Pandoc line-number anchors inside `<pre>` are decorative targets; ignore
+        // them so clicking code never opens LinkPeek or re-displays the chapter.
+        if (anchor?.getAttribute('aria-hidden') === 'true' && anchor.closest('pre') !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         const raw = anchor?.getAttribute('href') ?? '';
         const href = resolveChapterLink(raw, spineItems[contents.sectionIndex]?.href);
         if (href === null) return;
@@ -928,6 +1055,78 @@ export async function openEpubDocument(
       },
       { passive: false },
     );
+    if (!hoveredCodeDocs.has(chapterDoc)) {
+      hoveredCodeDocs.add(chapterDoc);
+      const inspectCodeBlock = (pre: Element | null, clientPoint?: { x: number; y: number }) => {
+        if (destroyed) return;
+        if (!pre || !isCopyableCodeBlock(pre)) {
+          clearCodeBlockHover();
+          return;
+        }
+        const frameRect = contents.window.frameElement?.getBoundingClientRect() ?? zeroRect;
+        const hostRect = element.getBoundingClientRect();
+        const pointer = clientPoint
+          ? { x: frameRect.left + clientPoint.x, y: frameRect.top + clientPoint.y }
+          : undefined;
+        const rect = visibleCodeBlockRect(pre, frameRect, hostRect, pointer);
+        if (!rect) {
+          clearCodeBlockHover();
+          return;
+        }
+        const id = blockIdOf(pre);
+        const top = Math.round(rect.top);
+        const left = Math.round(rect.left);
+        const bottom = Math.round(rect.bottom);
+        const right = Math.round(rect.right);
+        if (
+          lastHoveredBlock &&
+          lastHoveredBlock.id === id &&
+          lastHoveredBlock.top === top &&
+          lastHoveredBlock.left === left &&
+          lastHoveredBlock.bottom === bottom &&
+          lastHoveredBlock.right === right
+        ) {
+          return;
+        }
+        lastHoveredBlock = { id, top, left, bottom, right };
+        codeBlockHoverListener({
+          id,
+          rect,
+          getText: () => extractCodeBlockText(pre),
+        });
+      };
+      const preFromTarget = (target: EventTarget | null): Element | null => {
+        const targetElement = target as Element | null;
+        return typeof targetElement?.closest === 'function' ? targetElement.closest('pre') : null;
+      };
+      chapterDoc.addEventListener('pointermove', (event: PointerEvent) => {
+        if (event.buttons !== 0) return;
+        const pre = preFromTarget(event.target);
+        if (!pre) {
+          clearCodeBlockHover();
+          return;
+        }
+        inspectCodeBlock(pre, { x: event.clientX, y: event.clientY });
+      });
+      chapterDoc.addEventListener('click', (event: MouseEvent) => {
+        if (event.button !== 0 || event.defaultPrevented || hasSelection()) return;
+        const pre = preFromTarget(event.target);
+        if (!pre) {
+          clearCodeBlockHover();
+          return;
+        }
+        inspectCodeBlock(pre, { x: event.clientX, y: event.clientY });
+      });
+      chapterDoc.addEventListener('focusin', (event: FocusEvent) => {
+        inspectCodeBlock(preFromTarget(event.target));
+      });
+      chapterDoc.addEventListener('pointerdown', () => {
+        clearCodeBlockHover();
+      });
+      chapterDoc.documentElement.addEventListener('pointerleave', () => {
+        clearCodeBlockHover();
+      });
+    }
     // `section.load()` runs `book.spine.hooks.content` only on the first parse of a
     // chapter, so any later view created by a resize, mode switch, or chapter revisit
     // must receive the latest preferences here too before author colors are audited.
@@ -946,6 +1145,7 @@ export async function openEpubDocument(
     reportSelection({ cfiRange, text }, false);
   });
   rendition.on('relocated', (location: Location) => {
+    clearCodeBlockHover();
     currentCfi = location.start.cfi;
     const displayed = location.start.displayed;
     const totalChapters = Math.max(spineItems.length, 1);
@@ -1019,6 +1219,7 @@ export async function openEpubDocument(
       .catch(() => undefined);
 
   const display = async (target?: string) => {
+    clearCodeBlockHover();
     // A newer navigation owns the strip: a slide still running would keep writing
     // its old page offset into the chapter this display is about to load.
     settleSlide();
@@ -1654,6 +1855,7 @@ export async function openEpubDocument(
     transition?: PageTransition,
     spread = false,
   ) => {
+    clearCodeBlockHover();
     // A turn starts from a whole page, so any slide or curl still running settles first.
     settleSlide();
     clearCurlStage();
@@ -1956,6 +2158,7 @@ export async function openEpubDocument(
       turn(direction, options?.animate ?? true, options?.transition, options?.spread),
     canTurnInPlace,
     beginScrub(options) {
+      clearCodeBlockHover();
       // A scrub starts from a whole page, never from half of a slide or curl.
       settleSlide();
       clearCurlStage();
@@ -2045,6 +2248,7 @@ export async function openEpubDocument(
     endScrub,
     async setReadingMode(mode) {
       if (mode === currentMode) return;
+      clearCodeBlockHover();
       // A relayout replaces the strip's chapter, so a slide in flight must land
       // before epub.js re-displays, not keep writing into the new one.
       settleSlide();
@@ -2083,6 +2287,7 @@ export async function openEpubDocument(
       currentColumns = columns;
       const after = spreadFor(currentMode, columns);
       if (before === after) return;
+      clearCodeBlockHover();
       // epub.js re-lays out on resize and returns to the current location then.
       rendition.spread(after, 0);
       const target = pendingTarget ?? currentCfi;
@@ -2101,6 +2306,7 @@ export async function openEpubDocument(
     },
 
     setPreferences(preferences) {
+      clearCodeBlockHover();
       const typographyChanged =
         preferences.fontFamily !== currentPreferences.fontFamily ||
         preferences.fontSize !== currentPreferences.fontSize ||
@@ -2223,6 +2429,7 @@ export async function openEpubDocument(
       pointerListener = listener;
     },
     resize: (width, height) => {
+      clearCodeBlockHover();
       // A resize clears epub.js' views. Restore the jump in flight, or the current
       // location, rather than the stale location epub.js last reported (#41).
       settleSlide();
@@ -2250,6 +2457,9 @@ export async function openEpubDocument(
     onWheel(listener) {
       wheelListener = listener;
     },
+    onCodeBlockHover(listener) {
+      codeBlockHoverListener = listener;
+    },
     setCursor(cursor) {
       if (cursor === frameCursor) return;
       frameCursor = cursor;
@@ -2258,6 +2468,9 @@ export async function openEpubDocument(
       }
     },
     destroy() {
+      clearCodeBlockHover();
+      destroyed = true;
+      codeBlockHoverListener = () => undefined;
       cancelSlide();
       clearCurlStage();
       // The seam hold shadows one method on the manager; leave it as we found it.
