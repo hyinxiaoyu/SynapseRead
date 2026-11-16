@@ -3,6 +3,7 @@
 import { fileURLToPath } from 'node:url';
 
 import { epubFlow } from './epub.mjs';
+import { epubCodeBlocksFlow } from './epubCodeBlocks.mjs';
 import { epubProgressFlow } from './epubProgress.mjs';
 import { goToFlow } from './goTo.mjs';
 import { launchPage, serveDist, warmUp } from './harness.mjs';
@@ -25,6 +26,7 @@ const FLOWS = {
   'pdf-layout': pdfLayoutFlow,
   'pdf-zoom': pdfZoomFlow,
   epub: epubFlow,
+  'epub-code-blocks': epubCodeBlocksFlow,
   'epub-progress': epubProgressFlow,
   keyboard: keyboardFlow,
   'txt-chapters': txtChaptersFlow,
