@@ -1864,10 +1864,14 @@ describe('EPUB code blocks', () => {
     const prefCss =
       contents.document.querySelector('style[data-synapse-preferences="true"]')?.textContent ?? '';
 
-    expect(typographyCss).toContain('pre a[aria-hidden="true"]');
+    expect(typographyCss).toContain('pre a[aria-hidden="true"],\npre a[aria-hidden="true"] *');
     expect(typographyCss).toContain('-webkit-user-drag: none;');
-    expect(prefCss).toContain('pre a[aria-hidden="true"]');
+    expect(typographyCss).toContain('-webkit-user-select: text;');
+    expect(typographyCss).toContain('user-select: text;');
+    expect(prefCss).toContain('pre a[aria-hidden="true"],\npre a[aria-hidden="true"] *');
     expect(prefCss).toContain('-webkit-user-drag: none !important;');
+    expect(prefCss).toContain('-webkit-user-select: text !important;');
+    expect(prefCss).toContain('user-select: text !important;');
     expect(prefCss).toContain('cursor: text !important;');
 
     const parsed = new DOMParser().parseFromString(

@@ -352,9 +352,12 @@ pre code {
   overflow-wrap: inherit;
   word-break: inherit;
 }
-pre a[aria-hidden="true"] {
+pre a[aria-hidden="true"],
+pre a[aria-hidden="true"] * {
   -webkit-user-drag: none;
   user-drag: none;
+  -webkit-user-select: text;
+  user-select: text;
   cursor: text;
 }
 `;
@@ -471,9 +474,12 @@ div:has(> pre), figure:has(> pre), blockquote:has(> pre) {
   break-inside: auto !important;
   page-break-inside: auto !important;
 }
-pre a[aria-hidden="true"] {
+pre a[aria-hidden="true"],
+pre a[aria-hidden="true"] * {
   -webkit-user-drag: none !important;
   user-drag: none !important;
+  -webkit-user-select: text !important;
+  user-select: text !important;
   cursor: text !important;
 }
 ${codeThemeCss}
