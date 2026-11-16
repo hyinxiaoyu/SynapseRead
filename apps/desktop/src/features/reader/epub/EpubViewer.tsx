@@ -1248,10 +1248,10 @@ export function EpubViewer({
   const turnPage = (direction: TurnDirection) => {
     if (!handle) return;
     backChip.dismiss();
-    // `slide` is the strip's own motion: the engine moves both pages across the
-    // page width, so the incoming page is never nudged after the outgoing one is
-    // gone. For `curl`, the engine captures the outgoing spread and sweeps a
-    // conical crease over the stationary incoming spread.
+    // `slide` is the page's own motion: the engine mirrors the outgoing page across
+    // the page area and carries the incoming one with it, so the whole page turns,
+    // not just the reading measure. For `curl`, the engine captures the outgoing
+    // spread and sweeps a conical crease over the stationary incoming spread.
     const slides = paged && transition === 'slide';
     const engineCurls =
       paged && transition === 'curl' && typeof handle.setCurlElements === 'function';
@@ -1639,14 +1639,6 @@ export function EpubViewer({
                   ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
                 }}
               />
-              <div
-                ref={curlHostRef}
-                inert
-                aria-hidden="true"
-                data-testid="epub-curl-host"
-                className="pointer-events-none invisible absolute inset-0 z-10 overflow-hidden"
-                style={pageSurfaceStyle(theme)}
-              />
               {readingMode === 'spread' && layout.columns === 2 && (
                 <div
                   aria-hidden="true"
@@ -1657,12 +1649,29 @@ export function EpubViewer({
                   }}
                 />
               )}
-              <PageTurnShadow
-                shadowRef={turnShadowRef}
-                palette={PAPER_CURL_PALETTES[theme]}
-                className="inset-0"
-              />
             </div>
+            {/*
+              The turn acts on the whole page, not on the reading measure. The
+              column width only says where the words sit; a sheet that peeled
+              inside it would leave the margins of the same paper standing still
+              while the sheet moved, which reads as a card sliding on a page.
+              So both the outgoing surface and the curl shading span the page
+              area, and the mirrored chapter inside `epub-curl-host` is offset
+              back to where its text column sits.
+            */}
+            <div
+              ref={curlHostRef}
+              inert
+              aria-hidden="true"
+              data-testid="epub-curl-host"
+              className="pointer-events-none invisible absolute inset-0 z-10 overflow-hidden"
+              style={pageSurfaceStyle(theme)}
+            />
+            <PageTurnShadow
+              shadowRef={turnShadowRef}
+              palette={PAPER_CURL_PALETTES[theme]}
+              className="inset-0"
+            />
             {paged && (
               <PageTurnChevrons
                 disabled={!handle}

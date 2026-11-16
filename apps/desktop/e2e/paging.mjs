@@ -69,8 +69,10 @@ const clearFrameSelection = `(() => {
 })()`;
 
 /**
- * Records the strip and the page's opacity every frame for `frames` frames, so a
- * turn can be asked whether it moved gradually and whether it ever dimmed.
+ * Records the strip, the page's transform, and its opacity every frame for
+ * `frames` frames, so a turn can be asked whether it moved gradually and whether
+ * it ever dimmed. A whole-page slide keeps the strip on the incoming page and
+ * travels the page itself, so the page's transform is part of the position.
  */
 const sampleTurn = (page, { frames = 40, target = 'epub' } = {}) => {
   const element =
@@ -86,6 +88,7 @@ const sampleTurn = (page, { frames = 40, target = 'epub' } = {}) => {
         position: Math.round(element?.scrollLeft ?? 0),
         // The computed transform, so a Web Animation's frames are visible here.
         transform: element ? getComputedStyle(element).transform : '',
+        page: host ? getComputedStyle(host).transform : '',
         opacity: host ? Number(getComputedStyle(host).opacity) : 1,
       });
       frames += 1;
@@ -98,7 +101,8 @@ const sampleTurn = (page, { frames = 40, target = 'epub' } = {}) => {
 
 const turnSamples = (page) => page.evaluate('window.__turnSamples');
 /** How many distinct positions the samples hold: more than two means it glided. */
-const distinctPositions = (samples) => new Set(samples.map((sample) => sample.position)).size;
+const distinctPositions = (samples) =>
+  new Set(samples.map((sample) => `${sample.position}|${sample.transform}|${sample.page}`)).size;
 
 const REDUCED = [{ name: 'prefers-reduced-motion', value: 'reduce' }];
 const ANIMATED = [{ name: 'prefers-reduced-motion', value: 'no-preference' }];
@@ -131,6 +135,34 @@ export async function pagingFlow(page) {
   assert(
     distinctPositions(turn) > 3,
     `a slide has to travel over several frames, saw ${distinctPositions(turn)} positions`,
+  );
+  // The page travels the page area, not the reading measure: a slide confined to
+  // the text column leaves the margins of the same paper standing still.
+  const widths = await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const area = host?.closest('[data-testid="epub-page-area"]');
+    return {
+      area: area?.getBoundingClientRect().width ?? 0,
+      measure: host?.parentElement?.getBoundingClientRect().width ?? 0,
+    };
+  })()`);
+  const translateX = (transform) => {
+    if (!transform || transform === 'none') return 0;
+    const values = transform
+      .slice(transform.indexOf('(') + 1, -1)
+      .split(',')
+      .map(Number);
+    return values.length >= 16 ? values[12] : values[4];
+  };
+  const travel = Math.max(...turn.map((sample) => Math.abs(translateX(sample.page))));
+  assert(
+    travel >= widths.area - 1,
+    `a slide must carry the page across the whole page area, not the reading measure: ` +
+      `travelled ${travel}px of ${widths.area}px (measure ${widths.measure}px)`,
+  );
+  assert(
+    widths.measure < widths.area - 8,
+    `the fixture must exercise a reading measure narrower than the page area: ${JSON.stringify(widths)}`,
   );
   assert(
     turn.every((sample) => sample.opacity === 1),
@@ -170,7 +202,8 @@ export async function pagingFlow(page) {
       const container = ${strip};
       const delta = container?.clientWidth ?? 0;
       const left = container?.scrollLeft ?? 0;
-      return delta > 0 && Math.abs(left % delta) < 2 && left > ${beforeSwipe};
+      return delta > 0 && Math.abs(left % delta) < 2 && left > ${beforeSwipe}
+        && getComputedStyle(${visibleHost}).transform === 'none';
     })()`,
     'the swipe to settle on a page boundary',
   );
@@ -590,9 +623,10 @@ export async function pagingFlow(page) {
   await page.waitForReaderLayout();
   await page.evaluate(`(() => {
     const host = ${visibleHost};
-    const wrapper = host?.parentElement;
-    const curlHost = wrapper?.querySelector('[data-testid="epub-curl-host"]');
-    const leaf = wrapper?.querySelector('[data-curl-part="leaf"]');
+    // The mirror and the curl shading span the page area, not the reading measure.
+    const area = host?.closest('[data-testid="epub-page-area"]');
+    const curlHost = area?.querySelector('[data-testid="epub-curl-host"]');
+    const leaf = area?.querySelector('[data-curl-part="leaf"]');
     window.__epubCurlSamples = [];
     let frames = 0;
     const step = () => {
@@ -616,6 +650,28 @@ export async function pagingFlow(page) {
   assert(
     epubCurl.some((sample) => sample.children > 0),
     'an EPUB curl turn must mirror the outgoing spread inside epub-curl-host',
+  );
+  // The sheet turns the whole page, not the reading measure: a curl confined to
+  // `layout.pageWidth` leaves the margins of the same paper standing still.
+  const spans = await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const area = host?.closest('[data-testid="epub-page-area"]');
+    const curlHost = area?.querySelector('[data-testid="epub-curl-host"]');
+    const shadow = area?.querySelector('[data-testid="page-turn-shadow"]');
+    return {
+      area: area?.getBoundingClientRect().width ?? 0,
+      measure: host?.parentElement?.getBoundingClientRect().width ?? 0,
+      curl: curlHost?.getBoundingClientRect().width ?? 0,
+      shadow: shadow?.getBoundingClientRect().width ?? 0,
+    };
+  })()`);
+  assert(
+    spans.curl >= spans.area - 2 && spans.shadow >= spans.area - 2,
+    `EPUB curl must span the whole page area, not the reading measure: ${JSON.stringify(spans)}`,
+  );
+  assert(
+    spans.measure < spans.area - 8,
+    `the fixture must exercise a reading measure narrower than the page area: ${JSON.stringify(spans)}`,
   );
   const mirrorCompats = epubCurl.map((sample) => sample.mirrorCompat).filter(Boolean);
   assert(
@@ -650,9 +706,9 @@ export async function pagingFlow(page) {
   await page.waitFor(
     `(() => {
       const host = ${visibleHost};
-      const wrapper = host?.parentElement;
-      const curlHost = wrapper?.querySelector('[data-testid="epub-curl-host"]');
-      const leaf = wrapper?.querySelector('[data-curl-part="leaf"]');
+      const area = host?.closest('[data-testid="epub-page-area"]');
+      const curlHost = area?.querySelector('[data-testid="epub-curl-host"]');
+      const leaf = area?.querySelector('[data-curl-part="leaf"]');
       return (
         curlHost?.childElementCount === 0 &&
         getComputedStyle(curlHost).clipPath === 'none' &&

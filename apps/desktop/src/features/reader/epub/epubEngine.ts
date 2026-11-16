@@ -1148,6 +1148,11 @@ export async function openEpubDocument(
 
   /** Puts the strip where the slide in flight was heading, if one is running. */
   const settleSlide = () => {
+    if (slideStage !== null) {
+      cancelStage();
+      endSlideStage();
+      return;
+    }
     const inFlight = slideFrame !== 0 || slideDone !== null;
     cancelSlide();
     // Without this, a finished slide's target would be re-applied to a chapter
@@ -1156,6 +1161,98 @@ export async function openEpubDocument(
     const current = strip();
     if (current) current.container.scrollLeft = slideTarget;
   };
+
+  /*
+   * The whole-page slide. Scrolling the strip only moves text inside the reading
+   * measure, leaving the margins of the same paper standing still; so the
+   * outgoing page is mirrored across the page area and the live host carries the
+   * incoming one, and the two travel together. `offset` runs from 0 to
+   * `-direction * paneWidth`, which puts the seam between them at the page area's
+   * edges instead of at the text column's.
+   */
+  let slideStage: { direction: TurnDirection; paneWidth: number; offset: number } | null = null;
+  let stageFrame = 0;
+  let stageDone: (() => void) | null = null;
+
+  const applySlideStage = (offset: number) => {
+    const stage = slideStage;
+    if (stage === null) return;
+    stage.offset = offset;
+    if (curlHost) curlHost.style.transform = `translateX(${offset}px)`;
+    if (element) {
+      element.style.transform = `translateX(${stage.direction * stage.paneWidth + offset}px)`;
+    }
+  };
+
+  const endSlideStage = () => {
+    slideStage = null;
+    if (curlHost) {
+      curlHost.style.transform = '';
+      curlHost.style.visibility = 'hidden';
+      curlHost.replaceChildren();
+    }
+    if (element) element.style.transform = '';
+  };
+
+  const cancelStage = () => {
+    if (stageFrame !== 0) {
+      cancelAnimationFrame(stageFrame);
+      stageFrame = 0;
+    }
+    const done = stageDone;
+    stageDone = null;
+    if (done) done();
+  };
+
+  /**
+   * Mirrors the outgoing page and advances the host to the incoming one, so the
+   * first painted frame is the outgoing page alone. Returns the page area's
+   * width, or `null` when the strip cannot be staged and the caller must fall
+   * back to scrolling it.
+   */
+  const beginSlideStage = (direction: TurnDirection): number | null => {
+    const current = strip();
+    const mirror = curlHost;
+    if (!current || !mirror || prefersReducedMotion()) return null;
+    const paneWidth = mirror.getBoundingClientRect().width;
+    if (paneWidth <= 0) return null;
+    if (!captureOutgoingSpread()) return null;
+    slideStage = { direction, paneWidth, offset: 0 };
+    mirror.style.transform = 'translateX(0px)';
+    if (element) element.style.transform = `translateX(${direction * paneWidth}px)`;
+    current.container.scrollLeft += direction * current.stride;
+    return paneWidth;
+  };
+
+  const animateSlideStage = (to: number, duration: number): Promise<void> =>
+    new Promise((resolve) => {
+      const stage = slideStage;
+      if (stage === null) {
+        resolve();
+        return;
+      }
+      const from = stage.offset;
+      if (duration <= 0 || Math.abs(to - from) < 0.5) {
+        applySlideStage(to);
+        resolve();
+        return;
+      }
+      cancelStage();
+      const started = performance.now();
+      stageDone = resolve;
+      const step = () => {
+        const progress = Math.min((performance.now() - started) / duration, 1);
+        applySlideStage(from + (to - from) * easeOut(progress));
+        if (progress < 1) {
+          stageFrame = requestAnimationFrame(step);
+        } else {
+          stageFrame = 0;
+          stageDone = null;
+          resolve();
+        }
+      };
+      stageFrame = requestAnimationFrame(step);
+    });
 
   const slideStrip = (target: number, duration: number): Promise<void> =>
     new Promise((resolve) => {
@@ -1326,6 +1423,7 @@ export async function openEpubDocument(
     scrubSpread = false;
     resetPaperCurl(curlHost, curlShadow);
     if (curlHost) {
+      curlHost.style.transform = '';
       curlHost.style.visibility = 'hidden';
       curlHost.replaceChildren();
     }
@@ -1382,6 +1480,16 @@ export async function openEpubDocument(
     const scrollLeft = current?.container.scrollLeft ?? 0;
     const viewportWidth = current?.container.clientWidth ?? element.clientWidth;
     const doc = curlHost.ownerDocument;
+    /*
+     * The mirror spans the whole page area, while the live strip only spans the
+     * reading measure. Offset the copied views by where that measure sits inside
+     * the page, so the text lands under the crease at the same place it does at
+     * rest and the margins around it are the mirror's own paper.
+     */
+    const hostBox = element.getBoundingClientRect();
+    const mirrorBox = curlHost.getBoundingClientRect();
+    const offsetX = hostBox.left - mirrorBox.left;
+    const offsetY = hostBox.top - mirrorBox.top;
 
     for (const view of container.querySelectorAll<HTMLElement>('.epub-view')) {
       const viewLeft = view.offsetLeft;
@@ -1393,8 +1501,8 @@ export async function openEpubDocument(
       }
       const viewClone = doc.createElement('div');
       viewClone.style.position = 'absolute';
-      viewClone.style.top = `${view.offsetTop}px`;
-      viewClone.style.left = `${viewLeft - scrollLeft}px`;
+      viewClone.style.top = `${offsetY + view.offsetTop}px`;
+      viewClone.style.left = `${offsetX + viewLeft - scrollLeft}px`;
       viewClone.style.width = view.style.width || `${viewWidth}px`;
       viewClone.style.height = view.style.height || `${view.offsetHeight}px`;
       viewClone.style.overflow = 'hidden';
@@ -1495,6 +1603,14 @@ export async function openEpubDocument(
     } else if (animate && canTurnInPlace(direction)) {
       const current = strip();
       if (current) {
+        const paneWidth = beginSlideStage(direction);
+        if (paneWidth !== null) {
+          const stage = slideStage;
+          await animateSlideStage(-direction * paneWidth, PAGE_SLIDE_MS);
+          // A newer turn may have taken the stage over; it owns the cleanup.
+          if (slideStage === stage) endSlideStage();
+          return;
+        }
         await slideStrip(current.container.scrollLeft + direction * current.stride, PAGE_SLIDE_MS);
         return;
       }
@@ -1576,6 +1692,22 @@ export async function openEpubDocument(
 
     const current = strip();
     if (!current) return;
+
+    // A staged scrub settles the whole-page slide the fingers were driving.
+    if (slideStage !== null) {
+      const stage = slideStage;
+      const commit = committed !== null && committed === stage.direction && inPlace;
+      await animateSlideStage(
+        commit ? -stage.direction * stage.paneWidth : 0,
+        commit ? PAGE_SLIDE_MS : PAGE_SPRING_BACK_MS,
+      );
+      // A turn that arrived during the settle owns the page now.
+      if (slideStage !== stage) return;
+      if (!commit) current.container.scrollLeft = scrubBase;
+      endSlideStage();
+      return;
+    }
+
     settleSlide();
     // Only `slide` settles by moving the strip. `none`, `fade` and `stack` land at
     // once and play their own motion on the incoming page, as a turn does.
@@ -1761,6 +1893,32 @@ export async function openEpubDocument(
         });
         return;
       }
+
+      // A staged slide follows the fingers across the whole page area.
+      if (scrubTransition === undefined || scrubTransition === 'slide') {
+        if (displacement === 0) {
+          if (slideStage !== null) {
+            endSlideStage();
+            current.container.scrollLeft = scrubBase;
+          }
+          return;
+        }
+        const dir: TurnDirection = displacement < 0 ? -1 : 1;
+        if (slideStage === null || slideStage.direction !== dir) {
+          if (slideStage !== null) endSlideStage();
+          current.container.scrollLeft = scrubBase;
+          if (!canTurnInPlace(dir) || beginSlideStage(dir) === null) {
+            current.container.scrollLeft = scrubBase + displacement;
+            return;
+          }
+        }
+        // The stage offset is the page's travel, which runs opposite the fingers:
+        // a forward swipe (positive displacement) pulls the incoming page in from
+        // the right, so its offset goes negative.
+        applySlideStage(-displacement);
+        return;
+      }
+
       current.container.scrollLeft = scrubBase + displacement;
     },
     endScrub,
