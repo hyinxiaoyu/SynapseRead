@@ -1149,8 +1149,14 @@ export async function openEpubDocument(
   /** Puts the strip where the slide in flight was heading, if one is running. */
   const settleSlide = () => {
     if (slideStage !== null) {
+      const stage = slideStage;
+      const current = strip();
+      // A scrub still under the fingers has not committed, so it lands on
+      // `scrubBase`; a turn or a settling scrub records its own landing.
+      const landing = scrubbing ? scrubBase : stage.landing;
       cancelStage();
       endSlideStage();
+      if (current) current.container.scrollLeft = landing;
       return;
     }
     const inFlight = slideFrame !== 0 || slideDone !== null;
@@ -1175,6 +1181,8 @@ export async function openEpubDocument(
     paneWidth: number;
     offset: number;
     surface: HTMLElement;
+    /** The strip position this stage lands on when it is settled or discarded. */
+    landing: number;
   } | null = null;
   let stageFrame = 0;
   let stageDone: (() => void) | null = null;
@@ -1241,11 +1249,12 @@ export async function openEpubDocument(
     if (paneWidth <= 0) return null;
     if (!captureOutgoingSpread()) return null;
     const surface = slideSurface();
-    slideStage = { direction, paneWidth, offset: 0, surface };
+    const landing = current.container.scrollLeft + direction * current.stride;
+    slideStage = { direction, paneWidth, offset: 0, surface, landing };
     mirror.style.transform = 'translateX(0px)';
     surface.style.boxShadow = '';
     surface.style.transform = `translateX(${direction * paneWidth}px)`;
-    current.container.scrollLeft += direction * current.stride;
+    current.container.scrollLeft = landing;
     return paneWidth;
   };
 
@@ -1258,9 +1267,11 @@ export async function openEpubDocument(
     const stage = slideStage;
     const current = strip();
     if (stage === null || !current) return false;
+    const landing = base + direction * current.stride;
     stage.direction = direction;
     stage.offset = 0;
-    current.container.scrollLeft = base + direction * current.stride;
+    stage.landing = landing;
+    current.container.scrollLeft = landing;
     if (curlHost) curlHost.style.transform = 'translateX(0px)';
     stage.surface.style.boxShadow = '';
     stage.surface.style.transform = `translateX(${direction * stage.paneWidth}px)`;
@@ -1543,17 +1554,27 @@ export async function openEpubDocument(
     const container = current?.container ?? element;
     const scrollLeft = current?.container.scrollLeft ?? 0;
     const viewportWidth = current?.container.clientWidth ?? element.clientWidth;
+    const viewportHeight = current?.container.clientHeight ?? element.clientHeight;
     const doc = curlHost.ownerDocument;
     /*
      * The mirror spans the whole page area, while the live strip only spans the
-     * reading measure. Offset the copied views by where that measure sits inside
-     * the page, so the text lands under the crease at the same place it does at
-     * rest and the margins around it are the mirror's own paper.
+     * reading measure. The copied views are clipped to a box the size of the live
+     * viewport, positioned where that viewport sits inside the page, so columns
+     * from the previous or next page never show in the paper margins; the paper
+     * around the box is the mirror's own.
      */
     const hostBox = element.getBoundingClientRect();
     const mirrorBox = curlHost.getBoundingClientRect();
-    const offsetX = hostBox.left - mirrorBox.left;
-    const offsetY = hostBox.top - mirrorBox.top;
+    const viewport = doc.createElement('div');
+    viewport.dataset.testid = 'epub-mirror-viewport';
+    viewport.style.position = 'absolute';
+    viewport.style.left = `${hostBox.left - mirrorBox.left}px`;
+    viewport.style.top = `${hostBox.top - mirrorBox.top}px`;
+    viewport.style.width = `${viewportWidth}px`;
+    viewport.style.height = `${viewportHeight}px`;
+    viewport.style.overflow = 'hidden';
+    viewport.style.pointerEvents = 'none';
+    curlHost.appendChild(viewport);
 
     for (const view of container.querySelectorAll<HTMLElement>('.epub-view')) {
       const viewLeft = view.offsetLeft;
@@ -1565,13 +1586,13 @@ export async function openEpubDocument(
       }
       const viewClone = doc.createElement('div');
       viewClone.style.position = 'absolute';
-      viewClone.style.top = `${offsetY + view.offsetTop}px`;
-      viewClone.style.left = `${offsetX + viewLeft - scrollLeft}px`;
+      viewClone.style.top = `${view.offsetTop}px`;
+      viewClone.style.left = `${viewLeft - scrollLeft}px`;
       viewClone.style.width = view.style.width || `${viewWidth}px`;
       viewClone.style.height = view.style.height || `${view.offsetHeight}px`;
       viewClone.style.overflow = 'hidden';
       viewClone.style.pointerEvents = 'none';
-      curlHost.appendChild(viewClone);
+      viewport.appendChild(viewClone);
 
       mirrorLiveFrame(view, viewClone, doc);
 
@@ -1586,7 +1607,7 @@ export async function openEpubDocument(
 
     // JSDOM fallback when `epubjs` views are mocked without `.epub-view` nodes.
     const fallbackDoc = contentsList()[0]?.document;
-    if (curlHost.childElementCount === 0 && fallbackDoc?.body) {
+    if (viewport.childElementCount === 0 && fallbackDoc?.body) {
       const cloneBox = doc.createElement('div');
       cloneBox.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden;';
       for (const node of Array.from(fallbackDoc.body.childNodes)) {
@@ -1594,10 +1615,13 @@ export async function openEpubDocument(
         if (imported instanceof Element) stripCloneIdentifiers(imported, true);
         cloneBox.appendChild(imported);
       }
-      curlHost.appendChild(cloneBox);
+      viewport.appendChild(cloneBox);
     }
 
-    if (curlHost.childElementCount === 0) return false;
+    if (viewport.childElementCount === 0) {
+      viewport.remove();
+      return false;
+    }
     curlHost.style.visibility = 'visible';
     return true;
   };
@@ -1761,6 +1785,9 @@ export async function openEpubDocument(
     if (slideStage !== null) {
       const stage = slideStage;
       const commit = committed !== null && committed === stage.direction && inPlace;
+      // Record where this settle lands before the animation: an interruption
+      // during the spring-back must restore the cancelled scrub's page.
+      stage.landing = commit ? scrubBase + stage.direction * current.stride : scrubBase;
       await animateSlideStage(
         commit ? -stage.direction * stage.paneWidth : 0,
         commit ? PAGE_SLIDE_MS : PAGE_SPRING_BACK_MS,

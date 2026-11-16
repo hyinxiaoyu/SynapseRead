@@ -636,9 +636,11 @@ export async function pagingFlow(page) {
     const area = host?.closest('[data-testid="epub-page-area"]');
     const curlHost = area?.querySelector('[data-testid="epub-curl-host"]');
     const leaf = area?.querySelector('[data-curl-part="leaf"]');
+    const areaLeft = () => area?.getBoundingClientRect().left ?? 0;
     window.__epubCurlSamples = [];
     let frames = 0;
     const step = () => {
+      const viewport = curlHost?.querySelector('[data-testid="epub-mirror-viewport"]');
       window.__epubCurlSamples.push({
         children: curlHost ? curlHost.childElementCount : 0,
         visibility: curlHost ? getComputedStyle(curlHost).visibility : 'hidden',
@@ -646,6 +648,9 @@ export async function pagingFlow(page) {
         hostTransform: host ? getComputedStyle(host).transform : 'none',
         leafOpacity: leaf ? Number(getComputedStyle(leaf).opacity) : 0,
         mirrorCompat: curlHost?.querySelector('iframe')?.contentDocument?.compatMode ?? null,
+        viewportWidth: viewport?.getBoundingClientRect().width ?? 0,
+        viewportLeft: (viewport?.getBoundingClientRect().left ?? 0) - areaLeft(),
+        measureLeft: (host?.getBoundingClientRect().left ?? 0) - areaLeft(),
       });
       frames += 1;
       if (frames < 40) requestAnimationFrame(step);
@@ -677,6 +682,19 @@ export async function pagingFlow(page) {
   assert(
     spans.curl >= spans.area - 2 && spans.shadow >= spans.area - 2,
     `EPUB curl must span the whole page area, not the reading measure: ${JSON.stringify(spans)}`,
+  );
+  // The chapter clone is clipped to the live reading viewport, so columns from
+  // the neighbouring pages cannot show in the paper margins.
+  const viewportSamples = epubCurl.filter((sample) => sample.viewportWidth > 0);
+  assert(viewportSamples.length > 0, 'the curl must clip the mirror to the reading viewport');
+  const viewportSample = viewportSamples[0];
+  assert(
+    Math.abs(viewportSample.viewportWidth - spans.measure) <= 2,
+    `the mirror must clip to the reading viewport, not the page area: ${JSON.stringify(viewportSample)}`,
+  );
+  assert(
+    Math.abs(viewportSample.viewportLeft - viewportSample.measureLeft) <= 2,
+    `the mirror viewport must sit where the reading measure sits: ${JSON.stringify(viewportSample)}`,
   );
   assert(
     spans.measure < spans.area - 8,
