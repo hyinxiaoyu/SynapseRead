@@ -753,6 +753,50 @@ export async function openEpubDocument(
   } as Parameters<typeof book.renderTo>[1] & { gap: number });
 
   let selectionListener: (selection: EpubSelection | null) => void = () => undefined;
+  /**
+   * epub.js debounces `selectionchange` by 250 ms (`Contents.onSelectionChange`),
+   * so a drag longer than that reports a partial selection first. The toolbar and
+   * the selection popover read the last report, so a click right after the release
+   * could excerpt the partial text. Report the settled selection on release, and
+   * drop the debounced duplicate that follows it.
+   */
+  let releasedSelection: { cfiRange: string; text: string } | null = null;
+  /** The selection a press started on: a click inside it must not report it again. */
+  let pressedSelection: { cfiRange: string; text: string } | null = null;
+  const selectionOf = (contents: Contents) => {
+    const selection = contents.window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+    try {
+      const cfiRange = contents.cfiFromRange(selection.getRangeAt(0));
+      const text = selection.toString().trim();
+      return text && cfiRange ? { cfiRange, text } : null;
+    } catch {
+      return null;
+    }
+  };
+  const reportSelection = (selection: { cfiRange: string; text: string }, released: boolean) => {
+    const chapterHref = book.spine.get(selection.cfiRange)?.href;
+    // Core refuses an excerpt of only whitespace.
+    if (!chapterHref) {
+      releasedSelection = null;
+      selectionListener(null);
+      return;
+    }
+    if (
+      !released &&
+      releasedSelection?.cfiRange === selection.cfiRange &&
+      releasedSelection.text === selection.text
+    ) {
+      releasedSelection = null;
+      return;
+    }
+    releasedSelection = released ? selection : null;
+    selectionListener({
+      cfiRange: selection.cfiRange,
+      chapterHref,
+      text: selection.text,
+    });
+  };
   let locationListener: (location: EpubLocation) => void = () => undefined;
   let internalLinkListener: (href: string, link: EpubInternalLink) => void = () => undefined;
   let keyDownListener: (event: KeyboardEvent) => void = () => undefined;
@@ -805,7 +849,10 @@ export async function openEpubDocument(
     // `selected` only reports new selections, not one that has been cleared.
     contents.document.addEventListener('selectionchange', () => {
       const selection = contents.window.getSelection();
-      if (!selection || selection.isCollapsed) selectionListener(null);
+      if (!selection || selection.isCollapsed) {
+        releasedSelection = null;
+        selectionListener(null);
+      }
     });
     contents.document.addEventListener('keydown', (event: KeyboardEvent) => {
       keyDownListener(event);
@@ -827,10 +874,20 @@ export async function openEpubDocument(
     };
     chapterDoc.documentElement.style.cursor = frameCursor;
     chapterDoc.addEventListener('pointerup', (event: PointerEvent) => {
-      if (event.button === 0) pointerListener(false);
+      if (event.button !== 0) return;
+      pointerListener(false);
+      const selection = selectionOf(contents);
+      const pressed = pressedSelection;
+      pressedSelection = null;
+      if (!selection) return;
+      // A click inside the existing selection leaves it in place; it is not a new
+      // one, and reporting it again would re-open a popover the reader dismissed.
+      if (pressed?.cfiRange === selection.cfiRange && pressed.text === selection.text) return;
+      reportSelection(selection, true);
     });
     chapterDoc.addEventListener('pointerdown', (event: PointerEvent) => {
       if (event.button !== 0) return;
+      pressedSelection = selectionOf(contents);
       pointerListener(true);
       const { left, top } = offset();
       gestureListener({
@@ -881,9 +938,12 @@ export async function openEpubDocument(
   });
   rendition.on('selected', (cfiRange: string, contents: Contents) => {
     const text = contents.window.getSelection()?.toString().trim() ?? '';
-    const chapterHref = book.spine.get(cfiRange)?.href;
-    // Core refuses an excerpt of only whitespace.
-    selectionListener(text && chapterHref ? { cfiRange, chapterHref, text } : null);
+    if (!text) {
+      releasedSelection = null;
+      selectionListener(null);
+      return;
+    }
+    reportSelection({ cfiRange, text }, false);
   });
   rendition.on('relocated', (location: Location) => {
     currentCfi = location.start.cfi;
