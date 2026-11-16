@@ -56,7 +56,19 @@ const widths = (page) =>
   })()`);
 
 /** Turns once and returns the pane's travel and whether the host stayed put. */
+/** Closes the appearance popover so its press-outside guard cannot eat the turn. */
+const closeAppearance = async (page) => {
+  if (await page.evaluate(`!!document.querySelector('[data-testid="appearance-popover"]')`)) {
+    await page.press('Escape');
+    await page.waitFor(
+      `!document.querySelector('[data-testid="appearance-popover"]')`,
+      'the appearance popover to close',
+    );
+  }
+};
+
 const turnAndMeasure = async (page) => {
+  await closeAppearance(page);
   await samplePanes(page);
   await page.clickButton('Next Page');
   await new Promise((done) => setTimeout(done, 650));
