@@ -126,6 +126,32 @@ describe('WheelScrub', () => {
     ]);
   });
 
+  it('keeps following the fingers until the moving surface is dragged, not the page', () => {
+    const scrub = make();
+    const wideSurface = {
+      // A 640 px reading measure inside a 1600 px slide pane.
+      pageWidth: () => 640,
+      surfaceWidth: () => 1600,
+      canTurn: () => true,
+    };
+    const updates = [];
+    let at = 0;
+    for (let event = 0; event < 40; event += 1) {
+      updates.push(...scrub.push(20, at, wideSurface));
+      at += 16;
+    }
+    // 800 px is past the 640 px measure but well short of the 1600 px pane.
+    expect(updates.some((update) => update.kind === 'end')).toBe(false);
+    expect(updates.filter((update) => update.kind === 'move').at(-1)).toEqual({
+      kind: 'move',
+      displacement: 800,
+    });
+    // A full pane drag finishes the gesture under the fingers.
+    expect(scrub.push(800, at, wideSurface)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: 1 },
+    ]);
+  });
+
   it('commits on release once a fifth of the page has been dragged', () => {
     const scrub = make();
     const { at } = run(

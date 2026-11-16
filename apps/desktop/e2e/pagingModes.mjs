@@ -130,6 +130,58 @@ export async function pagingModesFlow(page) {
     `the spread turn must leave no transform: ${JSON.stringify(spreadTurn.settled)}`,
   );
 
+  // A backward drag longer than the measure but shorter than the pane must keep
+  // following the fingers; reverse it before release so the book stays put.
+  const wideDrag = await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const pane = host?.closest('[data-testid="epub-slide-pane"]');
+    const area = host?.closest('[data-testid="epub-page-area"]');
+    const mirror = area?.querySelector('[data-testid="epub-curl-host"]');
+    for (let step = 0; step < 70; step += 1) {
+      host.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: -20, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+    }
+    const dragged = {
+      pane: pane ? getComputedStyle(pane).transform : 'none',
+      mirror: mirror ? getComputedStyle(mirror).transform : 'none',
+      mirrorVisible: mirror ? getComputedStyle(mirror).visibility : 'hidden',
+    };
+    for (let step = 0; step < 70; step += 1) {
+      host.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: 20, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+    }
+    return {
+      dragged,
+      cancelled: {
+        pane: pane ? getComputedStyle(pane).transform : 'none',
+        mirror: mirror ? getComputedStyle(mirror).transform : 'none',
+        mirrorVisible: mirror ? getComputedStyle(mirror).visibility : 'hidden',
+      },
+    };
+  })()`);
+  assert(
+    wideDrag.dragged.mirror === 'matrix(1, 0, 0, 1, 1400, 0)',
+    `a wide-area slide scrub must follow past the measure: ${JSON.stringify(wideDrag)}`,
+  );
+  assert(
+    wideDrag.dragged.mirrorVisible === 'visible',
+    `the outgoing mirror must be visible during a wide-area drag: ${JSON.stringify(wideDrag)}`,
+  );
+  assert(
+    wideDrag.cancelled.pane === 'none' && wideDrag.cancelled.mirrorVisible === 'hidden',
+    `reversing a wide-area drag must cancel its stage: ${JSON.stringify(wideDrag)}`,
+  );
+  await page.waitFor(
+    `(() => {
+      const host = ${visibleHost};
+      const pane = host?.closest('[data-testid="epub-slide-pane"]');
+      return pane ? getComputedStyle(pane).transform === 'none' : false;
+    })()`,
+    'the wide-area scrub to settle',
+  );
+
   // Wide is wider than Standard but still narrower than the page area.
   await page.clickButton('Reading appearance');
   await page.clickButton('Wide');
@@ -142,6 +194,8 @@ export async function pagingModesFlow(page) {
     })()`,
     'the EPUB to widen to Wide',
   );
+  // Let epub.js's 150 ms debounced re-layout finish before the turn.
+  await new Promise((done) => setTimeout(done, 250));
   const wide = await widths(page);
   const wideTurn = await turnAndMeasure(page);
   assert(
@@ -163,6 +217,8 @@ export async function pagingModesFlow(page) {
     })()`,
     'the EPUB to fill the page area at Full width',
   );
+  // Let epub.js's 150 ms debounced re-layout finish before the turn.
+  await new Promise((done) => setTimeout(done, 250));
   const full = await widths(page);
   const fullTurn = await turnAndMeasure(page);
   assert(

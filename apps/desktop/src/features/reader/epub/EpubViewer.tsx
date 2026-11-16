@@ -1373,6 +1373,14 @@ export function EpubViewer({
     enabled: handle !== null && isActive && paged,
     areaRef,
     pageRef: hostRef,
+    // A slide scrub moves the full-area pane, not the narrower reading measure;
+    // the gesture must finish at the pane's edge, not at the measure's. Fall back
+    // to the measure before the pane has been laid out.
+    scrubWidth: () => {
+      const paneWidth = areaRef.current?.getBoundingClientRect().width ?? 0;
+      if (paged && transition === 'slide' && paneWidth > 0) return paneWidth;
+      return hostRef.current?.getBoundingClientRect().width ?? 0;
+    },
     onTurn: turnPage,
     canTurn: (direction) =>
       (handle?.canTurnInPlace(direction) ?? false) ||
