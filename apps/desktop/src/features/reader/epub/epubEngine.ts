@@ -1622,6 +1622,28 @@ export async function openEpubDocument(
       viewport.remove();
       return false;
     }
+    /*
+     * The spine is a sibling of the live host, not part of the `.epub-view`, so
+     * the mirror would lose the outgoing spread's gutter as soon as the pane
+     * moves. Copy it into the mirror viewport at the same place, so it travels
+     * with the outgoing paper while the incoming pane brings its own.
+     */
+    const liveSpine = element.parentElement?.querySelector<HTMLElement>(
+      '[data-testid="epub-spine"]',
+    );
+    if (liveSpine) {
+      const spineBox = liveSpine.getBoundingClientRect();
+      const spineClone = doc.createElement('div');
+      spineClone.dataset.testid = 'epub-mirror-spine';
+      spineClone.style.position = 'absolute';
+      spineClone.style.left = `${spineBox.left - hostBox.left}px`;
+      spineClone.style.top = `${spineBox.top - hostBox.top}px`;
+      spineClone.style.width = `${spineBox.width}px`;
+      spineClone.style.height = `${spineBox.height}px`;
+      spineClone.style.backgroundImage = getComputedStyle(liveSpine).backgroundImage;
+      spineClone.style.pointerEvents = 'none';
+      viewport.appendChild(spineClone);
+    }
     curlHost.style.visibility = 'visible';
     return true;
   };

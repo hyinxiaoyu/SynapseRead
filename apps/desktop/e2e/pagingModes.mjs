@@ -25,12 +25,14 @@ const samplePanes = (page, { frames = 40 } = {}) =>
   page.evaluate(`(() => {
     const host = ${visibleHost};
     const pane = host?.closest('[data-testid="epub-slide-pane"]');
+    const mirror = host?.closest('[data-testid="epub-page-area"]')?.querySelector('[data-testid="epub-curl-host"]');
     window.__paneSamples = [];
     let frames = 0;
     const step = () => {
       window.__paneSamples.push({
         pane: pane ? getComputedStyle(pane).transform : 'none',
         host: host ? getComputedStyle(host).transform : 'none',
+        mirrorSpine: !!mirror?.querySelector('[data-testid="epub-mirror-spine"]'),
       });
       frames += 1;
       if (frames < ${frames}) requestAnimationFrame(step);
@@ -75,6 +77,7 @@ const turnAndMeasure = async (page) => {
   const samples = await paneSamples(page);
   const travel = Math.max(...samples.map((sample) => Math.abs(translateX(sample.pane))));
   const hostMoved = samples.some((sample) => sample.host !== 'none');
+  const mirrorSpine = samples.some((sample) => sample.mirrorSpine);
   const settled = await page.evaluate(`(() => {
     const host = ${visibleHost};
     const pane = host?.closest('[data-testid="epub-slide-pane"]');
@@ -83,7 +86,7 @@ const turnAndMeasure = async (page) => {
       host: host ? getComputedStyle(host).transform : 'none',
     };
   })()`);
-  return { travel, hostMoved, settled };
+  return { travel, hostMoved, settled, mirrorSpine };
 };
 
 export async function pagingModesFlow(page) {
@@ -120,6 +123,7 @@ export async function pagingModesFlow(page) {
     spreadTurn.travel >= spread.area - 1,
     `a spread slide must travel the page area, not the measure: ${JSON.stringify({ spread, spreadTurn })}`,
   );
+  assert(spreadTurn.mirrorSpine, 'the outgoing spread must keep its spine in the mirror');
   assert(!spreadTurn.hostMoved, 'the host must stay untransformed; the pane carries the slide');
   assert(
     spreadTurn.settled.pane === 'none' && spreadTurn.settled.host === 'none',
@@ -144,6 +148,7 @@ export async function pagingModesFlow(page) {
     wideTurn.travel >= wide.area - 1,
     `a Wide slide must travel the page area, not the wider measure: ${JSON.stringify({ wide, wideTurn })}`,
   );
+  assert(wideTurn.mirrorSpine, 'the Wide outgoing spread must keep its spine in the mirror');
   assert(!wideTurn.hostMoved, 'the host must stay untransformed at Wide width');
 
   // Full width makes the measure fill the page area; the turn still travels it.
@@ -168,6 +173,7 @@ export async function pagingModesFlow(page) {
     fullTurn.travel >= full.area - 1,
     `a Full-width slide must travel the page area: ${JSON.stringify({ full, fullTurn })}`,
   );
+  assert(fullTurn.mirrorSpine, 'the Full-width outgoing spread must keep its spine in the mirror');
   assert(!fullTurn.hostMoved, 'the host must stay untransformed at Full width');
   assert(
     fullTurn.settled.pane === 'none' && fullTurn.settled.host === 'none',

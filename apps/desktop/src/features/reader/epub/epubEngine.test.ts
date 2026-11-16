@@ -1146,6 +1146,12 @@ describe('EPUB slide seam scrubbing', () => {
     const pane = document.createElement('div');
     pane.dataset.testid = 'epub-slide-pane';
     pane.append(host);
+    const spine = document.createElement('div');
+    spine.dataset.testid = 'epub-spine';
+    spine.style.background =
+      'linear-gradient(to right, transparent, rgba(0, 0, 0, 0.16) 50%, transparent)';
+    vi.spyOn(spine, 'getBoundingClientRect').mockReturnValue(new DOMRect(400, 12, 48, 456));
+    pane.append(spine);
     document.body.append(pane);
     const curlHost = document.createElement('div');
     document.body.append(curlHost);
@@ -1182,6 +1188,14 @@ describe('EPUB slide seam scrubbing', () => {
       expect((mirrorViewport as HTMLElement).style.height).toBe('480px');
       expect((mirrorViewport?.firstElementChild as HTMLElement).style.left).toBe('0px');
       expect((mirrorViewport?.firstElementChild as HTMLElement).style.top).toBe('0px');
+      // The outgoing spread keeps its spine: the live spine is a sibling of the
+      // host, so the mirror has to carry a copy of it.
+      const mirrorSpine = mirrorViewport?.querySelector('[data-testid="epub-mirror-spine"]');
+      expect(mirrorSpine).not.toBeNull();
+      expect((mirrorSpine as HTMLElement).style.left).toBe('270px');
+      expect((mirrorSpine as HTMLElement).style.top).toBe('12px');
+      expect((mirrorSpine as HTMLElement).style.width).toBe('48px');
+      expect((mirrorSpine as HTMLElement).style.height).toBe('456px');
 
       tick(130);
       // Half-way: the outgoing page has left and the incoming one is arriving.
