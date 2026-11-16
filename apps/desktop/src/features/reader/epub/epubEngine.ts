@@ -352,6 +352,11 @@ pre code {
   overflow-wrap: inherit;
   word-break: inherit;
 }
+pre a[aria-hidden="true"] {
+  -webkit-user-drag: none;
+  user-drag: none;
+  cursor: text;
+}
 `;
 
 /**
@@ -465,6 +470,11 @@ div:has(> pre), figure:has(> pre), blockquote:has(> pre) {
   overflow: visible !important;
   break-inside: auto !important;
   page-break-inside: auto !important;
+}
+pre a[aria-hidden="true"] {
+  -webkit-user-drag: none !important;
+  user-drag: none !important;
+  cursor: text !important;
 }
 ${codeThemeCss}
 ${imageRule}
@@ -899,6 +909,7 @@ export async function openEpubDocument(
   const hoveredCodeDocs = new WeakSet<Document>();
   let lastHoveredBlock: {
     id: string;
+    rect: ViewportRect;
     top: number;
     left: number;
     bottom: number;
@@ -929,6 +940,38 @@ export async function openEpubDocument(
     lastHoveredBlock = null;
     if (!destroyed) codeBlockHoverListener(null);
   };
+  const ownerDoc = element.ownerDocument;
+  const isCodeActionPillTarget = (target: EventTarget | null): boolean => {
+    const targetElement = target as Element | null;
+    return (
+      typeof targetElement?.closest === 'function' &&
+      targetElement.closest('[data-testid="epub-code-action-pill"]') !== null
+    );
+  };
+  const onOwnerPointerDown = (event: PointerEvent) => {
+    if (lastHoveredBlock !== null && !isCodeActionPillTarget(event.target)) {
+      clearCodeBlockHover();
+    }
+  };
+  const onOwnerPointerMove = (event: PointerEvent) => {
+    if (event.buttons !== 0 || lastHoveredBlock === null) return;
+    if (isCodeActionPillTarget(event.target)) return;
+    const targetNode = event.target as Node | null;
+    const { rect } = lastHoveredBlock;
+    if (
+      targetNode &&
+      element.contains(targetNode) &&
+      event.clientX >= rect.left &&
+      event.clientX <= rect.right &&
+      event.clientY >= rect.top - 24 &&
+      event.clientY <= rect.bottom
+    ) {
+      return;
+    }
+    clearCodeBlockHover();
+  };
+  ownerDoc.addEventListener('pointermove', onOwnerPointerMove);
+  ownerDoc.addEventListener('pointerdown', onOwnerPointerDown);
 
   rendition.hooks.content.register((contents: Contents) => {
     const chapterDoc = contents.document;
@@ -973,7 +1016,7 @@ export async function openEpubDocument(
       ) {
         return;
       }
-      lastHoveredBlock = { id, top, left, bottom, right };
+      lastHoveredBlock = { id, rect, top, left, bottom, right };
       codeBlockHoverListener({
         id,
         rect,
@@ -1125,6 +1168,14 @@ export async function openEpubDocument(
       });
       chapterDoc.addEventListener('pointerdown', () => {
         clearCodeBlockHover();
+      });
+      chapterDoc.addEventListener('dragstart', (event: DragEvent) => {
+        const rawTarget = event.target as Node | null;
+        const targetElement =
+          rawTarget?.nodeType === 1 ? (rawTarget as Element) : (rawTarget?.parentElement ?? null);
+        if (targetElement?.closest('pre a[aria-hidden="true"]')) {
+          event.preventDefault();
+        }
       });
       chapterDoc.documentElement.addEventListener('pointerleave', () => {
         clearCodeBlockHover();
@@ -2480,6 +2531,8 @@ export async function openEpubDocument(
       clearCodeBlockHover();
       destroyed = true;
       codeBlockHoverListener = () => undefined;
+      ownerDoc.removeEventListener('pointermove', onOwnerPointerMove);
+      ownerDoc.removeEventListener('pointerdown', onOwnerPointerDown);
       cancelSlide();
       clearCurlStage();
       // The seam hold shadows one method on the manager; leave it as we found it.

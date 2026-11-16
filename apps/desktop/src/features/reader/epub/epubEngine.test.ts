@@ -1795,4 +1795,95 @@ describe('EPUB code blocks', () => {
       handle.destroy();
     }
   });
+
+  it('clears stuck hover via parent-document pointer events outside the pill and 24px top bridge', async () => {
+    const { host, handle, contents } = await openRendered();
+    document.body.appendChild(host);
+    const pill = document.createElement('div');
+    pill.dataset.testid = 'epub-code-action-pill';
+    const copyBtn = document.createElement('button');
+    copyBtn.dataset.testid = 'epub-code-copy';
+    pill.appendChild(copyBtn);
+    document.body.appendChild(pill);
+
+    const hostChild = document.createElement('div');
+    host.appendChild(hostChild);
+
+    try {
+      const seen: (EpubCodeBlockHover | null)[] = [];
+      handle.onCodeBlockHover?.((block) => seen.push(block));
+      contents.document.body.innerHTML = '<pre id="code"><code>let x = 1;</code></pre>';
+      const pre = contents.document.getElementById('code') as Element;
+      vi.spyOn(pre, 'getClientRects').mockReturnValue([
+        new DOMRect(200, 120, 400, 80),
+      ] as unknown as DOMRectList);
+
+      // Open hover via focusin (without chapterDoc pointer entry).
+      pre.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.rect).toEqual({ left: 200, top: 120, right: 600, bottom: 200 });
+
+      // Hovering inside the pill keeps it open.
+      copyBtn.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 0 }));
+      expect(seen).toHaveLength(1);
+
+      // Moving inside host within the block's rect + 24px top bridge keeps it open.
+      hostChild.dispatchEvent(
+        new MouseEvent('pointermove', { bubbles: true, buttons: 0, clientX: 350, clientY: 100 }),
+      );
+      expect(seen).toHaveLength(1);
+
+      // Pressing inside the pill keeps it open.
+      copyBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+      expect(seen).toHaveLength(1);
+
+      // Moving pointer onto outer chrome (e.g. (1, 1)) clears hover immediately.
+      document.body.dispatchEvent(
+        new MouseEvent('pointermove', { bubbles: true, buttons: 0, clientX: 1, clientY: 1 }),
+      );
+      expect(seen).toHaveLength(2);
+      expect(seen[1]).toBeNull();
+
+      // Re-open via focusin and verify pointerdown on outer chrome also clears hover.
+      pre.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(seen).toHaveLength(3);
+      document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+      expect(seen).toHaveLength(4);
+      expect(seen[3]).toBeNull();
+    } finally {
+      handle.destroy();
+      host.remove();
+      pill.remove();
+    }
+  });
+
+  it('disables native link drag on pre a[aria-hidden="true"] via CSS and dragstart', async () => {
+    const { handle, contents } = await openRendered();
+    const typographyCss =
+      contents.document.querySelector('style[data-synapse-typography="true"]')?.textContent ?? '';
+    const prefCss =
+      contents.document.querySelector('style[data-synapse-preferences="true"]')?.textContent ?? '';
+
+    expect(typographyCss).toContain('pre a[aria-hidden="true"]');
+    expect(typographyCss).toContain('-webkit-user-drag: none;');
+    expect(prefCss).toContain('pre a[aria-hidden="true"]');
+    expect(prefCss).toContain('-webkit-user-drag: none !important;');
+    expect(prefCss).toContain('cursor: text !important;');
+
+    const parsed = new DOMParser().parseFromString(
+      `<pre class="sourceCode"><code><a id="a-hidden" href="#cb1-1" aria-hidden="true"><span id="tok">word</span></a></code></pre><a id="regular-link" href="#other">other</a>`,
+      'text/html',
+    );
+    contents.document.body.innerHTML = parsed.body.innerHTML;
+
+    const dragHidden = new Event('dragstart', { bubbles: true, cancelable: true });
+    contents.document.getElementById('tok')?.dispatchEvent(dragHidden);
+    expect(dragHidden.defaultPrevented).toBe(true);
+
+    const dragRegular = new Event('dragstart', { bubbles: true, cancelable: true });
+    contents.document.getElementById('regular-link')?.dispatchEvent(dragRegular);
+    expect(dragRegular.defaultPrevented).toBe(false);
+
+    handle.destroy();
+  });
 });
