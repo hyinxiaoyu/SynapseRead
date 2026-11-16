@@ -931,23 +931,78 @@ export async function openEpubDocument(
   };
 
   rendition.hooks.content.register((contents: Contents) => {
-    contents.document.body?.classList.toggle('epubjs-scrolled', currentMode === 'scroll');
+    const chapterDoc = contents.document;
+    chapterDoc.body?.classList.toggle('epubjs-scrolled', currentMode === 'scroll');
+    const offset = () => {
+      const frame = contents.window.frameElement;
+      const rect = frame?.getBoundingClientRect();
+      return { left: rect?.left ?? 0, top: rect?.top ?? 0 };
+    };
+    const hasSelection = () => {
+      const selection = contents.window.getSelection();
+      return selection !== null && !selection.isCollapsed;
+    };
+    const inspectCodeBlock = (pre: Element | null, clientPoint?: { x: number; y: number }) => {
+      if (destroyed) return;
+      if (!pre || !isCopyableCodeBlock(pre)) {
+        clearCodeBlockHover();
+        return;
+      }
+      const frameRect = contents.window.frameElement?.getBoundingClientRect() ?? zeroRect;
+      const hostRect = element.getBoundingClientRect();
+      const pointer = clientPoint
+        ? { x: frameRect.left + clientPoint.x, y: frameRect.top + clientPoint.y }
+        : undefined;
+      const rect = visibleCodeBlockRect(pre, frameRect, hostRect, pointer);
+      if (!rect) {
+        clearCodeBlockHover();
+        return;
+      }
+      const id = blockIdOf(pre);
+      const top = Math.round(rect.top);
+      const left = Math.round(rect.left);
+      const bottom = Math.round(rect.bottom);
+      const right = Math.round(rect.right);
+      if (
+        lastHoveredBlock &&
+        lastHoveredBlock.id === id &&
+        lastHoveredBlock.top === top &&
+        lastHoveredBlock.left === left &&
+        lastHoveredBlock.bottom === bottom &&
+        lastHoveredBlock.right === right
+      ) {
+        return;
+      }
+      lastHoveredBlock = { id, top, left, bottom, right };
+      codeBlockHoverListener({
+        id,
+        rect,
+        getText: () => extractCodeBlockText(pre),
+      });
+    };
+    const preFromTarget = (target: EventTarget | null): Element | null => {
+      const targetElement = target as Element | null;
+      return typeof targetElement?.closest === 'function' ? targetElement.closest('pre') : null;
+    };
     // epub.js puts a click handler on every relative link that calls `display()`
     // directly, before the viewer hears about it, so an internal link would jump
     // without joining the reader's jump history or offering the way back. Capture
     // the click first and let the viewer navigate. Absolute links keep their own
     // behaviour (epub.js already sends them to a new tab).
-    contents.document.addEventListener(
+    chapterDoc.addEventListener(
       'click',
       (event: MouseEvent) => {
         if (event.button !== 0) return;
         const target = event.target as Element | null;
         const anchor = target?.closest?.('a[href]') ?? null;
-        // Pandoc line-number anchors inside `<pre>` are decorative targets; ignore
-        // them so clicking code never opens LinkPeek or re-displays the chapter.
-        if (anchor?.getAttribute('aria-hidden') === 'true' && anchor.closest('pre') !== null) {
+        // Pandoc line-number anchors inside `<pre>` are decorative targets (and in
+        // `.html` spine chapters HTML5 parses `<a .../>` as wrapping the line's
+        // code spans): suppress LinkPeek/navigation, but still update hover on click.
+        const pre = anchor?.closest('pre') ?? null;
+        if (anchor?.getAttribute('aria-hidden') === 'true' && pre !== null) {
           event.preventDefault();
           event.stopPropagation();
+          if (!hasSelection()) inspectCodeBlock(pre, { x: event.clientX, y: event.clientY });
           return;
         }
         const raw = anchor?.getAttribute('href') ?? '';
@@ -974,31 +1029,21 @@ export async function openEpubDocument(
       true,
     );
     // `selected` only reports new selections, not one that has been cleared.
-    contents.document.addEventListener('selectionchange', () => {
+    chapterDoc.addEventListener('selectionchange', () => {
       const selection = contents.window.getSelection();
       if (!selection || selection.isCollapsed) {
         releasedSelection = null;
         selectionListener(null);
       }
     });
-    contents.document.addEventListener('keydown', (event: KeyboardEvent) => {
+    chapterDoc.addEventListener('keydown', (event: KeyboardEvent) => {
       keyDownListener(event);
     });
     // The app guards the webview's own context menu on the window, and a chapter is
     // a frame: its right clicks never reach that listener. The same function serves
     // every chapter, so a re-rendered document gets one listener, not two.
-    contents.document.addEventListener('contextmenu', onChapterContextMenu);
+    chapterDoc.addEventListener('contextmenu', onChapterContextMenu);
     // Page turns are decided outside the frame, in the top window's coordinates.
-    const chapterDoc = contents.document;
-    const offset = () => {
-      const frame = contents.window.frameElement;
-      const rect = frame?.getBoundingClientRect();
-      return { left: rect?.left ?? 0, top: rect?.top ?? 0 };
-    };
-    const hasSelection = () => {
-      const selection = contents.window.getSelection();
-      return selection !== null && !selection.isCollapsed;
-    };
     chapterDoc.documentElement.style.cursor = frameCursor;
     chapterDoc.addEventListener('pointerup', (event: PointerEvent) => {
       if (event.button !== 0) return;
@@ -1057,48 +1102,6 @@ export async function openEpubDocument(
     );
     if (!hoveredCodeDocs.has(chapterDoc)) {
       hoveredCodeDocs.add(chapterDoc);
-      const inspectCodeBlock = (pre: Element | null, clientPoint?: { x: number; y: number }) => {
-        if (destroyed) return;
-        if (!pre || !isCopyableCodeBlock(pre)) {
-          clearCodeBlockHover();
-          return;
-        }
-        const frameRect = contents.window.frameElement?.getBoundingClientRect() ?? zeroRect;
-        const hostRect = element.getBoundingClientRect();
-        const pointer = clientPoint
-          ? { x: frameRect.left + clientPoint.x, y: frameRect.top + clientPoint.y }
-          : undefined;
-        const rect = visibleCodeBlockRect(pre, frameRect, hostRect, pointer);
-        if (!rect) {
-          clearCodeBlockHover();
-          return;
-        }
-        const id = blockIdOf(pre);
-        const top = Math.round(rect.top);
-        const left = Math.round(rect.left);
-        const bottom = Math.round(rect.bottom);
-        const right = Math.round(rect.right);
-        if (
-          lastHoveredBlock &&
-          lastHoveredBlock.id === id &&
-          lastHoveredBlock.top === top &&
-          lastHoveredBlock.left === left &&
-          lastHoveredBlock.bottom === bottom &&
-          lastHoveredBlock.right === right
-        ) {
-          return;
-        }
-        lastHoveredBlock = { id, top, left, bottom, right };
-        codeBlockHoverListener({
-          id,
-          rect,
-          getText: () => extractCodeBlockText(pre),
-        });
-      };
-      const preFromTarget = (target: EventTarget | null): Element | null => {
-        const targetElement = target as Element | null;
-        return typeof targetElement?.closest === 'function' ? targetElement.closest('pre') : null;
-      };
       chapterDoc.addEventListener('pointermove', (event: PointerEvent) => {
         if (event.buttons !== 0) return;
         const pre = preFromTarget(event.target);

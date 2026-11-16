@@ -1745,4 +1745,54 @@ describe('EPUB code blocks', () => {
     inner.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, buttons: 0 }));
     expect(seen).toHaveLength(2);
   });
+
+  it('hovers and click-activates HTML5-misparsed Pandoc sourceCode blocks without opening LinkPeek', async () => {
+    const { handle, contents } = await openRendered();
+    Reflect.set(contents, 'sectionIndex', 0);
+    const links: string[] = [];
+    const seen: (EpubCodeBlockHover | null)[] = [];
+    handle.onInternalLink((href) => links.push(href));
+    handle.onCodeBlockHover?.((block) => seen.push(block));
+
+    // HTML5 (`text/html`) parses self-closing `<a .../>` as wrapping the line's tokens.
+    const parsed = new DOMParser().parseFromString(
+      `<div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"/><span class="ex">cmd</span> arg</span></code></pre></div>`,
+      'text/html',
+    );
+    contents.document.body.innerHTML = parsed.body.innerHTML;
+    const pre = contents.document.querySelector('pre') as Element;
+    const token = contents.document.querySelector('span.ex') as Element;
+    vi.spyOn(pre, 'getClientRects').mockReturnValue([
+      new DOMRect(120, 100, 400, 40),
+    ] as unknown as DOMRectList);
+
+    token.dispatchEvent(
+      new MouseEvent('pointermove', { bubbles: true, buttons: 0, clientX: 140, clientY: 115 }),
+    );
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.getText()).toBe('cmd arg');
+
+    // pointerdown clears hover, then clicking inside the wrapped `<a aria-hidden="true">`
+    // must suppress LinkPeek while still restoring code-block hover when selection is collapsed.
+    const collapsed = { isCollapsed: true, rangeCount: 0 } as unknown as Selection;
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue(collapsed);
+    try {
+      token.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+      expect(seen.at(-1)).toBeNull();
+      const click = new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        clientX: 140,
+        clientY: 115,
+      });
+      token.dispatchEvent(click);
+      expect(click.defaultPrevented).toBe(true);
+      expect(links).toEqual([]);
+      expect(seen.at(-1)?.getText()).toBe('cmd arg');
+    } finally {
+      getSelectionSpy.mockRestore();
+      handle.destroy();
+    }
+  });
 });

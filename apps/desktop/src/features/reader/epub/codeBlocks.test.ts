@@ -39,6 +39,16 @@ describe('extractCodeBlockText', () => {
     expect(extractCodeBlockText(pre)).toBe('service: synthetic-worker\n  endpoint: (1)');
   });
 
+  it('preserves code wrapped by HTML5-misparsed self-closing Pandoc anchors in text/html chapters', () => {
+    const doc = new DOMParser().parseFromString(
+      `<div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"/><span class="ex">cmd</span> arg</span>\n<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"/>  # plain comment</span>\n<span id="cb1-3"><a href="#cb1-3" aria-hidden="true">3</a><span class="ex">next</span></span></code></pre></div>`,
+      'text/html',
+    );
+    const pre = doc.querySelector('pre') as Element;
+    expect(isCopyableCodeBlock(pre)).toBe(true);
+    expect(extractCodeBlockText(pre)).toBe('cmd arg\n  # plain comment\nnext');
+  });
+
   it('keeps code inside [data-line-number] line wrappers while skipping numeric/empty gutters', () => {
     const doc = parseXhtml(`
       <pre id="p"><code><span data-line-number="1">1</span><span class="line" data-line-number="1">const a = 1;</span>\n<span data-line-number="2">   </span><span class="line" data-line-number="2">const b = 2;</span></code></pre>

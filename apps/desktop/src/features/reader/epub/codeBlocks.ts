@@ -42,7 +42,17 @@ function isLineNumberDescendant(element: Element): boolean {
 function shouldSkipDescendant(element: Element, tag: string): boolean {
   if (SKIPPED_TAGS.has(tag) || element.hasAttribute('data-synapse-ui')) return true;
   if (tag === 'code') return false;
-  return element.getAttribute('aria-hidden') === 'true' || isLineNumberDescendant(element);
+  if (isLineNumberDescendant(element)) return true;
+  if (element.getAttribute('aria-hidden') === 'true') {
+    if (tag === 'a') {
+      // Pandoc emits self-closing `<a href="#cb1-1" aria-hidden="true"/>` anchors
+      // that HTML5 (`text/html`) parses as wrapping the rest of the line's tokens.
+      // Only skip empty/whitespace or line-number-only anchors; descend transparently otherwise.
+      return element.childElementCount === 0 && /^\d*$/.test((element.textContent ?? '').trim());
+    }
+    return true;
+  }
+  return false;
 }
 
 /**
