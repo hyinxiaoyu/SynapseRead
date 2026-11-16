@@ -96,8 +96,9 @@ for task IDs, acceptance evidence, and measurements.
       acceptance (`macOS 15.6.1`, `Apple M4`, `AppleWebKit/605.1.15`).
 - [x] Books-style continuous page turns (`#86`): a trackpad swipe scrubs the page 1:1
       with the fingers, rubber-bands at the ends of the document, and absorbs a mac's
-      inertial tail instead of locking out rapid flicks; EPUB slides its own column
-      strip across a whole page and holds the outgoing chapter across a spine seam;
+      inertial tail instead of locking out rapid flicks; EPUB slides a full-area pane
+      (mirroring the outgoing page, carrying the incoming one, and casting a seam shadow),
+      stages the held chapter across a spine seam, and keeps the spine on the pane;
       PDF `single`/`two-page` keep a three-slot stage of already-rasterized spreads;
       `curl` is a stationary dual-page conical paper-curl peel with live 1:1
       horizontal trackpad scrubbing: the outgoing surface stays pinned at `(0, 0)`

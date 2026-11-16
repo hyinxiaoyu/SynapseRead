@@ -181,6 +181,12 @@ interface Sample {
 export interface WheelScrubContext {
   /** The page width in px, measured once per gesture; thresholds scale with it. */
   pageWidth: () => number;
+  /**
+   * The width of the surface the fingers move, when it differs from the page —
+   * a full-area slide pane inside a narrower reading measure. Defaults to
+   * `pageWidth`, so a whole-page drag still ends the gesture at the right edge.
+   */
+  surfaceWidth?: () => number;
   /** Whether a page exists in that direction; a scrub toward nothing rubber-bands. */
   canTurn: (direction: TurnDirection) => boolean;
 }
@@ -204,6 +210,7 @@ export class WheelScrub {
   private travel = 0;
   private samples: Sample[] = [];
   private width = 0;
+  private surfaceWidth = 0;
   private lastDeltaX = 0;
   private lastAbs = 0;
   private lastAt = 0;
@@ -285,6 +292,7 @@ export class WheelScrub {
     this.context = context;
     // One layout read per gesture, not one per wheel event.
     this.width = Math.max(context.pageWidth(), 1);
+    this.surfaceWidth = Math.max(context.surfaceWidth?.() ?? this.width, 1);
     return [{ kind: 'start' }, ...this.advance(deltaX, at)];
   }
 
@@ -296,8 +304,8 @@ export class WheelScrub {
     this.lastAbs = Math.abs(deltaX);
     this.lastAt = at;
     const direction = directionOf(this.travel);
-    if (Math.abs(this.travel) >= this.width && this.canTurn(direction)) {
-      // A whole page has been dragged: the turn is made under the fingers, and
+    if (Math.abs(this.travel) >= this.surfaceWidth && this.canTurn(direction)) {
+      // A whole surface has been dragged: the turn is made under the fingers, and
       // everything after this in the same gesture is inertia.
       return this.finish(this.velocity(at), direction, at);
     }
@@ -396,6 +404,7 @@ export function usePageTurnGestures({
   enabled,
   areaRef,
   pageRef,
+  scrubWidth,
   onTurn,
   canSwipe,
   canTurn,
@@ -406,6 +415,12 @@ export function usePageTurnGestures({
   enabled: boolean;
   areaRef: RefObject<HTMLElement | null>;
   pageRef?: RefObject<HTMLElement | null>;
+  /**
+   * The width of the surface a slide scrub moves, when it differs from the page
+   * (a full-area slide pane inside a narrower reading measure). Defaults to the
+   * page width.
+   */
+  scrubWidth?: () => number;
   onTurn: (direction: TurnDirection) => void;
   /** False while the page scrolls sideways itself (a zoomed PDF). */
   canSwipe?: () => boolean;
@@ -588,13 +603,14 @@ export function usePageTurnGestures({
       emit(
         scrub.push(wheel.deltaX, timestamp, {
           pageWidth,
+          ...(scrubWidth === undefined ? {} : { surfaceWidth: scrubWidth }),
           canTurn: (direction) => latest.current.canTurn?.(direction) ?? true,
         }),
       );
       armIdle();
       return true;
     },
-    [absorbNotchTail, areaRef, armIdle, clearDiscreteWheel, emit, pageRef, scrub],
+    [absorbNotchTail, areaRef, armIdle, clearDiscreteWheel, emit, pageRef, scrub, scrubWidth],
   );
 
   useEffect(() => {

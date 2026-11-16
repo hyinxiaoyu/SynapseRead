@@ -1,5 +1,6 @@
 import { BookOpen, FileText, PanelLeft, ScrollText } from 'lucide-react';
 import {
+  type CSSProperties,
   startTransition,
   useCallback,
   useEffect,
@@ -55,6 +56,7 @@ import {
   pageFooterStyle,
   pageSurfaceStyle,
   PAPER_CURL_PALETTES,
+  paperCurlVariables,
 } from '@/features/reader/appearance/themes';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
@@ -1248,10 +1250,10 @@ export function EpubViewer({
   const turnPage = (direction: TurnDirection) => {
     if (!handle) return;
     backChip.dismiss();
-    // `slide` is the strip's own motion: the engine moves both pages across the
-    // page width, so the incoming page is never nudged after the outgoing one is
-    // gone. For `curl`, the engine captures the outgoing spread and sweeps a
-    // conical crease over the stationary incoming spread.
+    // `slide` is the page's own motion: the engine mirrors the outgoing page across
+    // the page area and carries the incoming one with it, so the whole page turns,
+    // not just the reading measure. For `curl`, the engine captures the outgoing
+    // spread and sweeps a conical crease over the stationary incoming spread.
     const slides = paged && transition === 'slide';
     const engineCurls =
       paged && transition === 'curl' && typeof handle.setCurlElements === 'function';
@@ -1371,6 +1373,14 @@ export function EpubViewer({
     enabled: handle !== null && isActive && paged,
     areaRef,
     pageRef: hostRef,
+    // A slide scrub moves the full-area pane, not the narrower reading measure;
+    // the gesture must finish at the pane's edge, not at the measure's. Fall back
+    // to the measure before the pane has been laid out.
+    scrubWidth: () => {
+      const paneWidth = areaRef.current?.getBoundingClientRect().width ?? 0;
+      if (paged && transition === 'slide' && paneWidth > 0) return paneWidth;
+      return hostRef.current?.getBoundingClientRect().width ?? 0;
+    },
     onTurn: turnPage,
     canTurn: (direction) =>
       (handle?.canTurnInPlace(direction) ?? false) ||
@@ -1618,6 +1628,9 @@ export function EpubViewer({
             className="group/page relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5"
             style={{
               ...pageSurfaceStyle(theme),
+              // The slide's seam shadow reads the same calibrated cast colour as
+              // the curl, so it stays visible on Light, Sepia, and Dark paper.
+              ...(paperCurlVariables(PAPER_CURL_PALETTES[theme]) as CSSProperties),
               cursor: zoneCursor(zone) || undefined,
               // The toolbar floats over the page in focus mode. A page does not
               // scroll out from under it, so its band is the page's top margin and
@@ -1625,44 +1638,69 @@ export function EpubViewer({
               ...(toolbarMargin ? { paddingTop: TOOLBAR_HEIGHT_PX } : undefined),
             }}
           >
+            {/*
+              The pane is the paper the turn moves: page-area wide, with the
+              reading measure centred inside it. Translating the pane (rather than
+              the measure) carries the margins, the spine, and the incoming page's
+              paper together, so the seam sits at the page-area edge instead of
+              inside the text column.
+            */}
             <div
-              className={cn('relative h-full', availableWidth === 0 && 'w-full')}
-              style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
+              data-testid="epub-slide-pane"
+              className="relative flex h-full w-full justify-center"
+              style={pageSurfaceStyle(theme)}
             >
               <div
-                ref={hostRef}
-                tabIndex={-1}
-                data-testid="epub-host"
-                className={cn('relative h-full overflow-hidden', availableWidth === 0 && 'w-full')}
-                style={{
-                  ...pageSurfaceStyle(theme),
-                  ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
-                }}
-              />
-              <div
-                ref={curlHostRef}
-                inert
-                aria-hidden="true"
-                data-testid="epub-curl-host"
-                className="pointer-events-none invisible absolute inset-0 z-10 overflow-hidden"
-                style={pageSurfaceStyle(theme)}
-              />
-              {readingMode === 'spread' && layout.columns === 2 && (
+                className={cn('relative h-full', availableWidth === 0 && 'w-full')}
+                style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
+              >
                 <div
-                  aria-hidden="true"
-                  data-testid="epub-spine"
-                  className="pointer-events-none absolute inset-y-3 left-1/2 z-[15] w-12 -translate-x-1/2"
+                  ref={hostRef}
+                  tabIndex={-1}
+                  data-testid="epub-host"
+                  className={cn(
+                    'relative h-full overflow-hidden',
+                    availableWidth === 0 && 'w-full',
+                  )}
                   style={{
-                    background: `linear-gradient(to right, transparent, ${PAGE_PALETTES[theme].spine} 50%, transparent)`,
+                    ...pageSurfaceStyle(theme),
+                    ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
                   }}
                 />
-              )}
-              <PageTurnShadow
-                shadowRef={turnShadowRef}
-                palette={PAPER_CURL_PALETTES[theme]}
-                className="inset-0"
-              />
+                {readingMode === 'spread' && layout.columns === 2 && (
+                  <div
+                    aria-hidden="true"
+                    data-testid="epub-spine"
+                    className="pointer-events-none absolute inset-y-3 left-1/2 z-[15] w-12 -translate-x-1/2"
+                    style={{
+                      background: `linear-gradient(to right, transparent, ${PAGE_PALETTES[theme].spine} 50%, transparent)`,
+                    }}
+                  />
+                )}
+              </div>
             </div>
+            {/*
+              The turn acts on the whole page, not on the reading measure. The
+              column width only says where the words sit; a sheet that peeled
+              inside it would leave the margins of the same paper standing still
+              while the sheet moved, which reads as a card sliding on a page.
+              So both the outgoing surface and the curl shading span the page
+              area, and the mirrored chapter inside `epub-curl-host` is offset
+              back to where its text column sits.
+            */}
+            <div
+              ref={curlHostRef}
+              inert
+              aria-hidden="true"
+              data-testid="epub-curl-host"
+              className="pointer-events-none invisible absolute inset-0 z-10 overflow-hidden"
+              style={pageSurfaceStyle(theme)}
+            />
+            <PageTurnShadow
+              shadowRef={turnShadowRef}
+              palette={PAPER_CURL_PALETTES[theme]}
+              className="inset-0"
+            />
             {paged && (
               <PageTurnChevrons
                 disabled={!handle}

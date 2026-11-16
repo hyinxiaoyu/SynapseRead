@@ -847,6 +847,7 @@ describe('EPUB slide seam scrubbing', () => {
     let scrollWidth = 1280;
     let scrollLeft = 0;
     Object.defineProperty(container, 'clientWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'clientHeight', { value: 480, configurable: true });
     Object.defineProperty(container, 'offsetWidth', { value: 640, configurable: true });
     Object.defineProperty(container, 'scrollWidth', {
       get: () => scrollWidth,
@@ -952,6 +953,101 @@ describe('EPUB slide seam scrubbing', () => {
     }
   });
 
+  it('stages a seam turn across the page area', async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const tick = (at: number) => {
+      clock = at;
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(at);
+    };
+
+    const strip = stripHarness();
+    const heldView = document.createElement('div');
+    heldView.className = 'epub-view';
+    Object.defineProperty(heldView, 'offsetLeft', { value: 0, configurable: true });
+    Object.defineProperty(heldView, 'offsetTop', { value: 0, configurable: true });
+    Object.defineProperty(heldView, 'offsetWidth', { value: 1280, configurable: true });
+    Object.defineProperty(heldView, 'offsetHeight', { value: 480, configurable: true });
+    strip.container.appendChild(heldView);
+    const viewDestroy = vi.fn();
+    const held = { element: heldView, displayed: true, destroy: viewDestroy };
+    const destroyView = vi.fn((view: typeof held) => {
+      view.destroy();
+      view.element.remove();
+    });
+    const views = {
+      _views: [held],
+      length: 1,
+      container: strip.container,
+      clear: vi.fn(),
+      destroy: destroyView,
+    };
+    Reflect.set(fake.rendition, 'manager', {
+      container: strip.container,
+      layout: { delta: 640 },
+      views,
+    });
+    Reflect.set(fake.rendition, 'reportLocation', vi.fn());
+    const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(async () => {
+      views.clear();
+      strip.scrollLeft = 0;
+      strip.setScrollWidth(1920);
+    });
+
+    const host = document.createElement('div');
+    const curlHost = document.createElement('div');
+    document.body.append(curlHost);
+    vi.spyOn(curlHost, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 900, 600));
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(130, 0, 640, 600));
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+      handle.setCurlElements?.({ curlHost, shadow: null });
+
+      strip.scrollLeft = 640;
+      const turn = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      for (let step = 0; step < 4; step += 1) await Promise.resolve();
+      // The held chapter's last page is the outgoing page; the incoming chapter's
+      // first page is one stride away, and the whole page area carries the motion.
+      expect(host.style.transform).toBe('translateX(900px)');
+      expect(curlHost.style.visibility).toBe('visible');
+      expect(strip.scrollLeft).toBe(1280);
+
+      tick(130);
+      expect(host.style.transform).not.toBe('');
+      tick(300);
+      await turn;
+      expect(host.style.transform).toBe('');
+      expect(curlHost.style.visibility).toBe('hidden');
+      expect(heldView.parentElement).toBeNull();
+      expect(strip.scrollLeft).toBe(0);
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      Reflect.set(fake.rendition, 'reportLocation', undefined);
+      nextSpy.mockRestore();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
   it('stops a running slide when a newer relayout replaces its chapter', async () => {
     const frames = new Map<number, FrameRequestCallback>();
     let nextFrame = 1;
@@ -1004,6 +1100,403 @@ describe('EPUB slide seam scrubbing', () => {
       handle.destroy();
     } finally {
       Reflect.set(fake.rendition, 'manager', undefined);
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('slides the whole page area instead of the reading measure', async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const tick = (at: number) => {
+      clock = at;
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(at);
+    };
+
+    const strip = stripHarness();
+    document.body.append(strip.container);
+    const view = document.createElement('div');
+    view.className = 'epub-view';
+    Object.defineProperty(view, 'offsetLeft', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetTop', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetWidth', { value: 640, configurable: true });
+    Object.defineProperty(view, 'offsetHeight', { value: 480, configurable: true });
+    view.appendChild(document.createElement('iframe'));
+    strip.container.appendChild(view);
+    Reflect.set(fake.rendition, 'manager', {
+      container: strip.container,
+      layout: { delta: 640 },
+    });
+
+    const host = document.createElement('div');
+    const pane = document.createElement('div');
+    pane.dataset.testid = 'epub-slide-pane';
+    pane.append(host);
+    const spine = document.createElement('div');
+    spine.dataset.testid = 'epub-spine';
+    spine.style.background =
+      'linear-gradient(to right, transparent, rgba(0, 0, 0, 0.16) 50%, transparent)';
+    vi.spyOn(spine, 'getBoundingClientRect').mockReturnValue(new DOMRect(400, 12, 48, 456));
+    pane.append(spine);
+    document.body.append(pane);
+    const curlHost = document.createElement('div');
+    document.body.append(curlHost);
+    // The page area is wider than the reading measure: a slide confined to the
+    // measure would leave the margins of the same paper standing still.
+    vi.spyOn(curlHost, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 900, 600));
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(130, 0, 640, 600));
+
+    const translateX = (element: HTMLElement) =>
+      Number(element.style.transform.match(/-?[\d.]+/)?.[0] ?? 0);
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+      handle.setCurlElements?.({ curlHost, shadow: null });
+
+      const turn = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      // The strip is already on the incoming page; the pane carries the motion.
+      expect(strip.scrollLeft).toBe(640);
+      expect(translateX(pane)).toBe(900);
+      expect(host.style.transform).toBe('');
+      expect(translateX(curlHost)).toBe(0);
+      expect(curlHost.style.visibility).toBe('visible');
+      expect(curlHost.childElementCount).toBeGreaterThan(0);
+      // The chapter clone is clipped to the live reading viewport, not the page
+      // area, so neighbouring columns cannot show in the paper margins.
+      const mirrorViewport = curlHost.querySelector('[data-testid="epub-mirror-viewport"]');
+      expect(mirrorViewport).not.toBeNull();
+      expect((mirrorViewport as HTMLElement).style.left).toBe('130px');
+      expect((mirrorViewport as HTMLElement).style.top).toBe('0px');
+      expect((mirrorViewport as HTMLElement).style.width).toBe('640px');
+      expect((mirrorViewport as HTMLElement).style.height).toBe('480px');
+      expect((mirrorViewport?.firstElementChild as HTMLElement).style.left).toBe('0px');
+      expect((mirrorViewport?.firstElementChild as HTMLElement).style.top).toBe('0px');
+      // The outgoing spread keeps its spine: the live spine is a sibling of the
+      // host, so the mirror has to carry a copy of it.
+      const mirrorSpine = mirrorViewport?.querySelector('[data-testid="epub-mirror-spine"]');
+      expect(mirrorSpine).not.toBeNull();
+      expect((mirrorSpine as HTMLElement).style.left).toBe('270px');
+      expect((mirrorSpine as HTMLElement).style.top).toBe('12px');
+      expect((mirrorSpine as HTMLElement).style.width).toBe('48px');
+      expect((mirrorSpine as HTMLElement).style.height).toBe('456px');
+
+      tick(130);
+      // Half-way: the outgoing page has left and the incoming one is arriving.
+      expect(translateX(pane)).toBeLessThan(900);
+      expect(translateX(pane)).toBeGreaterThan(0);
+      expect(translateX(curlHost)).toBeLessThan(0);
+      expect(translateX(curlHost)).toBeGreaterThan(-900);
+
+      tick(300);
+      await turn;
+      expect(pane.style.transform).toBe('');
+      expect(curlHost.style.transform).toBe('');
+      expect(curlHost.style.visibility).toBe('hidden');
+      expect(curlHost.childElementCount).toBe(0);
+
+      // A forward scrub follows the fingers across the page area too: the strip
+      // lands on the incoming page at once, and the page itself carries the drag.
+      strip.scrollLeft = 0;
+      handle.beginScrub({ transition: 'slide', spread: false });
+      handle.scrubTo(120);
+      expect(strip.scrollLeft).toBe(640);
+      expect(translateX(pane)).toBe(780);
+      expect(translateX(curlHost)).toBe(-120);
+      handle.scrubTo(0);
+      expect(pane.style.transform).toBe('');
+      expect(curlHost.style.transform).toBe('');
+      expect(strip.scrollLeft).toBe(0);
+
+      // A reversal restages the same mirror instead of cloning the chapter again.
+      strip.scrollLeft = 640;
+      // Three pages, so the scrub has a page in either direction from page two.
+      strip.setScrollWidth(1920);
+      handle.beginScrub({ transition: 'slide', spread: false });
+      handle.scrubTo(120);
+      const scrubViewport = curlHost.querySelector('[data-testid="epub-mirror-viewport"]');
+      const mirrorChild = scrubViewport?.firstElementChild;
+      handle.scrubTo(-120);
+      expect(scrubViewport?.firstElementChild).toBe(mirrorChild);
+      expect(translateX(pane)).toBe(-780);
+      expect(translateX(curlHost)).toBe(120);
+      expect(strip.scrollLeft).toBe(0);
+      handle.scrubTo(0);
+      expect(strip.scrollLeft).toBe(640);
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      strip.container.remove();
+      pane.remove();
+      curlHost.remove();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('restores a cancelled scrub when a turn interrupts the spring-back', async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const tick = (at: number) => {
+      clock = at;
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(at);
+    };
+
+    const strip = stripHarness();
+    strip.setScrollWidth(1920);
+    document.body.append(strip.container);
+    const view = document.createElement('div');
+    view.className = 'epub-view';
+    Object.defineProperty(view, 'offsetLeft', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetTop', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetWidth', { value: 640, configurable: true });
+    Object.defineProperty(view, 'offsetHeight', { value: 480, configurable: true });
+    view.appendChild(document.createElement('iframe'));
+    strip.container.appendChild(view);
+    Reflect.set(fake.rendition, 'manager', {
+      container: strip.container,
+      layout: { delta: 640 },
+    });
+
+    const host = document.createElement('div');
+    const pane = document.createElement('div');
+    pane.dataset.testid = 'epub-slide-pane';
+    pane.append(host);
+    document.body.append(pane);
+    const curlHost = document.createElement('div');
+    document.body.append(curlHost);
+    vi.spyOn(curlHost, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 900, 600));
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(130, 0, 640, 600));
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+      handle.setCurlElements?.({ curlHost, shadow: null });
+
+      strip.scrollLeft = 0;
+      handle.beginScrub({ transition: 'slide', spread: false });
+      handle.scrubTo(120);
+      expect(strip.scrollLeft).toBe(640);
+
+      const springBack = handle.endScrub(null);
+      // The spring-back is still in flight when the turn arrives.
+      const turn = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      // The cancelled scrub must land on its original page before the turn starts,
+      // or the turn would advance from the page the scrub never committed.
+      expect(strip.scrollLeft).toBe(640);
+      expect(pane.style.transform).toBe('translateX(900px)');
+
+      tick(300);
+      await Promise.all([springBack, turn]);
+      expect(strip.scrollLeft).toBe(640);
+      expect(pane.style.transform).toBe('');
+      expect(curlHost.style.visibility).toBe('hidden');
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      strip.container.remove();
+      pane.remove();
+      curlHost.remove();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('keeps the newer stage when two turns overlap', async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const tick = (at: number) => {
+      clock = at;
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(at);
+    };
+
+    const strip = stripHarness();
+    // Three pages, so both turns can be made in place.
+    strip.setScrollWidth(1920);
+    document.body.append(strip.container);
+    const view = document.createElement('div');
+    view.className = 'epub-view';
+    Object.defineProperty(view, 'offsetLeft', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetTop', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetWidth', { value: 640, configurable: true });
+    Object.defineProperty(view, 'offsetHeight', { value: 480, configurable: true });
+    view.appendChild(document.createElement('iframe'));
+    strip.container.appendChild(view);
+    Reflect.set(fake.rendition, 'manager', {
+      container: strip.container,
+      layout: { delta: 640 },
+    });
+
+    const host = document.createElement('div');
+    const curlHost = document.createElement('div');
+    document.body.append(curlHost);
+    vi.spyOn(curlHost, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 900, 600));
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(130, 0, 640, 600));
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+      handle.setCurlElements?.({ curlHost, shadow: null });
+
+      const first = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      expect(strip.scrollLeft).toBe(640);
+      expect(host.style.transform).toBe('translateX(900px)');
+
+      // The second turn settles the first stage and starts its own from page two.
+      const second = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      expect(strip.scrollLeft).toBe(1280);
+      expect(host.style.transform).toBe('translateX(900px)');
+
+      // Let the first turn's cancelled continuation run while the second stage is
+      // still animating: it must not clear the stage it no longer owns.
+      await Promise.resolve();
+      expect(host.style.transform).toBe('translateX(900px)');
+
+      tick(130);
+      // The first turn's continuation must not clear the stage the second one owns.
+      expect(host.style.transform).not.toBe('');
+      tick(300);
+      await Promise.all([first, second]);
+      expect(strip.scrollLeft).toBe(1280);
+      expect(host.style.transform).toBe('');
+      expect(curlHost.style.transform).toBe('');
+      expect(curlHost.style.visibility).toBe('hidden');
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      strip.container.remove();
+      curlHost.remove();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('carries a two-page spread across the page area while the strip advances one spread', async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const tick = (at: number) => {
+      clock = at;
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(at);
+    };
+
+    const strip = stripHarness();
+    // A spread is two pages: the strip advances by the spread, while the page
+    // itself travels the page area, which is wider than the spread.
+    Object.defineProperty(strip.container, 'clientWidth', { value: 1163, configurable: true });
+    Object.defineProperty(strip.container, 'offsetWidth', { value: 1163, configurable: true });
+    strip.setScrollWidth(2326);
+    document.body.append(strip.container);
+    const view = document.createElement('div');
+    view.className = 'epub-view';
+    Object.defineProperty(view, 'offsetLeft', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetTop', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetWidth', { value: 1163, configurable: true });
+    Object.defineProperty(view, 'offsetHeight', { value: 862, configurable: true });
+    view.appendChild(document.createElement('iframe'));
+    strip.container.appendChild(view);
+    Reflect.set(fake.rendition, 'manager', {
+      container: strip.container,
+      layout: { delta: 1163 },
+    });
+
+    const host = document.createElement('div');
+    const curlHost = document.createElement('div');
+    document.body.append(curlHost);
+    vi.spyOn(curlHost, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1726, 1000));
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(281, 0, 1163, 862));
+
+    const translateX = (element: HTMLElement) =>
+      Number(element.style.transform.match(/-?[\d.]+/)?.[0] ?? 0);
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+      handle.setCurlElements?.({ curlHost, shadow: null });
+
+      const turn = handle.turnPage(1, { animate: true, transition: 'slide', spread: true });
+      expect(strip.scrollLeft).toBe(1163);
+      expect(translateX(host)).toBe(1726);
+
+      tick(130);
+      expect(translateX(host)).toBeLessThan(1726);
+      expect(translateX(host)).toBeGreaterThan(0);
+      expect(translateX(curlHost)).toBeLessThan(0);
+      expect(translateX(curlHost)).toBeGreaterThan(-1726);
+
+      tick(300);
+      await turn;
+      expect(strip.scrollLeft).toBe(1163);
+      expect(host.style.transform).toBe('');
+      expect(curlHost.style.transform).toBe('');
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      strip.container.remove();
+      curlHost.remove();
       rafSpy.mockRestore();
       cancelSpy.mockRestore();
       nowSpy.mockRestore();
