@@ -2258,6 +2258,15 @@ export async function openEpubDocument(
       const target = pendingTarget ?? currentCfi;
       const wanted = target === undefined ? undefined : book.spine.get(target)?.href;
       pendingTarget = target;
+      // Clear `location` while changing flow, spread, and stage size so
+      // `rendition.flow` and `onResized` do not enqueue stale displays first.
+      Reflect.set(rendition, 'location', undefined);
+      rendition.flow(MODE_FLOW[mode]);
+      rendition.spread(spreadFor(mode, currentColumns), 0);
+      if (element.clientWidth > 0 && element.clientHeight > 0) {
+        resizeTo(element.clientWidth, element.clientHeight, target);
+      }
+      rendition.clear();
       Reflect.set(
         rendition,
         'location',
@@ -2265,9 +2274,6 @@ export async function openEpubDocument(
           ? { start: { href: wanted, cfi: target } }
           : undefined,
       );
-      rendition.flow(MODE_FLOW[mode]);
-      rendition.spread(spreadFor(mode, currentColumns), 0);
-      rendition.clear();
       try {
         await (rendition.display(target) as unknown as Promise<void>).catch(
           () => rendition.display() as unknown as Promise<void>,

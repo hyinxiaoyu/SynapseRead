@@ -513,6 +513,35 @@ describe('EPUB navigation', () => {
       'font-size: 1.680rem !important;',
     );
   });
+
+  it('resizes the rendition stage to the host dimensions when switching reading modes', async () => {
+    const host = document.createElement('div');
+    let hostWidth = 1163;
+    Object.defineProperty(host, 'clientWidth', { get: () => hostWidth, configurable: true });
+    Object.defineProperty(host, 'clientHeight', { value: 900, configurable: true });
+    fake.rendition.location = { start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' } };
+    const handle = await openEpubDocument(
+      { kind: 'bytes', bytes: new Uint8Array() },
+      host,
+      'spread',
+    );
+    const initial = handle.display('epubcfi(/6/2!/4/2/1:0)');
+    fake.settle('epubcfi(/6/2!/4/2/1:0)');
+    await initial;
+    fake.state.displays = [];
+    fake.state.resizes = [];
+
+    // Switching Two pages -> Single page shrinks the host from 1163 to 581 before
+    // `setReadingMode('paged')` runs, while `setColumns(1)` no-ops because spread is already 'none'.
+    hostWidth = 581;
+    const modeSwitch = handle.setReadingMode('paged');
+    handle.setColumns(1);
+    expect(fake.state.resizes).toEqual([[581, 900, 'epubcfi(/6/2!/4/2/1:0)']]);
+    expect(fake.state.displays).toEqual(['epubcfi(/6/2!/4/2/1:0)']);
+    fake.settle('epubcfi(/6/2!/4/2/1:0)');
+    await modeSwitch;
+    handle.destroy();
+  });
 });
 
 describe('decorateWithNoteMarker', () => {
