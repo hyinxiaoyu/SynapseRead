@@ -96,7 +96,9 @@ import {
   type ReadingPreferences,
 } from '@/types/domain';
 
+import { CodeBlockOverlay, type ExpandedCodeBlock } from './CodeBlockOverlay';
 import {
+  type EpubCodeBlockHover,
   type EpubHandle,
   type EpubLocation,
   type EpubReadingMode,
@@ -287,6 +289,8 @@ export function EpubViewer({
   const readerAreaRef = useRef<HTMLDivElement>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
+  const [hoveredCodeBlock, setHoveredCodeBlock] = useState<EpubCodeBlockHover | null>(null);
+  const [expandedCodeBlock, setExpandedCodeBlock] = useState<ExpandedCodeBlock | null>(null);
   const [staleAnnotationIds, setStaleAnnotationIds] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -895,6 +899,13 @@ export function EpubViewer({
       if (down) dismissLinkPeek();
       reportPointer(down);
     });
+    handle.onCodeBlockHover?.((block) => {
+      if (!latest.current.isActive) return;
+      setHoveredCodeBlock(block);
+    });
+    return () => {
+      handle.onCodeBlockHover?.(() => undefined);
+    };
   }, [handle, openForAnnotation, reportPointer, dismissLinkPeek]);
 
   useEffect(() => {
@@ -1370,7 +1381,7 @@ export function EpubViewer({
   // ---- Page-turn gestures: edge clicks and swipes, also from inside the frame ----
 
   const gestures = usePageTurnGestures({
-    enabled: handle !== null && isActive && paged,
+    enabled: handle !== null && isActive && paged && expandedCodeBlock === null,
     areaRef,
     pageRef: hostRef,
     // A slide scrub moves the full-area pane, not the narrower reading measure;
@@ -1426,6 +1437,24 @@ export function EpubViewer({
     }
   }
 
+  // Switching away from this tab or following a jump puts the code dialog and pill away.
+  const [seenActiveForCode, setSeenActiveForCode] = useState(isActive);
+  if (seenActiveForCode !== isActive) {
+    setSeenActiveForCode(isActive);
+    if (!isActive) {
+      setHoveredCodeBlock(null);
+      setExpandedCodeBlock(null);
+    }
+  }
+  const [seenJumpForCode, setSeenJumpForCode] = useState(jumpRequest);
+  if (seenJumpForCode !== jumpRequest) {
+    setSeenJumpForCode(jumpRequest);
+    if (jumpRequest !== null) {
+      setHoveredCodeBlock(null);
+      setExpandedCodeBlock(null);
+    }
+  }
+
   const ready = handle !== null;
   useReaderCommands({
     isActive,
@@ -1457,8 +1486,8 @@ export function EpubViewer({
         run: () => updatePreferences({ epubReadingMode: 'scroll' }),
         enabled: ready,
       },
-      'go.previousPage': { run: () => turnPage(-1), enabled: ready },
-      'go.nextPage': { run: () => turnPage(1), enabled: ready },
+      'go.previousPage': { run: () => turnPage(-1), enabled: ready && expandedCodeBlock === null },
+      'go.nextPage': { run: () => turnPage(1), enabled: ready && expandedCodeBlock === null },
       'go.previousChapter': {
         run: () => goToChapter(currentChapterIndex - 1),
         enabled: ready && currentChapterIndex > 0,
@@ -1467,8 +1496,14 @@ export function EpubViewer({
         run: () => goToChapter(currentChapterIndex + 1),
         enabled: ready && currentChapterIndex < chapterCount - 1,
       },
-      'go.chapterStart': { run: () => goToChapterEdge('start'), enabled: ready },
-      'go.chapterEnd': { run: () => goToChapterEdge('end'), enabled: ready },
+      'go.chapterStart': {
+        run: () => goToChapterEdge('start'),
+        enabled: ready && expandedCodeBlock === null,
+      },
+      'go.chapterEnd': {
+        run: () => goToChapterEdge('end'),
+        enabled: ready && expandedCodeBlock === null,
+      },
       'go.page': { run: goTo.focus, enabled: ready, title: 'Go to Percentage…' },
       'go.back': { run: handleReturnBack, enabled: ready && history.canGoBack },
       'go.forward': { run: handleForward, enabled: ready && history.canGoForward },
@@ -1609,6 +1644,26 @@ export function EpubViewer({
             onDismiss={dismissLinkPeek}
             onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
           />
+          <CodeBlockOverlay
+            hoveredBlock={hoveredCodeBlock}
+            expandedBlock={expandedCodeBlock}
+            onExpand={(block) => {
+              setHoveredCodeBlock(null);
+              setExpandedCodeBlock(block);
+            }}
+            onCloseExpanded={() => setExpandedCodeBlock(null)}
+            boundsRef={readerAreaRef}
+            suppressed={
+              popover.target !== null ||
+              linkPeek !== null ||
+              expandedCodeBlock !== null ||
+              !isActive
+            }
+            invalidationKey={`${currentCfi ?? ''}|${readingMode}|${layout.columns}|${layout.pageWidth}|${preferencesKey}|${showSidebar}|${markup.visible}|${chromeHidden}`}
+            theme={theme}
+            fontSizePercent={effectivePreferences.fontSize}
+            onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
+          />
           <ReaderPopoverLayer hidden={chromeHidden}>
             {missedJump && (
               <ReaderNotice tone="warning" onDismiss={() => setMissedJump(false)}>
@@ -1703,7 +1758,7 @@ export function EpubViewer({
             />
             {paged && (
               <PageTurnChevrons
-                disabled={!handle}
+                disabled={!handle || expandedCodeBlock !== null}
                 onPrevious={() => turnPage(-1)}
                 onNext={() => turnPage(1)}
               />

@@ -21,6 +21,7 @@ import {
 } from '@/stores/useStudySyncStore';
 
 import {
+  type EpubCodeBlockHover,
   type EpubInternalLink,
   type EpubLocation,
   type EpubReadingMode,
@@ -70,6 +71,7 @@ const engine = vi.hoisted(() => ({
   emitWheel: (() => false) as (wheel: WheelSample) => boolean,
   emitMarkClick: (() => undefined) as (annotationId: string, rect: null) => void,
   emitPointer: (() => undefined) as (down: boolean) => void,
+  emitCodeBlockHover: (() => undefined) as (block: EpubCodeBlockHover | null) => void,
   cursor: '',
   displayedFractions: [] as [number, number][],
   /** The engine's text measurement; null leaves it out, as the old seam did. */
@@ -213,6 +215,9 @@ vi.mock('./epubEngine', () => ({
     },
     onWheel(listener: (wheel: WheelSample) => boolean) {
       engine.emitWheel = listener;
+    },
+    onCodeBlockHover(listener: (block: EpubCodeBlockHover | null) => void) {
+      engine.emitCodeBlockHover = listener;
     },
     setCursor(cursor: string) {
       engine.cursor = cursor;
@@ -1873,5 +1878,146 @@ describe('EpubViewer', () => {
     await store.getState().openDocument();
     render(<Harness store={store} documentId={store.getState().activeDocumentId as string} />);
     expect(await screen.findByRole('alert')).toHaveTextContent('file is gone');
+  });
+
+  describe('code block overlay (#104)', () => {
+    const hoverBlock = (overrides: Partial<EpubCodeBlockHover> = {}): EpubCodeBlockHover => ({
+      id: 'code-1',
+      rect: { top: 200, left: 100, right: 600, bottom: 320 },
+      getText: () => '  const a = 1;\n\treturn a;',
+      ...overrides,
+    });
+
+    it('copies from the action pill, expands the modal viewer, gates page-turn commands, and closes on Esc', async () => {
+      const writeText = vi.fn(async () => undefined);
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText },
+      });
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      act(() => engine.emitCodeBlockHover(hoverBlock()));
+      expect(screen.getByTestId('epub-code-action-pill')).toBeInTheDocument();
+
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('epub-code-copy'));
+      });
+      expect(writeText).toHaveBeenCalledWith('  const a = 1;\n\treturn a;');
+      expect(screen.getByTestId('epub-code-copy')).toHaveTextContent('Copied');
+
+      fireEvent.click(screen.getByTestId('epub-code-expand'));
+      expect(screen.queryByTestId('epub-code-action-pill')).toBeNull();
+      expect(screen.getByTestId('epub-code-dialog')).toBeInTheDocument();
+      expect(screen.getByTestId('epub-code-dialog-scroll')).toHaveFocus();
+      expect(screen.getByTestId('epub-code-dialog-pre').textContent).toBe(
+        '  const a = 1;\n\treturn a;',
+      );
+
+      // Page-turn commands (arrows, Space, Home/End, and iframe keys) are disabled while expanded.
+      const nextCalls = engine.next.mock.calls.length;
+      const prevCalls = engine.previous.mock.calls.length;
+      const fractionCalls = engine.displayedFractions.length;
+      fireEvent.keyDown(window, { key: 'ArrowRight' });
+      fireEvent.keyDown(window, { key: 'ArrowLeft' });
+      fireEvent.keyDown(window, { key: ' ' });
+      fireEvent.keyDown(window, { key: 'Home' });
+      fireEvent.keyDown(window, { key: 'End' });
+      act(() => engine.emitKeyDown(new KeyboardEvent('keydown', { key: 'ArrowRight' })));
+      expect(engine.next).toHaveBeenCalledTimes(nextCalls);
+      expect(engine.previous).toHaveBeenCalledTimes(prevCalls);
+      expect(engine.displayedFractions).toHaveLength(fractionCalls);
+
+      // Esc from chapter frame closes the expanded dialog before Find/popover and returns focus to host.
+      fireEvent.change(screen.getByTestId('search-input'), { target: { value: 'fox' } });
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      act(() => engine.emitKeyDown(esc));
+      expect(esc.defaultPrevented).toBe(true);
+      expect(screen.queryByTestId('epub-code-dialog')).toBeNull();
+      expect(screen.getByTestId('search-input')).toHaveValue('fox');
+      expect(screen.getByTestId('epub-host')).toHaveFocus();
+
+      // Page-turn commands work again after closing.
+      fireEvent.keyDown(window, { key: 'ArrowRight' });
+      expect(engine.next).toHaveBeenCalledTimes(nextCalls + 1);
+
+      // Font size and theme preferences propagate into the expanded dialog.
+      await act(async () =>
+        store.getState().updateReadingPreferences({ fontSize: 160, theme: 'dark' }),
+      );
+      act(() => engine.emitCodeBlockHover(hoverBlock({ id: 'code-themed' })));
+      fireEvent.click(screen.getByTestId('epub-code-expand'));
+      const pre = screen.getByTestId('epub-code-dialog-pre');
+      expect(Number.parseFloat(pre.style.fontSize)).toBeCloseTo((0.92 * 160) / 100, 3);
+      expect(screen.getByTestId('epub-code-dialog-scroll').style.backgroundColor).toBe(
+        'rgb(24, 24, 27)',
+      );
+    });
+
+    it('suppresses the pill on selection/linkPeek, invalidates on relocation, and closes dialog on tab switch or jump', async () => {
+      engine.peek = async () => 'Footnote text.';
+      const { store, documentId } = await setup();
+      const view = render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      // Suppresses when selection popover is active.
+      act(() => engine.emitCodeBlockHover(hoverBlock()));
+      expect(screen.getByTestId('epub-code-action-pill')).toBeInTheDocument();
+      select();
+      expect(await screen.findByTestId('selection-popover')).toBeInTheDocument();
+      expect(screen.queryByTestId('epub-code-action-pill')).toBeNull();
+
+      act(() => engine.emitSelection(null));
+      await waitFor(() => expect(screen.queryByTestId('selection-popover')).toBeNull());
+
+      // Suppresses when LinkPeek is open.
+      act(() => engine.emitCodeBlockHover(hoverBlock({ id: 'code-2' })));
+      expect(screen.getByTestId('epub-code-action-pill')).toBeInTheDocument();
+      act(() =>
+        engine.emitInternalLink('OEBPS/notes.xhtml#fn1', {
+          noteref: true,
+          rect: { top: 100, left: 100, bottom: 116, right: 108 },
+        }),
+      );
+      await screen.findByTestId('link-peek');
+      expect(screen.queryByTestId('epub-code-action-pill')).toBeNull();
+      act(() => engine.emitPointer(true));
+      act(() => engine.emitPointer(false));
+      expect(screen.queryByTestId('link-peek')).toBeNull();
+
+      // Relocation clears pill immediately without waiting for leave grace.
+      act(() => engine.emitCodeBlockHover(hoverBlock({ id: 'code-3' })));
+      expect(screen.getByTestId('epub-code-action-pill')).toBeInTheDocument();
+      act(() => engine.emitLocation({ cfi: FAR_CFI, href: 'OEBPS/chapter2.xhtml' }));
+      expect(screen.queryByTestId('epub-code-action-pill')).toBeNull();
+
+      // Inactive tab ignores hover and closes an open expanded dialog.
+      act(() => engine.emitCodeBlockHover(hoverBlock({ id: 'code-4' })));
+      fireEvent.click(screen.getByTestId('epub-code-expand'));
+      expect(screen.getByTestId('epub-code-dialog')).toBeInTheDocument();
+
+      view.rerender(<Harness store={store} documentId={documentId} isActive={false} />);
+      expect(screen.queryByTestId('epub-code-dialog')).toBeNull();
+      act(() => engine.emitCodeBlockHover(hoverBlock({ id: 'code-5' })));
+      expect(screen.queryByTestId('epub-code-action-pill')).toBeNull();
+
+      // Jump request closes an open expanded dialog.
+      view.rerender(<Harness store={store} documentId={documentId} isActive />);
+      act(() => engine.emitCodeBlockHover(hoverBlock({ id: 'code-6' })));
+      fireEvent.click(screen.getByTestId('epub-code-expand'));
+      expect(screen.getByTestId('epub-code-dialog')).toBeInTheDocument();
+      act(() =>
+        store.setState({
+          jumpRequest: {
+            nonce: 99,
+            documentId,
+            annotationId: 'ann-1',
+            anchor: { format: 'epub', cfiRange: FAR_CFI, chapterHref: 'OEBPS/chapter2.xhtml' },
+          },
+        }),
+      );
+      expect(screen.queryByTestId('epub-code-dialog')).toBeNull();
+    });
   });
 });

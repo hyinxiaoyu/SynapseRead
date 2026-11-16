@@ -10,6 +10,8 @@ import { useEffect, useLayoutEffect, useRef } from 'react';
  * moves into an EPUB chapter, so a key forwarded from the frame finds none open.
  */
 export const ESCAPE_LAYER = {
+  /** Expanded code block dialog: above selection notes and everything below it. */
+  codeView: 45,
   noteField: 40,
   /** A footnote card: above the selection popover, which a link click never opens. */
   linkPeek: 35,

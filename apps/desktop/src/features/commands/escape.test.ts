@@ -33,6 +33,28 @@ describe('the Esc order', () => {
     expect(closed).toEqual(['note', 'popover', 'find', 'focus']);
   });
 
+  it('closes expanded code view before the note field and all lower layers', () => {
+    expect(ESCAPE_LAYER.codeView).toBeGreaterThan(ESCAPE_LAYER.noteField);
+    const closed: string[] = [];
+    const open = new Set(['codeView', 'note', 'linkPeek', 'popover', 'find', 'sidebar', 'focus']);
+    const closing = (name: string) => () => {
+      if (!open.has(name)) return false;
+      open.delete(name);
+      closed.push(name);
+      return true;
+    };
+    layer(ESCAPE_LAYER.focusMode, closing('focus'));
+    layer(ESCAPE_LAYER.sidebar, closing('sidebar'));
+    layer(ESCAPE_LAYER.find, closing('find'));
+    layer(ESCAPE_LAYER.selectionPopover, closing('popover'));
+    layer(ESCAPE_LAYER.linkPeek, closing('linkPeek'));
+    layer(ESCAPE_LAYER.noteField, closing('note'));
+    layer(ESCAPE_LAYER.codeView, closing('codeView'));
+
+    for (let press = 0; press < 7; press += 1) dispatchEscape(escape());
+    expect(closed).toEqual(['codeView', 'note', 'linkPeek', 'popover', 'find', 'sidebar', 'focus']);
+  });
+
   it('skips a closed layer and one that declines the key', () => {
     const focus = vi.fn(() => true);
     layer(ESCAPE_LAYER.selectionPopover, null);
