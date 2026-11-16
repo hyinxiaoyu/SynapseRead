@@ -78,9 +78,15 @@ const sampleTurn = (page, { frames = 40, target = 'epub' } = {}) => {
   const element =
     target === 'epub' ? strip : `${visibleScroller}?.querySelector('[data-testid="pdf-stage"]')`;
   const host = target === 'epub' ? visibleHost : visibleScroller;
+  // The slide moves the full-area pane; the host inside it stays put.
+  const surface =
+    target === 'epub'
+      ? `${visibleHost}?.closest('[data-testid="epub-slide-pane"]') ?? ${visibleHost}`
+      : host;
   return page.evaluate(`(() => {
     const element = ${element};
     const host = ${host};
+    const surface = ${surface};
     window.__turnSamples = [];
     let frames = 0;
     const step = () => {
@@ -88,7 +94,7 @@ const sampleTurn = (page, { frames = 40, target = 'epub' } = {}) => {
         position: Math.round(element?.scrollLeft ?? 0),
         // The computed transform, so a Web Animation's frames are visible here.
         transform: element ? getComputedStyle(element).transform : '',
-        page: host ? getComputedStyle(host).transform : '',
+        page: surface ? getComputedStyle(surface).transform : '',
         opacity: host ? Number(getComputedStyle(host).opacity) : 1,
       });
       frames += 1;
@@ -171,7 +177,8 @@ export async function pagingFlow(page) {
   // Nothing is left behind: no transform, and the strip is where the turn put it.
   const settled = await page.evaluate(`(() => {
     const host = ${visibleHost};
-    return { transform: getComputedStyle(host).transform, left: ${scrollLeft} };
+    const pane = host.closest('[data-testid="epub-slide-pane"]') ?? host;
+    return { transform: getComputedStyle(pane).transform, left: ${scrollLeft} };
   })()`);
   assert(settled.transform === 'none', `the page must not stay transformed: ${settled.transform}`);
   assert(settled.left > before, 'the turn must move to the next page');
@@ -200,10 +207,12 @@ export async function pagingFlow(page) {
   await page.waitFor(
     `(() => {
       const container = ${strip};
+      const host = ${visibleHost};
+      const pane = host?.closest('[data-testid="epub-slide-pane"]') ?? host;
       const delta = container?.clientWidth ?? 0;
       const left = container?.scrollLeft ?? 0;
       return delta > 0 && Math.abs(left % delta) < 2 && left > ${beforeSwipe}
-        && getComputedStyle(${visibleHost}).transform === 'none';
+        && getComputedStyle(pane).transform === 'none';
     })()`,
     'the swipe to settle on a page boundary',
   );

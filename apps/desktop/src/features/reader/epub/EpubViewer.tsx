@@ -1,5 +1,6 @@
 import { BookOpen, FileText, PanelLeft, ScrollText } from 'lucide-react';
 import {
+  type CSSProperties,
   startTransition,
   useCallback,
   useEffect,
@@ -55,6 +56,7 @@ import {
   pageFooterStyle,
   pageSurfaceStyle,
   PAPER_CURL_PALETTES,
+  paperCurlVariables,
 } from '@/features/reader/appearance/themes';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
@@ -1618,6 +1620,9 @@ export function EpubViewer({
             className="group/page relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5"
             style={{
               ...pageSurfaceStyle(theme),
+              // The slide's seam shadow reads the same calibrated cast colour as
+              // the curl, so it stays visible on Light, Sepia, and Dark paper.
+              ...(paperCurlVariables(PAPER_CURL_PALETTES[theme]) as CSSProperties),
               cursor: zoneCursor(zone) || undefined,
               // The toolbar floats over the page in focus mode. A page does not
               // scroll out from under it, so its band is the page's top margin and
@@ -1625,30 +1630,46 @@ export function EpubViewer({
               ...(toolbarMargin ? { paddingTop: TOOLBAR_HEIGHT_PX } : undefined),
             }}
           >
+            {/*
+              The pane is the paper the turn moves: page-area wide, with the
+              reading measure centred inside it. Translating the pane (rather than
+              the measure) carries the margins, the spine, and the incoming page's
+              paper together, so the seam sits at the page-area edge instead of
+              inside the text column.
+            */}
             <div
-              className={cn('relative h-full', availableWidth === 0 && 'w-full')}
-              style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
+              data-testid="epub-slide-pane"
+              className="relative flex h-full w-full justify-center"
+              style={pageSurfaceStyle(theme)}
             >
               <div
-                ref={hostRef}
-                tabIndex={-1}
-                data-testid="epub-host"
-                className={cn('relative h-full overflow-hidden', availableWidth === 0 && 'w-full')}
-                style={{
-                  ...pageSurfaceStyle(theme),
-                  ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
-                }}
-              />
-              {readingMode === 'spread' && layout.columns === 2 && (
+                className={cn('relative h-full', availableWidth === 0 && 'w-full')}
+                style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
+              >
                 <div
-                  aria-hidden="true"
-                  data-testid="epub-spine"
-                  className="pointer-events-none absolute inset-y-3 left-1/2 z-[15] w-12 -translate-x-1/2"
+                  ref={hostRef}
+                  tabIndex={-1}
+                  data-testid="epub-host"
+                  className={cn(
+                    'relative h-full overflow-hidden',
+                    availableWidth === 0 && 'w-full',
+                  )}
                   style={{
-                    background: `linear-gradient(to right, transparent, ${PAGE_PALETTES[theme].spine} 50%, transparent)`,
+                    ...pageSurfaceStyle(theme),
+                    ...(availableWidth > 0 ? { width: layout.pageWidth } : undefined),
                   }}
                 />
-              )}
+                {readingMode === 'spread' && layout.columns === 2 && (
+                  <div
+                    aria-hidden="true"
+                    data-testid="epub-spine"
+                    className="pointer-events-none absolute inset-y-3 left-1/2 z-[15] w-12 -translate-x-1/2"
+                    style={{
+                      background: `linear-gradient(to right, transparent, ${PAGE_PALETTES[theme].spine} 50%, transparent)`,
+                    }}
+                  />
+                )}
+              </div>
             </div>
             {/*
               The turn acts on the whole page, not on the reading measure. The

@@ -235,13 +235,14 @@ hidden !important` isolation for inactive `inert` EPUB tabpanels; `48 px` pagina
   springs back over `200 ms`;
   after a commit it absorbs the decaying inertial tail a mac trackpad keeps sending and
   starts a new scrub on a velocity spike or a direction reversal, so rapid flicks no
-  longer wait out a `300 ms` silence lockout. EPUB turns slide the whole page area — the
+  longer wait out a `300 ms` silence lockout. EPUB turns slide a full-area pane — the
   outgoing page mirrored across it and the incoming one carried with it at `opacity: 1`,
-  so the margins turn with the text instead of standing still — and a turn across a spine
-  seam holds the outgoing chapter's frame in the strip until the incoming one is up, so no
-  turn shows a blank page; PDF `single` and `two-page` render a three-slot stage whose
-  neighbouring spreads are already rasterized (bounded to `<= 3` spreads / `<= 6`
-  canvases); `curl` uses
+  so the margins, the spine, and the incoming paper turn together instead of standing
+  still, with a calibrated cast shadow at the seam — and a turn across a spine seam stages
+  the held chapter's last page against the incoming chapter's first page, so the seam turn
+  is a whole-page turn too and no turn shows a blank page; PDF `single` and `two-page`
+  render a three-slot stage whose neighbouring spreads are already rasterized (bounded to
+  `<= 3` spreads / `<= 6` canvases); `curl` uses
   a stationary dual-page conical paper-curl peel across PDF, EPUB (via an inert
   `sandbox="allow-same-origin"` mirror), and TXT — both outgoing and incoming pages stay
   pinned at `(0, 0)` (zero `rotateY`), an animated or 1:1-scrubbed lower-corner-leading
