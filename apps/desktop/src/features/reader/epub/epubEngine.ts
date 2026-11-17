@@ -2044,10 +2044,10 @@ export async function openEpubDocument(
     spread: boolean;
     captured: boolean;
     token: symbol;
-  }): Promise<void> =>
+  }): Promise<boolean> =>
     new Promise((resolve) => {
       let settledRun = false;
-      const settleRun = () => {
+      const settleRun = (completed: boolean) => {
         if (settledRun) return;
         settledRun = true;
         cancelCurl = null;
@@ -2059,7 +2059,7 @@ export async function openEpubDocument(
             curlHost.replaceChildren();
           }
         }
-        resolve();
+        resolve(completed);
       };
       const cancelAnim = animatePaperCurl({
         outgoing: params.captured ? curlHost : null,
@@ -2069,12 +2069,12 @@ export async function openEpubDocument(
         to: params.to,
         duration: params.duration,
         spread: params.spread,
-        onFinish: settleRun,
+        onFinish: () => settleRun(true),
       });
       if (!settledRun) {
         cancelCurl = () => {
           cancelAnim();
-          settleRun();
+          settleRun(false);
         };
       }
     });
@@ -2326,11 +2326,12 @@ export async function openEpubDocument(
       current.container.scrollLeft = base;
       const inPlaceCurl = committed !== null && committed === activeCurl.direction && inPlace;
       if (committed === null || committed !== activeCurl.direction) {
+        const epoch = navigation;
         settlingSpringBack = true;
         setStripHidden(activeCurl.seam);
         const token = Symbol('curl');
         curlRunToken = token;
-        await runCurlAnimation({
+        const completed = await runCurlAnimation({
           from: activeCurl.progress,
           to: 0,
           duration: PAGE_SPRING_BACK_MS,
@@ -2339,21 +2340,20 @@ export async function openEpubDocument(
           captured: activeCurl.captured,
           token,
         });
-        if (curlRunToken !== null && curlRunToken !== token) return;
-        if (!scrubbing) {
-          settlingSpringBack = false;
-          setStripHidden(false);
-          restoreScrubBaseLocation(baseCfi, baseLocation);
-        }
+        if (!completed || epoch !== navigation || destroyed || scrubbing) return;
+        settlingSpringBack = false;
+        setStripHidden(false);
+        restoreScrubBaseLocation(baseCfi, baseLocation);
         return;
       }
       const duration = Math.max(120, Math.round((1 - activeCurl.progress) * PAGE_CURL_MS));
       if (inPlaceCurl) {
+        const epoch = navigation;
         setStripHidden(false);
         current.container.scrollLeft = base + committed * current.stride;
         const token = Symbol('curl');
         curlRunToken = token;
-        await runCurlAnimation({
+        const completed = await runCurlAnimation({
           from: activeCurl.progress,
           to: 1,
           duration,
@@ -2362,7 +2362,7 @@ export async function openEpubDocument(
           captured: activeCurl.captured,
           token,
         });
-        if (curlRunToken === null && !scrubbing && !settlingSpringBack) {
+        if (completed && epoch === navigation && !destroyed && !scrubbing && !settlingSpringBack) {
           syncCurrentCfiFromScroll();
         }
         return;
@@ -2409,13 +2409,14 @@ export async function openEpubDocument(
       const commit =
         committed !== null && committed === stage.direction && (stage.seam ? true : inPlace);
       if (!commit) {
+        const epoch = navigation;
         settlingSpringBack = true;
         // Record where this settle lands before the animation: an interruption
         // during the spring-back must restore the cancelled scrub's page.
         stage.landing = base;
         await animateSlideStage(0, PAGE_SPRING_BACK_MS);
-        // A turn that arrived during the settle owns the page now.
-        if (slideStage !== stage) return;
+        // A turn or navigation that arrived during the settle owns the page now.
+        if (epoch !== navigation || slideStage !== stage || destroyed) return;
         settlingSpringBack = false;
         current.container.scrollLeft = base;
         endSlideStage();
@@ -2431,14 +2432,10 @@ export async function openEpubDocument(
         return;
       }
       const epoch = beginNavigation();
-      const slideAnim = animateSlideStage(-stage.direction * stage.paneWidth, PAGE_SLIDE_MS);
-      const chapterLoad = (committed > 0 ? rendition.next() : rendition.prev()).then(() => {
-        if (epoch === navigation && slideStage === stage && !destroyed) {
-          setStripHidden(false);
-        }
-      });
+      // Keep the outgoing page visible where the fingers released until the next
+      // chapter finishes loading so a slow parse never leaves a blank paper pane.
       try {
-        await Promise.all([slideAnim, chapterLoad]);
+        await (committed > 0 ? rendition.next() : rendition.prev());
       } catch (err) {
         if (epoch === navigation && slideStage === stage) {
           cancelStage();
@@ -2447,7 +2444,12 @@ export async function openEpubDocument(
         throw err;
       }
       if (epoch !== navigation || slideStage !== stage || destroyed) return;
+      setStripHidden(false);
       stage.landing = current.container.scrollLeft;
+      const progress = Math.min(Math.abs(stage.offset) / Math.max(stage.paneWidth, 1), 1);
+      const duration = Math.max(120, Math.round((1 - progress) * PAGE_SLIDE_MS));
+      await animateSlideStage(-stage.direction * stage.paneWidth, duration);
+      if (epoch !== navigation || slideStage !== stage || destroyed) return;
       endSlideStage();
       syncCurrentCfiFromScroll();
       return;
@@ -2460,9 +2462,10 @@ export async function openEpubDocument(
     const settleMs = slides ? PAGE_SLIDE_MS : 0;
     const springMs = slides ? PAGE_SPRING_BACK_MS : 0;
     if (committed === null) {
+      const epoch = navigation;
       settlingSpringBack = true;
       await slideStrip(base, springMs);
-      if (!scrubbing) {
+      if (epoch === navigation && !destroyed && !scrubbing && settlingSpringBack) {
         settlingSpringBack = false;
         restoreScrubBaseLocation(baseCfi, baseLocation);
       }

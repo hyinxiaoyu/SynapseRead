@@ -1625,14 +1625,33 @@ describe('EPUB slide seam scrubbing', () => {
       expect(strip.scrollLeft).toBe(640);
       expect(pane.style.transform).toBe('');
 
-      // Committing loads the next chapter and lands on its first page.
+      // Committing with a slow chapter load keeps the outgoing page visible until
+      // the next chapter is ready, rather than sliding off onto blank paper.
+      let resolveSlowNext!: () => void;
+      nextSpy.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveSlowNext = () => {
+              strip.scrollLeft = 0;
+              resolve();
+            };
+          }),
+      );
       handle.beginScrub({ transition: 'slide', spread: false });
       handle.scrubTo(200);
       const commitPromise = handle.endScrub(1);
       await Promise.resolve();
       expect(nextSpy).toHaveBeenCalledTimes(1);
+      clock = 800;
+      expect(curlHost.style.visibility).toBe('visible');
+      expect(curlHost.style.transform).toBe('translateX(-200px)');
+      expect(strip.container.style.visibility).toBe('hidden');
+
+      resolveSlowNext();
+      await Promise.resolve();
+      await Promise.resolve();
       expect(strip.container.style.visibility).toBe('');
-      tick(600);
+      tick(1200);
       await commitPromise;
       expect(strip.scrollLeft).toBe(0);
       expect(pane.style.transform).toBe('');
@@ -1829,6 +1848,30 @@ describe('EPUB slide seam scrubbing', () => {
       for (const cb of [...frames.values()]) cb(clock);
       frames.clear();
       await jump;
+
+      // 4. Interrupting a curl spring-back with display() must not restore the old CFI.
+      const ch1Cfi = 'epubcfi(/6/2!/4/2/1:0)';
+      const ch2Cfi = 'epubcfi(/6/4!/4/2/1:0)';
+      fake.rendition.location = { start: { href: 'chapter1.xhtml', cfi: ch1Cfi } };
+      fake.state.listeners.relocated?.({
+        start: { cfi: ch1Cfi, href: 'chapter1.xhtml', index: 0 },
+        end: { cfi: ch1Cfi },
+      });
+      strip.scrollLeft = 0;
+      handle.beginScrub({ transition: 'curl', spread: false });
+      handle.scrubTo(200);
+      const cancelledSpring = handle.endScrub(null);
+      const tocJump = handle.display(ch2Cfi);
+      await cancelledSpring;
+      fake.settle(ch2Cfi);
+      await Promise.resolve();
+      await Promise.resolve();
+      for (const cb of [...frames.values()]) cb(clock);
+      frames.clear();
+      await tocJump;
+      fake.state.resizes = [];
+      handle.resize(640, 480);
+      expect(fake.state.resizes[0]?.[2]).toBe(ch2Cfi);
       handle.destroy();
     } finally {
       Reflect.set(fake.rendition, 'manager', undefined);
