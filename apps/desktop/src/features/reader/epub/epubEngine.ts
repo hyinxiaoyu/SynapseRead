@@ -2604,10 +2604,11 @@ export async function openEpubDocument(
     beginScrub(options) {
       clearCodeBlockHover();
       // A scrub starts from a whole page and claims navigation ownership so any
-      // in-flight seam turn that finishes later cannot take over the stage.
+      // in-flight seam turn or jump that finishes later cannot overwrite it.
       settleSlide();
       clearCurlStage();
       beginNavigation();
+      pendingTarget = undefined;
       scrubbing = true;
       scrubMoved = false;
       settlingSpringBack = false;

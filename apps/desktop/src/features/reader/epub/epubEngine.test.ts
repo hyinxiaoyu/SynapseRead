@@ -1992,6 +1992,33 @@ describe('EPUB slide seam scrubbing', () => {
       const cancelCurl = handle.endScrub(null);
       tick(800);
       await cancelCurl;
+
+      // 3. Starting a scrub during an in-flight display() clears pendingTarget so
+      // a subsequent resize keeps the scrubbed location instead of snapping back.
+      const page1Cfi = 'epubcfi(/6/2!/4/2/1:0)';
+      const page2Cfi = 'epubcfi(/6/2!/4/4/1:4)';
+      const ch2Cfi = 'epubcfi(/6/4!/4/2/1:0)';
+      strip.scrollLeft = 0;
+      fake.rendition.location = { start: { href: 'chapter1.xhtml', cfi: page1Cfi } };
+      fake.state.listeners.relocated?.({
+        start: { cfi: page1Cfi, href: 'chapter1.xhtml', index: 0 },
+        end: { cfi: page1Cfi },
+      });
+      const pendingJump = handle.display(ch2Cfi);
+      handle.beginScrub({ transition: 'slide', spread: false });
+      handle.scrubTo(200);
+      const commitScrub = handle.endScrub(1);
+      tick(1200);
+      await commitScrub;
+      fake.state.listeners.relocated?.({
+        start: { cfi: page2Cfi, href: 'chapter1.xhtml', index: 0 },
+        end: { cfi: page2Cfi },
+      });
+      fake.settle(ch2Cfi);
+      await pendingJump;
+      fake.state.resizes = [];
+      handle.resize(640, 480);
+      expect(fake.state.resizes[0]?.[2]).toBe(page2Cfi);
       handle.destroy();
     } finally {
       Reflect.set(fake.rendition, 'manager', undefined);

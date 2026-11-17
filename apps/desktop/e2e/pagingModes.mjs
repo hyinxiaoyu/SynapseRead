@@ -155,6 +155,13 @@ export async function pagingModesFlow(page) {
       for (let step = 0; step < 15; step += 1) {
         host.dispatchEvent(new WheelEvent('wheel', { deltaX: 20, deltaY: 0, bubbles: true, cancelable: true }));
       }
+      // Keep the scrub alive at ±1 px so a slow screenshot round-trip never races
+      // past the 90 ms release idle window before capturing the seam shadow.
+      let toggle = 1;
+      window.__seamHoldTimer = window.setInterval(() => {
+        host.dispatchEvent(new WheelEvent('wheel', { deltaX: toggle, deltaY: 0, bubbles: true, cancelable: true }));
+        toggle = -toggle;
+      }, 30);
       const areaRect = area.getBoundingClientRect();
       const paneRect = pane.getBoundingClientRect();
       return {
@@ -164,6 +171,11 @@ export async function pagingModesFlow(page) {
       };
     })()`);
     const shot = await page.cdp.send('Page.captureScreenshot', { format: 'png' });
+    await page.evaluate(`(() => {
+      window.clearInterval(window.__seamHoldTimer);
+      delete window.__seamHoldTimer;
+      return true;
+    })()`);
     const contrast = await page.evaluate(`(async () => {
       const img = new Image();
       img.src = 'data:image/png;base64,${shot.data}';
