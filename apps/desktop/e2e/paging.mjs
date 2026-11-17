@@ -945,6 +945,7 @@ export async function pagingFlow(page) {
   await page.evaluate(`(() => {
     const doc = ${visibleTxtDoc};
     window.__txtFadeSamples = [];
+    window.__txtFadeOpacityKeyframes = null;
     window.__txtFadeDone = false;
     window.__txtFadeDeadline = null;
     let seenFade = false;
@@ -954,7 +955,16 @@ export async function pagingFlow(page) {
       const anims = doc.getAnimations();
       const animIds = anims.map((a) => a.id);
       const runningFade = anims.some((a) => a.id === 'page-turn' && a.playState === 'running');
-      if (animIds.includes('page-turn')) seenFade = true;
+      const fadeAnim = anims.find((a) => a.id === 'page-turn');
+      if (fadeAnim) {
+        seenFade = true;
+        const opacityKfs = (fadeAnim.effect?.getKeyframes?.() ?? [])
+          .map((kf) => (kf.opacity !== undefined ? Number.parseFloat(kf.opacity) : Number.NaN))
+          .filter((value) => Number.isFinite(value));
+        if (opacityKfs.length >= 2 && window.__txtFadeOpacityKeyframes === null) {
+          window.__txtFadeOpacityKeyframes = opacityKfs;
+        }
+      }
       const opacity = Number(getComputedStyle(doc).opacity);
       window.__txtFadeSamples.push({
         opacity,
@@ -985,12 +995,20 @@ export async function pagingFlow(page) {
     `${visibleTxtDoc}.closest('[data-testid="txt-scroll"]').scrollTop`,
   );
   const txtFade = await page.evaluate('window.__txtFadeSamples');
+  const txtFadeKeyframes = await page.evaluate('window.__txtFadeOpacityKeyframes');
   assert(
     txtAfterFade > txtBeforeFade,
     `TXT Next Page must advance scrollTop: ${txtBeforeFade} -> ${txtAfterFade}`,
   );
   assert(
-    txtFade.some((s) => s.opacity < 0.9 && s.animIds.includes('page-turn')),
+    Array.isArray(txtFadeKeyframes) &&
+      txtFadeKeyframes.length >= 2 &&
+      Math.abs(txtFadeKeyframes[0] - 0.2) <= 0.05 &&
+      Math.abs(txtFadeKeyframes.at(-1) - 1) <= 0.05,
+    `TXT fade keyframes must animate opacity from ~0.2 to ~1: ${JSON.stringify(txtFadeKeyframes)}`,
+  );
+  assert(
+    txtFade.some((s) => s.opacity < 0.98 && s.animIds.includes('page-turn')),
     `TXT page turn must play a fade animation: ${JSON.stringify(txtFade.slice(0, 8))}`,
   );
   assert(

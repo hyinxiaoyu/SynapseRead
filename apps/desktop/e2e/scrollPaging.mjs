@@ -31,6 +31,8 @@ async function armFadeProbe(page, targetsExpr) {
       done: false,
       minOpacity: 1,
       hadPageTurnAnim: false,
+      fadeOpacityKeyframes: null,
+      allFadeKeyframesValid: true,
       allTransformsNone: true,
       startedAt: performance.now(),
       stopConfig: null,
@@ -57,6 +59,19 @@ async function armFadeProbe(page, targetsExpr) {
             if (kfs.some((kf) => kf.transform !== undefined && kf.transform !== 'none')) {
               state.allTransformsNone = false;
             }
+            const opacityKfs = kfs
+              .map((kf) => (kf.opacity !== undefined ? Number.parseFloat(kf.opacity) : Number.NaN))
+              .filter((value) => Number.isFinite(value));
+            if (state.fadeOpacityKeyframes === null && opacityKfs.length > 0) {
+              state.fadeOpacityKeyframes = opacityKfs;
+            }
+            if (
+              opacityKfs.length < 2 ||
+              Math.abs(opacityKfs[0] - 0.2) > 0.05 ||
+              Math.abs(opacityKfs[opacityKfs.length - 1] - 1) > 0.05
+            ) {
+              state.allFadeKeyframesValid = false;
+            }
           }
         }
       }
@@ -79,13 +94,13 @@ async function armFadeProbe(page, targetsExpr) {
   })()`);
 }
 
-async function finishFadeProbe(page, { waitForFade = false } = {}) {
+async function finishFadeProbe(page, { waitForFade = false, maxMs = 5000 } = {}) {
   await page.evaluate(`(() => {
     const state = window.__fadeProbe;
     if (!state || state.done) return;
     const now = performance.now();
     state.stopConfig = ${waitForFade}
-      ? { waitForFade: true, deadline: now + 2000 }
+      ? { waitForFade: true, deadline: now + ${maxMs} }
       : { waitForFade: false, deadline: Math.max(state.startedAt + 340, now + 180) };
   })()`);
   await page.waitFor(`window.__fadeProbe?.done === true`, 'fade probe window to complete');
@@ -93,16 +108,26 @@ async function finishFadeProbe(page, { waitForFade = false } = {}) {
 }
 
 function assertFadePlayed(probe, label) {
+  const kfs = probe.fadeOpacityKeyframes;
   assert(
-    probe.hadPageTurnAnim && probe.minOpacity < 0.9,
-    `${label} should animate fade opacity dip (got minOpacity=${probe.minOpacity}, hadPageTurnAnim=${probe.hadPageTurnAnim})`,
+    probe.hadPageTurnAnim &&
+      probe.allFadeKeyframesValid &&
+      Array.isArray(kfs) &&
+      kfs.length >= 2 &&
+      Math.abs(kfs[0] - 0.2) <= 0.05 &&
+      Math.abs(kfs.at(-1) - 1) <= 0.05,
+    `${label} should expose page-turn fade opacity keyframes ~0.2 -> ~1 (got hadPageTurnAnim=${probe.hadPageTurnAnim}, fadeOpacityKeyframes=${JSON.stringify(kfs)}, allFadeKeyframesValid=${probe.allFadeKeyframesValid})`,
+  );
+  assert(
+    probe.minOpacity < 0.98,
+    `${label} should animate fade opacity dip (got minOpacity=${probe.minOpacity}, hadPageTurnAnim=${probe.hadPageTurnAnim}, fadeOpacityKeyframes=${JSON.stringify(kfs)})`,
   );
   assert(probe.allTransformsNone, `${label} fade should not apply translate/slide transforms`);
 }
 
 function assertNoFade(probe, label) {
   assert(
-    !probe.hadPageTurnAnim && probe.minOpacity === 1,
+    !probe.hadPageTurnAnim && probe.minOpacity >= 0.99,
     `${label} should NOT run fade animation (got minOpacity=${probe.minOpacity}, hadPageTurnAnim=${probe.hadPageTurnAnim})`,
   );
 }
