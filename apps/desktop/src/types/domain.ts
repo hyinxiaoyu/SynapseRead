@@ -287,6 +287,8 @@ export type ReadingPageWidth = 'standard' | 'wide' | 'full';
 export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
 /** How a paged reader animates a page turn; reduced motion always turns instantly. */
 export type PageTransition = 'none' | 'slide' | 'fade' | 'curl' | 'stack';
+/** How a continuous-scrolling reader animates an explicit page turn; reduced motion turns instantly. */
+export type ScrollPageTransition = 'none' | 'fade';
 
 export interface ReadingPreferences {
   theme: ReadingTheme;
@@ -304,6 +306,13 @@ export interface ReadingPreferences {
   epubReadingMode: EpubReadingMode;
   /** Also used by PDF single and two-page modes. */
   pageTransition: PageTransition;
+  /**
+   * Used by continuous-scrolling modes (`EPUB` `scroll`, `PDF` `continuous`,
+   * `TXT`). When `null`, scrolling follows `pageTransition` (`none` stays
+   * `none`; everything else fades) so switching modes preserves both
+   * preferences independently.
+   */
+  scrollPageTransition: ScrollPageTransition | null;
   /** Tints PDF page canvases for Dark and Sepia; a capture still saves the original bitmap. */
   tintPdfPages: boolean;
   /** Whether entering focus mode also enters full screen. */
@@ -321,6 +330,7 @@ export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
   dimImages: false,
   epubReadingMode: 'spread',
   pageTransition: 'slide',
+  scrollPageTransition: null,
   tintPdfPages: false,
   focusModeFullScreen: false,
 };

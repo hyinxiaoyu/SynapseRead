@@ -562,6 +562,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
             "dimImages": false,
             "epubReadingMode": "spread",
             "pageTransition": "slide",
+            "scrollPageTransition": null,
             "tintPdfPages": false,
             "focusModeFullScreen": false,
         })
@@ -578,6 +579,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         "dimImages": true,
         "epubReadingMode": "paged",
         "pageTransition": "fade",
+        "scrollPageTransition": "none",
         "tintPdfPages": true,
         "focusModeFullScreen": true,
     });
@@ -600,6 +602,32 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
             with_mode
         );
         assert_eq!(h.ok("get_reading_preferences", json!({})), with_mode);
+    }
+
+    // Scrolling transitions accept `none`, `fade`, and `null` (follow paged),
+    // while paginated-only or unknown modes are rejected on the wire.
+    for mode in [json!(null), json!("none"), json!("fade")] {
+        let mut with_scroll = updated.clone();
+        with_scroll["scrollPageTransition"] = mode;
+        assert_eq!(
+            h.ok(
+                "save_reading_preferences",
+                json!({ "preferences": with_scroll })
+            ),
+            with_scroll
+        );
+        assert_eq!(h.ok("get_reading_preferences", json!({})), with_scroll);
+    }
+    for invalid_scroll in ["slide", "curl", "stack", "peel"] {
+        let mut bad_scroll = updated.clone();
+        bad_scroll["scrollPageTransition"] = json!(invalid_scroll);
+        assert!(
+            h.call(
+                "save_reading_preferences",
+                json!({ "preferences": bad_scroll })
+            )
+            .is_err()
+        );
     }
 
     // The wire enum stays strict: an unknown mode is a rejected argument, not a
@@ -627,6 +655,10 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
 
     let mut legacy = updated.clone();
     legacy.as_object_mut().unwrap().remove("pageWidth");
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("scrollPageTransition");
     // Preferences saved before the appearance switches existed have no such
     // keys, and their absence is the off default rather than an error.
     legacy.as_object_mut().unwrap().remove("tintPdfPages");
@@ -636,6 +668,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         .remove("focusModeFullScreen");
     let saved_legacy = h.ok("save_reading_preferences", json!({ "preferences": legacy }));
     assert_eq!(saved_legacy["pageWidth"], "standard");
+    assert_eq!(saved_legacy["scrollPageTransition"], json!(null));
     assert_eq!(saved_legacy["tintPdfPages"], false);
     assert_eq!(saved_legacy["focusModeFullScreen"], false);
 

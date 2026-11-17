@@ -696,6 +696,7 @@ describe('EpubViewer', () => {
         dimImages: true,
         epubReadingMode: 'paged',
         pageTransition: 'slide',
+        scrollPageTransition: null,
         tintPdfPages: false,
         focusModeFullScreen: false,
       }),

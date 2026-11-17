@@ -6,13 +6,21 @@ import { DEFAULT_READING_PREFERENCES, type ReadingPreferences } from '@/types/do
 
 import { AppearanceMenu, steppedFontSize, useAppearancePanel } from './AppearancePopover';
 import { fontStack } from './themes';
+import {
+  PAGE_TRANSITIONS,
+  SCROLL_PAGE_TRANSITIONS,
+  resolvePageTransition,
+  resolveScrollTransition,
+} from './transition';
 
 function Harness({
   initial = DEFAULT_READING_PREFERENCES,
   format = 'epub',
+  scrolled,
 }: {
   initial?: ReadingPreferences;
   format?: 'epub' | 'txt' | 'pdf';
+  scrolled?: boolean | undefined;
 }) {
   const panel = useAppearancePanel();
   const [preferences, setPreferences] = useState(initial);
@@ -26,6 +34,7 @@ function Harness({
         preferences={preferences}
         onChange={(patch) => setPreferences((current) => ({ ...current, ...patch }))}
         format={format}
+        scrolled={scrolled}
       />
       <output data-testid="preferences">{JSON.stringify(preferences)}</output>
     </div>
@@ -281,5 +290,182 @@ describe('AppearanceMenu', () => {
     expect(disclosure).not.toHaveAttribute('inert');
     expect(disclosure).toHaveAttribute('aria-hidden', 'false');
     expect(screen.getByRole('radiogroup', { name: 'Margins' })).toBeInTheDocument();
+  });
+
+  it('offers only None and Fade in scrolled modes while preserving paginated pageTransition', () => {
+    const view = render(
+      <Harness
+        format="epub"
+        initial={{
+          ...DEFAULT_READING_PREFERENCES,
+          epubReadingMode: 'scroll',
+          pageTransition: 'curl',
+          scrollPageTransition: null,
+        }}
+      />,
+    );
+    fireEvent.click(trigger());
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+
+    const scrollTurns = within(screen.getByRole('radiogroup', { name: 'Page turn' }));
+    expect(scrollTurns.getAllByRole('radio').map((radio) => radio.textContent)).toEqual([
+      'None',
+      'Fade',
+    ]);
+    // With scrollPageTransition unset, non-'none' paged preferences resolve to Fade.
+    expect(scrollTurns.getByRole('radio', { name: 'Fade' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+
+    fireEvent.click(scrollTurns.getByRole('radio', { name: 'None' }));
+    expect(current().scrollPageTransition).toBe('none');
+    expect(current().pageTransition).toBe('curl');
+    expect(scrollTurns.getByRole('radio', { name: 'None' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+
+    fireEvent.click(scrollTurns.getByRole('radio', { name: 'Fade' }));
+    expect(current().scrollPageTransition).toBe('fade');
+    expect(current().pageTransition).toBe('curl');
+
+    // Leaving scrolled mode restores all five options with Curl still selected.
+    view.rerender(
+      <Harness
+        format="epub"
+        scrolled={false}
+        initial={{
+          ...DEFAULT_READING_PREFERENCES,
+          epubReadingMode: 'scroll',
+          pageTransition: 'curl',
+          scrollPageTransition: 'none',
+        }}
+      />,
+    );
+    const pagedTurns = within(screen.getByRole('radiogroup', { name: 'Page turn' }));
+    expect(pagedTurns.getAllByRole('radio').map((radio) => radio.textContent)).toEqual([
+      'None',
+      'Slide',
+      'Fade',
+      'Curl',
+      'Stack',
+    ]);
+    expect(pagedTurns.getByRole('radio', { name: 'Curl' })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('honors pre-existing pageTransition="none" in scrolled mode when scrollPageTransition is null', () => {
+    render(
+      <Harness
+        format="txt"
+        initial={{
+          ...DEFAULT_READING_PREFERENCES,
+          pageTransition: 'none',
+          scrollPageTransition: null,
+        }}
+      />,
+    );
+    fireEvent.click(trigger());
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+
+    const turns = within(screen.getByRole('radiogroup', { name: 'Page turn' }));
+    expect(turns.getAllByRole('radio').map((radio) => radio.textContent)).toEqual(['None', 'Fade']);
+    expect(turns.getByRole('radio', { name: 'None' })).toHaveAttribute('aria-checked', 'true');
+
+    fireEvent.click(turns.getByRole('radio', { name: 'Fade' }));
+    expect(current().scrollPageTransition).toBe('fade');
+    expect(current().pageTransition).toBe('none');
+  });
+
+  it('respects explicit scrolled prop for PDF continuous vs paginated modes', () => {
+    const view = render(
+      <Harness
+        format="pdf"
+        scrolled={true}
+        initial={{
+          ...DEFAULT_READING_PREFERENCES,
+          pageTransition: 'stack',
+          scrollPageTransition: null,
+        }}
+      />,
+    );
+    fireEvent.click(trigger());
+
+    const scrollTurns = within(screen.getByRole('radiogroup', { name: 'Page turn' }));
+    expect(scrollTurns.getAllByRole('radio').map((radio) => radio.textContent)).toEqual([
+      'None',
+      'Fade',
+    ]);
+    expect(scrollTurns.getByRole('radio', { name: 'Fade' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+
+    fireEvent.click(scrollTurns.getByRole('radio', { name: 'None' }));
+    expect(current().scrollPageTransition).toBe('none');
+    expect(current().pageTransition).toBe('stack');
+
+    view.rerender(
+      <Harness
+        format="pdf"
+        scrolled={false}
+        initial={{
+          ...DEFAULT_READING_PREFERENCES,
+          pageTransition: 'stack',
+          scrollPageTransition: 'none',
+        }}
+      />,
+    );
+    const pagedTurns = within(screen.getByRole('radiogroup', { name: 'Page turn' }));
+    expect(pagedTurns.getAllByRole('radio').map((radio) => radio.textContent)).toHaveLength(5);
+    expect(pagedTurns.getByRole('radio', { name: 'Stack' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+  });
+});
+
+describe('transition helpers', () => {
+  it('matches PAGE_TRANSITIONS labels for SCROLL_PAGE_TRANSITIONS', () => {
+    const expected = PAGE_TRANSITIONS.filter(
+      (option) => option.value === 'none' || option.value === 'fade',
+    );
+    expect(SCROLL_PAGE_TRANSITIONS).toEqual(expected);
+  });
+
+  it('resolves scroll and paginated transitions independently', () => {
+    for (const pageTransition of ['slide', 'fade', 'curl', 'stack'] as const) {
+      const prefs = { ...DEFAULT_READING_PREFERENCES, pageTransition, scrollPageTransition: null };
+      expect(resolveScrollTransition(prefs)).toBe('fade');
+      expect(resolvePageTransition(prefs, { scrolled: true })).toBe('fade');
+      expect(resolvePageTransition(prefs, { scrolled: false })).toBe(pageTransition);
+    }
+
+    const preNone = {
+      ...DEFAULT_READING_PREFERENCES,
+      pageTransition: 'none' as const,
+      scrollPageTransition: null,
+    };
+    expect(resolveScrollTransition(preNone)).toBe('none');
+    expect(resolvePageTransition(preNone, { scrolled: true })).toBe('none');
+    expect(resolvePageTransition(preNone, { scrolled: false })).toBe('none');
+
+    const overrideNone = {
+      ...DEFAULT_READING_PREFERENCES,
+      pageTransition: 'curl' as const,
+      scrollPageTransition: 'none' as const,
+    };
+    expect(resolveScrollTransition(overrideNone)).toBe('none');
+    expect(resolvePageTransition(overrideNone, { scrolled: true })).toBe('none');
+    expect(resolvePageTransition(overrideNone, { scrolled: false })).toBe('curl');
+
+    const overrideFade = {
+      ...DEFAULT_READING_PREFERENCES,
+      pageTransition: 'none' as const,
+      scrollPageTransition: 'fade' as const,
+    };
+    expect(resolveScrollTransition(overrideFade)).toBe('fade');
+    expect(resolvePageTransition(overrideFade, { scrolled: true })).toBe('fade');
+    expect(resolvePageTransition(overrideFade, { scrolled: false })).toBe('none');
   });
 });
