@@ -12,6 +12,9 @@ import {
   directionOf,
   easeOut,
   hasScrollableAncestor,
+  hasSelectionIn,
+  hasTextSelection,
+  isOverContent,
   normalizeWheelDelta,
   PAGE_CURL_MS,
   PAGE_TURN_ANIMATION_ID,
@@ -1138,6 +1141,184 @@ describe('usePageTurnGestures consecutive clicks (#107) and vertical wheel (#106
     fireEvent.click(area, { button: 0, detail: 2, clientX: 950, clientY: 100 });
     expect(onTurn).toHaveBeenCalledTimes(1);
     expect(onTurn).toHaveBeenCalledWith(1);
+  });
+
+  it('ignores whitespace-only and empty non-collapsed selections in hasTextSelection and hasSelectionIn', () => {
+    const host = document.createElement('div');
+    const blankNode = document.createTextNode(' \n ');
+    const wordNode = document.createTextNode('word');
+    host.append(blankNode, wordNode);
+    document.body.append(host);
+
+    const selection = window.getSelection();
+    if (!selection) throw new Error('missing selection');
+    selection.removeAllRanges();
+    expect(hasSelectionIn(document)).toBe(false);
+    expect(hasTextSelection(null)).toBe(false);
+
+    // Non-collapsed range over whitespace only is not treated as a text selection.
+    const blankRange = document.createRange();
+    blankRange.setStart(blankNode, 0);
+    blankRange.setEnd(blankNode, blankNode.length);
+    selection.addRange(blankRange);
+    expect(selection.isCollapsed).toBe(false);
+    expect(hasSelectionIn(document)).toBe(false);
+
+    // Non-collapsed empty boundary selection (as Chromium creates on blank margins) is ignored.
+    const getSelectionSpy = vi.spyOn(document, 'getSelection').mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => '',
+    } as unknown as Selection);
+    expect(hasSelectionIn(document)).toBe(false);
+    getSelectionSpy.mockReturnValue({
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => ' \n\t ',
+    } as unknown as Selection);
+    expect(hasSelectionIn(document)).toBe(false);
+    getSelectionSpy.mockRestore();
+
+    // Real text selection is recognized.
+    selection.removeAllRanges();
+    const wordRange = document.createRange();
+    wordRange.setStart(wordNode, 0);
+    wordRange.setEnd(wordNode, wordNode.length);
+    selection.addRange(wordRange);
+    expect(selection.isCollapsed).toBe(false);
+    expect(hasSelectionIn(document)).toBe(true);
+
+    selection.removeAllRanges();
+    host.remove();
+  });
+
+  it('prevents native multi-click selection on blank turn margins while leaving detail 1, content, code, selections, and center zones untouched', () => {
+    const externalSelection = vi.fn(() => false);
+    const { view, area, onTurn } = mountWith({
+      hasSelection: externalSelection,
+      children: (
+        <div>
+          <a href="#ch2" data-testid="link">
+            Link
+          </a>
+          <button type="button" data-testid="chevron">
+            Next
+          </button>
+          <span data-annotation-id="note-1" data-testid="mark">
+            Mark
+          </span>
+          <pre data-testid="pre-block">
+            <code data-testid="inline-code">let x = 1;</code>
+          </pre>
+          <p data-testid="prose">Readable words</p>
+        </div>
+      ),
+    });
+
+    const fireMouseDown = (
+      target: Element,
+      init: { button?: number; detail?: number; clientX?: number; clientY?: number },
+    ) => {
+      const event = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button: init.button ?? 0,
+        detail: init.detail ?? 1,
+        clientX: init.clientX ?? 950,
+        clientY: init.clientY ?? 120,
+      });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    // detail: 1 on blank turn margin does NOT preventDefault (so real selections dismiss naturally).
+    expect(fireMouseDown(area, { detail: 1, clientX: 950 }).defaultPrevented).toBe(false);
+
+    // detail: 2 and 3 on blank right and left turn margins DO preventDefault.
+    expect(fireMouseDown(area, { detail: 2, clientX: 950 }).defaultPrevented).toBe(true);
+    expect(fireMouseDown(area, { detail: 3, clientX: 40 }).defaultPrevented).toBe(true);
+
+    // Non-primary button does NOT preventDefault.
+    expect(fireMouseDown(area, { button: 2, detail: 2, clientX: 950 }).defaultPrevented).toBe(
+      false,
+    );
+
+    // Center non-turn zone (outside left/right 12%) does NOT preventDefault.
+    expect(fireMouseDown(area, { detail: 2, clientX: 500 }).defaultPrevented).toBe(false);
+
+    // Interactive elements, highlights, <pre>, and <code> in turn zones do NOT preventDefault.
+    for (const testId of ['link', 'chevron', 'mark', 'pre-block', 'inline-code']) {
+      const target = screen.getByTestId(testId);
+      expect(isOverContent(target, 950, 120)).toBe(true);
+      expect(fireMouseDown(target, { detail: 2, clientX: 950 }).defaultPrevented).toBe(false);
+    }
+
+    // Glyph text in turn zones does NOT preventDefault.
+    const prose = screen.getByTestId('prose');
+    const textNode = prose.firstChild as Text;
+    const origCaretRange = document.caretRangeFromPoint;
+    const origGetClientRects = Range.prototype.getClientRects;
+    document.caretRangeFromPoint = () => {
+      const range = document.createRange();
+      range.setStart(textNode, 3);
+      range.setEnd(textNode, 3);
+      return range;
+    };
+    Range.prototype.getClientRects = () =>
+      [new DOMRect(940, 110, 30, 20)] as unknown as DOMRectList;
+    try {
+      expect(fireMouseDown(prose, { detail: 2, clientX: 950, clientY: 120 }).defaultPrevented).toBe(
+        false,
+      );
+    } finally {
+      document.caretRangeFromPoint = origCaretRange;
+      Range.prototype.getClientRects = origGetClientRects;
+    }
+
+    // Active external selection blocks preventDefault on detail: 2; once cleared, detail: 2 preventsDefault.
+    externalSelection.mockReturnValue(true);
+    expect(fireMouseDown(area, { detail: 2, clientX: 950 }).defaultPrevented).toBe(false);
+    externalSelection.mockReturnValue(false);
+
+    // Whitespace-only host Selection (" \n ") does NOT block mousedown prevention or click turns.
+    const whitespaceNode = document.createTextNode(' \n ');
+    area.append(whitespaceNode);
+    const selection = window.getSelection();
+    if (!selection) throw new Error('missing selection');
+    const wsRange = document.createRange();
+    wsRange.setStart(whitespaceNode, 0);
+    wsRange.setEnd(whitespaceNode, whitespaceNode.length);
+    selection.removeAllRanges();
+    selection.addRange(wsRange);
+    expect(fireMouseDown(area, { detail: 2, clientX: 950 }).defaultPrevented).toBe(true);
+    fireEvent.pointerDown(area, { button: 0, clientX: 950, clientY: 120 });
+    fireEvent.click(area, { button: 0, detail: 2, clientX: 950, clientY: 120 });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenCalledWith(1);
+
+    // Real text selection blocks Click 1 (detail: 1) without preventing mousedown,
+    // and rapid Click 2 (detail: 2) after dismissal prevents native selection and turns once.
+    onTurn.mockClear();
+    const realRange = document.createRange();
+    realRange.setStart(textNode, 0);
+    realRange.setEnd(textNode, 4);
+    selection.removeAllRanges();
+    selection.addRange(realRange);
+    fireEvent.pointerDown(area, { button: 0, clientX: 950, clientY: 120 });
+    expect(fireMouseDown(area, { detail: 1, clientX: 950 }).defaultPrevented).toBe(false);
+    selection.removeAllRanges();
+    fireEvent.click(area, { button: 0, detail: 1, clientX: 950, clientY: 120 });
+    expect(onTurn).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(area, { button: 0, clientX: 950, clientY: 120 });
+    expect(fireMouseDown(area, { detail: 2, clientX: 950 }).defaultPrevented).toBe(true);
+    fireEvent.click(area, { button: 0, detail: 2, clientX: 950, clientY: 120 });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenCalledWith(1);
+
+    // Disabled gestures do NOT preventDefault.
+    view.rerender(<Probe onTurn={onTurn} enabled={false} expose={() => undefined} />);
+    expect(fireMouseDown(area, { detail: 2, clientX: 950 }).defaultPrevented).toBe(false);
   });
 
   it('keeps vertical wheel disabled by default so continuous-scrolling viewers stay untouched', () => {

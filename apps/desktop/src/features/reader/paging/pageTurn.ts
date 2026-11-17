@@ -57,6 +57,7 @@ export const PAGE_TURN_ANIMATION_ID = 'page-turn';
 
 const INTERACTIVE =
   'a[href], button, input, textarea, select, summary, label, [role="button"], [role="link"], [contenteditable="true"], [data-annotation-id], [data-no-page-turn]';
+const CODE_CONTENT = 'pre, code';
 
 /** Which zone a point is in, if any. Everything beside the page counts too. */
 export function zoneAt(x: number, page: { left: number; width: number }): TurnZone | null {
@@ -140,11 +141,12 @@ export function hasScrollableAncestor(
   return false;
 }
 
-/** Over a link, a control, a highlight, or text: the click is the reader's. */
+/** Over a link, a control, a highlight, a code block, or text: the click is the reader's. */
 export function isOverContent(target: EventTarget | null, x: number, y: number): boolean {
-  const element = target as Element | null;
+  const node = target as Node | null;
+  const element = node && node.nodeType === 3 ? parentElementOf(node) : (target as Element | null);
   if (!element || typeof element.closest !== 'function') return false;
-  if (element.closest(INTERACTIVE)) return true;
+  if (element.closest(INTERACTIVE) || element.closest(CODE_CONTENT)) return true;
   return isOverText(element.ownerDocument, x, y);
 }
 
@@ -642,9 +644,16 @@ function absorbTailInto(
   return true;
 }
 
-function hasSelectionIn(doc: Document): boolean {
-  const selection = doc.getSelection();
-  return selection !== null && !selection.isCollapsed;
+/** Whether `selection` spans non-whitespace text rather than a caret or blank click snap. */
+export function hasTextSelection(selection: Selection | null | undefined): selection is Selection {
+  if (!selection || selection.isCollapsed) return false;
+  if (typeof selection.rangeCount === 'number' && selection.rangeCount === 0) return false;
+  return selection.toString().trim() !== '';
+}
+
+/** Whether `doc` currently holds a non-whitespace text selection. */
+export function hasSelectionIn(doc: Document): boolean {
+  return hasTextSelection(doc.getSelection());
 }
 
 /** The clock the scrub runs on. Wall time, so fake timers drive it in tests. */
@@ -982,6 +991,21 @@ export function usePageTurnGestures({
         hasSelection: hasSelectionIn(doc),
       });
     };
+    // Multi-click mousedown on blank turn margins snaps to adjacent whitespace or words in Chromium/WebKit
+    // before click fires; prevent default only when turning is active, no selection exists, and pointer is in a blank zone.
+    const onMouseDown = (event: MouseEvent) => {
+      if (
+        !latest.current.enabled ||
+        event.button !== 0 ||
+        event.detail <= 1 ||
+        event.defaultPrevented
+      ) {
+        return;
+      }
+      if (hasSelectionIn(doc) || (latest.current.hasSelection?.() ?? false)) return;
+      if (isOverContent(event.target, event.clientX, event.clientY)) return;
+      if (zoneFor(event.clientX) !== null) event.preventDefault();
+    };
     let frame = 0;
     const onPointerMove = (event: PointerEvent) => {
       if (event.buttons !== 0) return;
@@ -1009,6 +1033,7 @@ export function usePageTurnGestures({
       if (handleWheel(event)) event.preventDefault();
     };
     area.addEventListener('pointerdown', onPointerDown);
+    area.addEventListener('mousedown', onMouseDown);
     area.addEventListener('pointermove', onPointerMove);
     area.addEventListener('pointerleave', onPointerLeave);
     area.addEventListener('click', onClick);
@@ -1016,12 +1041,13 @@ export function usePageTurnGestures({
     return () => {
       window.cancelAnimationFrame(frame);
       area.removeEventListener('pointerdown', onPointerDown);
+      area.removeEventListener('mousedown', onMouseDown);
       area.removeEventListener('pointermove', onPointerMove);
       area.removeEventListener('pointerleave', onPointerLeave);
       area.removeEventListener('click', onClick);
       area.removeEventListener('wheel', onWheel);
     };
-  }, [areaRef, handleSample, handleWheel]);
+  }, [areaRef, handleSample, handleWheel, zoneFor]);
 
   useEffect(() => {
     if (enabled) return;

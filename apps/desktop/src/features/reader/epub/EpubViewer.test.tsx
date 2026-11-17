@@ -2375,5 +2375,105 @@ describe('EpubViewer', () => {
       });
       expect(engine.previous).toHaveBeenCalledTimes(1);
     });
+
+    it('prevents native multi-click selection on blank turn margins, ignores whitespace selections, and supports Click 1 dismissal + rapid Click 2 turn (#107)', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      const pageFrame = screen.getByTestId('epub-page-frame');
+      const host = screen.getByTestId('epub-host');
+      const area = screen.getByTestId('epub-page-area');
+      vi.spyOn(pageFrame, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 0, 1000, 800));
+      // Simulate epub-host translated during slide while pageFrame remains stationary.
+      vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(1500, 0, 1000, 800));
+
+      const fireMouseDown = (
+        target: Element,
+        init: { button?: number; detail?: number; clientX: number; clientY?: number },
+      ) => {
+        const event = new MouseEvent('mousedown', {
+          bubbles: true,
+          cancelable: true,
+          button: init.button ?? 0,
+          detail: init.detail ?? 1,
+          clientX: init.clientX,
+          clientY: init.clientY ?? 300,
+        });
+        target.dispatchEvent(event);
+        return event;
+      };
+
+      // Blank turn-margin mousedown prevents default on detail >= 2, not detail 1, not center, not interactive controls/code/text.
+      expect(fireMouseDown(area, { detail: 1, clientX: 1050 }).defaultPrevented).toBe(false);
+      expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(true);
+      expect(fireMouseDown(area, { detail: 2, clientX: 150 }).defaultPrevented).toBe(true);
+      expect(fireMouseDown(area, { detail: 2, clientX: 600 }).defaultPrevented).toBe(false);
+      const interactiveLink = document.createElement('a');
+      interactiveLink.href = '#note';
+      interactiveLink.textContent = 'Note';
+      const codeEl = document.createElement('code');
+      codeEl.textContent = 'let x = 1;';
+      area.append(interactiveLink, codeEl);
+      expect(fireMouseDown(interactiveLink, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(
+        false,
+      );
+      expect(fireMouseDown(codeEl, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(false);
+      interactiveLink.remove();
+      codeEl.remove();
+
+      // Whitespace-only host selection (" \n ") does not block cross-frame pointerup or outer multi-click turns.
+      const wsNode = document.createTextNode(' \n ');
+      area.append(wsNode);
+      const selection = window.getSelection();
+      if (!selection) throw new Error('missing selection');
+      const wsRange = document.createRange();
+      wsRange.setStart(wsNode, 0);
+      wsRange.setEnd(wsNode, wsNode.length);
+      selection.removeAllRanges();
+      selection.addRange(wsRange);
+
+      act(() => {
+        engine.emitGesture({ kind: 'down', x: 1050, y: 300, hasSelection: false });
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(1);
+
+      expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(true);
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.click(area, { button: 0, detail: 2, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(2);
+      selection.removeAllRanges();
+      wsNode.remove();
+
+      // Active real iframe selection: detail: 2 mousedown is not prevented while selection exists;
+      // Click 1 dismisses selection without turning, and rapid Click 2 prevents native selection and turns once.
+      engine.hasSelection = true;
+      expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(false);
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        expect(fireMouseDown(area, { detail: 1, clientX: 1050 }).defaultPrevented).toBe(false);
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.click(area, { button: 0, detail: 1, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(2);
+      expect(engine.selectionCleared).toBe(1);
+      expect(engine.hasSelection).toBe(false);
+
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(true);
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.click(area, { button: 0, detail: 2, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(3);
+
+      // Scroll mode disables edge gestures and never prevents native mousedown selection.
+      fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+      expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(false);
+    });
   });
 });

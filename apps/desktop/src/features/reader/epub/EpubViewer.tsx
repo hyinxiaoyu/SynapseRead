@@ -70,6 +70,7 @@ import {
 } from '@/features/reader/ReaderToolbar';
 import {
   animatePageTurn,
+  hasSelectionIn,
   isOverContent,
   type TurnDirection,
   usePageTurnGestures,
@@ -1483,13 +1484,12 @@ export function EpubViewer({
       if (pendingFrameDownRef.current === null) return;
       pendingFrameDownRef.current = null;
       reportPointer(false);
-      const selection = doc.getSelection();
       handleSample({
         kind: 'click',
         x: event.clientX,
         y: event.clientY,
         overContent: isOverContent(event.target, event.clientX, event.clientY),
-        hasSelection: selection !== null && !selection.isCollapsed,
+        hasSelection: hasSelectionIn(doc),
       });
     };
     const clearPending = () => {

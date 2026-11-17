@@ -2208,6 +2208,7 @@ describe('EPUB code blocks', () => {
       getSelectionSpy.mockReturnValue({
         isCollapsed: false,
         rangeCount: 1,
+        toString: () => 'const x = 1;',
       } as unknown as Selection);
       inner.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
       expect(seen).toEqual([null]);
@@ -2953,6 +2954,168 @@ describe('EPUB chapter wheel, consecutive click, selection, and seam queue (#106
       getSelectionSpy.mockRestore();
       handle.destroy();
       host.remove();
+    }
+  });
+
+  it('ignores whitespace-only selections in hasSelection() and prevents native multi-click selection only on blank paginated turn margins', async () => {
+    const area = document.createElement('div');
+    area.dataset.testid = 'epub-page-area';
+    const pageFrame = document.createElement('div');
+    pageFrame.dataset.testid = 'epub-page-frame';
+    const host = document.createElement('div');
+    area.append(pageFrame, host);
+    document.body.append(area);
+    vi.spyOn(pageFrame, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 0, 1000, 600));
+    // Simulate epub-host translated during a slide while pageFrame stays stationary.
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(400, 0, 1000, 600));
+
+    const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+    const jump = handle.display('chapter1.xhtml');
+    fake.settle('chapter1.xhtml');
+    await jump;
+    const contents = fake.state.contents[0];
+    if (!contents) throw new Error('missing contents');
+
+    const fakeFrame = {
+      getBoundingClientRect: () => new DOMRect(300, 0, 1000, 600),
+    } as unknown as Element;
+    Object.defineProperty(contents.window, 'frameElement', {
+      value: fakeFrame,
+      configurable: true,
+    });
+
+    contents.document.body.innerHTML =
+      '<div id="blank" style="height:200px"></div><p id="prose">Filler</p><pre id="code"><code id="inline">let x = 1;</code></pre><a id="link" href="#ch2">Link</a>';
+    const blank = contents.document.getElementById('blank') as Element;
+    const prose = contents.document.getElementById('prose') as Element;
+    const pre = contents.document.getElementById('code') as Element;
+    const code = contents.document.getElementById('inline') as Element;
+    const link = contents.document.getElementById('link') as Element;
+
+    const gestures: PageGestureSample[] = [];
+    handle.onGesture((sample) => gestures.push(sample));
+
+    const dispatchMouseDown = (
+      target: Element,
+      init: { button?: number; detail?: number; clientX: number; clientY?: number },
+    ) => {
+      const event = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+        button: init.button ?? 0,
+        detail: init.detail ?? 1,
+        clientX: init.clientX,
+        clientY: init.clientY ?? 120,
+      });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    const getSelectionSpy = vi.spyOn(window, 'getSelection');
+    try {
+      // Whitespace-only and empty non-collapsed selections are ignored by hasSelection() and gesture samples.
+      for (const text of ['', ' \n\t ']) {
+        getSelectionSpy.mockReturnValue({
+          isCollapsed: false,
+          rangeCount: 1,
+          toString: () => text,
+        } as unknown as Selection);
+        expect(handle.hasSelection()).toBe(false);
+        blank.dispatchEvent(
+          new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            detail: 2,
+            clientX: 750,
+            clientY: 120,
+          }),
+        );
+        const last = gestures.at(-1);
+        expect(last?.kind === 'click' && last.hasSelection).toBe(false);
+        // top-window x = frameRect.left(300) + clientX(750) = 1050 -> inside pageFrame[100..1100] right 12%.
+        expect(dispatchMouseDown(blank, { detail: 2, clientX: 750 }).defaultPrevented).toBe(true);
+      }
+
+      // Clear selection to collapsed state.
+      getSelectionSpy.mockReturnValue({ isCollapsed: true, rangeCount: 0 } as unknown as Selection);
+
+      // detail: 1 on blank turn margin does NOT preventDefault.
+      expect(dispatchMouseDown(blank, { detail: 1, clientX: 750 }).defaultPrevented).toBe(false);
+      // Non-primary button does NOT preventDefault.
+      expect(
+        dispatchMouseDown(blank, { button: 2, detail: 2, clientX: 750 }).defaultPrevented,
+      ).toBe(false);
+
+      // Left and right stationary turn margins (topWindowX=150, 1050) DO preventDefault on detail >= 2.
+      expect(dispatchMouseDown(blank, { detail: 2, clientX: -150 }).defaultPrevented).toBe(true);
+      expect(dispatchMouseDown(blank, { detail: 3, clientX: 750 }).defaultPrevented).toBe(true);
+
+      // Center non-turn zone (topWindowX = 300 + 300 = 600 inside pageFrame[100..1100]) does NOT preventDefault.
+      expect(dispatchMouseDown(blank, { detail: 2, clientX: 300 }).defaultPrevented).toBe(false);
+
+      // <pre>, <code>, and <a> inside turn zone do NOT preventDefault.
+      expect(dispatchMouseDown(pre, { detail: 2, clientX: 750 }).defaultPrevented).toBe(false);
+      expect(dispatchMouseDown(code, { detail: 2, clientX: 750 }).defaultPrevented).toBe(false);
+      expect(dispatchMouseDown(link, { detail: 2, clientX: 750 }).defaultPrevented).toBe(false);
+
+      // Glyph text inside turn zone does NOT preventDefault.
+      const textNode = prose.firstChild as Text;
+      const origCaretRange = contents.document.caretRangeFromPoint;
+      const origGetClientRects = Range.prototype.getClientRects;
+      contents.document.caretRangeFromPoint = () => {
+        const range = contents.document.createRange();
+        range.setStart(textNode, 2);
+        range.setEnd(textNode, 2);
+        return range;
+      };
+      Range.prototype.getClientRects = () =>
+        [new DOMRect(740, 110, 30, 20)] as unknown as DOMRectList;
+      try {
+        expect(dispatchMouseDown(prose, { detail: 2, clientX: 750 }).defaultPrevented).toBe(false);
+      } finally {
+        contents.document.caretRangeFromPoint = origCaretRange;
+        Range.prototype.getClientRects = origGetClientRects;
+      }
+
+      // Real non-whitespace selection blocks preventDefault and sets hasSelection() = true.
+      getSelectionSpy.mockReturnValue({
+        isCollapsed: false,
+        rangeCount: 1,
+        toString: () => 'Filler',
+      } as unknown as Selection);
+      expect(handle.hasSelection()).toBe(true);
+      expect(dispatchMouseDown(blank, { detail: 2, clientX: 750 }).defaultPrevented).toBe(false);
+
+      // Scroll mode never prevents native multi-click selection on margins (both mid-switch and after settle).
+      getSelectionSpy.mockReturnValue({ isCollapsed: true, rangeCount: 0 } as unknown as Selection);
+      const modeSwitch = handle.setReadingMode('scroll');
+      expect(dispatchMouseDown(blank, { detail: 2, clientX: 750 }).defaultPrevented).toBe(false);
+      fake.settle('chapter1.xhtml');
+      await modeSwitch;
+      const scrollContents = fake.state.contents[0];
+      if (!scrollContents) throw new Error('missing scroll contents');
+      Object.defineProperty(scrollContents.window, 'frameElement', {
+        value: fakeFrame,
+        configurable: true,
+      });
+      scrollContents.document.body.innerHTML = '<div id="scroll-blank" style="height:200px"></div>';
+      const scrollBlank = scrollContents.document.getElementById('scroll-blank') as Element;
+      expect(dispatchMouseDown(scrollBlank, { detail: 2, clientX: 750 }).defaultPrevented).toBe(
+        false,
+      );
+      Object.defineProperty(scrollContents.window, 'frameElement', {
+        value: null,
+        configurable: true,
+      });
+    } finally {
+      Object.defineProperty(contents.window, 'frameElement', {
+        value: null,
+        configurable: true,
+      });
+      getSelectionSpy.mockRestore();
+      handle.destroy();
+      area.remove();
     }
   });
 

@@ -23,6 +23,8 @@ import {
   animatePaperCurl,
   applyPaperCurl,
   easeOut,
+  hasSelectionIn,
+  hasTextSelection,
   isOverContent,
   PAGE_CURL_MS,
   PAGE_SLIDE_MS,
@@ -31,7 +33,9 @@ import {
   prefersReducedMotion,
   resetPaperCurl,
   type TurnDirection,
+  type TurnZone,
   type WheelSample,
+  zoneAt,
 } from '@/features/reader/paging/pageTurn';
 import { computeScrollPageStep } from '@/features/reader/paging/scrollStep';
 import {
@@ -888,9 +892,13 @@ export async function openEpubDocument(
   let releasedSelection: { cfiRange: string; text: string } | null = null;
   /** The selection a press started on: a click inside it must not report it again. */
   let pressedSelection: { cfiRange: string; text: string } | null = null;
+  const hasContentsSelection = (contents: Contents): boolean =>
+    hasTextSelection(
+      contents.window?.getSelection?.() ?? contents.document?.getSelection?.() ?? null,
+    );
   const selectionOf = (contents: Contents) => {
     const selection = contents.window.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+    if (!hasTextSelection(selection) || selection.rangeCount === 0) return null;
     try {
       const cfiRange = contents.cfiFromRange(selection.getRangeAt(0));
       const text = selection.toString().trim();
@@ -1113,9 +1121,20 @@ export async function openEpubDocument(
       const rect = frame?.getBoundingClientRect();
       return { left: rect?.left ?? 0, top: rect?.top ?? 0 };
     };
-    const hasSelection = () => {
-      const selection = contents.window.getSelection();
-      return selection !== null && !selection.isCollapsed;
+    const hasSelection = () => hasContentsSelection(contents);
+    const hasAnySelection = () =>
+      hasSelection() || contentsList().some(hasContentsSelection) || hasSelectionIn(ownerDoc);
+    const turnZoneAt = (topWindowX: number): TurnZone | null => {
+      const pageFrame = element
+        .closest('[data-testid="epub-page-area"]')
+        ?.querySelector('[data-testid="epub-page-frame"]');
+      const pageRect = pageFrame?.getBoundingClientRect();
+      if (pageRect && pageRect.width > 0) return zoneAt(topWindowX, pageRect);
+      const hostRect = element.getBoundingClientRect();
+      if (hostRect.width > 0) return zoneAt(topWindowX, hostRect);
+      const frameRect = contents.window.frameElement?.getBoundingClientRect();
+      if (frameRect && frameRect.width > 0) return zoneAt(topWindowX, frameRect);
+      return null;
     };
     const inspectCodeBlock = (pre: Element | null, clientPoint?: { x: number; y: number }) => {
       if (destroyed) return;
@@ -1251,8 +1270,7 @@ export async function openEpubDocument(
       );
       // `selected` only reports new selections, not one that has been cleared.
       chapterDoc.addEventListener('selectionchange', () => {
-        const selection = contents.window.getSelection();
-        if (!selection || selection.isCollapsed) {
+        if (!hasSelection()) {
           releasedSelection = null;
           selectionListener(null);
         }
@@ -1311,6 +1329,22 @@ export async function openEpubDocument(
       });
       chapterDoc.addEventListener('pointercancel', () => {
         clearFramePointerDown();
+      });
+      chapterDoc.addEventListener('mousedown', (event: MouseEvent) => {
+        if (
+          currentMode === 'scroll' ||
+          event.button !== 0 ||
+          event.detail <= 1 ||
+          event.defaultPrevented
+        ) {
+          return;
+        }
+        if (hasAnySelection()) return;
+        if (isOverContent(event.target, event.clientX, event.clientY)) return;
+        const { left } = offset();
+        if (turnZoneAt(left + event.clientX) !== null) {
+          event.preventDefault();
+        }
       });
       chapterDoc.addEventListener('pointerdown', (event: PointerEvent) => {
         if (event.button !== 0) return;
@@ -2909,11 +2943,7 @@ export async function openEpubDocument(
       turn(direction, options?.animate ?? true, options?.transition, options?.spread),
     canTurnInPlace,
     hasSelection() {
-      return contentsList().some((contents) => {
-        const selection =
-          contents.window?.getSelection?.() ?? contents.document?.getSelection?.() ?? null;
-        return selection !== null && !selection.isCollapsed;
-      });
+      return contentsList().some(hasContentsSelection);
     },
     beginScrub(options) {
       clearCodeBlockHover();
@@ -3165,11 +3195,7 @@ export async function openEpubDocument(
         // Search marks are painted by the reader, not annotations it can open.
         if (annotationId.startsWith('__')) return;
         // A drag that ends over a mark clicks it too; that press made a selection instead.
-        const selecting = contentsList().some((contents) => {
-          const selection = contents.window.getSelection();
-          return selection !== null && !selection.isCollapsed;
-        });
-        if (selecting) return;
+        if (contentsList().some(hasContentsSelection)) return;
         const marks = element.querySelectorAll(
           `[data-annotation-id="${CSS.escape(annotationId)}"]`,
         );
@@ -3211,7 +3237,7 @@ export async function openEpubDocument(
     selectionRect() {
       for (const contents of contentsList()) {
         const selection = contents.window.getSelection();
-        if (!selection || selection.isCollapsed || selection.rangeCount === 0) continue;
+        if (!hasTextSelection(selection) || selection.rangeCount === 0) continue;
         const frame = contents.window.frameElement?.getBoundingClientRect();
         return rangeViewportRect(selection.getRangeAt(0), {
           left: frame?.left ?? 0,
