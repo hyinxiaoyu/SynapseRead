@@ -2472,12 +2472,17 @@ export async function openEpubDocument(
       return;
     }
     if (inPlace) {
+      const epoch = navigation;
       await slideStrip(base + committed * current.stride, settleMs);
-      if (!scrubbing && !settlingSpringBack) syncCurrentCfiFromScroll();
+      if (epoch === navigation && !destroyed && !scrubbing && !settlingSpringBack) {
+        syncCurrentCfiFromScroll();
+      }
       return;
     }
     // The fingers reached the chapter's edge: settle back, then cross the seam.
+    const epoch = navigation;
     await slideStrip(base, springMs);
+    if (epoch !== navigation || destroyed || scrubbing) return;
     await turn(committed, transition === 'slide', transition, spread);
   };
 
@@ -2598,9 +2603,11 @@ export async function openEpubDocument(
     canTurnInPlace,
     beginScrub(options) {
       clearCodeBlockHover();
-      // A scrub starts from a whole page, never from half of a slide or curl.
+      // A scrub starts from a whole page and claims navigation ownership so any
+      // in-flight seam turn that finishes later cannot take over the stage.
       settleSlide();
       clearCurlStage();
+      beginNavigation();
       scrubbing = true;
       scrubMoved = false;
       settlingSpringBack = false;

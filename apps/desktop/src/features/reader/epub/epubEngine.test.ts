@@ -1882,6 +1882,127 @@ describe('EPUB slide seam scrubbing', () => {
       nowSpy.mockRestore();
     }
   });
+
+  it('ignores a stale seam turn load when a new scrub gesture begins first', async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const tick = (at: number) => {
+      clock = at;
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(at);
+    };
+
+    const strip = stripHarness();
+    strip.setScrollWidth(1920);
+    const view = document.createElement('div');
+    view.className = 'epub-view';
+    Object.defineProperty(view, 'offsetLeft', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetTop', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetWidth', { value: 640, configurable: true });
+    Object.defineProperty(view, 'offsetHeight', { value: 480, configurable: true });
+    view.appendChild(document.createElement('iframe'));
+    strip.container.appendChild(view);
+    Reflect.set(fake.rendition, 'manager', {
+      container: strip.container,
+      layout: { delta: 640 },
+    });
+
+    const host = document.createElement('div');
+    const pane = document.createElement('div');
+    pane.dataset.testid = 'epub-slide-pane';
+    pane.append(host);
+    document.body.append(pane);
+    const curlHost = document.createElement('div');
+    const shadow = document.createElement('div');
+    const leaf = document.createElement('div');
+    leaf.dataset.curlPart = 'leaf';
+    shadow.appendChild(leaf);
+    document.body.append(curlHost);
+    vi.spyOn(curlHost, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 900, 600));
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(130, 0, 640, 600));
+
+    let resolveNext!: () => void;
+    const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveNext = resolve;
+        }),
+    );
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+      handle.setCurlElements?.({ curlHost, shadow });
+
+      // 1. Delayed slide seam turn overridden by beginScrub().
+      strip.scrollLeft = 1280;
+      const staleSlideSeam = handle.turnPage(1, {
+        animate: true,
+        transition: 'slide',
+        spread: false,
+      });
+      strip.scrollLeft = 0;
+      handle.beginScrub({ transition: 'slide', spread: false });
+      handle.scrubTo(150);
+      expect(curlHost.style.transform).toBe('translateX(-150px)');
+      expect(pane.style.transform).toBe('translateX(750px)');
+
+      resolveNext();
+      await staleSlideSeam;
+      expect(frames.size).toBe(0);
+      expect(curlHost.style.visibility).toBe('visible');
+      expect(curlHost.style.transform).toBe('translateX(-150px)');
+      expect(pane.style.transform).toBe('translateX(750px)');
+      const cancelSlide = handle.endScrub(null);
+      tick(400);
+      await cancelSlide;
+
+      // 2. Delayed curl seam turn overridden by beginScrub().
+      strip.scrollLeft = 1280;
+      const staleCurlSeam = handle.turnPage(1, {
+        animate: false,
+        transition: 'curl',
+        spread: false,
+      });
+      strip.scrollLeft = 0;
+      handle.beginScrub({ transition: 'curl', spread: false });
+      handle.scrubTo(225);
+      const scrubClip = curlHost.style.clipPath;
+      expect(scrubClip).toContain('polygon(');
+
+      resolveNext();
+      await staleCurlSeam;
+      expect(frames.size).toBe(0);
+      expect(curlHost.style.visibility).toBe('visible');
+      expect(curlHost.style.clipPath).toBe(scrubClip);
+      const cancelCurl = handle.endScrub(null);
+      tick(800);
+      await cancelCurl;
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      nextSpy.mockRestore();
+      pane.remove();
+      curlHost.remove();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
+    }
+  });
 });
 
 describe('EPUB code blocks', () => {
