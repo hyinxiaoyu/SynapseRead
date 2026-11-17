@@ -140,6 +140,11 @@ beside the code in `#[cfg(test)]`, frontend as `*.test.ts(x)` beside the source.
 
 ## Git
 
+Make changes on a branch and integrate them through a pull request. Do not merge
+changes directly into the target branch or push changes directly to `main`.
+Write GitHub issue and pull request titles, descriptions, and comments in English,
+unless the user explicitly requests another language.
+
 Use Conventional Commits (`feat:`, `fix:`, `docs:`, `chore:`, and so on). Commit
 `Cargo.lock` and `pnpm-lock.yaml`. Never commit secrets, local databases, or user
 documents.
