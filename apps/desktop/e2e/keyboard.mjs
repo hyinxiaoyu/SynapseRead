@@ -35,8 +35,19 @@ export async function keyboardFlow(page) {
   );
 
   // And the keys work without a click: this is the reported "Page Down did nothing".
+  // In continuous fit-width mode, ArrowRight steps down one viewport screen at a time
+  // until reaching page 2 (#103).
   await page.press('ArrowRight', 'ArrowRight');
-  await page.waitFor(`${pdfPageField} === '2'`, 'ArrowRight to turn the PDF page');
+  await page.waitFor(
+    `${visiblePdfScroll}.scrollTop > 0`,
+    'ArrowRight to step down the continuous PDF page without clicking',
+  );
+  for (let step = 0; step < 5; step += 1) {
+    if ((await page.evaluate(pdfPageField)) === '2') break;
+    await page.press('ArrowRight', 'ArrowRight');
+    await new Promise((done) => setTimeout(done, 100));
+  }
+  await page.waitFor(`${pdfPageField} === '2'`, 'ArrowRight to turn to PDF page 2');
 
   // Previous Tab (⇧⌘[) activates the TXT tab and hands it the keyboard too.
   await page.press('[', 'BracketLeft', META | SHIFT);

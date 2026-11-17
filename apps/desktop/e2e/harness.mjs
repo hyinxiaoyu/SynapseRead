@@ -326,6 +326,22 @@ export class Page {
   }
 
   /**
+   * Sends `count` rapid real mouse clicks (`clickCount: 1..count`) at `{ x, y }` so
+   * Chromium dispatches consecutive `pointerdown` / `pointerup` / `click` events with
+   * real `event.detail` increments and native multi-click selection semantics.
+   */
+  async multiClick({ x, y }, count = 2, gapMs = 0) {
+    await this.mouse('mouseMoved', x, y);
+    for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+      await this.mouse('mousePressed', x, y, 'left', clickCount);
+      await this.mouse('mouseReleased', x, y, 'left', clickCount);
+      if (gapMs > 0 && clickCount < count) {
+        await new Promise((done) => setTimeout(done, gapMs));
+      }
+    }
+  }
+
+  /**
    * Clicks the button named `name` where it is when the press arrives. The button can
    * still move between finding it and the press (a popover opening on a slow macOS
    * runner), and a press that lands beside a popover closes it. So the press is

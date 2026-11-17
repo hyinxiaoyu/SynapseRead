@@ -911,7 +911,7 @@ export async function pagingFlow(page) {
   );
   await page.emulateMedia(ANIMATED);
 
-  // ---- A TXT curl keeps the snapshot and shadow aligned with the text column ----
+  // ---- #103: TXT uses fade-only page turns and preserves paginated transitions ----
   const visibleTxtDoc = `[...document.querySelectorAll('[data-testid="txt-scroll"] [role="document"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
   await page.evaluate(`(() => {
     const doc = [...document.querySelectorAll('[data-testid="txt-scroll"] [role="document"]')]
@@ -919,114 +919,215 @@ export async function pagingFlow(page) {
     const panelId = doc?.closest('[role="tabpanel"]')?.id;
     document.querySelector('[aria-label="Open documents"] [role="tab"][aria-controls="' + panelId + '"]')?.click();
   })()`);
-  await page.waitFor(visibleTxtDoc, 'the TXT tab to return for curl check');
+  await page.waitFor(visibleTxtDoc, 'the TXT tab to return for fade check');
   await page.waitForReaderLayout();
-  await page.evaluate(`(() => {
-    const doc = ${visibleTxtDoc};
-    const stage = doc?.closest('[data-testid="txt-scroll"]')?.parentElement;
-    const curlHost = stage?.querySelector('[data-testid="txt-curl-host"]');
-    const shadow = stage?.querySelector('[data-testid="page-turn-shadow"]');
-    const leaf = shadow?.querySelector('[data-curl-part="leaf"]');
-    window.__txtCurlSamples = [];
-    let frames = 0;
-    const step = () => {
-      const curlVisible = curlHost && getComputedStyle(curlHost).visibility === 'visible';
-      const docRect = doc?.getBoundingClientRect();
-      const curlRect = curlHost?.getBoundingClientRect();
-      const shadowRect = shadow?.getBoundingClientRect();
-      window.__txtCurlSamples.push({
-        children: curlHost ? curlHost.childElementCount : 0,
-        visibility: curlHost ? getComputedStyle(curlHost).visibility : 'hidden',
-        clipPath: curlHost ? getComputedStyle(curlHost).clipPath : 'none',
-        leafOpacity: leaf ? Number(getComputedStyle(leaf).opacity) : 0,
-        deltaLeft:
-          curlVisible && docRect && curlRect ? Math.abs(curlRect.left - docRect.left) : 0,
-        shadowDeltaLeft:
-          curlVisible && docRect && shadowRect ? Math.abs(shadowRect.left - docRect.left) : 0,
-      });
-      frames += 1;
-      if (frames < 40) requestAnimationFrame(step);
-    };
-    requestAnimationFrame(step);
-    return true;
-  })()`);
-  await page.clickButton('Next Page');
-  await new Promise((done) => setTimeout(done, 700));
-  const txtCurl = await page.evaluate('window.__txtCurlSamples');
+
   assert(
-    txtCurl.some((sample) => sample.children > 0 && sample.leafOpacity > 0.5),
-    'a TXT curl turn must capture and animate the text snapshot',
-  );
-  const firstTxtClipIndex = txtCurl.findIndex((sample) => sample.clipPath !== 'none');
-  assert(firstTxtClipIndex >= 0, 'TXT curl must clip txt-curl-host while peeling');
-  assert(
-    txtCurl
-      .slice(firstTxtClipIndex)
-      .every((sample) => sample.visibility !== 'visible' || sample.clipPath !== 'none'),
-    'once TXT peeling begins, visible txt-curl-host must never flash unclipped',
-  );
-  assert(
-    txtCurl.every((sample) => sample.deltaLeft < 0.5 && sample.shadowDeltaLeft < 0.5),
-    `txt-curl-host and shadow must align with the text column, saw max deltas (${Math.max(...txtCurl.map((s) => s.deltaLeft))}, ${Math.max(...txtCurl.map((s) => s.shadowDeltaLeft))})`,
+    !(await page.evaluate(`document.querySelector('[data-testid="txt-curl-host"]')`)),
+    'TXT must not mount a curl snapshot host',
   );
 
-  // ---- A TXT page slide yields to a reader who scrolls by hand ----
-  // The animation writes its own scroll position every frame, so a reader's scroll
-  // has to win over the frame that would otherwise drag them back to the turn's
-  // target. The scroll is made inside the page, two frames into the slide, so the
-  // motion has already written a position of its own to compare against.
   await page.clickButton('Reading appearance');
   await page.waitFor(
     `document.querySelector('[data-testid="appearance-popover"]')`,
     'the TXT appearance popover',
   );
-  // The text popover is taller than the PDF one, so Page turn may sit below the
-  // fold: click the radio directly rather than through the hit-tested helper.
-  const choseSlide = await page.evaluate(`(() => {
+  await page.evaluate(`(() => {
     const popover = document.querySelector('[data-testid="appearance-popover"]');
-    const slide = [...(popover?.querySelectorAll('button') ?? [])].find(
-      (candidate) => candidate.textContent.trim() === 'Slide',
+    const customize = [...(popover?.querySelectorAll('button') ?? [])].find(
+      (b) => b.textContent.trim() === 'Customize',
     );
-    slide?.click();
-    return !!slide;
+    customize?.scrollIntoView({ block: 'center' });
   })()`);
-  assert(choseSlide, 'the TXT appearance popover must offer a Slide page turn');
+  await page.clickButton('Customize');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"] [inert]')`,
+    'the TXT Customize section to open',
+  );
+  await new Promise((done) => setTimeout(done, 250));
+  const txtPageTurnOptions = await page.evaluate(`(() => {
+    const popover = document.querySelector('[data-testid="appearance-popover"]');
+    const group = [...(popover?.querySelectorAll('[role="radiogroup"]') ?? [])].find(
+      (el) => document.getElementById(el.getAttribute('aria-labelledby') ?? '')?.textContent?.trim() === 'Page turn',
+    );
+    return [...(group?.querySelectorAll('[role="radio"]') ?? [])].map((b) => ({
+      label: b.textContent.trim(),
+      checked: b.getAttribute('aria-checked') === 'true',
+    }));
+  })()`);
+  assert(
+    JSON.stringify(txtPageTurnOptions) ===
+      JSON.stringify([
+        { label: 'None', checked: false },
+        { label: 'Fade', checked: true },
+      ]),
+    `TXT appearance must offer only None and Fade with Fade active while paginated Curl is set: ${JSON.stringify(txtPageTurnOptions)}`,
+  );
   await page.press('Escape');
   await page.waitFor(
     `!document.querySelector('[data-testid="appearance-popover"]')`,
     'the appearance popover to close',
   );
-  const yielded = await page.evaluate(`(() => new Promise((resolve) => {
-    const scroller = ${visibleTxtDoc}?.closest('[data-testid="txt-scroll"]');
-    const button = [...document.querySelectorAll('button')].find(
-      (candidate) =>
-        (candidate.getAttribute('aria-label') ?? candidate.textContent).trim() === 'Next Page'
-        && !candidate.disabled
-        && candidate.checkVisibility({ visibilityProperty: true }),
-    );
-    if (!scroller || !button) {
-      resolve(null);
-      return;
-    }
-    scroller.scrollTop = 2000;
-    scroller.dispatchEvent(new Event('scroll'));
-    const start = scroller.scrollTop;
-    button.click();
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      const mid = scroller.scrollTop;
-      scroller.scrollTop = mid - 600;
-      scroller.dispatchEvent(new Event('scroll'));
-      const wanted = scroller.scrollTop;
-      setTimeout(() => resolve({ start, mid, wanted, end: scroller.scrollTop }), 600);
-    }));
-  }))()`);
-  assert(yielded !== null, 'the TXT page and its Next Page button must be visible');
+
+  // Explicit Next Page click in TXT fades [role="document"] without transform or curl.
+  const txtBeforeFade = await page.evaluate(
+    `${visibleTxtDoc}.closest('[data-testid="txt-scroll"]').scrollTop`,
+  );
+  await page.evaluate(`(() => {
+    const doc = ${visibleTxtDoc};
+    window.__txtFadeSamples = [];
+    let frames = 0;
+    const step = () => {
+      window.__txtFadeSamples.push({
+        opacity: Number(getComputedStyle(doc).opacity),
+        transform: getComputedStyle(doc).transform,
+        animIds: doc.getAnimations().map((a) => a.id),
+      });
+      if (++frames < 25) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  })()`);
+  await page.clickButton('Next Page');
+  await new Promise((done) => setTimeout(done, 350));
+  const txtAfterFade = await page.evaluate(
+    `${visibleTxtDoc}.closest('[data-testid="txt-scroll"]').scrollTop`,
+  );
+  const txtFade = await page.evaluate('window.__txtFadeSamples');
   assert(
-    yielded.mid > yielded.start,
-    `the TXT slide has to be running before the reader scrolls: ${yielded.start} → ${yielded.mid}`,
+    txtAfterFade > txtBeforeFade,
+    `TXT Next Page must advance scrollTop: ${txtBeforeFade} -> ${txtAfterFade}`,
   );
   assert(
-    Math.abs(yielded.end - yielded.wanted) < 2,
-    `a TXT slide must stop where the reader scrolled: wanted ${yielded.wanted}, ended ${yielded.end}`,
+    txtFade.some((s) => s.opacity < 0.9 && s.animIds.includes('page-turn')),
+    `TXT page turn must play a fade animation: ${JSON.stringify(txtFade.slice(0, 8))}`,
+  );
+  assert(
+    txtFade.every((s) => s.transform === 'none') && txtFade.at(-1)?.opacity === 1,
+    `TXT fade must leave transform none and settle at opacity 1: ${JSON.stringify(txtFade.at(-1))}`,
+  );
+
+  // Normal wheel scrolling in TXT retains native scrolling without fade.
+  const txtPoint = await page.evaluate(`(() => {
+    const r = ${visibleTxtDoc}.closest('[data-testid="txt-scroll"]').getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })()`);
+  await page.evaluate(`(() => {
+    const doc = ${visibleTxtDoc};
+    window.__txtWheelSamples = [];
+    let frames = 0;
+    const step = () => {
+      window.__txtWheelSamples.push({
+        opacity: Number(getComputedStyle(doc).opacity),
+        animIds: doc.getAnimations().map((a) => a.id),
+      });
+      if (++frames < 15) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  })()`);
+  await page.wheel(txtPoint, 120);
+  await page.waitFor(
+    `${visibleTxtDoc}.closest('[data-testid="txt-scroll"]').scrollTop > ${txtAfterFade}`,
+    'normal wheel scroll in TXT',
+  );
+  const txtWheel = await page.evaluate('window.__txtWheelSamples');
+  assert(
+    txtWheel.every((s) => s.opacity === 1 && !s.animIds.includes('page-turn')),
+    `normal wheel scrolling in TXT must not fade: ${JSON.stringify(txtWheel)}`,
+  );
+
+  // Toggling None in TXT makes explicit turns instant without clobbering EPUB's Curl setting.
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'the TXT appearance popover for None check',
+  );
+  await page.evaluate(`(() => {
+    const popover = document.querySelector('[data-testid="appearance-popover"]');
+    const customize = [...(popover?.querySelectorAll('button') ?? [])].find(
+      (b) => b.textContent.trim() === 'Customize',
+    );
+    customize?.scrollIntoView({ block: 'center' });
+  })()`);
+  await page.clickButton('Customize');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"] [inert]')`,
+    'the TXT Customize section to open for None',
+  );
+  await new Promise((done) => setTimeout(done, 250));
+  await page.evaluate(`(() => {
+    const popover = document.querySelector('[data-testid="appearance-popover"]');
+    const none = [...(popover?.querySelectorAll('button') ?? [])].find(
+      (candidate) => candidate.textContent.trim() === 'None',
+    );
+    none?.click();
+  })()`);
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"]')`,
+    'the appearance popover to close after selecting None',
+  );
+  const beforeNoneTurn = await page.evaluate(
+    `${visibleTxtDoc}.closest('[data-testid="txt-scroll"]').scrollTop`,
+  );
+  await page.evaluate(`(() => {
+    const doc = ${visibleTxtDoc};
+    window.__txtNoneSamples = [];
+    let frames = 0;
+    const step = () => {
+      window.__txtNoneSamples.push({
+        opacity: Number(getComputedStyle(doc).opacity),
+        animIds: doc.getAnimations().map((a) => a.id),
+      });
+      if (++frames < 15) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  })()`);
+  await page.clickButton('Previous Page');
+  await page.waitFor(
+    `${visibleTxtDoc}.closest('[data-testid="txt-scroll"]').scrollTop < ${beforeNoneTurn}`,
+    'TXT Previous Page under None',
+  );
+  const txtNone = await page.evaluate('window.__txtNoneSamples');
+  assert(
+    txtNone.every((s) => s.opacity === 1 && !s.animIds.includes('page-turn')),
+    `TXT turn under None must be instant with no fade animation: ${JSON.stringify(txtNone)}`,
+  );
+
+  // Switching back to EPUB verifies paginated Curl preference survived toggling None in TXT.
+  await page.evaluate(
+    `document.querySelector('[aria-label="Open documents"] [role="tab"][data-e2e="paging-epub"]')?.click()`,
+  );
+  await page.waitFor(visibleHost, 'the EPUB tab to return for preference preservation check');
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'the EPUB appearance popover',
+  );
+  await page.evaluate(`(() => {
+    const popover = document.querySelector('[data-testid="appearance-popover"]');
+    const customize = [...(popover?.querySelectorAll('button') ?? [])].find(
+      (b) => b.textContent.trim() === 'Customize',
+    );
+    customize?.scrollIntoView({ block: 'center' });
+  })()`);
+  await page.clickButton('Customize');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="appearance-popover"] [inert]')`,
+    'the EPUB Customize section to open',
+  );
+  await new Promise((done) => setTimeout(done, 250));
+  const epubPageTurnOptions = await page.evaluate(`(() => {
+    const popover = document.querySelector('[data-testid="appearance-popover"]');
+    const group = [...(popover?.querySelectorAll('[role="radiogroup"]') ?? [])].find(
+      (el) => document.getElementById(el.getAttribute('aria-labelledby') ?? '')?.textContent?.trim() === 'Page turn',
+    );
+    return [...(group?.querySelectorAll('[role="radio"]') ?? [])].map((b) => ({
+      label: b.textContent.trim(),
+      checked: b.getAttribute('aria-checked') === 'true',
+    }));
+  })()`);
+  assert(
+    epubPageTurnOptions.some((option) => option.label === 'Curl' && option.checked),
+    `paginated EPUB Curl must be preserved after toggling None in TXT: ${JSON.stringify(epubPageTurnOptions)}`,
   );
 }
