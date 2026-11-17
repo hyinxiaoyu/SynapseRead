@@ -342,6 +342,10 @@ pre {
   -webkit-hyphens: none;
   text-indent: 2ch hanging each-line;
 }
+pre:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
 pre code {
   background: transparent;
   border: 0;
@@ -460,6 +464,10 @@ pre {
   text-indent: 2ch hanging each-line !important;
   break-inside: auto !important;
   page-break-inside: auto !important;
+}
+pre:focus-visible {
+  outline: 2px solid currentColor !important;
+  outline-offset: 2px !important;
 }
 pre code {
   font-size: inherit !important;
@@ -787,6 +795,10 @@ function mirrorLiveFrame(view: HTMLElement, viewClone: HTMLElement, doc: Documen
   if (liveDoc.body) {
     const bodyClone = mirrorDoc.importNode(liveDoc.body, true);
     for (const script of bodyClone.querySelectorAll('script')) script.remove();
+    for (const pre of bodyClone.querySelectorAll('[data-synapse-tabindex]')) {
+      pre.removeAttribute('tabindex');
+      pre.removeAttribute('data-synapse-tabindex');
+    }
     mirrorDoc.body.replaceWith(bodyClone);
   }
 }
@@ -913,6 +925,7 @@ export async function openEpubDocument(
   const codeBlockIds = new WeakMap<Element, string>();
   let nextCodeBlockId = 0;
   const hoveredCodeDocs = new WeakSet<Document>();
+  const codeTabObservers = new Set<MutationObserver>();
   let lastHoveredBlock: {
     id: string;
     rect: ViewportRect;
@@ -931,6 +944,75 @@ export async function openEpubDocument(
     width: 0,
     height: 0,
     toJSON: () => ({}),
+  };
+  const TABBABLE_SELECTOR =
+    'a[href], button:not(:disabled), input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), summary, [tabindex]';
+  const isTabbable = (el: Element): boolean => {
+    const htmlEl = el as HTMLElement;
+    if (htmlEl.tabIndex < 0) return false;
+    if (el.hasAttribute('disabled')) return false;
+    if (el.closest('[inert], [hidden]') !== null) return false;
+    if (
+      el.localName.toLowerCase() === 'a' &&
+      el.getAttribute('aria-hidden') === 'true' &&
+      el.closest('pre') !== null
+    ) {
+      return false;
+    }
+    if (
+      typeof htmlEl.checkVisibility === 'function' &&
+      !htmlEl.checkVisibility({ visibilityProperty: true })
+    ) {
+      return false;
+    }
+    return true;
+  };
+  const isChapterElementVisible = (
+    candidate: Element,
+    frameRect: DOMRectReadOnly,
+    hostRect: DOMRectReadOnly,
+  ): boolean => {
+    if (candidate.localName.toLowerCase() === 'pre') {
+      return visibleCodeBlockRect(candidate, frameRect, hostRect) !== null;
+    }
+    const clientRects =
+      typeof candidate.getClientRects === 'function' ? Array.from(candidate.getClientRects()) : [];
+    const fragments = clientRects.length > 0 ? clientRects : [candidate.getBoundingClientRect()];
+    return fragments.some(
+      (rect) =>
+        rect.width > 0 &&
+        rect.height > 0 &&
+        rect.right + frameRect.left > hostRect.left &&
+        rect.left + frameRect.left < hostRect.right &&
+        rect.bottom + frameRect.top > hostRect.top &&
+        rect.top + frameRect.top < hostRect.bottom,
+    );
+  };
+  const syncCodeBlockTabStops = (contents: Contents) => {
+    const chapterDoc = contents.document;
+    const pres = chapterDoc.querySelectorAll('pre');
+    if (pres.length === 0) return;
+    const frameRect =
+      currentMode !== 'scroll'
+        ? (contents.window.frameElement?.getBoundingClientRect() ?? zeroRect)
+        : zeroRect;
+    const hostRect =
+      currentMode !== 'scroll' && frameRect.width > 0 ? element.getBoundingClientRect() : zeroRect;
+    const checkVisibility = currentMode !== 'scroll' && frameRect.width > 0 && hostRect.width > 0;
+    for (const pre of pres) {
+      const managed = pre.hasAttribute('data-synapse-tabindex');
+      if (pre.hasAttribute('tabindex') && !managed) continue;
+      const focusable =
+        isCopyableCodeBlock(pre) &&
+        (!checkVisibility || visibleCodeBlockRect(pre, frameRect, hostRect) !== null);
+      if (focusable) {
+        if (pre.getAttribute('tabindex') !== '0') pre.setAttribute('tabindex', '0');
+        if (!managed) pre.setAttribute('data-synapse-tabindex', 'true');
+      } else if (managed) {
+        pre.removeAttribute('tabindex');
+        pre.removeAttribute('data-synapse-tabindex');
+      }
+    }
   };
   const blockIdOf = (pre: Element): string => {
     let id = codeBlockIds.get(pre);
@@ -952,6 +1034,13 @@ export async function openEpubDocument(
     return (
       typeof targetElement?.closest === 'function' &&
       targetElement.closest('[data-testid="epub-code-action-pill"]') !== null
+    );
+  };
+  const isCopyBufferTarget = (target: EventTarget | null): boolean => {
+    const targetElement = target as Element | null;
+    return (
+      typeof targetElement?.hasAttribute === 'function' &&
+      targetElement.hasAttribute('data-synapse-copy-buffer')
     );
   };
   const onOwnerPointerDown = (event: PointerEvent) => {
@@ -976,8 +1065,16 @@ export async function openEpubDocument(
     }
     clearCodeBlockHover();
   };
+  const onOwnerFocusIn = (event: FocusEvent) => {
+    if (lastHoveredBlock === null) return;
+    if (isCodeActionPillTarget(event.target) || isCopyBufferTarget(event.target)) return;
+    const targetNode = event.target as Node | null;
+    if (targetNode && element.contains(targetNode)) return;
+    clearCodeBlockHover();
+  };
   ownerDoc.addEventListener('pointermove', onOwnerPointerMove);
   ownerDoc.addEventListener('pointerdown', onOwnerPointerDown);
+  ownerDoc.addEventListener('focusin', onOwnerFocusIn);
 
   rendition.hooks.content.register((contents: Contents) => {
     const chapterDoc = contents.document;
@@ -1023,10 +1120,53 @@ export async function openEpubDocument(
         return;
       }
       lastHoveredBlock = { id, rect, top, left, bottom, right };
+      const focusBlock = (): boolean => {
+        if (destroyed || !pre.isConnected) return false;
+        const focusablePre = pre as HTMLElement;
+        if (typeof focusablePre.focus !== 'function') return false;
+        syncCodeBlockTabStops(contents);
+        contents.window.focus?.();
+        focusablePre.focus({ preventScroll: true });
+        return chapterDoc.activeElement === pre;
+      };
+      const focusAfterBlock = (): boolean => {
+        if (destroyed) return false;
+        syncCodeBlockTabStops(contents);
+        const currentFrameRect = contents.window.frameElement?.getBoundingClientRect() ?? zeroRect;
+        const currentHostRect = element.getBoundingClientRect();
+        const checkChapterVisibility =
+          currentMode !== 'scroll' && currentFrameRect.width > 0 && currentHostRect.width > 0;
+        for (const candidate of chapterDoc.querySelectorAll(TABBABLE_SELECTOR)) {
+          if (candidate === pre || pre.contains(candidate)) continue;
+          if ((pre.compareDocumentPosition(candidate) & 4) === 0) continue;
+          if (!isTabbable(candidate)) continue;
+          if (
+            checkChapterVisibility &&
+            !isChapterElementVisible(candidate, currentFrameRect, currentHostRect)
+          ) {
+            continue;
+          }
+          contents.window.focus?.();
+          (candidate as HTMLElement).focus({ preventScroll: true });
+          return true;
+        }
+        for (const candidate of ownerDoc.querySelectorAll(TABBABLE_SELECTOR)) {
+          if (element.contains(candidate)) continue;
+          if (isCodeActionPillTarget(candidate) || isCopyBufferTarget(candidate)) continue;
+          if ((element.compareDocumentPosition(candidate) & 4) === 0) continue;
+          if (!isTabbable(candidate)) continue;
+          clearCodeBlockHover();
+          (candidate as HTMLElement).focus({ preventScroll: true });
+          return true;
+        }
+        return false;
+      };
       codeBlockHoverListener({
         id,
         rect,
         getText: () => extractCodeBlockText(pre),
+        focusBlock,
+        focusAfterBlock,
       });
     };
     const preFromTarget = (target: EventTarget | null): Element | null => {
@@ -1086,6 +1226,27 @@ export async function openEpubDocument(
       }
     });
     chapterDoc.addEventListener('keydown', (event: KeyboardEvent) => {
+      if (
+        !event.defaultPrevented &&
+        !event.isComposing &&
+        event.key === 'Tab' &&
+        !event.shiftKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.metaKey
+      ) {
+        const pre = preFromTarget(event.target);
+        if (pre && event.target === pre && isCopyableCodeBlock(pre)) {
+          if (lastHoveredBlock?.id !== blockIdOf(pre)) inspectCodeBlock(pre);
+          const scope = element.closest('[data-testid="epub-viewer"]') ?? ownerDoc;
+          const copyButton = scope.querySelector<HTMLElement>('[data-testid="epub-code-copy"]');
+          if (copyButton && !copyButton.hasAttribute('disabled')) {
+            event.preventDefault();
+            copyButton.focus({ preventScroll: true });
+            return;
+          }
+        }
+      }
       keyDownListener(event);
     });
     // The app guards the webview's own context menu on the window, and a chapter is
@@ -1186,6 +1347,11 @@ export async function openEpubDocument(
       chapterDoc.documentElement.addEventListener('pointerleave', () => {
         clearCodeBlockHover();
       });
+      if (chapterDoc.documentElement) {
+        const observer = new MutationObserver(() => syncCodeBlockTabStops(contents));
+        observer.observe(chapterDoc.documentElement, { childList: true, subtree: true });
+        codeTabObservers.add(observer);
+      }
     }
     // `section.load()` runs `book.spine.hooks.content` only on the first parse of a
     // chapter, so any later view created by a resize, mode switch, or chapter revisit
@@ -1194,6 +1360,7 @@ export async function openEpubDocument(
     // Dark and Sepia color `html` and `body`; a chapter's own colors survive.
     // The iframe's load event has already run, so its stylesheets are applied.
     if (!isFixedLayout) applyReadableAuthorColors(contents.document, currentPreferences.theme);
+    syncCodeBlockTabStops(contents);
   });
   rendition.on('selected', (cfiRange: string, contents: Contents) => {
     const text = contents.window.getSelection()?.toString().trim() ?? '';
@@ -1206,6 +1373,9 @@ export async function openEpubDocument(
   });
   rendition.on('relocated', (location: Location) => {
     clearCodeBlockHover();
+    for (const contents of contentsList()) {
+      syncCodeBlockTabStops(contents);
+    }
     currentCfi = location.start.cfi;
     const displayed = location.start.displayed;
     const totalChapters = Math.max(spineItems.length, 1);
@@ -2537,8 +2707,11 @@ export async function openEpubDocument(
       clearCodeBlockHover();
       destroyed = true;
       codeBlockHoverListener = () => undefined;
+      for (const observer of codeTabObservers) observer.disconnect();
+      codeTabObservers.clear();
       ownerDoc.removeEventListener('pointermove', onOwnerPointerMove);
       ownerDoc.removeEventListener('pointerdown', onOwnerPointerDown);
+      ownerDoc.removeEventListener('focusin', onOwnerFocusIn);
       cancelSlide();
       clearCurlStage();
       // The seam hold shadows one method on the manager; leave it as we found it.

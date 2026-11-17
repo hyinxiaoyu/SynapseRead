@@ -669,6 +669,79 @@ export async function epubCodeBlocksFlow(page) {
     'focus returned cleanly after closing expanded code dialog',
   );
 
+  // 5b. Keyboard-only flow: Tab from toolbar into ordinary <pre>, pill Copy/Expand via Tab/Shift+Tab/Enter.
+  await hoverPoint(page, { x: 1, y: 1 });
+  await page.waitFor(
+    `!document.querySelector('[data-testid="epub-code-copy"]')`,
+    'action pill dismissed before keyboard-only flow',
+  );
+  await page.waitFor(
+    `${frameDocument}?.querySelector('#plain-block')?.getAttribute('tabindex') === '0'`,
+    'ordinary <pre> has managed tabindex="0"',
+  );
+  await page.evaluate(`${visibleHost}?.focus({ preventScroll: true })`);
+  await page.waitFor(
+    `document.activeElement === ${visibleHost}`,
+    'epub-host focused before tabbing into chapter',
+  );
+  await page.press('Tab', 'Tab');
+  await page.waitFor(
+    `${frameDocument}?.activeElement?.id === 'plain-block'
+      && document.querySelector('[data-testid="epub-code-copy"]')?.checkVisibility({ visibilityProperty: true })`,
+    'Tab from reader host focuses #plain-block and shows action pill',
+  );
+  await page.press('Tab', 'Tab');
+  await page.waitFor(
+    `document.activeElement === document.querySelector('[data-testid="epub-code-copy"]')`,
+    'Tab from focused <pre> moves focus to Copy button',
+  );
+  await page.evaluate(`navigator.clipboard.writeText('__stale__')`);
+  await page.press('Enter', 'Enter');
+  await page.waitFor(
+    `document.querySelector('[data-testid="epub-code-copy"]')?.textContent?.includes('Copied')`,
+    'Enter on keyboard-focused Copy button shows Copied feedback',
+  );
+  const keyboardCopied = await page.evaluate('navigator.clipboard.readText()');
+  assert(
+    keyboardCopied === EXPECTED_PLAIN_TEXT,
+    `keyboard copy mismatch:\nEXPECTED: ${JSON.stringify(EXPECTED_PLAIN_TEXT)}\nACTUAL:   ${JSON.stringify(keyboardCopied)}`,
+  );
+  await page.press('Tab', 'Tab');
+  await page.waitFor(
+    `document.activeElement === document.querySelector('[data-testid="epub-code-expand"]')`,
+    'Tab moves focus from Copy to Expand button',
+  );
+  await page.press('Tab', 'Tab', 8);
+  await page.waitFor(
+    `document.activeElement === document.querySelector('[data-testid="epub-code-copy"]')`,
+    'Shift+Tab moves focus back from Expand to Copy',
+  );
+  await page.press('Tab', 'Tab', 8);
+  await page.waitFor(
+    `${frameDocument}?.activeElement?.id === 'plain-block'`,
+    'Shift+Tab on Copy returns focus to #plain-block',
+  );
+  await page.press('Tab', 'Tab');
+  await page.waitFor(
+    `document.activeElement === document.querySelector('[data-testid="epub-code-copy"]')`,
+    'Tab returns focus to Copy',
+  );
+  await page.press('Tab', 'Tab');
+  await page.waitFor(
+    `document.activeElement === document.querySelector('[data-testid="epub-code-expand"]')`,
+    'Tab returns focus to Expand',
+  );
+  await page.press('Enter', 'Enter');
+  await page.waitFor(
+    `document.querySelector('[data-testid="epub-code-dialog"]')?.checkVisibility({ visibilityProperty: true })`,
+    'Enter on Expand opens expanded code dialog',
+  );
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="epub-code-dialog"]')`,
+    'Escape closes expanded dialog opened via keyboard',
+  );
+
   // 6. Narrow (960x600) & wide (1440x900) viewports across Light, Sepia, and Dark themes (iframe + overlay/dialog >= 4.5:1).
   for (const viewport of [
     { width: 960, height: 600 },

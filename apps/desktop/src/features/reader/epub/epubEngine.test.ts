@@ -1635,7 +1635,7 @@ describe('EPUB code blocks', () => {
     contents.document.body.innerHTML = `
       <p id="prose">Prose</p>
       <pre id="code"><code id="inner">  const x = 1;\n</code></pre>
-      <pre id="gutter" class="linenos">1</pre>
+      <table><tr><td class="linenos"><pre id="gutter">1</pre></td><td class="code"><pre id="paired"><code>const p = 1;</code></pre></td></tr></table>
     `;
     const prose = contents.document.getElementById('prose') as Element;
     const pre = contents.document.getElementById('code') as Element;
@@ -1665,7 +1665,7 @@ describe('EPUB code blocks', () => {
     const first = seen[0];
     expect(first?.id).toBe('code-1');
     expect(first?.rect).toEqual({ left: 120, top: 100, right: 520, bottom: 180 });
-    expect(first?.getText()).toBe('  const x = 1;');
+    expect(first?.getText()).toBe('  const x = 1;\n');
 
     // Sub-pixel jitter that rounds to the same rect is deduplicated.
     fragRect = new DOMRect(120.2, 100.3, 400, 80);
@@ -1889,5 +1889,205 @@ describe('EPUB code blocks', () => {
     expect(dragRegular.defaultPrevented).toBe(false);
 
     handle.destroy();
+  });
+
+  it('adds focus-visible ring and manages tabindex on visible copyable pre blocks across mutations and relocations', async () => {
+    const { host, handle, contents } = await openRendered();
+    try {
+      const typographyCss =
+        contents.document.querySelector('style[data-synapse-typography="true"]')?.textContent ?? '';
+      const prefCss =
+        contents.document.querySelector('style[data-synapse-preferences="true"]')?.textContent ??
+        '';
+      expect(typographyCss).toContain('pre:focus-visible');
+      expect(prefCss).toContain('pre:focus-visible');
+
+      const iframe = document.createElement('iframe');
+      host.appendChild(iframe);
+      document.body.appendChild(host);
+      const frameDoc = iframe.contentDocument as Document;
+      const frameWin = iframe.contentWindow as Window;
+      vi.spyOn(iframe, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 40, 2000, 600));
+      frameDoc.body.innerHTML = `
+        <pre id="plain"><code>const x = 1;</code></pre>
+        <pre id="offscreen"><code>const z = 3;</code></pre>
+        <table><tr><td class="linenos"><pre id="gutter">1</pre></td><td class="code"><pre id="paired"><code>const p = 1;</code></pre></td></tr></table>
+        <pre id="authored" tabindex="2"><code>const y = 2;</code></pre>
+      `;
+      const plain = frameDoc.getElementById('plain') as Element;
+      const offscreen = frameDoc.getElementById('offscreen') as Element;
+      const gutter = frameDoc.getElementById('gutter') as Element;
+      const paired = frameDoc.getElementById('paired') as Element;
+      const authored = frameDoc.getElementById('authored') as Element;
+
+      let offscreenRect = new DOMRect(1500, 100, 300, 40);
+      vi.spyOn(plain, 'getClientRects').mockReturnValue([
+        new DOMRect(150, 100, 300, 40),
+      ] as unknown as DOMRectList);
+      vi.spyOn(offscreen, 'getClientRects').mockImplementation(
+        () => [offscreenRect] as unknown as DOMRectList,
+      );
+      vi.spyOn(gutter, 'getClientRects').mockReturnValue([
+        new DOMRect(110, 150, 30, 40),
+      ] as unknown as DOMRectList);
+      vi.spyOn(paired, 'getClientRects').mockReturnValue([
+        new DOMRect(150, 150, 300, 40),
+      ] as unknown as DOMRectList);
+      vi.spyOn(authored, 'getClientRects').mockReturnValue([
+        new DOMRect(150, 200, 300, 40),
+      ] as unknown as DOMRectList);
+
+      const frameContents = {
+        document: frameDoc,
+        window: frameWin,
+        cfiFromRange: () => 'epubcfi(/6/2!/4/2/1:0)',
+        expand: vi.fn(),
+      };
+      fake.state.contents.push(frameContents as unknown as (typeof fake.state.contents)[number]);
+      for (const hook of fake.state.renditionHooks) {
+        hook(frameContents as unknown as (typeof fake.state.contents)[number]);
+      }
+
+      expect(plain.getAttribute('tabindex')).toBe('0');
+      expect(plain.getAttribute('data-synapse-tabindex')).toBe('true');
+      expect(offscreen.hasAttribute('tabindex')).toBe(false);
+      expect(gutter.hasAttribute('tabindex')).toBe(false);
+      expect(paired.getAttribute('tabindex')).toBe('0');
+      expect(authored.getAttribute('tabindex')).toBe('2');
+      expect(authored.hasAttribute('data-synapse-tabindex')).toBe(false);
+
+      // Moving offscreen block into visible viewport on relocate restores its managed tabindex.
+      offscreenRect = new DOMRect(150, 300, 300, 40);
+      fake.state.listeners.relocated?.({
+        start: { cfi: 'epubcfi(/6/2!/4/2/1:0)', href: 'chapter1.xhtml' },
+        end: { cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      });
+      expect(offscreen.getAttribute('tabindex')).toBe('0');
+      expect(offscreen.getAttribute('data-synapse-tabindex')).toBe('true');
+
+      // DOM mutation adding a new visible <pre> updates tab stops via MutationObserver.
+      const added = frameDoc.createElement('pre');
+      added.innerHTML = '<code>const added = true;</code>';
+      vi.spyOn(added, 'getClientRects').mockReturnValue([
+        new DOMRect(150, 400, 300, 40),
+      ] as unknown as DOMRectList);
+      frameDoc.body.appendChild(added);
+      await Promise.resolve();
+      expect(added.getAttribute('tabindex')).toBe('0');
+      expect(added.getAttribute('data-synapse-tabindex')).toBe('true');
+    } finally {
+      handle.destroy();
+      host.remove();
+    }
+  });
+
+  it('bridges Tab from focused <pre> to the action pill, returns or advances focus, and clears on outside focusin', async () => {
+    const { host, handle } = await openRendered();
+    document.body.appendChild(host);
+
+    const pill = document.createElement('div');
+    pill.dataset.testid = 'epub-code-action-pill';
+    const copyBtn = document.createElement('button');
+    copyBtn.dataset.testid = 'epub-code-copy';
+    const expandBtn = document.createElement('button');
+    expandBtn.dataset.testid = 'epub-code-expand';
+    pill.append(copyBtn, expandBtn);
+    document.body.appendChild(pill);
+
+    const afterHost = document.createElement('button');
+    afterHost.id = 'after-host';
+    document.body.appendChild(afterHost);
+
+    const copyBuffer = document.createElement('textarea');
+    copyBuffer.setAttribute('data-synapse-copy-buffer', 'true');
+    document.body.appendChild(copyBuffer);
+
+    try {
+      const seen: (EpubCodeBlockHover | null)[] = [];
+      handle.onCodeBlockHover?.((block) => seen.push(block));
+
+      const iframe = document.createElement('iframe');
+      host.appendChild(iframe);
+      const frameDoc = iframe.contentDocument as Document;
+      const frameWin = iframe.contentWindow as Window;
+      const frameFocusSpy = vi.spyOn(frameWin, 'focus').mockImplementation(() => undefined);
+      vi.spyOn(iframe, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 40, 800, 600));
+      frameDoc.body.innerHTML = `
+        <pre id="code1"><code><a href="#hidden-line" aria-hidden="true">1</a>let a = 1;</code></pre>
+        <a id="chapter-link" href="#next">Next</a>
+      `;
+      const code1 = frameDoc.getElementById('code1') as HTMLElement;
+      const chapterLink = frameDoc.getElementById('chapter-link') as HTMLElement;
+      vi.spyOn(code1, 'getClientRects').mockReturnValue([
+        new DOMRect(20, 40, 400, 60),
+      ] as unknown as DOMRectList);
+      vi.spyOn(chapterLink, 'getClientRects').mockReturnValue([
+        new DOMRect(20, 120, 80, 20),
+      ] as unknown as DOMRectList);
+
+      const frameContents = {
+        document: frameDoc,
+        window: frameWin,
+        cfiFromRange: () => 'epubcfi(/6/2!/4/2/1:0)',
+        expand: vi.fn(),
+      };
+      fake.state.contents.push(frameContents as unknown as (typeof fake.state.contents)[number]);
+      for (const hook of fake.state.renditionHooks) {
+        hook(frameContents as unknown as (typeof fake.state.contents)[number]);
+      }
+
+      // Focus on <pre> emits hover with focusBlock and focusAfterBlock helpers.
+      code1.focus();
+      code1.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(seen).toHaveLength(1);
+      const hovered = seen[0];
+      expect(hovered).not.toBeNull();
+
+      // Bare Tab on focused <pre> hands focus to epub-code-copy.
+      const tabEvent = new KeyboardEvent('keydown', {
+        key: 'Tab',
+        bubbles: true,
+        cancelable: true,
+      });
+      code1.dispatchEvent(tabEvent);
+      expect(tabEvent.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(copyBtn);
+
+      // focusBlock moves focus back onto <pre> inside the chapter frame.
+      expect(hovered?.focusBlock?.()).toBe(true);
+      expect(frameFocusSpy).toHaveBeenCalledTimes(1);
+      expect(frameDoc.activeElement).toBe(code1);
+
+      // focusAfterBlock skips internal aria-hidden links and lands on the next tabbable chapter link.
+      expect(hovered?.focusAfterBlock?.()).toBe(true);
+      expect(frameFocusSpy).toHaveBeenCalledTimes(2);
+      expect(frameDoc.activeElement).toBe(chapterLink);
+
+      // Without further chapter tabbables, focusAfterBlock clears hover and moves to ownerDoc after host.
+      chapterLink.remove();
+      code1.focus();
+      code1.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      const rehovered = seen.at(-1);
+      expect(rehovered?.focusAfterBlock?.()).toBe(true);
+      expect(seen.at(-1)).toBeNull();
+      expect(document.activeElement).toBe(afterHost);
+
+      // focusin on copy-buffer does not dismiss; focusin on outside chrome dismisses hover.
+      code1.focus();
+      code1.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(seen.at(-1)).not.toBeNull();
+      copyBuffer.focus();
+      copyBuffer.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(seen.at(-1)).not.toBeNull();
+      afterHost.focus();
+      afterHost.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      expect(seen.at(-1)).toBeNull();
+    } finally {
+      handle.destroy();
+      host.remove();
+      pill.remove();
+      afterHost.remove();
+      copyBuffer.remove();
+    }
   });
 });

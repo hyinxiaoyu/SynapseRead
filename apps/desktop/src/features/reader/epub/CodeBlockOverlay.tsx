@@ -28,6 +28,8 @@ export interface HoveredCodeBlock {
   id: string;
   rect: ViewportRect;
   getText: () => string;
+  focusBlock?: (() => boolean) | undefined;
+  focusAfterBlock?: (() => boolean) | undefined;
 }
 
 export interface ExpandedCodeBlock {
@@ -122,19 +124,21 @@ function overlayPalette(theme: ResolvedReadingTheme): OverlayPalette {
  * Copies plain text to the system clipboard, falling back to a hidden readonly
  * textarea when the async Clipboard API is unavailable or denied.
  */
-export async function copyPlainText(text: string): Promise<void> {
+export async function copyPlainText(text: string): Promise<boolean> {
   try {
     if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
-      return;
+      return true;
     }
   } catch {
     // Fall back to execCommand when Clipboard API rejects or is unavailable.
   }
+  if (typeof document.execCommand !== 'function') return false;
   const field = document.createElement('textarea');
   field.value = text;
   field.setAttribute('readonly', '');
   field.setAttribute('aria-hidden', 'true');
+  field.setAttribute('data-synapse-copy-buffer', 'true');
   field.style.position = 'fixed';
   field.style.top = '0';
   field.style.left = '-9999px';
@@ -147,9 +151,9 @@ export async function copyPlainText(text: string): Promise<void> {
     field.focus({ preventScroll: true });
     field.select();
     field.setSelectionRange(0, text.length);
-    if (typeof document.execCommand === 'function') {
-      document.execCommand('copy');
-    }
+    return Boolean(document.execCommand('copy'));
+  } catch {
+    return false;
   } finally {
     field.remove();
     if (
@@ -164,27 +168,45 @@ export async function copyPlainText(text: string): Promise<void> {
 
 function countLines(text: string): number {
   if (text.length === 0) return 0;
-  return text.split(/\r\n|\r|\n/).length;
+  const withoutTrailingNewline = text.replace(/(?:\r\n|\r|\n)$/, '');
+  if (withoutTrailingNewline.length === 0) return 1;
+  return withoutTrailingNewline.split(/\r\n|\r|\n/).length;
 }
 
 function useCopiedFeedback(resetKey?: string) {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const timerRef = useRef<number | undefined>(undefined);
+  const mountedRef = useRef(true);
   const key = resetKey ?? '__active__';
 
   useEffect(() => {
-    return () => window.clearTimeout(timerRef.current);
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      window.clearTimeout(timerRef.current);
+    };
   }, []);
 
-  const markCopied = useCallback(() => {
-    window.clearTimeout(timerRef.current);
-    setCopiedKey(key);
-    timerRef.current = window.setTimeout(() => {
-      setCopiedKey((current) => (current === key ? null : current));
-    }, COPIED_FEEDBACK_MS);
-  }, [key]);
+  const copy = useCallback(
+    async (text: string): Promise<boolean> => {
+      const targetKey = key;
+      const ok = await copyPlainText(text);
+      if (!mountedRef.current) return false;
+      window.clearTimeout(timerRef.current);
+      if (!ok) {
+        setCopiedKey((current) => (current === targetKey ? null : current));
+        return false;
+      }
+      setCopiedKey(targetKey);
+      timerRef.current = window.setTimeout(() => {
+        setCopiedKey((current) => (current === targetKey ? null : current));
+      }, COPIED_FEEDBACK_MS);
+      return true;
+    },
+    [key],
+  );
 
-  return { copied: copiedKey === key, markCopied };
+  return { copied: copiedKey === key, copy };
 }
 
 function CodeBlockActionPill({
@@ -193,20 +215,24 @@ function CodeBlockActionPill({
   theme,
   onExpand,
   onPointerInsideChange,
+  onFocusInsideChange,
 }: {
   block: HoveredCodeBlock;
   boundsRef: RefObject<HTMLElement | null>;
   theme: ResolvedReadingTheme;
   onExpand: (block: ExpandedCodeBlock) => void;
   onPointerInsideChange: (inside: boolean) => void;
+  onFocusInsideChange: (inside: boolean) => void;
 }) {
   const pillRef = useRef<HTMLDivElement>(null);
+  const copyButtonRef = useRef<HTMLButtonElement>(null);
+  const expandButtonRef = useRef<HTMLButtonElement>(null);
   const [position, setPosition] = useState<{
     top: number;
     left: number;
     placement: 'above' | 'inside';
   } | null>(null);
-  const { copied, markCopied } = useCopiedFeedback(block.id);
+  const { copied, copy } = useCopiedFeedback(block.id);
   const palette = overlayPalette(theme);
 
   useLayoutEffect(() => {
@@ -266,6 +292,12 @@ function CodeBlockActionPill({
       data-placement={placement}
       onPointerEnter={() => onPointerInsideChange(true)}
       onPointerLeave={() => onPointerInsideChange(false)}
+      onFocusCapture={() => onFocusInsideChange(true)}
+      onBlurCapture={(event) => {
+        const next = event.relatedTarget as Element | null;
+        if (next?.hasAttribute?.('data-synapse-copy-buffer')) return;
+        if (!event.currentTarget.contains(next)) onFocusInsideChange(false);
+      }}
       className={cn('absolute z-30 transition-none', placement === 'above' && 'pb-1.5')}
       style={
         position
@@ -283,14 +315,23 @@ function CodeBlockActionPill({
         }}
       >
         <button
+          ref={copyButtonRef}
           type="button"
           data-testid="epub-code-copy"
           aria-label="Copy code block"
           title="Copy code block"
           onMouseDown={keepPageFocus}
+          onKeyDown={(event) => {
+            if (event.key !== 'Tab' || event.ctrlKey || event.altKey || event.metaKey) return;
+            if (event.shiftKey) {
+              if (block.focusBlock?.()) event.preventDefault();
+            } else {
+              event.preventDefault();
+              expandButtonRef.current?.focus({ preventScroll: true });
+            }
+          }}
           onClick={() => {
-            void copyPlainText(block.getText());
-            markCopied();
+            void copy(block.getText());
           }}
           style={buttonStyle}
           className="flex h-7 items-center gap-1 rounded-md bg-[var(--code-pill-btn-bg)] px-2 text-xs font-medium transition-none outline-none hover:bg-[var(--code-pill-btn-hover)] focus-visible:ring-2 focus-visible:ring-ring"
@@ -303,11 +344,21 @@ function CodeBlockActionPill({
           <span>{copied ? 'Copied' : 'Copy'}</span>
         </button>
         <button
+          ref={expandButtonRef}
           type="button"
           data-testid="epub-code-expand"
           aria-label="Expand code block"
           title="Expand code block"
           onMouseDown={keepPageFocus}
+          onKeyDown={(event) => {
+            if (event.key !== 'Tab' || event.ctrlKey || event.altKey || event.metaKey) return;
+            if (event.shiftKey) {
+              event.preventDefault();
+              copyButtonRef.current?.focus({ preventScroll: true });
+            } else if (block.focusAfterBlock?.()) {
+              event.preventDefault();
+            }
+          }}
           onClick={() => onExpand({ id: block.id, text: block.getText() })}
           style={buttonStyle}
           className="flex h-7 items-center gap-1 rounded-md bg-[var(--code-pill-btn-bg)] px-2 text-xs font-medium transition-none outline-none hover:bg-[var(--code-pill-btn-hover)] focus-visible:ring-2 focus-visible:ring-ring"
@@ -334,7 +385,7 @@ function ExpandedCodeDialog({
   onReturnFocus: () => void;
 }) {
   const [wrap, setWrap] = useState(false);
-  const { copied, markCopied } = useCopiedFeedback(block.id);
+  const { copied, copy } = useCopiedFeedback(block.id);
   const scrollRef = useRef<HTMLDivElement>(null);
   const startedInsideCardRef = useRef(false);
   const palette = overlayPalette(theme);
@@ -463,8 +514,7 @@ function ExpandedCodeDialog({
               data-testid="epub-code-dialog-copy"
               aria-label="Copy code block"
               onClick={() => {
-                void copyPlainText(block.text);
-                markCopied();
+                void copy(block.text);
               }}
               style={headerButtonVars}
               className="flex h-7 items-center gap-1 rounded-md bg-[var(--code-dlg-btn-bg)] px-2.5 text-xs font-medium transition-none outline-none hover:bg-[var(--code-dlg-btn-hover)] focus-visible:ring-2 focus-visible:ring-ring"
@@ -525,12 +575,14 @@ export function CodeBlockOverlay({
   const [invalidatedBlock, setInvalidatedBlock] = useState<HoveredCodeBlock | null>(null);
   const [graceBlock, setGraceBlock] = useState<HoveredCodeBlock | null>(null);
   const [pointerInPill, setPointerInPill] = useState(false);
+  const [focusInPill, setFocusInPill] = useState(false);
 
   if (seenInvalidationKey !== invalidationKey) {
     setSeenInvalidationKey(invalidationKey);
     setInvalidatedBlock(hoveredBlock);
     setGraceBlock(null);
     setPointerInPill(false);
+    setFocusInPill(false);
   } else if (invalidatedBlock !== null && hoveredBlock !== invalidatedBlock) {
     setInvalidatedBlock(null);
   }
@@ -545,20 +597,30 @@ export function CodeBlockOverlay({
     } else if (suppressed) {
       setGraceBlock(null);
       setPointerInPill(false);
+      setFocusInPill(false);
     }
   }
-  if (suppressed && (graceBlock !== null || pointerInPill)) {
+  if (suppressed && (graceBlock !== null || pointerInPill || focusInPill)) {
     setGraceBlock(null);
     setPointerInPill(false);
+    setFocusInPill(false);
   }
 
   useEffect(() => {
-    if (suppressed || activeHovered !== null || graceBlock === null || pointerInPill) return;
+    if (
+      suppressed ||
+      activeHovered !== null ||
+      graceBlock === null ||
+      pointerInPill ||
+      focusInPill
+    ) {
+      return;
+    }
     const timer = window.setTimeout(() => {
       setGraceBlock(null);
     }, LEAVE_GRACE_MS);
     return () => window.clearTimeout(timer);
-  }, [suppressed, activeHovered, graceBlock, pointerInPill]);
+  }, [suppressed, activeHovered, graceBlock, pointerInPill, focusInPill]);
 
   const pillBlock = suppressed ? null : (activeHovered ?? graceBlock);
 
@@ -571,6 +633,12 @@ export function CodeBlockOverlay({
           theme={theme}
           onExpand={onExpand}
           onPointerInsideChange={setPointerInPill}
+          onFocusInsideChange={(inside) => {
+            setFocusInPill(inside);
+            if (!inside && !pointerInPill && activeHovered === null) {
+              setGraceBlock(null);
+            }
+          }}
         />
       )}
       {expandedBlock && (

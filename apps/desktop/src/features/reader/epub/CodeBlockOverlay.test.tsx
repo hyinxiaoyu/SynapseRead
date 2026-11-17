@@ -110,7 +110,7 @@ describe('copyPlainText', () => {
       value: { writeText },
     });
     const text = '  def fn():\n\treturn "$ok"';
-    await copyPlainText(text);
+    await expect(copyPlainText(text)).resolves.toBe(true);
     expect(writeText).toHaveBeenCalledWith(text);
   });
 
@@ -125,11 +125,13 @@ describe('copyPlainText', () => {
       value: execCommand,
     });
     let capturedReadonly: boolean | null = null;
+    let capturedCopyBuffer: string | null = null;
     let capturedValue: string | null = null;
     execCommand.mockImplementation(() => {
       const active = document.querySelector('textarea');
       if (active instanceof HTMLTextAreaElement) {
         capturedReadonly = active.hasAttribute('readonly');
+        capturedCopyBuffer = active.getAttribute('data-synapse-copy-buffer');
         capturedValue = active.value;
       }
       return true;
@@ -139,14 +141,43 @@ describe('copyPlainText', () => {
     document.body.append(button);
     button.focus();
 
-    await copyPlainText('line 1\n  line 2');
+    await expect(copyPlainText('line 1\n  line 2')).resolves.toBe(true);
 
     expect(execCommand).toHaveBeenCalledWith('copy');
     expect(capturedReadonly).toBe(true);
+    expect(capturedCopyBuffer).toBe('true');
     expect(capturedValue).toBe('line 1\n  line 2');
     expect(document.querySelector('textarea')).toBeNull();
     expect(document.activeElement).toBe(button);
     button.remove();
+  });
+
+  it('returns false when clipboard API fails and execCommand returns false, throws, or is missing', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => Promise.reject(new Error('denied'))) },
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    await expect(copyPlainText('code')).resolves.toBe(false);
+    expect(document.querySelector('textarea')).toBeNull();
+
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn(() => {
+        throw new Error('blocked');
+      }),
+    });
+    await expect(copyPlainText('code')).resolves.toBe(false);
+    expect(document.querySelector('textarea')).toBeNull();
+
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: undefined,
+    });
+    await expect(copyPlainText('code')).resolves.toBe(false);
   });
 });
 
@@ -308,6 +339,89 @@ describe('CodeBlockOverlay action pill', () => {
     fireEvent.click(screen.getByTestId('epub-code-expand'));
     expect(onExpand).toHaveBeenCalledWith({ id: 'block-1', text: '  echo "$PATH"' });
   });
+
+  it('waits for clipboard resolution before showing Copied and keeps Copy on failure', async () => {
+    let resolveWrite!: () => void;
+    const pendingWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    const writeText = vi.fn(() => pendingWrite);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    setupOverlay({ hoveredBlock: makeHovered({ getText: () => 'ok' }) });
+    const copyBtn = screen.getByTestId('epub-code-copy');
+    fireEvent.click(copyBtn);
+    expect(copyBtn).toHaveTextContent('Copy');
+
+    await act(async () => {
+      resolveWrite();
+      await pendingWrite;
+    });
+    expect(copyBtn).toHaveTextContent('Copied');
+
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => Promise.reject(new Error('denied'))) },
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+    expect(copyBtn).toHaveTextContent('Copy');
+  });
+
+  it('supports Tab/Shift+Tab between pill controls and holds pill open while focused', () => {
+    const focusBlock = vi.fn(() => true);
+    const focusAfterBlock = vi.fn(() => true);
+    const block = makeHovered({ focusBlock, focusAfterBlock });
+    const { rerenderOverlay } = setupOverlay({ hoveredBlock: block });
+
+    const copyBtn = screen.getByTestId('epub-code-copy');
+    const expandBtn = screen.getByTestId('epub-code-expand');
+    copyBtn.focus();
+    expect(copyBtn).toHaveFocus();
+
+    // Focus keeps the pill open even after hoveredBlock clears and 120ms grace elapses.
+    rerenderOverlay({ hoveredBlock: null });
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByTestId('epub-code-action-pill')).toBeInTheDocument();
+
+    // Tab moves Copy -> Expand; Shift+Tab moves Expand -> Copy.
+    fireEvent.keyDown(copyBtn, { key: 'Tab' });
+    expect(expandBtn).toHaveFocus();
+    fireEvent.keyDown(expandBtn, { key: 'Tab', shiftKey: true });
+    expect(copyBtn).toHaveFocus();
+
+    // Shift+Tab on Copy invokes focusBlock; Tab on Expand invokes focusAfterBlock.
+    const backTab = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      shiftKey: true,
+      cancelable: true,
+      bubbles: true,
+    });
+    copyBtn.dispatchEvent(backTab);
+    expect(focusBlock).toHaveBeenCalledTimes(1);
+    expect(backTab.defaultPrevented).toBe(true);
+
+    expandBtn.focus();
+    const fwdTab = new KeyboardEvent('keydown', { key: 'Tab', cancelable: true, bubbles: true });
+    expandBtn.dispatchEvent(fwdTab);
+    expect(focusAfterBlock).toHaveBeenCalledTimes(1);
+    expect(fwdTab.defaultPrevented).toBe(true);
+
+    // Blurring out of the pill dismisses it when hoveredBlock is null.
+    fireEvent.blur(expandBtn, { relatedTarget: screen.getByTestId('page-focus-target') });
+    expect(screen.queryByTestId('epub-code-action-pill')).toBeNull();
+  });
 });
 
 describe('CodeBlockOverlay expanded dialog', () => {
@@ -348,11 +462,20 @@ describe('CodeBlockOverlay expanded dialog', () => {
   });
 
   it('uses singular line label for single-line blocks and toggles Wrap mode cleanly', () => {
-    setupOverlay({
+    const { rerenderOverlay } = setupOverlay({
       expandedBlock: { id: 'b1', text: 'single_very_long_line_of_code()' },
     });
 
     expect(screen.getByTestId('epub-code-line-count')).toHaveTextContent('1 line');
+    rerenderOverlay({ expandedBlock: { id: 'b2', text: 'a\nb\n' } });
+    expect(screen.getByTestId('epub-code-line-count')).toHaveTextContent('2 lines');
+    rerenderOverlay({ expandedBlock: { id: 'b3', text: '\na\nb\n' } });
+    expect(screen.getByTestId('epub-code-line-count')).toHaveTextContent('3 lines');
+    rerenderOverlay({ expandedBlock: { id: 'b4', text: 'a\nb\n\n' } });
+    expect(screen.getByTestId('epub-code-line-count')).toHaveTextContent('3 lines');
+    rerenderOverlay({
+      expandedBlock: { id: 'b1', text: 'single_very_long_line_of_code()' },
+    });
     const toggle = screen.getByTestId('epub-code-wrap-toggle');
     const scroll = screen.getByTestId('epub-code-dialog-scroll');
     const pre = screen.getByTestId('epub-code-dialog-pre');
@@ -398,6 +521,42 @@ describe('CodeBlockOverlay expanded dialog', () => {
 
     fireEvent.wheel(screen.getByTestId('epub-code-dialog-scroll'), { deltaY: 120 });
     expect(onParentWheel).not.toHaveBeenCalled();
+  });
+
+  it('does not show Copied in expanded dialog while writeText is pending or when copy fails', async () => {
+    let resolveWrite!: () => void;
+    const pendingWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(() => pendingWrite) },
+    });
+    setupOverlay({
+      expandedBlock: { id: 'b1', text: 'alpha' },
+    });
+    const copyBtn = screen.getByTestId('epub-code-dialog-copy');
+    fireEvent.click(copyBtn);
+    expect(copyBtn).toHaveTextContent('Copy');
+
+    await act(async () => {
+      resolveWrite();
+      await pendingWrite;
+    });
+    expect(copyBtn).toHaveTextContent('Copied');
+
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => Promise.reject(new Error('denied'))) },
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: vi.fn(() => false),
+    });
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+    expect(copyBtn).toHaveTextContent('Copy');
   });
 
   it('closes and returns focus on Close button, backdrop click, and Escape above noteField', () => {

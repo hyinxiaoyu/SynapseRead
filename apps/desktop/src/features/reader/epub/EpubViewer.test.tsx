@@ -2019,5 +2019,34 @@ describe('EpubViewer', () => {
       );
       expect(screen.queryByTestId('epub-code-dialog')).toBeNull();
     });
+
+    it('keeps Copy label when clipboard write and execCommand fallback both fail', async () => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: vi.fn(async () => Promise.reject(new Error('denied'))) },
+      });
+      Object.defineProperty(document, 'execCommand', {
+        configurable: true,
+        value: vi.fn(() => false),
+      });
+
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      act(() => engine.emitCodeBlockHover(hoverBlock()));
+      const pillCopy = screen.getByTestId('epub-code-copy');
+      await act(async () => {
+        fireEvent.click(pillCopy);
+      });
+      expect(pillCopy).toHaveTextContent('Copy');
+
+      fireEvent.click(screen.getByTestId('epub-code-expand'));
+      const dialogCopy = screen.getByTestId('epub-code-dialog-copy');
+      await act(async () => {
+        fireEvent.click(dialogCopy);
+      });
+      expect(dialogCopy).toHaveTextContent('Copy');
+    });
   });
 });

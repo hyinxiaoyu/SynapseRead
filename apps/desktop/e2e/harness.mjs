@@ -370,13 +370,22 @@ export class Page {
    * DevTools bit field: Alt 1, Ctrl 2, Meta 4, Shift 8.
    */
   async press(key, code = key, modifiers = 0) {
+    const virtualKeyCodes = {
+      Escape: 27,
+      Tab: 9,
+      Enter: 13,
+      ' ': 32,
+    };
+    const windowsVirtualKeyCode = virtualKeyCodes[key] ?? 0;
+    const text = key === 'Enter' ? '\r' : key === ' ' ? ' ' : undefined;
     for (const type of ['keyDown', 'keyUp']) {
       await this.cdp.send('Input.dispatchKeyEvent', {
         type,
         key,
         code,
         modifiers,
-        windowsVirtualKeyCode: key === 'Escape' ? 27 : 0,
+        windowsVirtualKeyCode,
+        ...(type === 'keyDown' && text !== undefined ? { text } : {}),
       });
     }
   }
