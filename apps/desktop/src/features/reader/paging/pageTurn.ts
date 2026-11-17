@@ -368,6 +368,7 @@ export class WheelScrub {
   }
 
   private commitDirection(velocity: number): TurnDirection | null {
+    if (this.travel === 0) return null;
     const direction = directionOf(this.travel);
     if (!this.canTurn(direction)) return null;
     if (Math.abs(this.travel) >= scrubCommitDistance(this.width)) return direction;

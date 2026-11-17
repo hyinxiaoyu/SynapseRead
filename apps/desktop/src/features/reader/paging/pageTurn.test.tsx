@@ -256,6 +256,53 @@ describe('WheelScrub', () => {
     expect(scrub.release(at + SCRUB_IDLE_MS)).toEqual([
       { kind: 'end', velocity: expect.any(Number), committed: 1 },
     ]);
+
+    const backward = make();
+    const back = run(backward, [-12, -12, -12]);
+    expect(backward.release(back.at + SCRUB_IDLE_MS)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: -1 },
+    ]);
+  });
+
+  it('cancels when a scrub returns to zero even with fast return velocity', () => {
+    const wideSurface = {
+      pageWidth: () => 1000,
+      surfaceWidth: () => 1728,
+      canTurn: () => true,
+    };
+    const scrubOutAndBack = (outSteps: number, backSteps: number, delta = -20) => {
+      const scrub = make();
+      let at = 0;
+      for (const [steps, stepDelta] of [
+        [outSteps, delta],
+        [backSteps, -delta],
+      ] as const) {
+        for (let step = 0; step < steps; step += 1) {
+          scrub.push(stepDelta, at, wideSurface);
+          if (step % 20 === 19) at += 1;
+        }
+      }
+      return scrub.release(at + SCRUB_IDLE_MS);
+    };
+
+    const returnedToZero = scrubOutAndBack(70, 70);
+    expect(returnedToZero).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: null },
+    ]);
+    if (returnedToZero[0]?.kind === 'end') {
+      expect(returnedToZero[0].velocity).toBeGreaterThanOrEqual(SCRUB_COMMIT_VELOCITY);
+    }
+    expect(scrubOutAndBack(70, 70, 20)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: null },
+    ]);
+
+    // Returning nearly to zero (small non-zero travel opposite the return velocity) also cancels.
+    expect(scrubOutAndBack(70, 69)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: null },
+    ]);
+    expect(scrubOutAndBack(70, 69, 20)).toEqual([
+      { kind: 'end', velocity: expect.any(Number), committed: null },
+    ]);
   });
 
   it('rubber-bands and refuses to commit at the end of the document', () => {
