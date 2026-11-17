@@ -1,5 +1,5 @@
-import { act, cleanup, render, screen } from '@testing-library/react';
-import { createRef, useRef } from 'react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { createRef, type ReactNode, useRef } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { PAPER_CURL_PALETTES } from '@/features/reader/appearance/themes';
@@ -11,6 +11,7 @@ import {
   computePaperCurl,
   directionOf,
   easeOut,
+  hasScrollableAncestor,
   normalizeWheelDelta,
   PAGE_CURL_MS,
   PAGE_TURN_ANIMATION_ID,
@@ -25,8 +26,12 @@ import {
   scrubCommitDistance,
   slideScroll,
   SWIPE_THRESHOLD_PX,
+  type TurnDirection,
   usePageTurnGestures,
+  type UsePageTurnGesturesOptions,
+  VerticalWheelTurn,
   WHEEL_LINE_PX,
+  type WheelSample,
   WheelScrub,
   zoneAt,
 } from './pageTurn';
@@ -404,16 +409,22 @@ function Probe({
   expose,
   scrub,
   canTurn,
+  hasSelection,
+  verticalWheel,
+  children,
 }: {
-  onTurn: (direction: 1 | -1) => void;
+  onTurn: (direction: TurnDirection) => void;
   enabled?: boolean;
   expose: (gestures: PageTurnGestures) => void;
   scrub?: {
     start: () => void;
     move: (displacement: number) => void;
-    end: (velocity: number, committed: 1 | -1 | null) => void;
+    end: (velocity: number, committed: TurnDirection | null) => void;
   };
-  canTurn?: (direction: 1 | -1) => boolean;
+  canTurn?: UsePageTurnGesturesOptions['canTurn'];
+  hasSelection?: UsePageTurnGesturesOptions['hasSelection'];
+  verticalWheel?: UsePageTurnGesturesOptions['verticalWheel'];
+  children?: ReactNode;
 }) {
   const areaRef = useRef<HTMLDivElement>(null);
   expose(
@@ -422,6 +433,8 @@ function Probe({
       areaRef,
       onTurn,
       ...(canTurn === undefined ? {} : { canTurn }),
+      ...(hasSelection === undefined ? {} : { hasSelection }),
+      ...(verticalWheel === undefined ? {} : { verticalWheel }),
       ...(scrub === undefined
         ? {}
         : {
@@ -431,7 +444,11 @@ function Probe({
           }),
     }),
   );
-  return <div ref={areaRef} data-testid="area" />;
+  return (
+    <div ref={areaRef} data-testid="area">
+      {children}
+    </div>
+  );
 }
 
 /** A page that only reports turns, with no scrub callbacks of its own. */
@@ -784,6 +801,523 @@ describe('usePageTurnGestures', () => {
       ).toBe(true);
     });
     expect(atEnd.onTurn).not.toHaveBeenCalled();
+  });
+});
+
+describe('VerticalWheelTurn', () => {
+  it('accumulates sub-threshold travel and commits once at WHEEL_LINE_PX', () => {
+    const controller = new VerticalWheelTurn();
+    expect(controller.isActive(0)).toBe(false);
+    expect(controller.push(15, 0)).toBeNull();
+    expect(controller.isActive(0)).toBe(true);
+    expect(controller.push(15, 16)).toBeNull();
+    expect(controller.push(15, 32)).toBe(1);
+    expect(controller.isActive(32)).toBe(true);
+    expect(controller.release(32 + SCRUB_IDLE_MS)).toBeNull();
+    expect(controller.isActive(32 + SCRUB_IDLE_MS)).toBe(false);
+  });
+
+  it('absorbs an accelerating trackpad ramp-up and decaying inertia as one turn', () => {
+    const controller = new VerticalWheelTurn();
+    const turns: TurnDirection[] = [];
+    const sequence = [4, 10, 22, 45, 95, 110, 80, 50, 30, 15, 5];
+    sequence.forEach((deltaY, index) => {
+      const result = controller.push(deltaY, index * 16);
+      if (result !== null) turns.push(result);
+    });
+    expect(turns).toEqual([1]);
+    expect(controller.release(sequence.length * 16 + SCRUB_IDLE_MS)).toBeNull();
+  });
+
+  it('absorbs small upward wobbles in a decaying inertial tail', () => {
+    const controller = new VerticalWheelTurn();
+    const turns: TurnDirection[] = [];
+    for (const [index, deltaY] of [15, 30, 45, 30, 32, 20, 10].entries()) {
+      const result = controller.push(deltaY, index * 16);
+      if (result !== null) turns.push(result);
+    }
+    expect(turns).toEqual([1]);
+  });
+
+  it('breaks settling immediately on direction reversal and starts a new turn', () => {
+    const controller = new VerticalWheelTurn();
+    expect(controller.push(25, 0)).toBeNull();
+    expect(controller.push(25, 16)).toBe(1);
+    // Reversal immediately breaks SETTLING and commits backward once -40px is reached.
+    expect(controller.push(-20, 32)).toBeNull();
+    expect(controller.push(-25, 48)).toBe(-1);
+  });
+
+  it('starts a new turn when a second physical impulse spikes past decayed tail', () => {
+    const controller = new VerticalWheelTurn();
+    const turns: TurnDirection[] = [];
+    for (const [index, deltaY] of [30, 30, 20, 5, 25, 30].entries()) {
+      const result = controller.push(deltaY, index * 16);
+      if (result !== null) turns.push(result);
+    }
+    expect(turns).toEqual([1, 1]);
+  });
+
+  it('commits isolated slow mouse detents >= 12px and fast flicks on release, ignoring tiny touches', () => {
+    const detent = new VerticalWheelTurn();
+    expect(detent.push(15, 0, 0)).toBeNull();
+    expect(detent.release(SCRUB_IDLE_MS)).toBe(1);
+
+    const diagonalTouch = new VerticalWheelTurn();
+    expect(diagonalTouch.push(15, 0, 2)).toBeNull();
+    expect(diagonalTouch.release(SCRUB_IDLE_MS)).toBeNull();
+
+    const tinyTouch = new VerticalWheelTurn();
+    expect(tinyTouch.push(8, 0, 0)).toBeNull();
+    expect(tinyTouch.release(SCRUB_IDLE_MS)).toBeNull();
+
+    const fastFlick = new VerticalWheelTurn();
+    expect(fastFlick.push(10, 0, 1)).toBeNull();
+    expect(fastFlick.push(10, 10, 1)).toBeNull();
+    expect(fastFlick.push(10, 20, 1)).toBeNull();
+    expect(fastFlick.release(20 + SCRUB_IDLE_MS)).toBe(1);
+
+    const slowShortDrag = new VerticalWheelTurn();
+    expect(slowShortDrag.push(8, 0, 1)).toBeNull();
+    expect(slowShortDrag.push(8, 35, 1)).toBeNull();
+    expect(slowShortDrag.push(8, 70, 1)).toBeNull();
+    expect(slowShortDrag.release(70 + SCRUB_IDLE_MS)).toBeNull();
+  });
+
+  it('expires stale accumulation after SCRUB_IDLE_MS and clears on reset', () => {
+    const controller = new VerticalWheelTurn();
+    expect(controller.push(25, 0)).toBeNull();
+    expect(controller.push(25, SCRUB_IDLE_MS + 10)).toBeNull();
+    controller.reset();
+    expect(controller.isActive()).toBe(false);
+  });
+});
+
+describe('hasScrollableAncestor', () => {
+  afterEach(() => {
+    document.body.replaceChildren();
+    vi.restoreAllMocks();
+  });
+
+  it('detects scrollable nested ancestors and [data-no-page-turn] strictly inside boundary', () => {
+    const boundary = document.createElement('div');
+    const scrollable = document.createElement('div');
+    scrollable.style.overflowY = 'auto';
+    Object.defineProperty(scrollable, 'clientHeight', { value: 120, configurable: true });
+    Object.defineProperty(scrollable, 'scrollHeight', { value: 360, configurable: true });
+    const inner = document.createElement('p');
+    const text = document.createTextNode('Code line');
+    inner.append(text);
+    scrollable.append(inner);
+
+    const nonOverflowing = document.createElement('div');
+    nonOverflowing.style.overflowY = 'scroll';
+    Object.defineProperty(nonOverflowing, 'clientHeight', { value: 200, configurable: true });
+    Object.defineProperty(nonOverflowing, 'scrollHeight', { value: 200, configurable: true });
+    const child = document.createElement('span');
+    nonOverflowing.append(child);
+
+    const blocked = document.createElement('div');
+    blocked.setAttribute('data-no-page-turn', '');
+    const blockedChild = document.createElement('span');
+    blocked.append(blockedChild);
+
+    boundary.append(scrollable, nonOverflowing, blocked);
+    document.body.append(boundary);
+
+    expect(hasScrollableAncestor(null, boundary)).toBe(false);
+    expect(hasScrollableAncestor(boundary, boundary)).toBe(false);
+    expect(hasScrollableAncestor(inner, boundary)).toBe(true);
+    expect(hasScrollableAncestor(text, boundary)).toBe(true);
+    expect(hasScrollableAncestor(child, boundary)).toBe(false);
+    expect(hasScrollableAncestor(blockedChild, boundary)).toBe(true);
+
+    // Even if boundary itself is scrollable (like PdfViewer scrollRef), boundary is ignored.
+    boundary.style.overflowY = 'scroll';
+    Object.defineProperty(boundary, 'clientHeight', { value: 400, configurable: true });
+    Object.defineProperty(boundary, 'scrollHeight', { value: 900, configurable: true });
+    expect(hasScrollableAncestor(child, boundary)).toBe(false);
+  });
+
+  it('stops before body/documentElement in cross-realm documents without instanceof', () => {
+    const boundary = document.createElement('div');
+    const chapterDoc = document.implementation.createHTMLDocument('chapter');
+    chapterDoc.body.style.overflowY = 'auto';
+    Object.defineProperty(chapterDoc.body, 'clientHeight', { value: 500, configurable: true });
+    Object.defineProperty(chapterDoc.body, 'scrollHeight', { value: 1200, configurable: true });
+
+    const paragraph = chapterDoc.createElement('p');
+    const pre = chapterDoc.createElement('pre');
+    pre.style.overflowY = 'overlay';
+    Object.defineProperty(pre, 'clientHeight', { value: 100, configurable: true });
+    Object.defineProperty(pre, 'scrollHeight', { value: 260, configurable: true });
+    const codeText = chapterDoc.createTextNode('const x = 1;');
+    pre.append(codeText);
+    chapterDoc.body.append(paragraph, pre);
+
+    const fakeView = {
+      getComputedStyle: (el: Element) => ({
+        overflowY: (el as HTMLElement).style.overflowY || 'visible',
+      }),
+    } as unknown as Window;
+    Object.defineProperty(chapterDoc, 'defaultView', { value: fakeView, configurable: true });
+
+    expect(hasScrollableAncestor(chapterDoc.body, boundary)).toBe(false);
+    expect(hasScrollableAncestor(paragraph, boundary)).toBe(false);
+    expect(hasScrollableAncestor(codeText, boundary)).toBe(true);
+  });
+});
+
+describe('usePageTurnGestures consecutive clicks (#107) and vertical wheel (#106)', () => {
+  afterEach(() => {
+    cleanup();
+    window.getSelection()?.removeAllRanges();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const mountWith = (
+    options: Partial<Omit<UsePageTurnGesturesOptions, 'areaRef' | 'onTurn'>> & {
+      children?: ReactNode;
+    } = {},
+  ) => {
+    const onTurn = vi.fn();
+    const scrub = { start: vi.fn(), move: vi.fn(), end: vi.fn() };
+    let gestures: PageTurnGestures | null = null;
+    const { children, ...rest } = options;
+    const view = render(
+      <Probe onTurn={onTurn} expose={(value) => (gestures = value)} scrub={scrub} {...rest}>
+        {children}
+      </Probe>,
+    );
+    const area = view.getByTestId('area');
+    vi.spyOn(area, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1000, 600));
+    return {
+      view,
+      area,
+      onTurn,
+      scrub,
+      gestures: () => gestures as unknown as PageTurnGestures,
+    };
+  };
+
+  it('turns on consecutive blank-edge clicks including detail 2 and 3', () => {
+    const { area, onTurn } = mountWith();
+
+    for (const detail of [1, 2, 3]) {
+      fireEvent.pointerDown(area, { button: 0, clientX: 950, clientY: 120 });
+      fireEvent.click(area, { button: 0, detail, clientX: 950, clientY: 120 });
+    }
+    expect(onTurn).toHaveBeenCalledTimes(3);
+    expect(onTurn.mock.calls).toEqual([[1], [1], [1]]);
+
+    onTurn.mockClear();
+    for (const detail of [1, 2, 3]) {
+      fireEvent.pointerDown(area, { button: 0, clientX: 40, clientY: 120 });
+      fireEvent.click(area, { button: 0, detail, clientX: 40, clientY: 120 });
+    }
+    expect(onTurn).toHaveBeenCalledTimes(3);
+    expect(onTurn.mock.calls).toEqual([[-1], [-1], [-1]]);
+  });
+
+  it('does not turn on multi-clicks over text, links, interactive elements, or selections', () => {
+    const externalSelection = vi.fn(() => false);
+    const { area, onTurn } = mountWith({
+      hasSelection: externalSelection,
+      children: (
+        <div>
+          <a href="#ch2" data-testid="link">
+            Link
+          </a>
+          <span data-annotation-id="note-1" data-testid="mark">
+            Mark
+          </span>
+          <p data-testid="prose">Readable words</p>
+        </div>
+      ),
+    });
+
+    const link = screen.getByTestId('link');
+    fireEvent.pointerDown(link, { button: 0, clientX: 950, clientY: 100 });
+    fireEvent.click(link, { button: 0, detail: 2, clientX: 950, clientY: 100 });
+    const mark = screen.getByTestId('mark');
+    fireEvent.pointerDown(mark, { button: 0, clientX: 950, clientY: 100 });
+    fireEvent.click(mark, { button: 0, detail: 3, clientX: 950, clientY: 100 });
+    expect(onTurn).not.toHaveBeenCalled();
+
+    // Multi-click directly over glyph text is blocked by isOverText.
+    const prose = screen.getByTestId('prose');
+    const textNode = prose.firstChild as Text;
+    const origCaretRange = document.caretRangeFromPoint;
+    const origGetClientRects = Range.prototype.getClientRects;
+    document.caretRangeFromPoint = () => {
+      const range = document.createRange();
+      range.setStart(textNode, 3);
+      range.setEnd(textNode, 3);
+      return range;
+    };
+    Range.prototype.getClientRects = () => [new DOMRect(940, 90, 30, 20)] as unknown as DOMRectList;
+    try {
+      fireEvent.pointerDown(prose, { button: 0, clientX: 950, clientY: 100 });
+      fireEvent.click(prose, { button: 0, detail: 2, clientX: 950, clientY: 100 });
+      expect(onTurn).not.toHaveBeenCalled();
+    } finally {
+      document.caretRangeFromPoint = origCaretRange;
+      Range.prototype.getClientRects = origGetClientRects;
+    }
+
+    // Active host document selection blocks multi-click turns.
+    const selRange = document.createRange();
+    selRange.setStart(textNode, 0);
+    selRange.setEnd(textNode, 5);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(selRange);
+    fireEvent.pointerDown(area, { button: 0, clientX: 950, clientY: 100 });
+    fireEvent.click(area, { button: 0, detail: 2, clientX: 950, clientY: 100 });
+    expect(onTurn).not.toHaveBeenCalled();
+    selection?.removeAllRanges();
+
+    // External selection (e.g., EPUB iframe) blocks both active selection clicks and dismissal clicks.
+    externalSelection.mockReturnValue(true);
+    fireEvent.pointerDown(area, { button: 0, clientX: 950, clientY: 100 });
+    // Even if selection collapses before click fires, hadSelection on pointerDown blocks Click 1.
+    externalSelection.mockReturnValue(false);
+    fireEvent.click(area, { button: 0, detail: 1, clientX: 950, clientY: 100 });
+    expect(onTurn).not.toHaveBeenCalled();
+
+    // Subsequent rapid Click 2 (detail: 2) after dismissal turns once.
+    fireEvent.pointerDown(area, { button: 0, clientX: 950, clientY: 100 });
+    fireEvent.click(area, { button: 0, detail: 2, clientX: 950, clientY: 100 });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenCalledWith(1);
+  });
+
+  it('keeps vertical wheel disabled by default so continuous-scrolling viewers stay untouched', () => {
+    const { area, onTurn, gestures } = mountWith();
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 120, deltaMode: 0, ctrlKey: false })).toBe(
+      false,
+    );
+    const notCanceled = fireEvent.wheel(area, { deltaX: 0, deltaY: 120, deltaMode: 0 });
+    expect(notCanceled).toBe(true);
+    expect(onTurn).not.toHaveBeenCalled();
+  });
+
+  it('turns pages on vertical discrete pixel notches, line mode, and page mode when enabled', () => {
+    vi.useFakeTimers();
+    const { area, onTurn, gestures } = mountWith({ verticalWheel: true });
+
+    // Rapid Windows pixel notches turn once per notch in both directions.
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 120, deltaMode: 0, ctrlKey: false })).toBe(
+      true,
+    );
+    vi.advanceTimersByTime(16);
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 120, deltaMode: 0, ctrlKey: false })).toBe(
+      true,
+    );
+    vi.advanceTimersByTime(16);
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: -120, deltaMode: 0, ctrlKey: false })).toBe(
+      true,
+    );
+    expect(onTurn.mock.calls).toEqual([[1], [1], [-1]]);
+
+    onTurn.mockClear();
+    vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+
+    // DOM_DELTA_LINE: 3-line notch turns once; partial 0.5-line ticks accumulate; idle clears.
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 3, deltaMode: 1, ctrlKey: false })).toBe(
+      true,
+    );
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: -0.5, deltaMode: 1, ctrlKey: false })).toBe(
+      true,
+    );
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: -0.5, deltaMode: 1, ctrlKey: false })).toBe(
+      true,
+    );
+    expect(onTurn.mock.calls).toEqual([[1], [-1]]);
+
+    onTurn.mockClear();
+    // DOM_DELTA_PAGE through DOM wheel listener prevents default and turns once.
+    const canceled = !fireEvent.wheel(area, { deltaX: 0, deltaY: 1, deltaMode: 2 });
+    expect(canceled).toBe(true);
+    expect(onTurn).toHaveBeenCalledWith(1);
+  });
+
+  it('latches vertical trackpad momentum to one turn and breaks immediately on reversal', () => {
+    vi.useFakeTimers();
+    const { onTurn, gestures } = mountWith({ verticalWheel: true });
+
+    for (const deltaY of [4, 10, 22, 45, 95, 110, 80, 50, 30, 15, 5]) {
+      expect(gestures().handleWheel({ deltaX: 0, deltaY, deltaMode: 0, ctrlKey: false })).toBe(
+        true,
+      );
+      vi.advanceTimersByTime(16);
+    }
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenCalledWith(1);
+
+    // Reversal turns immediately without waiting for momentum to die.
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: -50, deltaMode: 0, ctrlKey: false })).toBe(
+      true,
+    );
+    expect(onTurn).toHaveBeenCalledTimes(2);
+    expect(onTurn).toHaveBeenLastCalledWith(-1);
+
+    // Decaying fast flick starting past 100px turns only once too.
+    onTurn.mockClear();
+    vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+    for (const deltaY of [120, 110, 112, 100, 90, 65, 40]) {
+      expect(gestures().handleWheel({ deltaX: 0, deltaY, deltaMode: 0, ctrlKey: false })).toBe(
+        true,
+      );
+      vi.advanceTimersByTime(16);
+    }
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenCalledWith(1);
+  });
+
+  it('respects modifier chords, defaultPrevented, active drag buttons, scrollable ancestors, and predicate vetoes', () => {
+    vi.useFakeTimers();
+    const veto = vi.fn<(direction: TurnDirection, wheel: WheelSample) => boolean>(() => true);
+    const { area, onTurn, gestures } = mountWith({
+      verticalWheel: veto,
+      children: (
+        <div data-testid="nested-scroll" style={{ overflowY: 'auto' }}>
+          <span data-testid="nested-child">Scrollable</span>
+        </div>
+      ),
+    });
+    const nested = screen.getByTestId('nested-scroll');
+    Object.defineProperty(nested, 'clientHeight', { value: 100, configurable: true });
+    Object.defineProperty(nested, 'scrollHeight', { value: 300, configurable: true });
+    const nestedChild = screen.getByTestId('nested-child');
+
+    // Modifiers, defaultPrevented, and active pointer drag return false (native behavior).
+    for (const sample of [
+      { deltaX: 0, deltaY: 120, ctrlKey: true },
+      { deltaX: 0, deltaY: 120, ctrlKey: false, metaKey: true },
+      { deltaX: 0, deltaY: 120, ctrlKey: false, altKey: true },
+      { deltaX: 0, deltaY: 120, ctrlKey: false, shiftKey: true },
+      { deltaX: 0, deltaY: 120, ctrlKey: false, defaultPrevented: true },
+      { deltaX: 0, deltaY: 120, ctrlKey: false, buttons: 1 },
+      { deltaX: 0, deltaY: 120, ctrlKey: false, target: nestedChild },
+    ] satisfies WheelSample[]) {
+      expect(gestures().handleWheel(sample)).toBe(false);
+    }
+    expect(onTurn).not.toHaveBeenCalled();
+
+    // Accumulate 25px, then veto: VerticalWheelTurn must reset so next 20px does not commit 45px!
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 25, ctrlKey: false })).toBe(true);
+    veto.mockReturnValue(false);
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 10, ctrlKey: false })).toBe(false);
+    veto.mockReturnValue(true);
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 20, ctrlKey: false })).toBe(true);
+    expect(onTurn).not.toHaveBeenCalled();
+
+    // Waiting SCRUB_IDLE_MS commits the fresh 20px single detent.
+    act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    expect(onTurn).toHaveBeenCalledWith(1);
+
+    // Ensure DOM wheel over area outside nested child does turn and preventDefault.
+    onTurn.mockClear();
+    const canceled = !fireEvent.wheel(area, { deltaX: 0, deltaY: -120 });
+    expect(canceled).toBe(true);
+    expect(onTurn).toHaveBeenCalledWith(-1);
+  });
+
+  it('prevents default at book boundaries without calling onTurn and keeps horizontal scrubs isolated', () => {
+    vi.useFakeTimers();
+    const { onTurn, scrub, gestures } = mountWith({
+      verticalWheel: true,
+      canTurn: (direction) => direction < 0,
+    });
+
+    // At end boundary: forward vertical wheel is consumed (returns true) but does not call onTurn.
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 120, deltaMode: 0, ctrlKey: false })).toBe(
+      true,
+    );
+    expect(onTurn).not.toHaveBeenCalled();
+
+    // Backward still turns.
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: -120, deltaMode: 0, ctrlKey: false })).toBe(
+      true,
+    );
+    expect(onTurn).toHaveBeenCalledWith(-1);
+
+    // Horizontal scrub in progress blocks vertical wheel from firing mid-swipe.
+    vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+    expect(gestures().handleWheel({ deltaX: 20, deltaY: 0, ctrlKey: false })).toBe(true);
+    expect(scrub.start).toHaveBeenCalledTimes(1);
+    expect(gestures().handleWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(false);
+  });
+
+  it('cancels pending vertical wheel detents when disabled or switched off and measures pageRef height for page mode', () => {
+    vi.useFakeTimers();
+    const onTurn = vi.fn();
+    let gestures: PageTurnGestures | null = null;
+    const CustomProbe = ({
+      enabled,
+      verticalWheel,
+      expose,
+    }: {
+      enabled: boolean;
+      verticalWheel: boolean;
+      expose: (value: PageTurnGestures) => void;
+    }) => {
+      const areaRef = useRef<HTMLDivElement>(null);
+      const pageRef = useRef<HTMLDivElement>(null);
+      expose(
+        usePageTurnGestures({
+          enabled,
+          areaRef,
+          pageRef,
+          verticalWheel,
+          onTurn,
+        }),
+      );
+      return (
+        <div ref={areaRef} data-testid="area">
+          <div ref={pageRef} data-testid="page" />
+        </div>
+      );
+    };
+
+    const expose = (value: PageTurnGestures) => {
+      gestures = value;
+    };
+    const view = render(<CustomProbe enabled verticalWheel expose={expose} />);
+    const page = view.getByTestId('page');
+    const pageRectSpy = vi
+      .spyOn(page, 'getBoundingClientRect')
+      .mockReturnValue(new DOMRect(100, 0, 800, 640));
+
+    // DOM_DELTA_PAGE reads pageRef height.
+    expect(
+      (gestures as unknown as PageTurnGestures).handleWheel({
+        deltaX: 0,
+        deltaY: 1,
+        deltaMode: 2,
+        ctrlKey: false,
+      }),
+    ).toBe(true);
+    expect(pageRectSpy).toHaveBeenCalled();
+    expect(onTurn).toHaveBeenCalledWith(1);
+
+    // Partial vertical detent should not fire after verticalWheel turns off.
+    onTurn.mockClear();
+    expect(
+      (gestures as unknown as PageTurnGestures).handleWheel({
+        deltaX: 0,
+        deltaY: 20,
+        deltaMode: 0,
+        ctrlKey: false,
+      }),
+    ).toBe(true);
+    view.rerender(<CustomProbe enabled verticalWheel={false} expose={expose} />);
+    act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
+    expect(onTurn).not.toHaveBeenCalled();
   });
 });
 

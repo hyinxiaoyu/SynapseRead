@@ -100,6 +100,46 @@ export function isOverText(doc: Document, x: number, y: number): boolean {
   return false;
 }
 
+const SCROLLABLE_OVERFLOW_Y = new Set(['auto', 'scroll', 'overlay']);
+
+function parentElementOf(node: Node): Element | null {
+  const parent = node.parentElement ?? node.parentNode;
+  return parent && parent.nodeType === 1 ? (parent as Element) : null;
+}
+
+/**
+ * Whether `target` sits inside a vertically scrollable nested container (or a
+ * `[data-no-page-turn]` region) strictly inside `boundary` (or below `body` /
+ * `documentElement` inside an EPUB chapter iframe). Uses `nodeType` and
+ * `ownerDocument.defaultView` instead of `instanceof` so cross-realm documents
+ * work reliably.
+ */
+export function hasScrollableAncestor(
+  target: EventTarget | null,
+  boundary: Element | null,
+): boolean {
+  if (!target || typeof (target as Node).nodeType !== 'number') return false;
+  const node = target as Node;
+  let current: Element | null = node.nodeType === 1 ? (node as Element) : parentElementOf(node);
+  while (current) {
+    const doc = current.ownerDocument;
+    if (current === boundary || current === doc?.body || current === doc?.documentElement) {
+      break;
+    }
+    if (current.hasAttribute?.('data-no-page-turn')) return true;
+    const view = doc?.defaultView ?? (typeof window !== 'undefined' ? window : null);
+    const overflowY =
+      view && typeof view.getComputedStyle === 'function'
+        ? view.getComputedStyle(current).overflowY
+        : '';
+    if (SCROLLABLE_OVERFLOW_Y.has(overflowY) && current.scrollHeight > current.clientHeight + 1) {
+      return true;
+    }
+    current = parentElementOf(current);
+  }
+  return false;
+}
+
 /** Over a link, a control, a highlight, or text: the click is the reader's. */
 export function isOverContent(target: EventTarget | null, x: number, y: number): boolean {
   const element = target as Element | null;
@@ -120,6 +160,12 @@ export interface WheelSample {
   deltaY: number;
   deltaMode?: number | undefined;
   ctrlKey: boolean;
+  metaKey?: boolean | undefined;
+  altKey?: boolean | undefined;
+  shiftKey?: boolean | undefined;
+  buttons?: number | undefined;
+  defaultPrevented?: boolean | undefined;
+  target?: EventTarget | null | undefined;
 }
 
 /** Converts a wheel delta in pixel, line, or page units into CSS pixels. */
@@ -352,20 +398,179 @@ export class WheelScrub {
   }
 
   private velocity(at: number): number {
-    // Measured over the last moments of the gesture, not up to `at`: the release
-    // fires after the wheel has been quiet, and would otherwise average in nothing.
-    const end = this.samples.at(-1)?.at ?? at;
-    const recent = this.samples.filter((sample) => end - sample.at <= VELOCITY_WINDOW_MS);
-    const first = recent[0];
-    const last = recent.at(-1);
-    if (!first || !last) return 0;
-    const span = last.at - first.at;
-    if (span <= 0) return 0;
-    let travel = 0;
-    for (let index = 1; index < recent.length; index += 1) {
-      travel += recent[index]?.deltaX ?? 0;
+    return measureWheelVelocity(this.samples, (sample) => sample.deltaX, at);
+  }
+}
+
+function measureWheelVelocity<T extends { at: number }>(
+  samples: readonly T[],
+  deltaOf: (sample: T) => number,
+  at: number,
+): number {
+  // Measured over the last moments of the gesture, not up to `at`: the release
+  // fires after the wheel has been quiet, and would otherwise average in nothing.
+  const end = samples.at(-1)?.at ?? at;
+  const recent = samples.filter((sample) => end - sample.at <= VELOCITY_WINDOW_MS);
+  const first = recent[0];
+  const last = recent.at(-1);
+  if (!first || !last) return 0;
+  const span = last.at - first.at;
+  if (span <= 0) return 0;
+  let travel = 0;
+  for (let index = 1; index < recent.length; index += 1) {
+    const sample = recent[index];
+    if (sample) travel += deltaOf(sample);
+  }
+  return travel / span;
+}
+
+const VERTICAL_ACCUMULATING = 1;
+const VERTICAL_SINGLE_DETENT_MIN_PX = 12;
+const VERTICAL_FAST_FLICK_MIN_PX = 24;
+
+interface VerticalSample {
+  deltaY: number;
+  deltaX: number;
+  at: number;
+}
+
+/**
+ * Turns vertical trackpad and low-delta wheel streams into single committed page
+ * turns (`IDLE -> ACCUMULATING -> SETTLING`), absorbing accelerating ramp-ups and
+ * decaying inertial tails while breaking immediately on direction reversals or a
+ * true new impulse.
+ */
+export class VerticalWheelTurn {
+  private phase = IDLE;
+  private travel = 0;
+  private samples: VerticalSample[] = [];
+  private lastDeltaY = 0;
+  private lastAbs = 0;
+  private lastAt = 0;
+  private hasDecayed = false;
+
+  /** Whether an active accumulation or momentum latch is still in progress. */
+  isActive(at = this.lastAt): boolean {
+    this.expire(at);
+    return this.phase !== IDLE;
+  }
+
+  /** Feeds one vertical pixel-mode wheel event, returning a committed direction if any. */
+  push(deltaY: number, at: number, deltaX = 0): TurnDirection | null {
+    this.expire(at);
+    if (deltaY === 0) return null;
+    if (this.phase === SETTLING) {
+      const reversed = this.lastDeltaY !== 0 && Math.sign(deltaY) !== Math.sign(this.lastDeltaY);
+      if (reversed) {
+        return this.start(deltaY, at, deltaX);
+      }
+      const abs = Math.abs(deltaY);
+      if (!this.hasDecayed) {
+        if (abs < this.lastAbs) {
+          this.hasDecayed = true;
+        }
+        this.lastDeltaY = deltaY;
+        this.lastAbs = abs;
+        this.lastAt = at;
+        return null;
+      }
+      if (abs <= this.lastAbs * MOMENTUM_SPIKE_RATIO + MOMENTUM_SPIKE_SLACK) {
+        this.lastDeltaY = deltaY;
+        this.lastAbs = abs;
+        this.lastAt = at;
+        return null;
+      }
+      return this.start(deltaY, at, deltaX);
     }
-    return travel / span;
+    if (this.phase === IDLE) {
+      return this.start(deltaY, at, deltaX);
+    }
+    return this.advance(deltaY, at, deltaX);
+  }
+
+  /** Called after `SCRUB_IDLE_MS` of quiet: commits isolated detents or fast flicks. */
+  release(at: number): TurnDirection | null {
+    if (this.phase === SETTLING) {
+      this.reset();
+      return null;
+    }
+    if (this.phase === IDLE) return null;
+    const committed = this.commitOnRelease(at);
+    this.reset();
+    return committed;
+  }
+
+  /** Clears all accumulated travel and momentum latch state. */
+  reset(): void {
+    this.phase = IDLE;
+    this.travel = 0;
+    this.samples = [];
+    this.lastDeltaY = 0;
+    this.lastAbs = 0;
+    this.lastAt = 0;
+    this.hasDecayed = false;
+  }
+
+  private expire(at: number): void {
+    if (this.phase !== IDLE && at - this.lastAt >= SCRUB_IDLE_MS) {
+      this.reset();
+    }
+  }
+
+  private start(deltaY: number, at: number, deltaX: number): TurnDirection | null {
+    this.phase = VERTICAL_ACCUMULATING;
+    this.travel = 0;
+    this.samples = [];
+    this.lastDeltaY = 0;
+    this.lastAbs = 0;
+    this.lastAt = at;
+    this.hasDecayed = false;
+    return this.advance(deltaY, at, deltaX);
+  }
+
+  private advance(deltaY: number, at: number, deltaX: number): TurnDirection | null {
+    if (this.travel !== 0 && Math.sign(deltaY) !== Math.sign(this.travel)) {
+      this.travel = 0;
+      this.samples = [];
+    }
+    this.travel += deltaY;
+    this.samples.push({ deltaY, deltaX, at });
+    if (this.samples.length > 32) this.samples.shift();
+    this.lastDeltaY = deltaY;
+    this.lastAbs = Math.abs(deltaY);
+    this.lastAt = at;
+    if (Math.abs(this.travel) >= WHEEL_LINE_PX) {
+      const direction = directionOf(this.travel);
+      this.phase = SETTLING;
+      this.travel = 0;
+      this.samples = [];
+      this.hasDecayed = false;
+      return direction;
+    }
+    return null;
+  }
+
+  private commitOnRelease(at: number): TurnDirection | null {
+    if (this.travel === 0) return null;
+    const direction = directionOf(this.travel);
+    const first = this.samples[0];
+    if (
+      this.samples.length === 1 &&
+      first !== undefined &&
+      first.deltaX === 0 &&
+      Math.abs(this.travel) >= VERTICAL_SINGLE_DETENT_MIN_PX
+    ) {
+      return direction;
+    }
+    const velocity = measureWheelVelocity(this.samples, (sample) => sample.deltaY, at);
+    if (
+      Math.abs(this.travel) >= VERTICAL_FAST_FLICK_MIN_PX &&
+      Math.abs(velocity) >= SCRUB_COMMIT_VELOCITY &&
+      directionOf(velocity) === direction
+    ) {
+      return direction;
+    }
+    return null;
   }
 }
 
@@ -376,6 +581,64 @@ export interface PageTurnGestures {
   handleSample: (sample: PageGestureSample) => void;
   /** Whether a wheel event was a swipe the page used; the caller then cancels it. */
   handleWheel: (wheel: WheelSample) => boolean;
+}
+
+export interface UsePageTurnGesturesOptions {
+  enabled: boolean;
+  areaRef: RefObject<HTMLElement | null>;
+  pageRef?: RefObject<HTMLElement | null> | undefined;
+  /**
+   * The width of the surface a slide scrub moves, when it differs from the page
+   * (a full-area slide pane inside a narrower reading measure). Defaults to the
+   * page width.
+   */
+  scrubWidth?: (() => number) | undefined;
+  onTurn: (direction: TurnDirection) => void;
+  /** False while the page scrolls sideways itself (a zoomed PDF). */
+  canSwipe?: (() => boolean) | undefined;
+  /** Whether a page exists in that direction, for the end-of-document rubber band. */
+  canTurn?: ((direction: TurnDirection) => boolean) | undefined;
+  /** Additional selection check (e.g. an EPUB chapter iframe) beyond the host document. */
+  hasSelection?: (() => boolean) | undefined;
+  /**
+   * Whether vertical wheel events turn pages instead of scrolling natively.
+   * Defaults to `false` so continuous-scrolling readers keep native vertical scroll.
+   */
+  verticalWheel?: boolean | ((direction: TurnDirection, wheel: WheelSample) => boolean) | undefined;
+  onScrubStart?: (() => void) | undefined;
+  /** Follows the fingers: px of travel, signed, already rubber-banded. */
+  onScrubMove?: ((displacement: number) => void) | undefined;
+  onScrubEnd?: ((velocity: number, committed: TurnDirection | null) => void) | undefined;
+}
+
+interface DiscreteWheelState {
+  travel: number;
+  timer: number | undefined;
+}
+
+interface NotchTail {
+  delta: number;
+  peak: number;
+  at: number;
+}
+
+function clearDiscreteState(state: DiscreteWheelState): void {
+  state.travel = 0;
+  window.clearTimeout(state.timer);
+  state.timer = undefined;
+}
+
+function absorbTailInto(
+  tailRef: { current: NotchTail | null },
+  delta: number,
+  at: number,
+): boolean {
+  const tail = tailRef.current;
+  if (!tail || at - tail.at > SCRUB_IDLE_MS) return false;
+  if (Math.sign(delta) !== Math.sign(tail.delta)) return false;
+  if (Math.abs(delta) >= tail.peak) return false;
+  tailRef.current = { delta, peak: tail.peak, at };
+  return true;
 }
 
 function hasSelectionIn(doc: Document): boolean {
@@ -390,10 +653,10 @@ function now(): number {
 
 /**
  * Page turns from the page itself: clicks in the outer edges of the page and
- * two-finger horizontal swipes. Neither ever starts on top of text, so
+ * wheel swipes/notches. Neither click turn ever starts on top of text, so
  * selecting text works everywhere, edges included.
  *
- * A swipe is reported live through `onScrubStart` / `onScrubMove` /
+ * A horizontal swipe is reported live through `onScrubStart` / `onScrubMove` /
  * `onScrubEnd`, so the page can follow the fingers and only then commit or
  * spring back. Without those callbacks a swipe turns one page, as before.
  *
@@ -408,46 +671,40 @@ export function usePageTurnGestures({
   onTurn,
   canSwipe,
   canTurn,
+  hasSelection,
+  verticalWheel = false,
   onScrubStart,
   onScrubMove,
   onScrubEnd,
-}: {
-  enabled: boolean;
-  areaRef: RefObject<HTMLElement | null>;
-  pageRef?: RefObject<HTMLElement | null>;
-  /**
-   * The width of the surface a slide scrub moves, when it differs from the page
-   * (a full-area slide pane inside a narrower reading measure). Defaults to the
-   * page width.
-   */
-  scrubWidth?: () => number;
-  onTurn: (direction: TurnDirection) => void;
-  /** False while the page scrolls sideways itself (a zoomed PDF). */
-  canSwipe?: () => boolean;
-  /** Whether a page exists in that direction, for the end-of-document rubber band. */
-  canTurn?: (direction: TurnDirection) => boolean;
-  onScrubStart?: () => void;
-  /** Follows the fingers: px of travel, signed, already rubber-banded. */
-  onScrubMove?: (displacement: number) => void;
-  onScrubEnd?: (velocity: number, committed: TurnDirection | null) => void;
-}): PageTurnGestures {
+}: UsePageTurnGesturesOptions): PageTurnGestures {
   const [zone, setZone] = useState<TurnZone | null>(null);
   const latest = useRef({
     enabled,
     onTurn,
     canSwipe,
     canTurn,
+    hasSelection,
+    verticalWheel,
     onScrubStart,
     onScrubMove,
     onScrubEnd,
   });
   useEffect(() => {
-    latest.current = { enabled, onTurn, canSwipe, canTurn, onScrubStart, onScrubMove, onScrubEnd };
+    latest.current = {
+      enabled,
+      onTurn,
+      canSwipe,
+      canTurn,
+      hasSelection,
+      verticalWheel,
+      onScrubStart,
+      onScrubMove,
+      onScrubEnd,
+    };
   });
   const press = useRef<{ x: number; y: number; hadSelection: boolean } | null>(null);
   const idleTimer = useRef<number | undefined>(undefined);
-  const discreteTravel = useRef(0);
-  const discreteTimer = useRef<number | undefined>(undefined);
+  const discreteState = useRef<DiscreteWheelState>({ travel: 0, timer: undefined });
   /**
    * The notch that last turned a page, while the events after it may still be that
    * gesture's inertia. A mouse notch is a single event; a trackpad flick is a
@@ -455,8 +712,12 @@ export function usePageTurnGestures({
    * as a notch. Without this, every event of a fast flick reads as its own notch.
    * `peak` is the magnitude the gesture started at, which inertia never exceeds.
    */
-  const notchTail = useRef<{ deltaX: number; peak: number; at: number } | null>(null);
+  const notchTail = useRef<NotchTail | null>(null);
+  const verticalIdleTimer = useRef<number | undefined>(undefined);
+  const verticalDiscreteState = useRef<DiscreteWheelState>({ travel: 0, timer: undefined });
+  const verticalNotchTail = useRef<NotchTail | null>(null);
   const [scrub] = useState(() => new WheelScrub());
+  const [verticalTurn] = useState(() => new VerticalWheelTurn());
 
   const zoneFor = useCallback(
     (x: number): TurnZone | null => {
@@ -474,9 +735,14 @@ export function usePageTurnGestures({
         setZone(null);
         return;
       }
+      const externalSelection = latest.current.hasSelection?.() ?? false;
       switch (sample.kind) {
         case 'down':
-          press.current = { x: sample.x, y: sample.y, hadSelection: sample.hasSelection };
+          press.current = {
+            x: sample.x,
+            y: sample.y,
+            hadSelection: sample.hasSelection || externalSelection,
+          };
           return;
         case 'move':
           setZone(sample.overContent ? null : zoneFor(sample.x));
@@ -487,7 +753,7 @@ export function usePageTurnGestures({
         case 'click': {
           const pressed = press.current;
           press.current = null;
-          if (sample.overContent || sample.hasSelection) return;
+          if (sample.overContent || sample.hasSelection || externalSelection) return;
           // The click that dismisses a selection does only that.
           if (pressed?.hadSelection) return;
           if (pressed && Math.hypot(sample.x - pressed.x, sample.y - pressed.y) > CLICK_SLOP_PX) {
@@ -522,28 +788,16 @@ export function usePageTurnGestures({
   }, []);
 
   const clearDiscreteWheel = useCallback(() => {
-    discreteTravel.current = 0;
-    window.clearTimeout(discreteTimer.current);
-    discreteTimer.current = undefined;
+    clearDiscreteState(discreteState.current);
   }, []);
 
-  /**
-   * Whether this event is the decaying tail of the notch that just turned a page.
-   * Inertia only ever decays and only ever travels one way, so a reversal is a new
-   * physical notch and turns again. A tail does wobble by a few pixels as it dies
-   * away, so the comparison is against the magnitude the gesture started at rather
-   * than the sample before: a wobble stays under the peak and is absorbed, while an
-   * event at or above it is a new impulse — which is what keeps a mouse wheel
-   * turning one page per click however fast it is spun.
-   */
-  const absorbNotchTail = useCallback((deltaX: number, at: number): boolean => {
-    const tail = notchTail.current;
-    if (!tail || at - tail.at > SCRUB_IDLE_MS) return false;
-    if (Math.sign(deltaX) !== Math.sign(tail.deltaX)) return false;
-    if (Math.abs(deltaX) >= tail.peak) return false;
-    notchTail.current = { deltaX, peak: tail.peak, at };
-    return true;
-  }, []);
+  const resetVerticalWheel = useCallback(() => {
+    verticalTurn.reset();
+    verticalNotchTail.current = null;
+    window.clearTimeout(verticalIdleTimer.current);
+    verticalIdleTimer.current = undefined;
+    clearDiscreteState(verticalDiscreteState.current);
+  }, [verticalTurn]);
 
   const armIdle = useCallback(() => {
     window.clearTimeout(idleTimer.current);
@@ -552,65 +806,166 @@ export function usePageTurnGestures({
     }, SCRUB_IDLE_MS);
   }, [emit, scrub]);
 
-  const handleWheel = useCallback(
-    (wheel: WheelSample): boolean => {
-      const { enabled: on, canSwipe: swipeAllowed } = latest.current;
-      if (!on || wheel.ctrlKey) return false;
-      if (Math.abs(wheel.deltaX) <= Math.abs(wheel.deltaY) * 1.5) return false;
-      if (swipeAllowed && !swipeAllowed()) return false;
-      const mode = wheel.deltaMode ?? DOM_DELTA_PIXEL;
-      const pageWidth = () =>
-        (pageRef?.current ?? areaRef.current)?.getBoundingClientRect().width ?? 0;
-      const timestamp = now();
-      // Read before `isDiscreteWheel`: the tail of a flick decays below the notch
-      // size partway through, and those events must not start a scrub either.
-      if (absorbNotchTail(wheel.deltaX, timestamp)) return true;
-      notchTail.current = null;
-      if (isDiscreteWheel(wheel, mode, !scrub.isScrubbing(timestamp))) {
-        const delta = normalizeWheelDelta(
-          wheel.deltaX,
-          mode,
-          mode === DOM_DELTA_PAGE ? pageWidth() : 0,
-        );
-        if (delta === 0) return false;
-        if (
-          discreteTravel.current !== 0 &&
-          Math.sign(delta) !== Math.sign(discreteTravel.current)
-        ) {
-          discreteTravel.current = 0;
-        }
-        discreteTravel.current += delta;
-        if (Math.abs(discreteTravel.current) >= WHEEL_LINE_PX) {
-          const direction = directionOf(discreteTravel.current);
-          clearDiscreteWheel();
-          if (latest.current.canTurn?.(direction) ?? true) {
-            latest.current.onTurn(direction);
-            notchTail.current = {
-              deltaX: wheel.deltaX,
-              peak: Math.abs(wheel.deltaX),
-              at: timestamp,
-            };
-          }
-        } else {
-          window.clearTimeout(discreteTimer.current);
-          discreteTimer.current = window.setTimeout(clearDiscreteWheel, SCRUB_IDLE_MS);
-        }
-        return true;
+  const armVerticalIdle = useCallback(() => {
+    window.clearTimeout(verticalIdleTimer.current);
+    verticalIdleTimer.current = window.setTimeout(() => {
+      const committed = verticalTurn.release(now());
+      if (committed !== null && (latest.current.canTurn?.(committed) ?? true)) {
+        latest.current.onTurn(committed);
       }
-      clearDiscreteWheel();
-      // Built here, in the event, so nothing that reads a ref is handed to the
-      // tracker while React is rendering.
-      emit(
-        scrub.push(wheel.deltaX, timestamp, {
-          pageWidth,
-          ...(scrubWidth === undefined ? {} : { surfaceWidth: scrubWidth }),
-          canTurn: (direction) => latest.current.canTurn?.(direction) ?? true,
-        }),
-      );
-      armIdle();
+    }, SCRUB_IDLE_MS);
+  }, [verticalTurn]);
+
+  const commitTurn = useCallback((direction: TurnDirection): boolean => {
+    if (latest.current.canTurn?.(direction) ?? true) {
+      latest.current.onTurn(direction);
+      return true;
+    }
+    return false;
+  }, []);
+
+  const pushDiscreteAxis = useCallback(
+    (
+      state: DiscreteWheelState,
+      rawDelta: number,
+      mode: number,
+      pageSize: number,
+      onCommit: (direction: TurnDirection) => void,
+    ): boolean => {
+      const delta = normalizeWheelDelta(rawDelta, mode, mode === DOM_DELTA_PAGE ? pageSize : 0);
+      if (delta === 0) return false;
+      if (state.travel !== 0 && Math.sign(delta) !== Math.sign(state.travel)) {
+        state.travel = 0;
+      }
+      state.travel += delta;
+      if (Math.abs(state.travel) >= WHEEL_LINE_PX) {
+        const direction = directionOf(state.travel);
+        clearDiscreteState(state);
+        onCommit(direction);
+      } else {
+        window.clearTimeout(state.timer);
+        state.timer = window.setTimeout(() => clearDiscreteState(state), SCRUB_IDLE_MS);
+      }
       return true;
     },
-    [absorbNotchTail, areaRef, armIdle, clearDiscreteWheel, emit, pageRef, scrub, scrubWidth],
+    [],
+  );
+
+  const handleWheel = useCallback(
+    (wheel: WheelSample): boolean => {
+      const { enabled: on, canSwipe: swipeAllowed, verticalWheel: allowVertical } = latest.current;
+      if (!on || wheel.defaultPrevented) return false;
+      const mode = wheel.deltaMode ?? DOM_DELTA_PIXEL;
+      const timestamp = now();
+
+      if (Math.abs(wheel.deltaX) > Math.abs(wheel.deltaY) * 1.5) {
+        if (wheel.ctrlKey) return false;
+        if (swipeAllowed && !swipeAllowed()) return false;
+        const pageWidth = () =>
+          (pageRef?.current ?? areaRef.current)?.getBoundingClientRect().width ?? 0;
+        // Read before `isDiscreteWheel`: the tail of a flick decays below the notch
+        // size partway through, and those events must not start a scrub either.
+        if (absorbTailInto(notchTail, wheel.deltaX, timestamp)) return true;
+        notchTail.current = null;
+        if (isDiscreteWheel(wheel, mode, !scrub.isScrubbing(timestamp))) {
+          return pushDiscreteAxis(
+            discreteState.current,
+            wheel.deltaX,
+            mode,
+            mode === DOM_DELTA_PAGE ? pageWidth() : 0,
+            (direction) => {
+              if (commitTurn(direction)) {
+                notchTail.current = {
+                  delta: wheel.deltaX,
+                  peak: Math.abs(wheel.deltaX),
+                  at: timestamp,
+                };
+              }
+            },
+          );
+        }
+        clearDiscreteWheel();
+        // Built here, in the event, so nothing that reads a ref is handed to the
+        // tracker while React is rendering.
+        emit(
+          scrub.push(wheel.deltaX, timestamp, {
+            pageWidth,
+            ...(scrubWidth === undefined ? {} : { surfaceWidth: scrubWidth }),
+            canTurn: (direction) => latest.current.canTurn?.(direction) ?? true,
+          }),
+        );
+        armIdle();
+        return true;
+      }
+
+      if (!allowVertical || scrub.isDragging()) return false;
+      if (Math.abs(wheel.deltaY) <= Math.abs(wheel.deltaX) * 1.5 || wheel.deltaY === 0) {
+        return false;
+      }
+      if (wheel.ctrlKey || wheel.metaKey || wheel.altKey || wheel.shiftKey) return false;
+      if ((wheel.buttons ?? 0) !== 0) return false;
+      if (hasScrollableAncestor(wheel.target ?? null, areaRef.current)) return false;
+      const direction = directionOf(wheel.deltaY);
+      if (typeof allowVertical === 'function' && !allowVertical(direction, wheel)) {
+        resetVerticalWheel();
+        return false;
+      }
+
+      if (mode === DOM_DELTA_LINE || mode === DOM_DELTA_PAGE) {
+        verticalTurn.reset();
+        verticalNotchTail.current = null;
+        window.clearTimeout(verticalIdleTimer.current);
+        verticalIdleTimer.current = undefined;
+        const pageHeight = () =>
+          (pageRef?.current ?? areaRef.current)?.getBoundingClientRect().height ?? 0;
+        return pushDiscreteAxis(
+          verticalDiscreteState.current,
+          wheel.deltaY,
+          mode,
+          mode === DOM_DELTA_PAGE ? pageHeight() : 0,
+          (committedDirection) => {
+            commitTurn(committedDirection);
+          },
+        );
+      }
+
+      clearDiscreteState(verticalDiscreteState.current);
+      if (absorbTailInto(verticalNotchTail, wheel.deltaY, timestamp)) return true;
+      verticalNotchTail.current = null;
+      if (
+        wheel.deltaX === 0 &&
+        Math.abs(wheel.deltaY) >= DISCRETE_PIXEL_WHEEL_PX &&
+        !verticalTurn.isActive(timestamp)
+      ) {
+        commitTurn(direction);
+        verticalNotchTail.current = {
+          delta: wheel.deltaY,
+          peak: Math.abs(wheel.deltaY),
+          at: timestamp,
+        };
+        return true;
+      }
+      const committed = verticalTurn.push(wheel.deltaY, timestamp, wheel.deltaX);
+      if (committed !== null) {
+        commitTurn(committed);
+      }
+      armVerticalIdle();
+      return true;
+    },
+    [
+      areaRef,
+      armIdle,
+      armVerticalIdle,
+      clearDiscreteWheel,
+      commitTurn,
+      emit,
+      pageRef,
+      pushDiscreteAxis,
+      resetVerticalWheel,
+      scrub,
+      scrubWidth,
+      verticalTurn,
+    ],
   );
 
   useEffect(() => {
@@ -640,7 +995,7 @@ export function usePageTurnGestures({
       handleSample({ kind: 'leave' });
     };
     const onClick = (event: MouseEvent) => {
-      if (event.button !== 0 || event.detail > 1 || event.defaultPrevented) return;
+      if (event.button !== 0 || event.defaultPrevented) return;
       handleSample({
         kind: 'click',
         x: event.clientX,
@@ -679,12 +1034,22 @@ export function usePageTurnGestures({
     window.clearTimeout(idleTimer.current);
     idleTimer.current = undefined;
     clearDiscreteWheel();
-  }, [clearDiscreteWheel, enabled, scrub]);
+    resetVerticalWheel();
+  }, [clearDiscreteWheel, enabled, resetVerticalWheel, scrub]);
+
+  const verticalActive = enabled && Boolean(verticalWheel);
+  useEffect(() => {
+    if (!verticalActive) resetVerticalWheel();
+  }, [resetVerticalWheel, verticalActive]);
 
   useEffect(() => {
+    const discrete = discreteState.current;
+    const verticalDiscrete = verticalDiscreteState.current;
     return () => {
       window.clearTimeout(idleTimer.current);
-      window.clearTimeout(discreteTimer.current);
+      window.clearTimeout(discrete.timer);
+      window.clearTimeout(verticalIdleTimer.current);
+      window.clearTimeout(verticalDiscrete.timer);
     };
   }, []);
 
