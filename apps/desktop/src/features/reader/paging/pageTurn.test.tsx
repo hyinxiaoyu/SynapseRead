@@ -1547,6 +1547,107 @@ describe('usePageTurnGestures consecutive clicks (#107) and vertical wheel (#106
     act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
     expect(onTurn).not.toHaveBeenCalled();
   });
+
+  it('preserves the 90ms inertia window after slow synchronous onTurn/capture across vertical and horizontal wheel paths', () => {
+    vi.useFakeTimers();
+    let delayInsideTurnMs = 0;
+    const onTurn = vi.fn(() => {
+      if (delayInsideTurnMs > 0) {
+        vi.setSystemTime(Date.now() + delayInsideTurnMs);
+      }
+    });
+    const canTurn = vi.fn(() => true);
+    let gestures: PageTurnGestures | null = null;
+    const view = render(
+      <Probe
+        onTurn={onTurn}
+        canTurn={canTurn}
+        verticalWheel
+        expose={(value) => {
+          gestures = value;
+        }}
+      />,
+    );
+    vi.spyOn(
+      view.container.firstElementChild as HTMLElement,
+      'getBoundingClientRect',
+    ).mockReturnValue(new DOMRect(0, 0, 1000, 600));
+    const g = () => gestures as unknown as PageTurnGestures;
+
+    // 1. VerticalWheelTurn: synchronous 60ms inside onTurn must not shrink the 90ms post-return window.
+    delayInsideTurnMs = 60;
+    act(() => {
+      expect(g().handleWheel({ deltaX: 0, deltaY: 50, deltaMode: 0, ctrlKey: false })).toBe(true);
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    delayInsideTurnMs = 0;
+    // 50ms post-return is < 90ms post-commit (even though 110ms > 90ms since pre-commit entry).
+    act(() => {
+      vi.advanceTimersByTime(50);
+      for (const deltaY of [40, 25, 10]) {
+        expect(g().handleWheel({ deltaX: 0, deltaY, deltaMode: 0, ctrlKey: false })).toBe(true);
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+
+    // 2. Vertical discrete pixel notch (verticalNotchTail): post-commit timestamp + canTurn guard.
+    onTurn.mockClear();
+    act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
+    canTurn.mockReturnValue(false);
+    act(() => {
+      expect(g().handleWheel({ deltaX: 0, deltaY: 120, deltaMode: 0, ctrlKey: false })).toBe(true);
+    });
+    expect(onTurn).not.toHaveBeenCalled();
+    // Since canTurn was false, verticalNotchTail must not swallow subsequent turns once canTurn recovers.
+    canTurn.mockReturnValue(true);
+    delayInsideTurnMs = 60;
+    act(() => {
+      expect(g().handleWheel({ deltaX: 0, deltaY: 105, deltaMode: 0, ctrlKey: false })).toBe(true);
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    delayInsideTurnMs = 0;
+    act(() => {
+      vi.advanceTimersByTime(50);
+      for (const deltaY of [80, 45, 20]) {
+        expect(g().handleWheel({ deltaX: 0, deltaY, deltaMode: 0, ctrlKey: false })).toBe(true);
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+
+    // 3. Horizontal WheelScrub full-surface commit + discrete horizontal notch tail.
+    onTurn.mockClear();
+    act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
+    delayInsideTurnMs = 60;
+    act(() => {
+      expect(g().handleWheel({ deltaX: 1000, deltaY: 0, deltaMode: 0, ctrlKey: false })).toBe(true);
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    delayInsideTurnMs = 0;
+    act(() => {
+      vi.advanceTimersByTime(50);
+      for (const deltaX of [40, 20, 10]) {
+        expect(g().handleWheel({ deltaX, deltaY: 0, deltaMode: 0, ctrlKey: false })).toBe(true);
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+
+    onTurn.mockClear();
+    act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
+    delayInsideTurnMs = 60;
+    act(() => {
+      expect(g().handleWheel({ deltaX: 120, deltaY: 0, deltaMode: 0, ctrlKey: false })).toBe(true);
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+    delayInsideTurnMs = 0;
+    act(() => {
+      vi.advanceTimersByTime(50);
+      expect(g().handleWheel({ deltaX: 80, deltaY: 0, deltaMode: 0, ctrlKey: false })).toBe(true);
+    });
+    expect(onTurn).toHaveBeenCalledTimes(1);
+  });
 });
 
 /** Parses `[x, y]` percent pairs from a `polygon(...)` clip path. */

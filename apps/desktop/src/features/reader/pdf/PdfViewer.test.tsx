@@ -2887,6 +2887,20 @@ describe('PdfViewer', () => {
         });
         expect(column.style.height).toBe('400px');
         expect(stage.querySelector<HTMLElement>('[data-stage-row="4"]')?.style.clipPath).toBe('');
+
+        // Mid-curl jump to the current page via Go To cancels the active curl cleanly.
+        fireEvent.click(nextBtn);
+        expect(pageInput).toHaveValue('5');
+        clock = 1000;
+        act(() => {
+          frames.at(-1)?.(clock);
+        });
+        fireEvent.click(prevBtn);
+        expect(pageInput).toHaveValue('4');
+        expect(column.style.height).toBe('800px');
+        fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+        expect(column.style.height).toBe('400px');
+        expect(stage.querySelector<HTMLElement>('[data-stage-row="4"]')?.style.clipPath).toBe('');
       } finally {
         rafSpy.mockRestore();
         cancelSpy.mockRestore();

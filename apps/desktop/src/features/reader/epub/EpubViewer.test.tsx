@@ -2206,6 +2206,111 @@ describe('EpubViewer', () => {
       }
     });
 
+    it('cancels in-flight page-turn animation on navigation jumps and scroll-mode wheeling', async () => {
+      const { store, documentId } = await setup();
+      await act(async () => {
+        await store.getState().updateReadingPreferences({ pageTransition: 'fade' });
+      });
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      const host = screen.getByTestId('epub-host');
+      const activeAnimations: { id: string; cancel: ReturnType<typeof vi.fn> }[] = [];
+      const cancelCalls: ReturnType<typeof vi.fn>[] = [];
+      host.animate = vi.fn(() => {
+        const cancel = vi.fn(() => {
+          const index = activeAnimations.indexOf(entry);
+          if (index >= 0) activeAnimations.splice(index, 1);
+        });
+        const entry = { id: '', cancel };
+        activeAnimations.push(entry);
+        cancelCalls.push(cancel);
+        return entry as unknown as Animation;
+      }) as unknown as HTMLElement['animate'];
+      host.getAnimations = vi.fn(
+        () => [...activeAnimations] as unknown as Animation[],
+      ) as unknown as HTMLElement['getAnimations'];
+
+      const emitCh1 = () =>
+        act(() =>
+          engine.emitLocation({
+            cfi: CFI,
+            href: 'OEBPS/chapter1.xhtml',
+            page: 1,
+            totalPages: 2,
+            chapterIndex: 0,
+            totalChapters: 2,
+            bookProgress: 25,
+            fraction: 0.25,
+          }),
+        );
+      emitCh1();
+
+      const triggerFade = async () => {
+        await act(async () => {
+          fireEvent.keyDown(window, { key: 'ArrowRight' });
+          await Promise.resolve();
+        });
+        expect(activeAnimations).toHaveLength(1);
+        expect(activeAnimations[0]?.id).toBe('page-turn');
+      };
+
+      // 1. jumpWithBackChip (via TOC) cancels in-flight fade.
+      await triggerFade();
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Two' }));
+      expect(activeAnimations).toHaveLength(0);
+      await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+
+      // 2. goToChapter cancels in-flight fade.
+      await triggerFade();
+      fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+      expect(activeAnimations).toHaveLength(0);
+
+      // 3. goToChapterEdge cancels in-flight fade.
+      await triggerFade();
+      fireEvent.keyDown(window, { key: 'Home', code: 'Home' });
+      expect(activeAnimations).toHaveLength(0);
+
+      // 4. handleReturnBack and handleForward cancel in-flight fade.
+      await triggerFade();
+      fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+      expect(activeAnimations).toHaveLength(0);
+
+      await triggerFade();
+      fireEvent.click(screen.getByRole('button', { name: 'Go forward' }));
+      expect(activeAnimations).toHaveLength(0);
+
+      // 5. External jumpRequest cancels in-flight fade.
+      await triggerFade();
+      act(() =>
+        store.setState({
+          jumpRequest: {
+            nonce: 99,
+            documentId,
+            annotationId: 'ann-jump',
+            anchor: {
+              format: 'epub',
+              cfiRange: FAR_CFI,
+              chapterHref: 'OEBPS/chapter2.xhtml',
+            },
+          },
+        }),
+      );
+      expect(activeAnimations).toHaveLength(0);
+
+      // 6. Scroll-mode manual wheeling (both inside iframe and on outer page area) cancels in-flight fade.
+      fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+      await triggerFade();
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(false);
+      expect(activeAnimations).toHaveLength(0);
+
+      await triggerFade();
+      fireEvent.wheel(screen.getByTestId('epub-page-area'), { deltaX: 0, deltaY: 120 });
+      expect(activeAnimations).toHaveLength(0);
+      expect(cancelCalls.length).toBeGreaterThanOrEqual(8);
+    });
+
     it('turns pages on vertical mouse wheel in spread/paged modes with modifier, drag, scrollable, and boundary guards (#106)', async () => {
       const { store, documentId } = await setup();
       render(<Harness store={store} documentId={documentId} />);

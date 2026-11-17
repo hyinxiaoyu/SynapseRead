@@ -932,6 +932,19 @@ function readPageSelection(
   return rects.length > 0 && cleaned ? { rects, text: cleaned } : null;
 }
 
+function restoreStageSlots(stage: HTMLElement): void {
+  for (const slot of stage.querySelectorAll<HTMLElement>('[data-stage-row]')) {
+    if (slot.dataset.stageLeft !== undefined) slot.style.left = `${slot.dataset.stageLeft}px`;
+    if (slot.dataset.stageWidth !== undefined) slot.style.width = `${slot.dataset.stageWidth}px`;
+    if (slot.dataset.stageHeight !== undefined) slot.style.height = `${slot.dataset.stageHeight}px`;
+    slot.style.paddingLeft = '';
+    slot.style.justifyContent = '';
+    slot.style.backgroundColor = '';
+    slot.style.zIndex = '';
+    slot.style.clipPath = '';
+  }
+}
+
 function PdfPages({
   engine,
   document,
@@ -1487,6 +1500,15 @@ function PdfPages({
     }, CURSOR_DEBOUNCE_MS);
   }, []);
 
+  const cancelActiveCurl = useCallback(() => {
+    pendingCurlRef.current = null;
+    cancelCurlRef.current?.();
+    cancelCurlRef.current = null;
+    setTurning(false);
+    if (stageRef.current) restoreStageSlots(stageRef.current);
+    resetPaperCurl(null, turnShadowRef.current);
+  }, []);
+
   const clearContinuousFade = useCallback(() => {
     pendingContinuousFadeRef.current = null;
     if (continuousFadeCleanupRafRef.current !== null) {
@@ -1531,11 +1553,12 @@ function PdfPages({
    * later report and layout change returns to.
    */
   const scrollToPageOffset = useCallback(
-    (pageIndex: number, offset: number) => {
+    (pageIndex: number, offset: number, options?: { preserveCurl?: boolean }) => {
       // A jump the reader asked for wins over a turn still sliding to its own page:
       // its completion would otherwise land on the page this one is leaving.
       cancelActiveSlide();
       clearContinuousFade();
+      if (!options?.preserveCurl) cancelActiveCurl();
       setCurrentPageIndex(pageIndex);
       programmaticScrollRef.current = { pageIndex, scrollTop: offset };
       scrollToOffset(offset);
@@ -1551,6 +1574,7 @@ function PdfPages({
       scheduleCursorReport();
     },
     [
+      cancelActiveCurl,
       cancelActiveSlide,
       clearContinuousFade,
       offsetWithin,
@@ -2229,8 +2253,7 @@ function PdfPages({
     }
     cancelActiveSlide();
     clearContinuousFade();
-    cancelCurlRef.current?.();
-    cancelCurlRef.current = null;
+    cancelActiveCurl();
     scrubbingRef.current = false;
     setCurrentPageIndex(jumpAnchor.pageIndex);
     const top = offsetWithin(jumpAnchor.pageIndex, jumpAnchor.rects[0]?.y ?? 0);
@@ -2367,20 +2390,6 @@ function PdfPages({
     },
     [contentWidth, rowCount, rowHeight, rowWidth],
   );
-
-  const restoreStageSlots = (stage: HTMLElement) => {
-    for (const slot of stage.querySelectorAll<HTMLElement>('[data-stage-row]')) {
-      if (slot.dataset.stageLeft !== undefined) slot.style.left = `${slot.dataset.stageLeft}px`;
-      if (slot.dataset.stageWidth !== undefined) slot.style.width = `${slot.dataset.stageWidth}px`;
-      if (slot.dataset.stageHeight !== undefined)
-        slot.style.height = `${slot.dataset.stageHeight}px`;
-      slot.style.paddingLeft = '';
-      slot.style.justifyContent = '';
-      slot.style.backgroundColor = '';
-      slot.style.zIndex = '';
-      slot.style.clipPath = '';
-    }
-  };
 
   const placeCurlSlots = (
     stage: HTMLElement,
@@ -2642,7 +2651,7 @@ function PdfPages({
           });
         }
       }
-      scrollToPageOffset(target, offsetWithin(target, 0));
+      scrollToPageOffset(target, offsetWithin(target, 0), { preserveCurl: true });
       return;
     }
     scrollToPageOffset(target, offsetWithin(target, 0));
@@ -2750,7 +2759,7 @@ function PdfPages({
           duration: Math.max(120, Math.round((1 - progress) * PAGE_CURL_MS)),
         };
         setCurlSeq((seq) => seq + 1);
-        scrollToPageOffset(target, offsetWithin(target, 0));
+        scrollToPageOffset(target, offsetWithin(target, 0), { preserveCurl: true });
         return;
       }
       const target = committed === null ? null : turnTarget(committed);

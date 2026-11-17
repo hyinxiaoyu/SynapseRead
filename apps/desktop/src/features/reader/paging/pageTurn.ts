@@ -323,6 +323,13 @@ export class WheelScrub {
     this.context = null;
   }
 
+  /** Refreshes the settling timestamp after synchronous turn/capture callbacks finish. */
+  touch(at: number): void {
+    if (this.phase === SETTLING && at > this.lastAt) {
+      this.lastAt = at;
+    }
+  }
+
   private expireSettling(at: number): void {
     if (this.phase === SETTLING && at - this.lastAt >= SCRUB_IDLE_MS) {
       this.phase = IDLE;
@@ -512,6 +519,13 @@ export class VerticalWheelTurn {
     this.lastAbs = 0;
     this.lastAt = 0;
     this.hasDecayed = false;
+  }
+
+  /** Refreshes the settling timestamp after synchronous turn/capture callbacks finish. */
+  touch(at: number): void {
+    if (this.phase === SETTLING && at > this.lastAt) {
+      this.lastAt = at;
+    }
   }
 
   private expire(at: number): void {
@@ -888,7 +902,7 @@ export function usePageTurnGestures({
                 notchTail.current = {
                   delta: wheel.deltaX,
                   peak: Math.abs(wheel.deltaX),
-                  at: timestamp,
+                  at: now(),
                 };
               }
             },
@@ -904,6 +918,7 @@ export function usePageTurnGestures({
             canTurn: (direction) => latest.current.canTurn?.(direction) ?? true,
           }),
         );
+        scrub.touch(now());
         armIdle();
         return true;
       }
@@ -947,17 +962,19 @@ export function usePageTurnGestures({
         Math.abs(wheel.deltaY) >= DISCRETE_PIXEL_WHEEL_PX &&
         !verticalTurn.isActive(timestamp)
       ) {
-        commitTurn(direction);
-        verticalNotchTail.current = {
-          delta: wheel.deltaY,
-          peak: Math.abs(wheel.deltaY),
-          at: timestamp,
-        };
+        if (commitTurn(direction)) {
+          verticalNotchTail.current = {
+            delta: wheel.deltaY,
+            peak: Math.abs(wheel.deltaY),
+            at: now(),
+          };
+        }
         return true;
       }
       const committed = verticalTurn.push(wheel.deltaY, timestamp, wheel.deltaX);
       if (committed !== null) {
         commitTurn(committed);
+        verticalTurn.touch(now());
       }
       armVerticalIdle();
       return true;

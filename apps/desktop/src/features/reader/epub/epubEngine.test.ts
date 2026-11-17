@@ -3326,6 +3326,67 @@ describe('EPUB chapter wheel, consecutive click, selection, and seam queue (#106
       expect(await endSeam).toBe(true);
       expect(await blockedNext).toBe(false);
 
+      // 8. Multi-item [move, boundary-blocked] batch resolves the final moving turn as true.
+      scrollLeft = 640;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const batchSeam = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      const batchMove = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      const batchBlocked = handle.turnPage(1, {
+        animate: false,
+        transition: 'fade',
+        spread: false,
+      });
+      scrollLeft = 0;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      resolveNext();
+      expect(await Promise.all([batchSeam, batchMove, batchBlocked])).toEqual([false, true, false]);
+      expect(scrollLeft).toBe(640);
+
+      // 9. Throw inside drainPendingTurns clears remaining queued turns instead of leaving them dangling.
+      scrollLeft = 640;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      prevSpy.mockRejectedValueOnce(new Error('seam failed'));
+      const errSeam = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      const errQueued1 = handle.turnPage(-1, { animate: false, transition: 'fade', spread: false });
+      const errQueued2 = handle.turnPage(-1, { animate: false, transition: 'fade', spread: false });
+      scrollLeft = 0;
+      scrollWidth = 640;
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      resolveNext();
+      await expect(errSeam).rejects.toThrow('seam failed');
+      expect(await errQueued1).toBe(false);
+      expect(await errQueued2).toBe(false);
+
+      // 10. canCrossChapter falls back to currentChapterIndex when view.section lacks .next/.prev.
+      Reflect.set(fake.rendition, 'manager', {
+        container,
+        layout: { delta: 640 },
+        views: { _views: [{ section: { index: 0 } }] },
+      });
+      scrollLeft = 0;
+      scrollWidth = 640;
+      expect(await handle.turnPage(-1, { animate: false, transition: 'fade', spread: false })).toBe(
+        false,
+      );
+      const fallbackTurn = handle.turnPage(1, {
+        animate: false,
+        transition: 'fade',
+        spread: false,
+      });
+      resolveNext();
+      expect(await fallbackTurn).toBe(true);
+
       handle.destroy();
     } finally {
       Reflect.set(fake.rendition, 'manager', undefined);
