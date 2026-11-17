@@ -290,7 +290,22 @@ export async function consecutiveClicksFlow(page) {
   await page.click(seamPts.innerRight);
   await waitSettle(40);
   await page.click(seamPts.innerLeft);
-  await waitSettle(550);
+  await page.waitFor(
+    `(() => {
+      const host = ${visibleEpubHost};
+      const area = host?.closest('[data-testid="epub-page-area"]');
+      const curlHost = area?.querySelector('[data-testid="epub-curl-host"]');
+      const leaf = area?.querySelector('[data-curl-part="leaf"]');
+      return (
+        ${chapterIs('Chapter One')} &&
+        (host?.querySelectorAll('iframe')?.length ?? 0) === 1 &&
+        (curlHost?.childElementCount ?? 0) === 0 &&
+        (!curlHost || getComputedStyle(curlHost).visibility === 'hidden') &&
+        Number(leaf ? getComputedStyle(leaf).opacity : 0) === 0
+      );
+    })()`,
+    'rapid +1/-1 reversal across EPUB seam to settle on Chapter One with a single active view',
+  );
   await waitForEpubAnimationsClear(page);
   assert(
     await page.evaluate(
@@ -509,7 +524,7 @@ export async function consecutiveClicksFlow(page) {
   assert(
     (await page.evaluate(`${pdfPageField}?.value`)) === '1' &&
       !(await page.evaluate(
-        `Boolean(document.querySelector('[data-testid="annotation-popover"]'))`,
+        `Boolean(document.querySelector('[data-testid="selection-popover"][data-popover-mode="edit"]'))`,
       )),
     'double-clicking highlighted PDF word neither turns page nor opens annotation popover',
   );
@@ -670,7 +685,7 @@ export async function consecutiveClicksFlow(page) {
   assert(
     (await page.evaluate(`${visibleTxtScroll}?.scrollTop ?? -1`)) === 0 &&
       !(await page.evaluate(
-        `Boolean(document.querySelector('[data-testid="annotation-popover"]'))`,
+        `Boolean(document.querySelector('[data-testid="selection-popover"][data-popover-mode="edit"]'))`,
       )),
     'double-clicking highlighted TXT word neither scrolls nor opens annotation popover',
   );

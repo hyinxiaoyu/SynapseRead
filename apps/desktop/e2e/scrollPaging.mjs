@@ -19,9 +19,9 @@ const SHIFT = 8;
 
 /**
  * Installs a rAF observer before triggering a turn so the 200 ms fade Web Animation
- * (`id: 'page-turn'`) is sampled cleanly without racing wall-clock timers.
+ * (`id: 'page-turn'`) is sampled cleanly without racing wall-clock or chapter-seam timers.
  */
-async function armFadeProbe(page, targetsExpr, maxMs = 340) {
+async function armFadeProbe(page, targetsExpr) {
   await page.waitFor(
     `!(${targetsExpr}).filter(Boolean).some((el) => el.getAnimations().some((a) => a.id === 'page-turn'))`,
     'previous page-turn fade animation to settle before probing',
@@ -32,11 +32,15 @@ async function armFadeProbe(page, targetsExpr, maxMs = 340) {
       minOpacity: 1,
       hadPageTurnAnim: false,
       allTransformsNone: true,
+      startedAt: performance.now(),
+      stopConfig: null,
     };
     window.__fadeProbe = state;
-    const start = performance.now();
+    const hardCap = state.startedAt + 30000;
     const tick = () => {
+      const now = performance.now();
       const elements = (${targetsExpr}).filter(Boolean);
+      let anyRunning = false;
       for (const el of elements) {
         const cs = getComputedStyle(el);
         const op = Number.parseFloat(cs.opacity);
@@ -48,6 +52,7 @@ async function armFadeProbe(page, targetsExpr, maxMs = 340) {
         for (const anim of el.getAnimations()) {
           if (anim.id === 'page-turn') {
             state.hadPageTurnAnim = true;
+            if (anim.playState === 'running') anyRunning = true;
             const kfs = anim.effect?.getKeyframes?.() ?? [];
             if (kfs.some((kf) => kf.transform !== undefined && kf.transform !== 'none')) {
               state.allTransformsNone = false;
@@ -55,7 +60,16 @@ async function armFadeProbe(page, targetsExpr, maxMs = 340) {
           }
         }
       }
-      if (performance.now() - start >= ${maxMs}) {
+      const stop = state.stopConfig;
+      if (stop) {
+        const settled = stop.waitForFade
+          ? (state.hadPageTurnAnim && !anyRunning) || now >= stop.deadline
+          : now >= stop.deadline;
+        if (settled) {
+          state.done = true;
+          return;
+        }
+      } else if (now >= hardCap) {
         state.done = true;
         return;
       }
@@ -65,7 +79,15 @@ async function armFadeProbe(page, targetsExpr, maxMs = 340) {
   })()`);
 }
 
-async function finishFadeProbe(page) {
+async function finishFadeProbe(page, { waitForFade = false } = {}) {
+  await page.evaluate(`(() => {
+    const state = window.__fadeProbe;
+    if (!state || state.done) return;
+    const now = performance.now();
+    state.stopConfig = ${waitForFade}
+      ? { waitForFade: true, deadline: now + 2000 }
+      : { waitForFade: false, deadline: Math.max(state.startedAt + 340, now + 180) };
+  })()`);
   await page.waitFor(`window.__fadeProbe?.done === true`, 'fade probe window to complete');
   return page.evaluate(`window.__fadeProbe`);
 }
@@ -393,7 +415,7 @@ export async function scrollPagingFlow(page) {
     `(${visibleEpubHost}?.querySelector('.epub-container')?.scrollTop ?? 0) > ${epubFwdTarget.scrollTop}`,
     'ArrowRight to step EPUB Scroll forward',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'EPUB Scroll ArrowRight');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'EPUB Scroll ArrowRight');
   const epubFwdCheck = await checkEpubLineVisible(page, epubFwdTarget);
   assert(
     epubFwdCheck?.fullyVisible,
@@ -410,7 +432,7 @@ export async function scrollPagingFlow(page) {
     `(${visibleEpubHost}?.querySelector('.epub-container')?.scrollTop ?? 0) < ${epubBackTarget.scrollTop}`,
     'ArrowLeft to step EPUB Scroll backward',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'EPUB Scroll ArrowLeft');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'EPUB Scroll ArrowLeft');
   const epubBackCheck = await checkEpubLineVisible(page, epubBackTarget);
   assert(
     epubBackCheck?.fullyVisible,
@@ -428,7 +450,10 @@ export async function scrollPagingFlow(page) {
     `(${visibleEpubHost}?.querySelector('.epub-container')?.scrollTop ?? 0) !== ${preScrubTop}`,
     'scrubber ArrowRight in EPUB Scroll',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'EPUB Scroll scrubber ArrowRight');
+  assertFadePlayed(
+    await finishFadeProbe(page, { waitForFade: true }),
+    'EPUB Scroll scrubber ArrowRight',
+  );
   await page.evaluate(`document.activeElement?.blur?.()`);
 
   // TOC jump lands directly without triggering page-turn fade, then return cleanly.
@@ -454,7 +479,10 @@ export async function scrollPagingFlow(page) {
     chapterIs('Chapter Two'),
     'Space at bottom of Chapter One crosses to Chapter Two',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'EPUB Scroll forward chapter seam');
+  assertFadePlayed(
+    await finishFadeProbe(page, { waitForFade: true }),
+    'EPUB Scroll forward chapter seam',
+  );
   assert(
     await page.evaluate(
       `(${visibleEpubHost}?.querySelector('.epub-container')?.scrollTop ?? -1) === 0`,
@@ -469,7 +497,10 @@ export async function scrollPagingFlow(page) {
     chapterIs('Chapter One'),
     'Shift+Space at top of Chapter Two crosses back to Chapter One',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'EPUB Scroll backward chapter seam');
+  assertFadePlayed(
+    await finishFadeProbe(page, { waitForFade: true }),
+    'EPUB Scroll backward chapter seam',
+  );
   const backSeamPos = await page.evaluate(`(() => {
     const s = ${visibleEpubHost}?.querySelector('.epub-container');
     return s ? { scrollTop: s.scrollTop, clientHeight: s.clientHeight, scrollHeight: s.scrollHeight } : null;
@@ -653,7 +684,7 @@ export async function scrollPagingFlow(page) {
     `(${visiblePdfScroll}?.scrollTop ?? 0) > ${pdfFwdTarget.scrollTop}`,
     'PageDown to advance PDF Continuous',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'PDF Continuous PageDown');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'PDF Continuous PageDown');
   const pdfFwdCheck = await checkPdfLineVisible(page, pdfFwdTarget);
   assert(
     pdfFwdCheck?.fullyVisible,
@@ -673,7 +704,7 @@ export async function scrollPagingFlow(page) {
     `(${visiblePdfScroll}?.scrollTop ?? 0) < ${pdfBackTarget.scrollTop}`,
     'PageUp to step back in PDF Continuous',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'PDF Continuous PageUp');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'PDF Continuous PageUp');
   const pdfBackCheck = await checkPdfLineVisible(page, pdfBackTarget);
   assert(
     pdfBackCheck?.fullyVisible,
@@ -689,7 +720,10 @@ export async function scrollPagingFlow(page) {
     `(${visiblePdfScroll}?.scrollTop ?? 0) > ${prePdfScrub}`,
     'scrubber ArrowRight in PDF Continuous',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'PDF Continuous scrubber ArrowRight');
+  assertFadePlayed(
+    await finishFadeProbe(page, { waitForFade: true }),
+    'PDF Continuous scrubber ArrowRight',
+  );
   await page.evaluate(`document.activeElement?.blur?.()`);
 
   // Normal wheel scroll in PDF Continuous does not trigger fade.
@@ -768,7 +802,7 @@ export async function scrollPagingFlow(page) {
   await armFadeProbe(page, txtFadeTarget);
   await page.clickButton('Next Page');
   await page.waitFor(`(${visibleTxtScroll}?.scrollTop ?? 0) > 0`, 'TXT Next Page chevron advances');
-  assertFadePlayed(await finishFadeProbe(page), 'TXT Next Page chevron');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'TXT Next Page chevron');
   const txtAfterNextChevron = await page.evaluate(`${visibleTxtScroll}?.scrollTop ?? 0`);
 
   await armFadeProbe(page, txtFadeTarget);
@@ -777,7 +811,7 @@ export async function scrollPagingFlow(page) {
     `(${visibleTxtScroll}?.scrollTop ?? ${txtAfterNextChevron}) < ${txtAfterNextChevron}`,
     'TXT Previous Page chevron steps back',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'TXT Previous Page chevron');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'TXT Previous Page chevron');
   await page.evaluate(
     `(() => { document.activeElement?.blur?.(); const s = ${visibleTxtScroll}; if (s) s.scrollTop = 0; })()`,
   );
@@ -801,7 +835,10 @@ export async function scrollPagingFlow(page) {
     `(${visibleTxtScroll}?.scrollTop ?? 0) > 0`,
     'TXT right-edge blank click advances',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'TXT blank right-edge click');
+  assertFadePlayed(
+    await finishFadeProbe(page, { waitForFade: true }),
+    'TXT blank right-edge click',
+  );
   const txtAfterRightEdge = await page.evaluate(`${visibleTxtScroll}?.scrollTop ?? 0`);
 
   await armFadeProbe(page, txtFadeTarget);
@@ -810,7 +847,7 @@ export async function scrollPagingFlow(page) {
     `(${visibleTxtScroll}?.scrollTop ?? ${txtAfterRightEdge}) < ${txtAfterRightEdge}`,
     'TXT left-edge blank click steps back',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'TXT blank left-edge click');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'TXT blank left-edge click');
 
   // Line-straddling overlap forward & backward in TXT.
   const txtFwdTarget = await setupTxtLineStraddle(page, 'bottom');
@@ -822,7 +859,7 @@ export async function scrollPagingFlow(page) {
     `(${visibleTxtScroll}?.scrollTop ?? 0) > ${txtFwdTarget.scrollTop}`,
     'Space to step TXT forward',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'TXT Space forward turn');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'TXT Space forward turn');
   const txtFwdCheck = await checkTxtLineVisible(page, txtFwdTarget);
   assert(
     txtFwdCheck?.fullyVisible,
@@ -838,7 +875,10 @@ export async function scrollPagingFlow(page) {
     `(${visibleTxtScroll}?.scrollTop ?? 0) < ${txtBackTarget.scrollTop}`,
     'Shift+Space to step TXT backward',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'TXT Shift+Space backward turn');
+  assertFadePlayed(
+    await finishFadeProbe(page, { waitForFade: true }),
+    'TXT Shift+Space backward turn',
+  );
   const txtBackCheck = await checkTxtLineVisible(page, txtBackTarget);
   assert(
     txtBackCheck?.fullyVisible,
@@ -854,7 +894,7 @@ export async function scrollPagingFlow(page) {
     `(${visibleTxtScroll}?.scrollTop ?? 0) > ${preTxtScrub}`,
     'scrubber ArrowRight in TXT',
   );
-  assertFadePlayed(await finishFadeProbe(page), 'TXT scrubber ArrowRight');
+  assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'TXT scrubber ArrowRight');
   await page.evaluate(`document.activeElement?.blur?.()`);
 
   await page.press('g', 'KeyG', ALT | META);

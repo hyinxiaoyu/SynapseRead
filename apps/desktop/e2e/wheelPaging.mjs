@@ -46,13 +46,52 @@ async function waitForSettle(ms = 320) {
   await new Promise((done) => setTimeout(done, ms));
 }
 
-async function wheelStream(page, point, deltas, gapMs = 16) {
-  for (let i = 0; i < deltas.length; i += 1) {
-    await page.wheel(point, deltas[i]);
-    if (gapMs > 0 && i < deltas.length - 1) {
-      await waitForSettle(gapMs);
+async function dispatchEpubWheelStream(page, deltas, { horizontal = false } = {}) {
+  await page.evaluate(`(() => {
+    const host = ${visibleEpubHost};
+    const doc = host?.querySelector('iframe')?.contentDocument;
+    const target = doc?.body ?? host;
+    const WheelCtor = doc?.defaultView?.WheelEvent ?? WheelEvent;
+    for (const delta of ${JSON.stringify(deltas)}) {
+      target?.dispatchEvent(
+        new WheelCtor('wheel', {
+          deltaX: ${horizontal} ? delta : 0,
+          deltaY: ${horizontal} ? 0 : delta,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
     }
-  }
+    return true;
+  })()`);
+}
+
+async function dispatchPdfSwipeStream(page, deltas) {
+  await page.evaluate(`(() => {
+    const target = ${visiblePdfScroll};
+    for (const deltaX of ${JSON.stringify(deltas)}) {
+      target?.dispatchEvent(
+        new WheelEvent('wheel', { deltaX, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+    }
+    return true;
+  })()`);
+}
+
+async function waitForEpubSlideSettle(page) {
+  await page.waitFor(
+    `(() => {
+      const host = ${visibleEpubHost};
+      const pane = host?.closest('[data-testid="epub-slide-pane"]') ?? host;
+      const curlHost = host?.closest('[data-testid="epub-page-area"]')?.querySelector('[data-testid="epub-curl-host"]');
+      return (
+        (host?.querySelectorAll('iframe')?.length ?? 0) === 1 &&
+        (!pane || getComputedStyle(pane).transform === 'none') &&
+        (!curlHost || getComputedStyle(curlHost).visibility === 'hidden')
+      );
+    })()`,
+    'EPUB slide transition to settle',
+  );
 }
 
 /**
@@ -119,12 +158,13 @@ export async function wheelPagingFlow(page) {
   await waitForSettle(350);
 
   // Trackpad flick + decaying inertia advances once per flick, and reversal breaks inertia cleanly.
-  await wheelStream(page, centerEpub, [45, 55, 60, 40, 20, 10], 16);
+  await dispatchEpubWheelStream(page, [45, 55, 60, 40, 20, 10]);
   await page.waitFor(
     `(${epubScroller}?.scrollLeft ?? 0) > 0`,
     'trackpad vertical flick advances EPUB',
   );
-  await waitForSettle(320);
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(120);
   const afterInertiaLeft = await page.evaluate(`${epubScroller}?.scrollLeft ?? 0`);
   assert(
     Math.abs(afterInertiaLeft - spreadStepLeft) <= 4,
@@ -134,10 +174,9 @@ export async function wheelPagingFlow(page) {
   // Mid-inertia reversal: flick down then reverse sharply up before inertia expires.
   await page.evaluate(`(() => { const s = ${epubScroller}; if (s) s.scrollLeft = 0; })()`);
   await waitForSettle(150);
-  await wheelStream(page, centerEpub, [50, 60, 50, 25], 16);
-  await waitForSettle(40);
-  await wheelStream(page, centerEpub, [-70, -60], 16);
-  await waitForSettle(380);
+  await dispatchEpubWheelStream(page, [50, 60, 50, 25, -70, -60]);
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(120);
   assert(
     (await page.evaluate(`${epubScroller}?.scrollLeft ?? -1`)) === 0,
     'reversing direction during vertical wheel inertia must return to previous spread',
@@ -151,24 +190,41 @@ export async function wheelPagingFlow(page) {
     'Ctrl+wheel must not turn EPUB page',
   );
 
-  await page.swipe(centerEpub, 90, { steps: 3, gapMs: 12 });
+  await dispatchEpubWheelStream(page, [90, 90, 90], { horizontal: true });
   await page.waitFor(
     `(${epubScroller}?.scrollLeft ?? 0) > 0`,
     'horizontal swipe still works in EPUB spread',
   );
-  await waitForSettle(350);
-  await page.swipe(centerEpub, -90, { steps: 3, gapMs: 12 });
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(120);
+  await dispatchEpubWheelStream(page, [-90, -90, -90], { horizontal: true });
   await page.waitFor(
     `(${epubScroller}?.scrollLeft ?? 1) === 0`,
     'horizontal swipe back in EPUB spread',
   );
-  await waitForSettle(350);
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(120);
 
   // Vertical wheel crosses EPUB chapter seams forward and backward, and clamps at book end.
   for (let i = 0; i < 8; i += 1) {
     if (await page.evaluate(chapterIs('Chapter Two'))) break;
+    const beforeLeft = await page.evaluate(`${epubScroller}?.scrollLeft ?? 0`);
     await page.wheel(centerEpub, 120);
-    await waitForSettle(320);
+    await page.waitFor(
+      `(() => {
+        const host = ${visibleEpubHost};
+        const scroller = ${epubScroller};
+        const pane = host?.closest('[data-testid="epub-slide-pane"]') ?? host;
+        const curlHost = host?.closest('[data-testid="epub-page-area"]')?.querySelector('[data-testid="epub-curl-host"]');
+        const moved = ${chapterIs('Chapter Two')} || (scroller?.scrollLeft ?? 0) !== ${beforeLeft};
+        const settled =
+          (host?.querySelectorAll('iframe')?.length ?? 0) === 1 &&
+          (!pane || getComputedStyle(pane).transform === 'none') &&
+          (!curlHost || getComputedStyle(curlHost).visibility === 'hidden');
+        return moved && settled;
+      })()`,
+      'EPUB wheel step or Chapter Two seam crossing to settle',
+    );
   }
   assert(
     await page.evaluate(chapterIs('Chapter Two')),
@@ -184,16 +240,42 @@ export async function wheelPagingFlow(page) {
     chapterIs('Chapter One'),
     'vertical wheel up crosses seam back to Chapter One',
   );
+  await waitForEpubSlideSettle(page);
   assert(
     (await page.evaluate(`${epubScroller}?.scrollLeft ?? 0`)) > 0,
     'crossing backward chapter seam via wheel lands at last spread of Chapter One',
   );
-  await waitForSettle(350);
 
   // Advance to the end of Chapter Two and confirm wheel down clamps cleanly.
   for (let i = 0; i < 12; i += 1) {
+    const atBookEnd = await page.evaluate(
+      `(() => {
+        const s = ${epubScroller};
+        return ${chapterIs('Chapter Two')} && s && s.scrollLeft + s.clientWidth >= s.scrollWidth - 2;
+      })()`,
+    );
+    if (atBookEnd) break;
+    const before = await page.evaluate(
+      `({ left: ${epubScroller}?.scrollLeft ?? 0, ch2: ${chapterIs('Chapter Two')} })`,
+    );
     await page.wheel(centerEpub, 120);
-    await waitForSettle(280);
+    await page.waitFor(
+      `(() => {
+        const host = ${visibleEpubHost};
+        const scroller = ${epubScroller};
+        const pane = host?.closest('[data-testid="epub-slide-pane"]') ?? host;
+        const curlHost = host?.closest('[data-testid="epub-page-area"]')?.querySelector('[data-testid="epub-curl-host"]');
+        const moved =
+          (scroller?.scrollLeft ?? 0) !== ${before.left} ||
+          (${chapterIs('Chapter Two')} && !${before.ch2});
+        const settled =
+          (host?.querySelectorAll('iframe')?.length ?? 0) === 1 &&
+          (!pane || getComputedStyle(pane).transform === 'none') &&
+          (!curlHost || getComputedStyle(curlHost).visibility === 'hidden');
+        return moved && settled;
+      })()`,
+      'EPUB advance toward end of Chapter Two to settle',
+    );
   }
   const endPos = await page.evaluate(
     `({ left: ${epubScroller}?.scrollLeft ?? 0, max: (${epubScroller}?.scrollWidth ?? 0) - (${epubScroller}?.clientWidth ?? 0) })`,
@@ -341,10 +423,10 @@ export async function wheelPagingFlow(page) {
   await page.evaluate(`document.activeElement?.blur?.()`);
 
   // Horizontal swipe still works alongside vertical wheel.
-  await page.swipe(pdfCenter, 90, { steps: 3, gapMs: 12 });
+  await dispatchPdfSwipeStream(page, [90, 90, 90]);
   await page.waitFor(`${pdfPageField}?.value === '2'`, 'horizontal swipe advances PDF single page');
   await waitForSettle(320);
-  await page.swipe(pdfCenter, -90, { steps: 3, gapMs: 12 });
+  await dispatchPdfSwipeStream(page, [-90, -90, -90]);
   await page.waitFor(`${pdfPageField}?.value === '1'`, 'horizontal swipe returns PDF single page');
   await waitForSettle(320);
 
@@ -439,12 +521,26 @@ export async function wheelPagingFlow(page) {
   })()`);
   await waitForSettle(60);
   await page.wheel(pdfCenter, 120);
-  await page.waitFor(
-    `(() => { const s = ${visiblePdfScroll}; return s && s.scrollTop + s.clientHeight >= s.scrollHeight - 2; })()`,
-    'zoomed PDF hits bottom edge',
-  );
-  await waitForSettle(80);
-  await page.wheel(pdfCenter, 120);
+  const bottomLatch = await page.evaluate(`new Promise((resolve, reject) => {
+    const s = ${visiblePdfScroll};
+    if (!s) return reject(new Error('missing PDF scroller'));
+    const deadline = performance.now() + 5000;
+    const probe = () => {
+      if (s.scrollTop + s.clientHeight >= s.scrollHeight - 2) {
+        // Dispatch immediately on hitting the edge so waitFor/CDP latency never consumes EDGE_SETTLE_MS (250 ms).
+        s.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true }));
+        resolve(true);
+        return;
+      }
+      if (performance.now() >= deadline) {
+        reject(new Error('timed out waiting for zoomed PDF to hit bottom edge'));
+        return;
+      }
+      requestAnimationFrame(probe);
+    };
+    probe();
+  })`);
+  assert(bottomLatch === true, 'zoomed PDF hits bottom edge and probes latch');
   await waitForSettle(60);
   assert(
     (await page.evaluate(`${pdfPageField}?.value`)) === '1',
@@ -463,12 +559,25 @@ export async function wheelPagingFlow(page) {
   await page.evaluate(`(() => { const s = ${visiblePdfScroll}; if (s) s.scrollTop = 40; })()`);
   await waitForSettle(60);
   await page.wheel(pdfCenter, -120);
-  await page.waitFor(
-    `(${visiblePdfScroll}?.scrollTop ?? -1) === 0`,
-    'zoomed PDF page 2 hits top edge',
-  );
-  await waitForSettle(80);
-  await page.wheel(pdfCenter, -120);
+  const topLatch = await page.evaluate(`new Promise((resolve, reject) => {
+    const s = ${visiblePdfScroll};
+    if (!s) return reject(new Error('missing PDF scroller'));
+    const deadline = performance.now() + 5000;
+    const probe = () => {
+      if (s.scrollTop === 0) {
+        s.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true }));
+        resolve(true);
+        return;
+      }
+      if (performance.now() >= deadline) {
+        reject(new Error('timed out waiting for zoomed PDF page 2 to hit top edge'));
+        return;
+      }
+      requestAnimationFrame(probe);
+    };
+    probe();
+  })`);
+  assert(topLatch === true, 'zoomed PDF page 2 hits top edge and probes latch');
   await waitForSettle(60);
   assert(
     (await page.evaluate(`${pdfPageField}?.value`)) === '2',
