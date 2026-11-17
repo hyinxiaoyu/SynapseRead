@@ -87,6 +87,10 @@ const sampleTurn = (page, { frames = 40, target = 'epub' } = {}) => {
     const element = ${element};
     const host = ${host};
     const surface = ${surface};
+    const area = host?.closest('[data-testid="epub-page-area"]');
+    const curlHost = area?.querySelector('[data-testid="epub-curl-host"]');
+    const prevBtn = area?.querySelector('[data-testid="page-turn-previous"]');
+    const nextBtn = area?.querySelector('[data-testid="page-turn-next"]');
     window.__turnSamples = [];
     let frames = 0;
     const step = () => {
@@ -95,6 +99,11 @@ const sampleTurn = (page, { frames = 40, target = 'epub' } = {}) => {
         // The computed transform, so a Web Animation's frames are visible here.
         transform: element ? getComputedStyle(element).transform : '',
         page: surface ? getComputedStyle(surface).transform : '',
+        boxShadow: surface ? getComputedStyle(surface).boxShadow : 'none',
+        curlVis: curlHost ? getComputedStyle(curlHost).visibility : 'hidden',
+        prevLeft: prevBtn ? prevBtn.getBoundingClientRect().left : 0,
+        nextRight: nextBtn ? nextBtn.getBoundingClientRect().right : 0,
+        chapter: host?.querySelector('iframe')?.contentDocument?.querySelector('h1')?.textContent ?? '',
         opacity: host ? Number(getComputedStyle(host).opacity) : 1,
       });
       frames += 1;
@@ -174,6 +183,18 @@ export async function pagingFlow(page) {
     turn.every((sample) => sample.opacity === 1),
     'the page must never dim during a turn',
   );
+  assert(
+    turn.some((sample) => sample.boxShadow && sample.boxShadow !== 'none'),
+    'the sliding pane must cast a visible seam shadow during a turn',
+  );
+  assert(
+    turn.every(
+      (sample) =>
+        Math.abs(sample.prevLeft - turn[0].prevLeft) < 0.5 &&
+        Math.abs(sample.nextRight - turn[0].nextRight) < 0.5,
+    ),
+    'page-turn chevrons must remain stationary during a turn',
+  );
   // Nothing is left behind: no transform, and the strip is where the turn put it.
   const settled = await page.evaluate(`(() => {
     const host = ${visibleHost};
@@ -182,6 +203,28 @@ export async function pagingFlow(page) {
   })()`);
   assert(settled.transform === 'none', `the page must not stay transformed: ${settled.transform}`);
   assert(settled.left > before, 'the turn must move to the next page');
+
+  // ---- A short slow scrub below the commit threshold springs back to the original page ----
+  const beforeCancel = await page.evaluate(scrollLeft);
+  for (let step = 0; step < 3; step += 1) {
+    await page.evaluate(`(() => {
+      ${visibleHost}.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: 12, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+      return true;
+    })()`);
+    if (step < 2) await new Promise((done) => setTimeout(done, 30));
+  }
+  await page.waitFor(
+    `(() => {
+      const host = ${visibleHost};
+      const pane = host?.closest('[data-testid="epub-slide-pane"]') ?? host;
+      const curlHost = host?.closest('[data-testid="epub-page-area"]')?.querySelector('[data-testid="epub-curl-host"]');
+      return (${scrollLeft} === ${beforeCancel}) && getComputedStyle(pane).transform === 'none'
+        && getComputedStyle(curlHost).visibility === 'hidden';
+    })()`,
+    'a cancelled scrub to spring back to the original page',
+  );
 
   // ---- A two-finger swipe scrubs the strip 1:1, then commits ----
   const beforeSwipe = await page.evaluate(scrollLeft);
@@ -256,6 +299,41 @@ export async function pagingFlow(page) {
     await page.evaluate(chapterIs('Chapter One')),
     'must reach the seam still inside Chapter One',
   );
+  // A chapter seam click turn freezes the outgoing page before loading Chapter Two
+  // (never flashing scrollLeft = 0 un-staged) and slides across the full page area.
+  const seamStartLeft = await page.evaluate(scrollLeft);
+  await sampleTurn(page);
+  await page.clickButton('Next Page');
+  await page.waitFor(chapterIs('Chapter Two'), 'a forward click across the EPUB chapter seam');
+  await waitForEpubSettle(page);
+  const seamFwd = await turnSamples(page);
+  const seamFwdTravel = Math.max(...seamFwd.map((sample) => Math.abs(translateX(sample.page))));
+  assert(
+    seamFwdTravel >= widths.area - 1,
+    `forward seam turn must slide across the page area: travelled ${seamFwdTravel}px of ${widths.area}px`,
+  );
+  assert(
+    seamFwd.every(
+      (sample) =>
+        !(
+          sample.chapter === 'Chapter One' &&
+          sample.position !== seamStartLeft &&
+          sample.curlVis !== 'visible'
+        ),
+    ),
+    'forward seam turn must never flash page 1 of Chapter One un-staged',
+  );
+  await sampleTurn(page);
+  await page.clickButton('Previous Page');
+  await page.waitFor(chapterIs('Chapter One'), 'a backward click across the EPUB chapter seam');
+  await waitForEpubSettle(page);
+  const seamBack = await turnSamples(page);
+  const seamBackTravel = Math.max(...seamBack.map((sample) => Math.abs(translateX(sample.page))));
+  assert(
+    seamBackTravel >= widths.area - 1,
+    `backward seam turn must slide across the page area: travelled ${seamBackTravel}px of ${widths.area}px`,
+  );
+  // Swipe across the seam in both directions too.
   await page.evaluate(`(() => {
     const target = ${visibleHost};
     for (let step = 0; step < 6; step += 1) {
@@ -745,6 +823,93 @@ export async function pagingFlow(page) {
     })()`,
     'EPUB curl host and overlay to empty and reset after settle',
   );
+
+  // Backward curl across the chapter seam and in-place, plus scrub back to 0 and reduced motion.
+  await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const area = host?.closest('[data-testid="epub-page-area"]');
+    const leaf = area?.querySelector('[data-curl-part="leaf"]');
+    window.__backCurlPeak = 0;
+    let frames = 0;
+    const step = () => {
+      window.__backCurlPeak = Math.max(
+        window.__backCurlPeak,
+        leaf ? Number(getComputedStyle(leaf).opacity) : 0,
+      );
+      if (++frames < 40) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  })()`);
+  await page.clickButton('Previous Page');
+  await page.waitFor(chapterIs('Chapter One'), 'backward EPUB curl across chapter seam');
+  await waitForEpubSettle(page);
+  await new Promise((done) => setTimeout(done, 450));
+  assert(
+    (await page.evaluate('window.__backCurlPeak')) > 0.5,
+    'backward EPUB curl across seam must animate the folded leaf',
+  );
+  const beforeInPlaceBackCurl = await page.evaluate(scrollLeft);
+  if (beforeInPlaceBackCurl > 0) {
+    await page.clickButton('Previous Page');
+    await page.waitFor(
+      `${scrollLeft} < ${beforeInPlaceBackCurl}`,
+      'backward in-place EPUB curl turn',
+    );
+    await waitForEpubSettle(page);
+    await new Promise((done) => setTimeout(done, 450));
+  }
+
+  const curlZeroReset = await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const area = host?.closest('[data-testid="epub-page-area"]');
+    const curlHost = area?.querySelector('[data-testid="epub-curl-host"]');
+    const leaf = area?.querySelector('[data-curl-part="leaf"]');
+    for (let step = 0; step < 6; step += 1) {
+      host.dispatchEvent(new WheelEvent('wheel', { deltaX: 20, deltaY: 0, bubbles: true, cancelable: true }));
+    }
+    const midOpacity = Number(getComputedStyle(leaf).opacity);
+    for (let step = 0; step < 6; step += 1) {
+      host.dispatchEvent(new WheelEvent('wheel', { deltaX: -20, deltaY: 0, bubbles: true, cancelable: true }));
+    }
+    return {
+      midOpacity,
+      endOpacity: Number(getComputedStyle(leaf).opacity),
+      endVis: getComputedStyle(curlHost).visibility,
+      scrollLeft: ${scrollLeft},
+    };
+  })()`);
+  assert(
+    curlZeroReset.midOpacity > 0.3 &&
+      curlZeroReset.endOpacity === 0 &&
+      curlZeroReset.endVis === 'hidden',
+    `EPUB curl scrub returning to 0 must reset cleanly: ${JSON.stringify(curlZeroReset)}`,
+  );
+  await new Promise((done) => setTimeout(done, 250));
+
+  await page.emulateMedia(REDUCED);
+  const beforeReducedCurl = await page.evaluate(scrollLeft);
+  await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const leaf = host?.closest('[data-testid="epub-page-area"]')?.querySelector('[data-curl-part="leaf"]');
+    window.__reducedCurlPeak = 0;
+    let frames = 0;
+    const step = () => {
+      window.__reducedCurlPeak = Math.max(
+        window.__reducedCurlPeak,
+        leaf ? Number(getComputedStyle(leaf).opacity) : 0,
+      );
+      if (++frames < 20) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  })()`);
+  await page.clickButton('Next Page');
+  await page.waitFor(`${scrollLeft} > ${beforeReducedCurl}`, 'reduced-motion curl turn');
+  await new Promise((done) => setTimeout(done, 250));
+  assert(
+    (await page.evaluate('window.__reducedCurlPeak')) === 0,
+    'reduced motion must turn without playing the curl leaf animation',
+  );
+  await page.emulateMedia(ANIMATED);
 
   // ---- A TXT curl keeps the snapshot and shadow aligned with the text column ----
   const visibleTxtDoc = `[...document.querySelectorAll('[data-testid="txt-scroll"] [role="document"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;

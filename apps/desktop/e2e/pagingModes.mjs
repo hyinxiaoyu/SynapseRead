@@ -69,10 +69,10 @@ const closeAppearance = async (page) => {
   }
 };
 
-const turnAndMeasure = async (page) => {
+const turnAndMeasure = async (page, button = 'Next Page') => {
   await closeAppearance(page);
   await samplePanes(page);
-  await page.clickButton('Next Page');
+  await page.clickButton(button);
   await new Promise((done) => setTimeout(done, 650));
   const samples = await paneSamples(page);
   const travel = Math.max(...samples.map((sample) => Math.abs(translateX(sample.pane))));
@@ -129,6 +129,95 @@ export async function pagingModesFlow(page) {
     spreadTurn.settled.pane === 'none' && spreadTurn.settled.host === 'none',
     `the spread turn must leave no transform: ${JSON.stringify(spreadTurn.settled)}`,
   );
+
+  // Backward spread turn also moves the full page area with its spine.
+  const backSpreadTurn = await turnAndMeasure(page, 'Previous Page');
+  assert(
+    backSpreadTurn.travel >= spread.area - 1,
+    `a backward spread slide must travel the page area: ${JSON.stringify({ spread, backSpreadTurn })}`,
+  );
+  assert(backSpreadTurn.mirrorSpine, 'the backward outgoing spread must keep its spine');
+  assert(!backSpreadTurn.hostMoved, 'the host must stay untransformed on backward spread slide');
+
+  // Verify the seam shadow renders onto the outgoing paper in Light, Sepia, and Dark themes.
+  for (const themeLabel of ['Light', 'Sepia', 'Dark']) {
+    await page.clickButton('Reading appearance');
+    await page.waitFor(
+      `document.querySelector('[data-testid="appearance-popover"]')`,
+      'appearance popover',
+    );
+    await page.clickButton(themeLabel);
+    await closeAppearance(page);
+    const midSeam = await page.evaluate(`(() => {
+      const host = ${visibleHost};
+      const area = host?.closest('[data-testid="epub-page-area"]');
+      const pane = host?.closest('[data-testid="epub-slide-pane"]');
+      for (let step = 0; step < 15; step += 1) {
+        host.dispatchEvent(new WheelEvent('wheel', { deltaX: 20, deltaY: 0, bubbles: true, cancelable: true }));
+      }
+      // Keep the scrub alive at ±1 px so a slow screenshot round-trip never races
+      // past the 90 ms release idle window before capturing the seam shadow.
+      let toggle = 1;
+      window.__seamHoldTimer = window.setInterval(() => {
+        host.dispatchEvent(new WheelEvent('wheel', { deltaX: toggle, deltaY: 0, bubbles: true, cancelable: true }));
+        toggle = -toggle;
+      }, 30);
+      const areaRect = area.getBoundingClientRect();
+      const paneRect = pane.getBoundingClientRect();
+      return {
+        seamX: Math.round(paneRect.left),
+        y: Math.round(areaRect.top + 24),
+        farX: Math.round(areaRect.left + 60),
+      };
+    })()`);
+    const shot = await page.cdp.send('Page.captureScreenshot', { format: 'png' });
+    await page.evaluate(`(() => {
+      window.clearInterval(window.__seamHoldTimer);
+      delete window.__seamHoldTimer;
+      return true;
+    })()`);
+    const contrast = await page.evaluate(`(async () => {
+      const img = new Image();
+      img.src = 'data:image/png;base64,${shot.data}';
+      await img.decode();
+      const c = document.createElement('canvas');
+      c.width = img.width;
+      c.height = img.height;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      const far = ctx.getImageData(${midSeam.farX}, ${midSeam.y}, 1, 1).data;
+      let maxDiff = 0;
+      for (let dx = -24; dx <= -2; dx += 2) {
+        const px = ctx.getImageData(${midSeam.seamX} + dx, ${midSeam.y}, 1, 1).data;
+        const diff = Math.abs(px[0] - far[0]) + Math.abs(px[1] - far[1]) + Math.abs(px[2] - far[2]);
+        if (diff > maxDiff) maxDiff = diff;
+      }
+      return { far: [far[0], far[1], far[2]], maxDiff };
+    })()`);
+    assert(
+      contrast.maxDiff >= 6,
+      `the slide seam shadow must be visible in ${themeLabel} theme: ${JSON.stringify(contrast)}`,
+    );
+    await page.waitFor(
+      `(() => {
+        const pane = ${visibleHost}?.closest('[data-testid="epub-slide-pane"]');
+        return pane ? getComputedStyle(pane).transform === 'none' : false;
+      })()`,
+      `${themeLabel} seam scrub to settle`,
+    );
+    await page.clickButton('Previous Page');
+    await new Promise((done) => setTimeout(done, 400));
+  }
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'appearance popover',
+  );
+  await page.clickButton('Light');
+  await closeAppearance(page);
+
+  // Move to page 2 before testing a backward wide drag.
+  await turnAndMeasure(page, 'Next Page');
 
   // A backward drag longer than the measure but shorter than the pane must keep
   // following the fingers; reverse it before release so the book stays put.
@@ -234,5 +323,86 @@ export async function pagingModesFlow(page) {
   assert(
     fullTurn.settled.pane === 'none' && fullTurn.settled.host === 'none',
     `the Full-width turn must leave no transform: ${JSON.stringify(fullTurn.settled)}`,
+  );
+
+  // Full-width spread curl acts across the whole page area and shades the spine valley.
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'appearance popover',
+  );
+  await page.evaluate(`(() => {
+    const popover = document.querySelector('[data-testid="appearance-popover"]');
+    const curl = [...(popover?.querySelectorAll('button') ?? [])].find((b) => b.textContent.trim() === 'Curl');
+    curl?.click();
+    return !!curl;
+  })()`);
+  await closeAppearance(page);
+  await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const area = host?.closest('[data-testid="epub-page-area"]');
+    const curlHost = area?.querySelector('[data-testid="epub-curl-host"]');
+    const shadow = area?.querySelector('[data-testid="page-turn-shadow"]');
+    const spine = shadow?.querySelector('[data-curl-part="spine"]');
+    const leaf = shadow?.querySelector('[data-curl-part="leaf"]');
+    window.__spreadCurlSamples = [];
+    let frames = 0;
+    const step = () => {
+      window.__spreadCurlSamples.push({
+        curlW: curlHost?.getBoundingClientRect().width ?? 0,
+        shadowW: shadow?.getBoundingClientRect().width ?? 0,
+        areaW: area?.getBoundingClientRect().width ?? 0,
+        spineOpacity: spine ? Number(getComputedStyle(spine).opacity) : 0,
+        leafOpacity: leaf ? Number(getComputedStyle(leaf).opacity) : 0,
+      });
+      if (++frames < 40) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  })()`);
+  await page.clickButton('Previous Page');
+  await new Promise((done) => setTimeout(done, 550));
+  const spreadCurl = await page.evaluate('window.__spreadCurlSamples');
+  assert(
+    spreadCurl.some(
+      (s) =>
+        s.leafOpacity > 0.5 &&
+        s.spineOpacity > 0.2 &&
+        s.curlW >= s.areaW - 2 &&
+        s.shadowW >= s.areaW - 2,
+    ),
+    `Full-width spread curl must span the page area and shade the spine: ${JSON.stringify(spreadCurl.slice(0, 6))}`,
+  );
+
+  // Cancelled scrub spring-back interrupted by viewport resize must restore the original page.
+  await page.clickButton('Reading appearance');
+  await page.waitFor(
+    `document.querySelector('[data-testid="appearance-popover"]')`,
+    'appearance popover',
+  );
+  await page.evaluate(`(() => {
+    const popover = document.querySelector('[data-testid="appearance-popover"]');
+    const slide = [...(popover?.querySelectorAll('button') ?? [])].find((b) => b.textContent.trim() === 'Slide');
+    slide?.click();
+    return !!slide;
+  })()`);
+  await closeAppearance(page);
+  const beforeResizeLeft = await page.evaluate(`${strip}?.scrollLeft ?? 0`);
+  for (let step = 0; step < 3; step += 1) {
+    await page.evaluate(`(() => {
+      ${visibleHost}.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: 12, deltaY: 0, bubbles: true, cancelable: true }),
+      );
+      return true;
+    })()`);
+    if (step < 2) await new Promise((done) => setTimeout(done, 30));
+  }
+  await new Promise((done) => setTimeout(done, 100));
+  await page.setViewport(1300, 900);
+  await page.waitForReaderLayout();
+  await new Promise((done) => setTimeout(done, 350));
+  const afterResizeLeft = await page.evaluate(`${strip}?.scrollLeft ?? 0`);
+  assert(
+    afterResizeLeft === beforeResizeLeft,
+    `cancelled scrub interrupted by resize must stay on original page (${beforeResizeLeft}), saw ${afterResizeLeft}`,
   );
 }

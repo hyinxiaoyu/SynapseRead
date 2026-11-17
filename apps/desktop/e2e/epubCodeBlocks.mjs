@@ -2,6 +2,9 @@ import { assert } from './harness.mjs';
 
 const META = 4;
 
+// Windows clipboard text is read back with CRLF even when the app writes LF.
+const clipboardText = (text) => (process.platform === 'win32' ? text.replace(/\r\n/g, '\n') : text);
+
 const visible = (testId) =>
   `[...document.querySelectorAll('[data-testid="${testId}"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
 
@@ -548,7 +551,7 @@ export async function epubCodeBlocksFlow(page) {
   );
   const copiedPlain = await page.evaluate('navigator.clipboard.readText()');
   assert(
-    copiedPlain === EXPECTED_PLAIN_TEXT,
+    clipboardText(copiedPlain) === EXPECTED_PLAIN_TEXT,
     `plain block clipboard mismatch:\nEXPECTED: ${JSON.stringify(EXPECTED_PLAIN_TEXT)}\nACTUAL:   ${JSON.stringify(copiedPlain)}`,
   );
 
@@ -560,7 +563,7 @@ export async function epubCodeBlocksFlow(page) {
   );
   const copiedPandoc = await page.evaluate('navigator.clipboard.readText()');
   assert(
-    copiedPandoc === EXPECTED_PANDOC_TEXT,
+    clipboardText(copiedPandoc) === EXPECTED_PANDOC_TEXT,
     `Pandoc block clipboard mismatch:\nEXPECTED: ${JSON.stringify(EXPECTED_PANDOC_TEXT)}\nACTUAL:   ${JSON.stringify(copiedPandoc)}`,
   );
 
@@ -654,7 +657,7 @@ export async function epubCodeBlocksFlow(page) {
   );
   const copiedFromDialog = await page.evaluate('navigator.clipboard.readText()');
   assert(
-    copiedFromDialog === EXPECTED_PLAIN_TEXT,
+    clipboardText(copiedFromDialog) === EXPECTED_PLAIN_TEXT,
     `dialog clipboard mismatch:\nEXPECTED: ${JSON.stringify(EXPECTED_PLAIN_TEXT)}\nACTUAL:   ${JSON.stringify(copiedFromDialog)}`,
   );
 
@@ -703,7 +706,7 @@ export async function epubCodeBlocksFlow(page) {
   );
   const keyboardCopied = await page.evaluate('navigator.clipboard.readText()');
   assert(
-    keyboardCopied === EXPECTED_PLAIN_TEXT,
+    clipboardText(keyboardCopied) === EXPECTED_PLAIN_TEXT,
     `keyboard copy mismatch:\nEXPECTED: ${JSON.stringify(EXPECTED_PLAIN_TEXT)}\nACTUAL:   ${JSON.stringify(keyboardCopied)}`,
   );
   await page.press('Tab', 'Tab');

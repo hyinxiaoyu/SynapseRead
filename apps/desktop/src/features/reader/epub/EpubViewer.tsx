@@ -1384,12 +1384,14 @@ export function EpubViewer({
     enabled: handle !== null && isActive && paged && expandedCodeBlock === null,
     areaRef,
     pageRef: hostRef,
-    // A slide scrub moves the full-area pane, not the narrower reading measure;
-    // the gesture must finish at the pane's edge, not at the measure's. Fall back
-    // to the measure before the pane has been laid out.
+    // Both `slide` and `curl` act across the full page area, not the narrower
+    // reading measure; a scrub must reach the pane's edge, not the measure's.
+    // Fall back to the measure before the pane has been laid out.
     scrubWidth: () => {
       const paneWidth = areaRef.current?.getBoundingClientRect().width ?? 0;
-      if (paged && transition === 'slide' && paneWidth > 0) return paneWidth;
+      if (paged && (transition === 'slide' || transition === 'curl') && paneWidth > 0) {
+        return paneWidth;
+      }
       return hostRef.current?.getBoundingClientRect().width ?? 0;
     },
     onTurn: turnPage,
