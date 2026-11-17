@@ -34,7 +34,13 @@ import {
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
 import { AppearanceMenu, useAppearancePanel } from '@/features/reader/appearance/AppearancePopover';
-import { PAGE_PALETTES, pdfCanvasFilter } from '@/features/reader/appearance/themes';
+import {
+  PAPER_CURL_PALETTES,
+  PAGE_PALETTES,
+  PDF_UNTINTED_CURL_PALETTE,
+  pdfCanvasFilter,
+} from '@/features/reader/appearance/themes';
+import { resolvePageTransition } from '@/features/reader/appearance/transition';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import {
   annotationAtPoint,
@@ -77,10 +83,6 @@ import {
   ToolbarSeparator,
 } from '@/features/reader/ReaderToolbar';
 import {
-  PAPER_CURL_PALETTES,
-  PDF_UNTINTED_CURL_PALETTE,
-} from '@/features/reader/appearance/themes';
-import {
   animatePageTurn,
   animatePaperCurl,
   applyPaperCurl,
@@ -98,6 +100,7 @@ import {
 } from '@/features/reader/paging/pageTurn';
 import { PageTurnChevrons } from '@/features/reader/paging/PageTurnChevrons';
 import { PageTurnShadow } from '@/features/reader/paging/PageTurnShadow';
+import { computeScrollPageStep } from '@/features/reader/paging/scrollStep';
 import {
   ReaderFooter,
   type ScrubberModel,
@@ -115,6 +118,7 @@ import {
   type Bookmark,
   type DocumentViewerProps,
   type NormalizedRect,
+  type PageTransition,
   DEFAULT_PDF_LAYOUT,
   type PdfAnchor,
   type PdfDisplayMode,
@@ -179,6 +183,11 @@ const DEFAULT_PAGE_SIZE: PageSize = { width: 612, height: 792 };
 const ZOOM_STEP = 0.25;
 const THUMBNAIL_WIDTH_PX = 92;
 const THUMBNAIL_ROW_HEIGHT_PX = 148;
+/**
+ * How long vertical scrolling at a zoomed page's top or bottom edge must stay
+ * quiet before the next wheel event turns the page instead of decaying inertia.
+ */
+const EDGE_SETTLE_MS = 250;
 
 /**
  * How the pages are tinted for a reading theme. The filter sits on each canvas
@@ -1119,6 +1128,16 @@ function PdfPages({
    * boundary until the turn commits.
    */
   const [turning, setTurning] = useState(false);
+  const [curlSeq, setCurlSeq] = useState(0);
+  const lastScrollStreamAtRef = useRef<number | null>(null);
+  const pendingContinuousFadeRef = useRef<{
+    scrollTop: number;
+    viewportHeight: number;
+    direction: TurnDirection;
+    transition: PageTransition;
+    animated: WeakSet<HTMLElement>;
+  } | null>(null);
+  const continuousFadeCleanupRafRef = useRef<number | null>(null);
 
   const setCurrentPageIndex = useCallback((pageIndex: number) => {
     committedPageRef.current = pageIndex;
@@ -1164,6 +1183,10 @@ function PdfPages({
    * needs them. Only Continuous stacks them down the pane.
    */
   const paged = displayMode !== 'continuous';
+  const effectiveTransition = resolvePageTransition(effectivePreferences, { scrolled: !paged });
+  useEffect(() => {
+    lastScrollStreamAtRef.current = null;
+  }, [displayMode]);
   const rowCount =
     displayMode === 'two-page' ? spreadCount(engine.pageCount, coverPageAlone) : engine.pageCount;
 
@@ -1464,6 +1487,45 @@ function PdfPages({
     }, CURSOR_DEBOUNCE_MS);
   }, []);
 
+  const clearContinuousFade = useCallback(() => {
+    pendingContinuousFadeRef.current = null;
+    if (continuousFadeCleanupRafRef.current !== null) {
+      window.cancelAnimationFrame(continuousFadeCleanupRafRef.current);
+      continuousFadeCleanupRafRef.current = null;
+    }
+    const content = pageContentRef.current;
+    if (!content) return;
+    for (const row of content.querySelectorAll<HTMLElement>('[data-continuous-row]')) {
+      cancelPageTurn(row);
+    }
+  }, []);
+
+  const animateVisibleContinuousRows = useCallback(
+    (
+      scrollTop: number,
+      viewportHeight: number,
+      direction: TurnDirection,
+      transition: PageTransition,
+      animated: WeakSet<HTMLElement>,
+    ) => {
+      const content = pageContentRef.current;
+      if (!content) return;
+      for (const row of content.querySelectorAll<HTMLElement>('[data-continuous-row]')) {
+        if (animated.has(row)) continue;
+        const rowStart = Number(row.dataset.rowStart);
+        const rowH = Number(row.dataset.rowHeight);
+        const isVisible =
+          Number.isFinite(rowStart) && Number.isFinite(rowH) && viewportHeight > 0
+            ? rowStart + rowH > scrollTop && rowStart < scrollTop + viewportHeight
+            : true;
+        if (!isVisible) continue;
+        animated.add(row);
+        animatePageTurn(row, direction, transition);
+      }
+    },
+    [],
+  );
+
   /**
    * Moves the reader to `pageIndex` at `offset`, and makes that the position every
    * later report and layout change returns to.
@@ -1473,7 +1535,9 @@ function PdfPages({
       // A jump the reader asked for wins over a turn still sliding to its own page:
       // its completion would otherwise land on the page this one is leaving.
       cancelActiveSlide();
+      clearContinuousFade();
       setCurrentPageIndex(pageIndex);
+      programmaticScrollRef.current = { pageIndex, scrollTop: offset };
       scrollToOffset(offset);
       const actualScrollTop = scrollRef.current?.scrollTop ?? offset;
       lastScrollTop.current = actualScrollTop;
@@ -1488,6 +1552,7 @@ function PdfPages({
     },
     [
       cancelActiveSlide,
+      clearContinuousFade,
       offsetWithin,
       pageHeight,
       scheduleCursorReport,
@@ -1852,13 +1917,20 @@ function PdfPages({
   };
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
+    const prevScrollTop = lastScrollTop.current;
     const nextScrollTop = event.currentTarget.scrollTop;
     lastScrollTop.current = nextScrollTop;
     const isProgrammatic =
       programmaticScrollRef.current !== null &&
       Math.abs(nextScrollTop - programmaticScrollRef.current.scrollTop) <= 2;
     // A programmatic scroll already recorded its exact target.
-    if (!isProgrammatic) layoutAnchor.current = currentReturnLocation();
+    if (!isProgrammatic) {
+      if (paged && Math.abs(nextScrollTop - prevScrollTop) > 0.5) {
+        lastScrollStreamAtRef.current = Date.now();
+      }
+      if (!paged) clearContinuousFade();
+      layoutAnchor.current = currentReturnLocation();
+    }
     if (
       programmaticScrollRef.current &&
       Math.abs(nextScrollTop - programmaticScrollRef.current.scrollTop) <= 2
@@ -2156,9 +2228,16 @@ function PdfPages({
       }
     }
     cancelActiveSlide();
+    clearContinuousFade();
+    cancelCurlRef.current?.();
+    cancelCurlRef.current = null;
     scrubbingRef.current = false;
     setCurrentPageIndex(jumpAnchor.pageIndex);
     const top = offsetWithin(jumpAnchor.pageIndex, jumpAnchor.rects[0]?.y ?? 0);
+    programmaticScrollRef.current = {
+      pageIndex: jumpAnchor.pageIndex,
+      scrollTop: Math.max(top - (viewportHeight ?? 0) / 3, 0),
+    };
     scrollToOffset(Math.max(top - (viewportHeight ?? 0) / 3, 0));
     // Only a new jump, or the layout it depends on, should move the page.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2372,6 +2451,7 @@ function PdfPages({
   useLayoutEffect(() => {
     const stage = stageRef.current;
     const layout = curlLayoutRef.current;
+    const previousRenderedRow = renderedRowRef.current;
     renderedRowRef.current = layout.rowOfPage(currentPageIndex);
     const activeSlide = activeSlideRef.current;
     if (stage) {
@@ -2393,7 +2473,10 @@ function PdfPages({
       return;
     }
 
-    if (layout.rowOfPage(layout.currentPageIndex) !== pending.incomingRow) {
+    if (
+      layout.rowOfPage(layout.currentPageIndex) !== pending.incomingRow ||
+      pending.incomingRow === previousRenderedRow
+    ) {
       setTurning(false);
       resetPaperCurl(null, turnShadowRef.current);
       return;
@@ -2435,17 +2518,76 @@ function PdfPages({
         restoreStageSlots(stage);
       },
     });
-  }, [currentPageIndex, displayMode]);
+  }, [currentPageIndex, displayMode, curlSeq]);
 
   useEffect(() => {
     return () => {
       cancelActiveSlide();
+      clearContinuousFade();
       cancelCurlRef.current?.();
       cancelCurlRef.current = null;
     };
-  }, [cancelActiveSlide]);
+  }, [cancelActiveSlide, clearContinuousFade]);
 
   const turnPage = (direction: TurnDirection) => {
+    if (!paged) {
+      const scroller = scrollRef.current;
+      const nextTop = computeScrollPageStep({
+        scroller,
+        contentRoot: pageContentRef.current,
+        direction,
+      });
+      if (!scroller || nextTop === null) return;
+      backChip.dismiss();
+      scrubbingRef.current = false;
+      settleActiveSlide();
+      cancelCurlRef.current?.();
+      cancelCurlRef.current = null;
+      setTurning(false);
+      clearContinuousFade();
+
+      const loc = locationAt(nextTop, currentPageIndex);
+      const prevTop = scroller.scrollTop;
+      setCurrentPageIndex(loc.pageIndex);
+      layoutAnchor.current = loc;
+      programmaticScrollRef.current = { pageIndex: loc.pageIndex, scrollTop: nextTop };
+      scrollToOffset(nextTop);
+      if (scroller.scrollTop === prevTop && Math.abs(nextTop - prevTop) > 1) {
+        scroller.scrollTop = nextTop;
+      }
+      const actualTop = scroller.scrollTop;
+      lastScrollTop.current = actualTop;
+      const actualLoc = locationAt(actualTop, loc.pageIndex);
+      layoutAnchor.current = actualLoc;
+      programmaticScrollRef.current = { pageIndex: actualLoc.pageIndex, scrollTop: actualTop };
+      scheduleCursorReport();
+
+      if (effectiveTransition !== 'none' && !prefersReducedMotion()) {
+        const animated = new WeakSet<HTMLElement>();
+        animateVisibleContinuousRows(
+          actualTop,
+          scroller.clientHeight,
+          direction,
+          effectiveTransition,
+          animated,
+        );
+        pendingContinuousFadeRef.current = {
+          scrollTop: actualTop,
+          viewportHeight: scroller.clientHeight,
+          direction,
+          transition: effectiveTransition,
+          animated,
+        };
+        if (typeof window.requestAnimationFrame === 'function') {
+          continuousFadeCleanupRafRef.current = window.requestAnimationFrame(() => {
+            continuousFadeCleanupRafRef.current = null;
+            pendingContinuousFadeRef.current = null;
+          });
+        }
+      }
+      return;
+    }
+
     backChip.dismiss();
     scrubbingRef.current = false;
     settleActiveSlide();
@@ -2456,8 +2598,8 @@ function PdfPages({
     // Whatever the previous turn was doing is over; each mode below says whether the
     // column has to hold both pages again.
     setTurning(false);
-    const transition = effectivePreferences.pageTransition;
-    if (paged && transition === 'slide') {
+    const transition = effectiveTransition;
+    if (transition === 'slide') {
       settleStage(
         -direction * stageStride,
         PAGE_SLIDE_MS,
@@ -2466,23 +2608,37 @@ function PdfPages({
       );
       return;
     }
-    if (paged && transition === 'curl') {
+    if (transition === 'curl') {
       if (!prefersReducedMotion()) {
-        setTurning(true);
         if (stageRef.current) {
-          pendingCurlRef.current = {
-            outgoingRow: rowOfPage(effectivePageIndex()),
-            incomingRow: rowOfPage(target),
-            direction,
-            fromProgress: 0,
-            duration: PAGE_CURL_MS,
-          };
+          const targetRow = rowOfPage(target);
+          if (targetRow === renderedRowRef.current) {
+            // Reversed back to the already-rendered row within one batch: settle without
+            // queuing a curl from an off-screen/unpainted row.
+            pendingCurlRef.current = null;
+            restoreStageSlots(stageRef.current);
+            resetPaperCurl(null, turnShadowRef.current);
+          } else {
+            setTurning(true);
+            pendingCurlRef.current = {
+              outgoingRow: rowOfPage(effectivePageIndex()),
+              incomingRow: targetRow,
+              direction,
+              fromProgress: 0,
+              duration: PAGE_CURL_MS,
+            };
+            setCurlSeq((seq) => seq + 1);
+          }
         } else {
-          animatePaperCurl({
+          setTurning(true);
+          cancelCurlRef.current = animatePaperCurl({
             shadow: turnShadowRef.current,
             direction,
             spread: displayMode === 'two-page',
-            onFinish: () => setTurning(false),
+            onFinish: () => {
+              cancelCurlRef.current = null;
+              setTurning(false);
+            },
           });
         }
       }
@@ -2490,7 +2646,7 @@ function PdfPages({
       return;
     }
     scrollToPageOffset(target, offsetWithin(target, 0));
-    if (paged && transition !== 'none') {
+    if (transition !== 'none') {
       animatePageTurn(pageContentRef.current, direction, transition, turnShadowRef.current, {
         spread: displayMode === 'two-page',
       });
@@ -2515,7 +2671,7 @@ function PdfPages({
     move: (displacement: number) => {
       const stage = stageRef.current;
       if (!stage) return;
-      if (effectivePreferences.pageTransition !== 'curl') {
+      if (effectiveTransition !== 'curl') {
         stage.style.transform = `translateX(${-displacement}px)`;
         return;
       }
@@ -2553,7 +2709,7 @@ function PdfPages({
     },
     end: (_velocity: number, committed: TurnDirection | null) => {
       scrubbingRef.current = false;
-      const transition = effectivePreferences.pageTransition;
+      const transition = effectiveTransition;
       if (transition === 'curl') {
         const { direction: dir, progress } = curlScrubRef.current;
         curlScrubRef.current = { direction: null, progress: 0 };
@@ -2593,6 +2749,7 @@ function PdfPages({
           fromProgress: progress,
           duration: Math.max(120, Math.round((1 - progress) * PAGE_CURL_MS)),
         };
+        setCurlSeq((seq) => seq + 1);
         scrollToPageOffset(target, offsetWithin(target, 0));
         return;
       }
@@ -2706,6 +2863,28 @@ function PdfPages({
     enabled: isActive && paged && !captureMode,
     areaRef: scrollRef,
     onTurn: turnPage,
+    verticalWheel: (direction) => {
+      const scroller = scrollRef.current;
+      if (!scroller || !paged) return false;
+      const effectiveHeight = rowHeight(rowOfPage(effectivePageIndex()));
+      if (effectiveHeight <= scroller.clientHeight + 1) return true;
+      const scrollTop = activeSlideRef.current ? 0 : scroller.scrollTop;
+      const shouldScrollPage =
+        direction > 0 ? scrollTop + scroller.clientHeight < effectiveHeight - 1 : scrollTop > 1;
+      const timestamp = Date.now();
+      if (shouldScrollPage) {
+        lastScrollStreamAtRef.current = timestamp;
+        return false;
+      }
+      if (
+        lastScrollStreamAtRef.current !== null &&
+        timestamp - lastScrollStreamAtRef.current < EDGE_SETTLE_MS
+      ) {
+        lastScrollStreamAtRef.current = timestamp;
+        return false;
+      }
+      return true;
+    },
     // A page zoomed wider than the pane scrolls sideways instead.
     canSwipe: () => {
       const scroller = scrollRef.current;
@@ -2758,9 +2937,8 @@ function PdfPages({
       'view.zoomToWidth': { run: () => applyZoom('fit-width') },
       'view.rotateLeft': { run: () => rotateBy(-90) },
       'view.rotateRight': { run: () => rotateBy(90) },
-      // Continuous scroll keeps Space and Page Up/Down as the browser scrolls them.
-      'go.previousPage': { run: () => turnPage(-1), nativeAliases: !paged },
-      'go.nextPage': { run: () => turnPage(1), nativeAliases: !paged },
+      'go.previousPage': { run: () => turnPage(-1) },
+      'go.nextPage': { run: () => turnPage(1) },
       'go.previousChapter': {
         run: () => showPage(chapterStartOf(currentPageIndex - 1)),
         enabled: chapterStarts.length > 0 && currentPageIndex > (chapterStarts[0] ?? 0),
@@ -2835,6 +3013,33 @@ function PdfPages({
 
   /** The rows the virtualizer renders in a continuous mode. */
   const virtualItems = paged ? [] : virtualizer.getVirtualItems();
+  const virtualItemsKey = virtualItems.map((item) => item.index).join(',');
+  useLayoutEffect(() => {
+    if (paged || effectiveTransition === 'none' || prefersReducedMotion()) {
+      clearContinuousFade();
+      return;
+    }
+    const pending = pendingContinuousFadeRef.current;
+    if (!pending) return;
+    pendingContinuousFadeRef.current = null;
+    if (continuousFadeCleanupRafRef.current !== null) {
+      window.cancelAnimationFrame(continuousFadeCleanupRafRef.current);
+      continuousFadeCleanupRafRef.current = null;
+    }
+    animateVisibleContinuousRows(
+      pending.scrollTop,
+      pending.viewportHeight,
+      pending.direction,
+      pending.transition,
+      pending.animated,
+    );
+  }, [
+    paged,
+    effectiveTransition,
+    virtualItemsKey,
+    animateVisibleContinuousRows,
+    clearContinuousFade,
+  ]);
   /**
    * The scrollable column is the page being read, never the neighbours staged beside
    * it: a smaller page between larger ones would otherwise scroll past its own edges
@@ -3052,6 +3257,7 @@ function PdfPages({
               preferences={effectivePreferences}
               onChange={updatePreferences}
               format="pdf"
+              scrolled={!paged}
             />
             <ToolbarSeparator />
             <BookmarkToggleButton
@@ -3295,6 +3501,9 @@ function PdfPages({
                     return (
                       <div
                         key={`${displayMode}-${item.key}`}
+                        data-continuous-row={item.index}
+                        data-row-start={item.start}
+                        data-row-height={itemHeight}
                         className="absolute flex items-start"
                         style={{
                           top: 0,

@@ -2,8 +2,9 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
-import { SCRUB_IDLE_MS } from '@/features/reader/paging/pageTurn';
+import { PAGE_TURN_ANIMATION_ID, SCRUB_IDLE_MS } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
@@ -123,12 +124,14 @@ function Harness({
   isActive = true,
   chromeHidden = false,
   preferences,
+  onPreferencesChange,
 }: {
   store: Store;
   documentId: string;
   isActive?: boolean;
   chromeHidden?: boolean;
   preferences?: ReadingPreferences;
+  onPreferencesChange?: (patch: Partial<ReadingPreferences>) => void;
 }) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
@@ -159,6 +162,7 @@ function Harness({
       onJumpHandled={state.completeJump}
       onCursorChange={(anchor) => state.reportCursor(documentId, anchor)}
       {...(preferences ? { preferences } : {})}
+      {...(onPreferencesChange ? { onPreferencesChange } : {})}
       {...(pdfLayout
         ? {
             pdfLayout,
@@ -907,11 +911,14 @@ describe('PdfViewer', () => {
     const edgeClick = (x: number) =>
       fireEvent.click(pane, { clientX: x, clientY: 300, button: 0, detail: 1 });
 
-    // Continuous scroll keeps native scrolling: no zones, no chevrons, Space untouched.
+    // Continuous scroll disables edge zones and chevrons, while Space steps by viewport.
     edgeClick(PANE_PX - 10);
     expect(readout).toHaveTextContent('Page 1 of 5');
     expect(screen.queryByRole('button', { name: 'Next Page' })).not.toBeInTheDocument();
-    expect(fireEvent.keyDown(pane, { key: ' ', code: 'Space' })).toBe(true);
+    expect(fireEvent.keyDown(pane, { key: ' ', code: 'Space' })).toBe(false);
+    expect(pane.scrollTop).toBeGreaterThan(0);
+    expect(fireEvent.keyDown(pane, { key: ' ', code: 'Space', shiftKey: true })).toBe(false);
+    expect(pane.scrollTop).toBe(0);
 
     fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
     edgeClick(PANE_PX - 10);
@@ -2279,5 +2286,660 @@ describe('PdfViewer', () => {
     } finally {
       HTMLElement.prototype.animate = originalAnimate;
     }
+  });
+
+  describe('continuous scroll fade and viewport step (#103)', () => {
+    it('shows only None and Fade in AppearanceMenu while continuous, preserving pageTransition across mode switches', async () => {
+      const { store, documentId } = await setup();
+      await act(() => store.getState().updateReadingPreferences({ pageTransition: 'curl' }));
+
+      function StorePrefsHarness() {
+        const prefs = store((s) => s.readingPreferences);
+        return (
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={prefs}
+            onPreferencesChange={(patch) => void store.getState().updateReadingPreferences(patch)}
+          />
+        );
+      }
+
+      render(<StorePrefsHarness />);
+      await pageElement(0);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+      let popover = await screen.findByTestId('appearance-popover');
+      let pageTurnGroup = within(popover).getByRole('radiogroup', { name: 'Page turn' });
+      expect(
+        within(pageTurnGroup)
+          .getAllByRole('radio')
+          .map((el) => el.textContent),
+      ).toEqual(['None', 'Fade']);
+      expect(within(pageTurnGroup).getByRole('radio', { name: 'Fade' })).toHaveAttribute(
+        'aria-checked',
+        'true',
+      );
+
+      fireEvent.click(within(pageTurnGroup).getByRole('radio', { name: 'None' }));
+      expect(store.getState().readingPreferences.scrollPageTransition).toBe('none');
+      expect(store.getState().readingPreferences.pageTransition).toBe('curl');
+      fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+
+      // Switch to Single page: all 5 transitions reappear with Curl still active.
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+      popover = await screen.findByTestId('appearance-popover');
+      pageTurnGroup = within(popover).getByRole('radiogroup', { name: 'Page turn' });
+      expect(
+        within(pageTurnGroup)
+          .getAllByRole('radio')
+          .map((el) => el.textContent),
+      ).toEqual(['None', 'Slide', 'Fade', 'Curl', 'Stack']);
+      expect(within(pageTurnGroup).getByRole('radio', { name: 'Curl' })).toHaveAttribute(
+        'aria-checked',
+        'true',
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+
+      // Switch back to Continuous scroll: None remains active for scrolling.
+      fireEvent.click(screen.getByRole('radio', { name: 'Continuous scroll' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+      popover = await screen.findByTestId('appearance-popover');
+      pageTurnGroup = within(popover).getByRole('radiogroup', { name: 'Page turn' });
+      expect(within(pageTurnGroup).getByRole('radio', { name: 'None' })).toHaveAttribute(
+        'aria-checked',
+        'true',
+      );
+    });
+
+    it('steps by viewport with obscured-line continuity and fades only visible continuous rows', async () => {
+      const originalAnimate = HTMLElement.prototype.animate;
+      const animatedTargets: { element: HTMLElement; keyframes: Keyframe[] }[] = [];
+      HTMLElement.prototype.animate = vi.fn(function (this: HTMLElement, keyframes: Keyframe[]) {
+        animatedTargets.push({ element: this, keyframes });
+        return {
+          id: PAGE_TURN_ANIMATION_ID,
+          finished: Promise.resolve({} as Animation),
+          cancel: vi.fn(),
+        } as unknown as Animation;
+      });
+
+      const originalGetClientRects = Range.prototype.getClientRects;
+      try {
+        // Place the second span of page 0 straddling the bottom of the 600 px viewport (588..612).
+        Range.prototype.getClientRects = function (this: Range) {
+          const span = this.startContainer.parentElement as Element;
+          const page = span.closest('[data-page-index]');
+          const pageIndex = Number(page?.getAttribute('data-page-index') ?? 0);
+          const line = [...(span.parentElement as Element).children]
+            .filter((child) => child.tagName === 'SPAN')
+            .indexOf(span);
+          const top =
+            pageIndex === 0 && line === 1 ? 588 : 50 + pageIndex * (PAGE_PX + GAP_PX) + line * 40;
+          return [new DOMRect(161, top, 120, 24)] as unknown as DOMRectList;
+        };
+
+        const { store, documentId } = await setup();
+        render(
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'curl' }}
+          />,
+        );
+        await pageElement(0);
+        const pane = await scroller();
+        vi.spyOn(pane, 'scrollHeight', 'get').mockReturnValue(5 * (PAGE_PX + GAP_PX));
+        const pageContent = pane.firstElementChild as HTMLElement;
+        const readout = screen.getByTestId('reader-footer-readout');
+        fireEvent.click(readout); // Page 1 of 5
+
+        // Space steps forward keeping the straddling line (588..612) wholly visible with 24px context pad -> 564.
+        expect(fireEvent.keyDown(pane, { key: ' ', code: 'Space' })).toBe(false);
+        expect(pane.scrollTop).toBe(564);
+        expect(animatedTargets.length).toBeGreaterThan(0);
+        expect(animatedTargets.some((entry) => entry.element === pageContent)).toBe(false);
+        expect(
+          animatedTargets.every((entry) => entry.element.hasAttribute('data-continuous-row')),
+        ).toBe(true);
+        expect(animatedTargets.every((entry) => entry.keyframes.length === 2)).toBe(true);
+        expect(animatedTargets[0]?.keyframes).toEqual([{ opacity: 0.2 }, { opacity: 1 }]);
+        const animatedRows = animatedTargets.map((entry) => entry.element.dataset.continuousRow);
+        expect(animatedRows).toContain('0');
+        expect(animatedRows).toContain('1');
+        expect(animatedRows).not.toContain('2');
+
+        // Go menu, PageDown, ArrowRight, and scrubber arrows all trigger continuous step + fade.
+        animatedTargets.length = 0;
+        forgetRecentCommandRuns();
+        act(() => void runCommand('go.nextPage', 'menu'));
+        forgetRecentCommandRuns();
+        expect(pane.scrollTop).toBeGreaterThan(564);
+        expect(animatedTargets.length).toBeGreaterThan(0);
+        expect(readout).toHaveTextContent('Page 2 of 5');
+
+        animatedTargets.length = 0;
+        const scrubber = screen.getByTestId('progress-scrubber');
+        fireEvent.keyDown(scrubber, { key: 'ArrowLeft', code: 'ArrowLeft' });
+        expect(animatedTargets.length).toBeGreaterThan(0);
+
+        animatedTargets.length = 0;
+        fireEvent.keyDown(pane, { key: 'PageDown', code: 'PageDown' });
+        expect(animatedTargets.length).toBeGreaterThan(0);
+
+        animatedTargets.length = 0;
+        fireEvent.keyDown(pane, { key: 'ArrowLeft', code: 'ArrowLeft' });
+        expect(animatedTargets.length).toBeGreaterThan(0);
+
+        // Shift+Space and PageUp step backward with top-straddling line continuity.
+        const beforeBack = pane.scrollTop;
+        animatedTargets.length = 0;
+        fireEvent.keyDown(pane, { key: ' ', code: 'Space', shiftKey: true });
+        expect(pane.scrollTop).toBeLessThan(beforeBack);
+        expect(animatedTargets.length).toBeGreaterThan(0);
+
+        animatedTargets.length = 0;
+        fireEvent.keyDown(pane, { key: 'PageUp', code: 'PageUp' });
+        expect(animatedTargets.length).toBeGreaterThan(0);
+
+        // Stepping forward again syncs cursor anchor after debounce.
+        fireEvent.keyDown(pane, { key: ' ', code: 'Space' });
+        await waitFor(
+          () => {
+            const cursor = store.getState().documents[0]?.lastCursorAnchor as PdfAnchor | null;
+            expect(cursor).not.toBeNull();
+            expect(cursor?.rects[0]?.y).toBeGreaterThan(0);
+          },
+          { timeout: 2000 },
+        );
+
+        // Normal wheel and non-page-turn jumps (Go To page, Back) stay instant without fade.
+        animatedTargets.length = 0;
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+        expect(animatedTargets).toHaveLength(0);
+
+        const pageInput = screen.getByLabelText('Page number');
+        fireEvent.change(pageInput, { target: { value: '4' } });
+        fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+        expect(readout).toHaveTextContent('Page 4 of 5');
+        expect(animatedTargets).toHaveLength(0);
+      } finally {
+        HTMLElement.prototype.animate = originalAnimate;
+        Range.prototype.getClientRects = originalGetClientRects;
+      }
+    });
+
+    it('is a no-op at document boundaries and skips animation for none or reduced motion', async () => {
+      const originalAnimate = HTMLElement.prototype.animate;
+      const animateSpy = vi.fn(function () {
+        return {
+          id: PAGE_TURN_ANIMATION_ID,
+          finished: Promise.resolve({} as Animation),
+          cancel: vi.fn(),
+        } as unknown as Animation;
+      });
+      HTMLElement.prototype.animate = animateSpy;
+
+      try {
+        const { store, documentId } = await setup();
+        const maxHeight = 5 * (PAGE_PX + GAP_PX);
+        const view = render(
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={{
+              ...DEFAULT_READING_PREFERENCES,
+              pageTransition: 'curl',
+              scrollPageTransition: null,
+            }}
+          />,
+        );
+        await pageElement(0);
+        const pane = await scroller();
+        vi.spyOn(pane, 'scrollHeight', 'get').mockReturnValue(maxHeight);
+
+        // Top boundary: Previous Page does not scroll or animate.
+        expect(pane.scrollTop).toBe(0);
+        fireEvent.keyDown(pane, { key: 'ArrowLeft', code: 'ArrowLeft' });
+        expect(pane.scrollTop).toBe(0);
+        expect(animateSpy).not.toHaveBeenCalled();
+
+        // Bottom boundary: Next Page does not scroll or animate.
+        await scrollTo(maxHeight - VIEWPORT_PX);
+        fireEvent.keyDown(pane, { key: ' ', code: 'Space' });
+        expect(pane.scrollTop).toBe(maxHeight - VIEWPORT_PX);
+        expect(animateSpy).not.toHaveBeenCalled();
+
+        // scrollPageTransition: 'none' steps scrollTop without calling animate.
+        await scrollTo(0);
+        view.rerender(
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={{
+              ...DEFAULT_READING_PREFERENCES,
+              pageTransition: 'curl',
+              scrollPageTransition: 'none',
+            }}
+          />,
+        );
+        fireEvent.keyDown(pane, { key: 'PageDown', code: 'PageDown' });
+        expect(pane.scrollTop).toBeGreaterThan(0);
+        expect(animateSpy).not.toHaveBeenCalled();
+
+        // Reduced motion skips animation even when scrollPageTransition is 'fade'.
+        await scrollTo(0);
+        view.rerender(
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={{
+              ...DEFAULT_READING_PREFERENCES,
+              pageTransition: 'slide',
+              scrollPageTransition: 'fade',
+            }}
+          />,
+        );
+        const originalMatchMedia = window.matchMedia;
+        window.matchMedia = vi.fn((query: string) => ({
+          matches: query === '(prefers-reduced-motion: reduce)',
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        })) as unknown as typeof window.matchMedia;
+        try {
+          fireEvent.keyDown(pane, { key: 'ArrowRight', code: 'ArrowRight' });
+          expect(pane.scrollTop).toBeGreaterThan(0);
+          expect(animateSpy).not.toHaveBeenCalled();
+        } finally {
+          window.matchMedia = originalMatchMedia;
+        }
+      } finally {
+        HTMLElement.prototype.animate = originalAnimate;
+      }
+    });
+  });
+
+  describe('paginated vertical mouse wheel and zoom priority (#106)', () => {
+    it('turns immediately in fit-page for single and two-page modes, while leaving continuous untouched', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+      const pane = await scroller();
+      vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout); // Page 1 of 5
+
+      // Continuous mode keeps native vertical wheel scrolling.
+      expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      // Single page + Fit page (576 <= 601): immediate turns on mouse notch, line mode, and trackpad ticks.
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Fit page' }));
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      // At page 0 boundary wheeling up stays at Page 1 and prevents outer rubber-banding.
+      expect(fireEvent.wheel(pane, { deltaY: -120 })).toBe(false);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      // Pixel notch down -> Page 2.
+      expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(false);
+      expect(readout).toHaveTextContent('Page 2 of 5');
+
+      // DOM_DELTA_LINE notch down -> Page 3.
+      expect(fireEvent.wheel(pane, { deltaY: 1, deltaMode: 1 })).toBe(false);
+      expect(readout).toHaveTextContent('Page 3 of 5');
+
+      // Trackpad vertical stream accumulation -> Page 4, then up -> Page 3.
+      expect(fireEvent.wheel(pane, { deltaY: 22 })).toBe(false);
+      expect(fireEvent.wheel(pane, { deltaY: 22 })).toBe(false);
+      expect(readout).toHaveTextContent('Page 4 of 5');
+      expect(fireEvent.wheel(pane, { deltaY: -120 })).toBe(false);
+      expect(readout).toHaveTextContent('Page 3 of 5');
+
+      // Two pages + Fit page turns whole spreads.
+      fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+      expect(readout).toHaveTextContent('Page 3 of 5');
+      expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(false);
+      expect(readout).toHaveTextContent('Page 5 of 5');
+      // Last spread boundary absorbs without advancing.
+      expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(false);
+      expect(readout).toHaveTextContent('Page 5 of 5');
+      expect(fireEvent.wheel(pane, { deltaY: -120 })).toBe(false);
+      expect(readout).toHaveTextContent('Page 3 of 5');
+    });
+
+    it('scrolls overflowing zoomed pages first and enforces the 250ms edge-settle latch', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { store, documentId } = await setup();
+        render(
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'none' }}
+          />,
+        );
+        await pageElement(0);
+        const pane = await scroller();
+        vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+        const readout = screen.getByTestId('reader-footer-readout');
+        fireEvent.click(readout);
+
+        // Single page at Fit width: page height is 800 > viewport 600.
+        fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+        expect(readout).toHaveTextContent('Page 1 of 5');
+
+        // At top (scrollTop = 0), wheeling down lets the page scroll natively.
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+
+        // Middle of page (scrollTop = 100): both up and down allow native page scroll.
+        pane.scrollTop = 100;
+        act(() => void pane.dispatchEvent(new Event('scroll')));
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+        expect(fireEvent.wheel(pane, { deltaY: -120 })).toBe(true);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+
+        // Reach bottom edge (scrollTop = 200): decaying momentum within 250ms is absorbed without turning.
+        pane.scrollTop = 200;
+        act(() => void pane.dispatchEvent(new Event('scroll')));
+        vi.advanceTimersByTime(100);
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+
+        // Refreshing momentum at 150ms keeps the latch alive; 200ms later it is still latched.
+        vi.advanceTimersByTime(200);
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+
+        // Once settled >= 250ms at the bottom edge, wheeling down turns to Page 2.
+        vi.advanceTimersByTime(260);
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 2 of 5');
+
+        // On Page 2 at top (scrollTop = 0), simulate scrolling up to the top edge then settling.
+        pane.scrollTop = 80;
+        act(() => void pane.dispatchEvent(new Event('scroll')));
+        pane.scrollTop = 0;
+        act(() => void pane.dispatchEvent(new Event('scroll')));
+        vi.advanceTimersByTime(100);
+        expect(fireEvent.wheel(pane, { deltaY: -120 })).toBe(true);
+        expect(readout).toHaveTextContent('Page 2 of 5');
+        vi.advanceTimersByTime(260);
+        expect(fireEvent.wheel(pane, { deltaY: -120 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+
+        // Two-page zoomed in (125% -> 1000 px tall): overflows vertically, waits for edge settle.
+        fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 50%
+        fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 75%
+        fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 100%
+        fireEvent.click(screen.getByRole('button', { name: 'Zoom in' })); // 125%
+        vi.spyOn(pane, 'scrollWidth', 'get').mockReturnValue(2000);
+        pane.scrollTop = 0;
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+        pane.scrollTop = 400;
+        vi.advanceTimersByTime(300);
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 3 of 5');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('treats an incoming slide page as top-aligned and preserves zoom/modifiers/drag priority', async () => {
+      const originalAnimate = HTMLElement.prototype.animate;
+      const pending: { resolve: () => void; cancel: ReturnType<typeof vi.fn<() => void>> }[] = [];
+      HTMLElement.prototype.animate = vi.fn(function () {
+        let resolveFinished: () => void = () => undefined;
+        let rejectFinished: (reason?: unknown) => void = () => undefined;
+        const finished = new Promise<Animation>((resolve, reject) => {
+          resolveFinished = () => resolve({} as Animation);
+          rejectFinished = reject;
+        });
+        const cancel = vi.fn(() => rejectFinished(new DOMException('AbortError', 'AbortError')));
+        pending.push({ resolve: resolveFinished, cancel });
+        return { id: PAGE_TURN_ANIMATION_ID, finished, cancel } as unknown as Animation;
+      });
+
+      try {
+        const { store, documentId } = await setup();
+        render(
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'slide' }}
+          />,
+        );
+        await pageElement(0);
+        const pane = await scroller();
+        vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+        const readout = screen.getByTestId('reader-footer-readout');
+        fireEvent.click(readout);
+        fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+
+        // At bottom of overflowing page 1, turn to page 2 -> slide starts (activeSlideRef active).
+        pane.scrollTop = 200;
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(false);
+        expect(pending).toHaveLength(1);
+        // While sliding to page 2, another wheel down scrolls page 2 instead of skipping to page 3.
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+        await act(async () => {
+          pending[0]?.resolve();
+        });
+        expect(readout).toHaveTextContent('Page 2 of 5');
+
+        // Modifiers (Ctrl+wheel zoom, Meta, Alt, Shift) and active drag (buttons: 1) never turn pages.
+        fireEvent.click(screen.getByRole('button', { name: 'Fit page' }));
+        expect(
+          fireEvent.wheel(pane, { deltaY: -100, ctrlKey: true, clientX: 318, clientY: 300 }),
+        ).toBe(false);
+        expect((pane.firstElementChild as HTMLElement).style.transform).toMatch(/^scale\(/);
+        await waitFor(() => expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent('88%'));
+        expect(readout).toHaveTextContent('Page 2 of 5');
+
+        expect(fireEvent.wheel(pane, { deltaY: 120, metaKey: true })).toBe(true);
+        expect(fireEvent.wheel(pane, { deltaY: 120, altKey: true })).toBe(true);
+        expect(fireEvent.wheel(pane, { deltaY: 120, shiftKey: true })).toBe(true);
+        expect(fireEvent.wheel(pane, { deltaY: 120, buttons: 1 })).toBe(true);
+        expect(readout).toHaveTextContent('Page 2 of 5');
+
+        // WebKit pinch gestures remain intact alongside vertical wheel turns.
+        const gStart = new Event('gesturestart', { bubbles: true, cancelable: true });
+        Object.assign(gStart, { scale: 1, clientX: 318, clientY: 300 });
+        const gChange = new Event('gesturechange', { bubbles: true, cancelable: true });
+        Object.assign(gChange, { scale: 1.5, clientX: 318, clientY: 300 });
+        const gEnd = new Event('gestureend', { bubbles: true, cancelable: true });
+        Object.assign(gEnd, { scale: 1.5, clientX: 318, clientY: 300 });
+        act(() => {
+          pane.dispatchEvent(gStart);
+          pane.dispatchEvent(gChange);
+        });
+        expect((pane.firstElementChild as HTMLElement).style.transform).toBe('scale(1.5)');
+        act(() => void pane.dispatchEvent(gEnd));
+        expect(screen.getByTestId('pdf-zoom-level')).toHaveTextContent('132%');
+        expect(readout).toHaveTextContent('Page 2 of 5');
+      } finally {
+        HTMLElement.prototype.animate = originalAnimate;
+      }
+    });
+  });
+
+  describe('consecutive blank-area clicks and curl reversal (#107)', () => {
+    it('turns on detail > 1 blank-area clicks across transitions without dropping or duplicating turns', async () => {
+      const { store, documentId } = await setup();
+      const view = render(
+        <Harness
+          store={store}
+          documentId={documentId}
+          preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'fade' }}
+        />,
+      );
+      await pageElement(0);
+      const pane = await scroller();
+      vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout);
+
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      const clickAt = (x: number, detail: number) => {
+        fireEvent.pointerDown(pane, { clientX: x, clientY: 300, button: 0, pointerId: 1 });
+        fireEvent.click(pane, { clientX: x, clientY: 300, button: 0, detail });
+      };
+
+      // Consecutive double/triple clicks on right margin advance 1 page per click.
+      clickAt(PANE_PX - 10, 1);
+      clickAt(PANE_PX - 10, 2);
+      clickAt(PANE_PX - 10, 3);
+      expect(readout).toHaveTextContent('Page 4 of 5');
+
+      // Reversing with detail: 2 on left margin steps back cleanly.
+      clickAt(10, 1);
+      clickAt(10, 2);
+      expect(readout).toHaveTextContent('Page 2 of 5');
+
+      // Two-page mode with rapid detail: 2 advances a spread.
+      fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+      clickAt(PANE_PX - 10, 2);
+      expect(readout).toHaveTextContent('Page 3 of 5');
+
+      // Dismissing an active selection consumes Click 1 and turns once on Click 2 (detail: 2).
+      const page2 = await pageElement(2);
+      const node = textNode(page2, 0);
+      select([node, 0], [node, 5]);
+      fireEvent.pointerDown(pane, { clientX: 10, clientY: 300, button: 0, pointerId: 1 });
+      window.getSelection()?.removeAllRanges();
+      act(() => void document.dispatchEvent(new Event('selectionchange')));
+      fireEvent.click(pane, { clientX: 10, clientY: 300, button: 0, detail: 1 });
+      expect(readout).toHaveTextContent('Page 3 of 5');
+      clickAt(10, 2);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      view.unmount();
+    });
+
+    it('clears pendingCurlRef and turning on same-batch +1/-1 curl reversal and handles mid-curl reversals', async () => {
+      const frames: FrameRequestCallback[] = [];
+      let clock = 0;
+      const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+        frames.push(cb);
+        return frames.length;
+      });
+      const cancelSpy = vi
+        .spyOn(window, 'cancelAnimationFrame')
+        .mockImplementation(() => undefined);
+      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+
+      try {
+        const { store, documentId } = await setup();
+        render(
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'curl' }}
+          />,
+        );
+        await pageElement(0);
+        fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Actual size' }));
+        const pageInput = screen.getByLabelText('Page number');
+        fireEvent.change(pageInput, { target: { value: '4' } });
+        fireEvent.submit(pageInput.closest('form') as HTMLFormElement);
+        await pageElement(3);
+
+        const stage = screen.getByTestId('pdf-stage');
+        const column = stage.parentElement as HTMLElement;
+        expect(column.style.height).toBe('400px');
+
+        const nextBtn = screen.getByRole('button', { name: 'Next Page' });
+        const prevBtn = screen.getByRole('button', { name: 'Previous Page' });
+
+        // Same-batch +1 then -1 leaves page unchanged at 4 and must NOT leave turning=true or start a curl.
+        frames.length = 0;
+        act(() => {
+          nextBtn.click();
+          prevBtn.click();
+        });
+        expect(pageInput).toHaveValue('4');
+        expect(column.style.height).toBe('400px');
+        expect(frames).toHaveLength(0);
+
+        // Subsequent committed curl +1 -> +1/-1 mid-curl reversal recovers cleanly.
+        fireEvent.click(nextBtn);
+        expect(pageInput).toHaveValue('5');
+        expect(column.style.height).toBe('800px');
+        expect(frames.length).toBeGreaterThan(0);
+
+        // Mid-curl reversal back to page 4 cancels first curl and curls back to page 4 cleanly.
+        fireEvent.click(prevBtn);
+        expect(pageInput).toHaveValue('4');
+        clock = 500;
+        act(() => {
+          frames.at(-1)?.(clock);
+        });
+        expect(column.style.height).toBe('400px');
+        expect(stage.querySelector<HTMLElement>('[data-stage-row="4"]')?.style.clipPath).toBe('');
+      } finally {
+        rafSpy.mockRestore();
+        cancelSpy.mockRestore();
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('preserves double-click word selection on highlights without opening the popover or turning', async () => {
+      engineState.pageAnnotations.set(0, {
+        links: [
+          {
+            id: 'link-0',
+            rect: { x: 0.88, y: 0.2, width: 0.08, height: 0.04 },
+            targetPageIndex: 2,
+          },
+        ],
+        embeddedAnnotations: [],
+        unsupportedSubtypes: [],
+      });
+
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      const page0 = await pageElement(0);
+      const pane = await scroller();
+      vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+
+      const node = textNode(page0, 0);
+      select([node, 0], [node, 10]);
+      fireEvent.click(await screen.findByRole('button', { name: 'Yellow highlight' }));
+      await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+
+      const singlePage0 = await pageElement(0);
+      const mark = singlePage0.querySelector<HTMLElement>('[data-annotation-id]')!;
+      // Double-click on the highlighted word (even inside the outer 12% margin zone) must NOT
+      // open the edit popover or turn the page, and leaves the word selected.
+      select([textNode(singlePage0, 0), 0], [textNode(singlePage0, 0), 5]);
+      fireEvent.pointerDown(mark, { clientX: 40, clientY: 135, button: 0, pointerId: 1 });
+      fireEvent.click(mark, { clientX: 40, clientY: 135, button: 0, detail: 2 });
+      expect(screen.queryByTestId('selection-popover')).toBeNull();
+      expect(window.getSelection()?.toString()).toBe('First');
+      expect(readout).toHaveTextContent('Page 1 of 5');
+      window.getSelection()?.removeAllRanges();
+      act(() => void document.dispatchEvent(new Event('selectionchange')));
+
+      // Double-clicking an internal link near the right edge navigates the link rather than turning via edge gesture.
+      const link = await screen.findByTestId('pdf-internal-link');
+      fireEvent.click(link, { detail: 2 });
+      expect(readout).toHaveTextContent('Page 3 of 5');
+    });
   });
 });
