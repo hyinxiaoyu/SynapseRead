@@ -17,13 +17,16 @@ const ALT = 1;
 const META = 4;
 const SHIFT = 8;
 
+const noPageTurnAnimExpr = (targetsExpr) =>
+  `!(${targetsExpr}).filter(Boolean).some((el) => el.getAnimations().some((a) => a.id === 'page-turn'))`;
+
 /**
  * Installs a rAF observer before triggering a turn so the 200 ms fade Web Animation
  * (`id: 'page-turn'`) is sampled cleanly without racing wall-clock or chapter-seam timers.
  */
 async function armFadeProbe(page, targetsExpr) {
   await page.waitFor(
-    `!(${targetsExpr}).filter(Boolean).some((el) => el.getAnimations().some((a) => a.id === 'page-turn'))`,
+    noPageTurnAnimExpr(targetsExpr),
     'previous page-turn fade animation to settle before probing',
   );
   await page.evaluate(`(() => {
@@ -129,6 +132,110 @@ function assertNoFade(probe, label) {
   assert(
     !probe.hadPageTurnAnim && probe.minOpacity >= 0.99,
     `${label} should NOT run fade animation (got minOpacity=${probe.minOpacity}, hadPageTurnAnim=${probe.hadPageTurnAnim})`,
+  );
+}
+
+/**
+ * Waits until `scrollerExpr` has reached `'top'` or `'bottom'` and any active
+ * `page-turn` Web Animation on `targetsExpr` has settled.
+ */
+async function waitForScrollBoundary(page, { scrollerExpr, targetsExpr, edge, description }) {
+  const edgeExpr =
+    edge === 'top'
+      ? 's.scrollTop === 0'
+      : 's.scrollHeight > s.clientHeight && s.scrollTop + s.clientHeight >= s.scrollHeight - 1';
+  await page.waitFor(
+    `(() => {
+      const s = ${scrollerExpr};
+      return Boolean(s && ${edgeExpr} && ${noPageTurnAnimExpr(targetsExpr)});
+    })()`,
+    description,
+  );
+}
+
+/**
+ * Waits until the visible EPUB scroll chapter has expanded (`scrollHeight > clientHeight`),
+ * its `scrollHeight` has stabilized across layout frames, and any `page-turn` Web Animation
+ * on `[data-testid="epub-host"]` has finished. When `edge` is `'top'` or `'bottom'`,
+ * pins `scrollTop` to that boundary and confirms `scrollTop` + `scrollHeight` stay settled.
+ */
+async function settleEpubScroll(page, { expectedChapter = null, edge = null } = {}) {
+  const chapterExpr = expectedChapter ? chapterIs(expectedChapter) : 'true';
+  const animSettledExpr = noPageTurnAnimExpr(
+    `[...document.querySelectorAll('[data-testid="epub-host"]')]`,
+  );
+  const atEdgeExpr =
+    edge === 'top'
+      ? 's.scrollTop === 0'
+      : edge === 'bottom'
+        ? 's.scrollTop + s.clientHeight >= s.scrollHeight - 1'
+        : 'true';
+  const readyExpr = `Boolean(
+    (${chapterExpr}) &&
+      s &&
+      s.clientHeight > 0 &&
+      s.scrollHeight > s.clientHeight &&
+      (${animSettledExpr}),
+  )`;
+  const settledExpr = `Boolean(
+    (${chapterExpr}) &&
+      s &&
+      s.clientHeight > 0 &&
+      s.scrollHeight > s.clientHeight &&
+      (${atEdgeExpr}) &&
+      (${animSettledExpr}),
+  )`;
+  const pinEdgeTarget = edge === 'top' ? '0' : 's.scrollHeight - s.clientHeight';
+
+  await page.waitFor(
+    `(() => {
+      const s = ${visibleEpubHost}?.querySelector('.epub-container');
+      return ${readyExpr};
+    })()`,
+    `EPUB Scroll ${expectedChapter ?? 'chapter'} to expand and page-turn fade to finish`,
+  );
+
+  if (edge !== null) {
+    await page.evaluate(`(() => {
+      const s = ${visibleEpubHost}?.querySelector('.epub-container');
+      if (s) s.scrollTop = ${pinEdgeTarget};
+    })()`);
+  }
+
+  const deadline = Date.now() + 10000;
+  let lastHeight = await page.evaluate(
+    `${visibleEpubHost}?.querySelector('.epub-container')?.scrollHeight ?? 0`,
+  );
+  let stableSince = Date.now();
+  while (Date.now() - stableSince < 180) {
+    if (Date.now() > deadline) {
+      throw new Error(
+        `timed out waiting for EPUB Scroll ${expectedChapter ?? 'chapter'} height to stabilize (lastHeight=${lastHeight})`,
+      );
+    }
+    await new Promise((done) => setTimeout(done, 50));
+    const pinBlock =
+      edge === null
+        ? ''
+        : `if (s.scrollHeight !== ${lastHeight} || !(${atEdgeExpr})) s.scrollTop = ${pinEdgeTarget};`;
+    const state = await page.evaluate(`(() => {
+      const s = ${visibleEpubHost}?.querySelector('.epub-container');
+      if (!s) return { ok: false, scrollHeight: 0 };
+      ${pinBlock}
+      return { ok: ${settledExpr}, scrollHeight: s.scrollHeight };
+    })()`);
+    if (!state.ok || state.scrollHeight !== lastHeight) {
+      lastHeight = state.scrollHeight;
+      stableSince = Date.now();
+    }
+  }
+
+  await page.waitFor(
+    `(() => {
+      const s = ${visibleEpubHost}?.querySelector('.epub-container');
+      return ${settledExpr};
+    })()`,
+    `EPUB Scroll ${expectedChapter ?? 'chapter'} settled${edge ? ` at ${edge} boundary` : ''}`,
   );
 }
 
@@ -397,9 +504,7 @@ export async function scrollPagingFlow(page) {
   );
 
   // Explicit turn under None runs immediately without fade animation.
-  await page.evaluate(
-    `(() => { const s = ${visibleEpubHost}?.querySelector('.epub-container'); if (s) s.scrollTop = 0; })()`,
-  );
+  await settleEpubScroll(page, { expectedChapter: 'Chapter One', edge: 'top' });
   await armFadeProbe(page, `[${visibleEpubHost}]`);
   await page.press(' ', 'Space');
   await page.waitFor(
@@ -410,13 +515,7 @@ export async function scrollPagingFlow(page) {
 
   // Switch back to Fade for fade + overlap tests, reset to top of Chapter One.
   await selectPageTurn(page, 'Fade', { customize: true });
-  await page.evaluate(
-    `(() => { const s = ${visibleEpubHost}?.querySelector('.epub-container'); if (s) s.scrollTop = 0; })()`,
-  );
-  await page.waitFor(
-    `(${visibleEpubHost}?.querySelector('.epub-container')?.scrollTop ?? -1) === 0`,
-    'EPUB Scroll at top of Chapter One',
-  );
+  await settleEpubScroll(page, { expectedChapter: 'Chapter One', edge: 'top' });
 
   // Document start boundary no-op: no scroll and no fade.
   await armFadeProbe(page, `[${visibleEpubHost}]`);
@@ -483,6 +582,7 @@ export async function scrollPagingFlow(page) {
 
   // TOC jump lands directly without triggering page-turn fade, then return cleanly.
   await page.showSidebarTab('Table of Contents');
+  await page.waitForReaderLayout();
   await armFadeProbe(page, `[${visibleEpubHost}]`);
   await page.clickTreeItem('Two');
   await page.waitFor(chapterIs('Chapter Two'), 'TOC jump to Chapter Two');
@@ -490,14 +590,11 @@ export async function scrollPagingFlow(page) {
   await page.clickTreeItem('One');
   await page.waitFor(chapterIs('Chapter One'), 'TOC jump back to Chapter One');
   await page.hideSidebar();
+  await page.waitForReaderLayout();
   await page.evaluate(`document.activeElement?.blur?.()`);
 
   // EPUB Scroll chapter seam forward (bottom of Chapter One -> top of Chapter Two with fade).
-  await page.evaluate(`(() => {
-    const s = ${visibleEpubHost}?.querySelector('.epub-container');
-    if (s) s.scrollTop = s.scrollHeight - s.clientHeight;
-  })()`);
-  await new Promise((done) => setTimeout(done, 80));
+  await settleEpubScroll(page, { expectedChapter: 'Chapter One', edge: 'bottom' });
   await armFadeProbe(page, `[${visibleEpubHost}]`);
   await page.press(' ', 'Space');
   await page.waitFor(
@@ -516,6 +613,7 @@ export async function scrollPagingFlow(page) {
   );
 
   // EPUB Scroll chapter seam backward (top of Chapter Two -> bottom of Chapter One with fade).
+  await settleEpubScroll(page, { expectedChapter: 'Chapter Two' });
   await armFadeProbe(page, `[${visibleEpubHost}]`);
   await page.press(' ', 'Space', SHIFT);
   await page.waitFor(
@@ -538,17 +636,15 @@ export async function scrollPagingFlow(page) {
   );
 
   // Return to Chapter Two bottom -> document end boundary no-op without fade.
-  await page.evaluate(`(() => {
-    const s = ${visibleEpubHost}?.querySelector('.epub-container');
-    if (s) s.scrollTop = s.scrollHeight - s.clientHeight;
-  })()`);
+  await settleEpubScroll(page, { expectedChapter: 'Chapter One', edge: 'bottom' });
+  await armFadeProbe(page, `[${visibleEpubHost}]`);
   await page.press(' ', 'Space');
   await page.waitFor(chapterIs('Chapter Two'), 'return to Chapter Two');
-  await page.evaluate(`(() => {
-    const s = ${visibleEpubHost}?.querySelector('.epub-container');
-    if (s) s.scrollTop = s.scrollHeight - s.clientHeight;
-  })()`);
-  await new Promise((done) => setTimeout(done, 80));
+  assertFadePlayed(
+    await finishFadeProbe(page, { waitForFade: true }),
+    'EPUB Scroll return to Chapter Two',
+  );
+  await settleEpubScroll(page, { expectedChapter: 'Chapter Two', edge: 'bottom' });
   const endMetrics = await page.evaluate(`(() => {
     const s = ${visibleEpubHost}?.querySelector('.epub-container');
     return s ? { scrollTop: s.scrollTop, rect: (() => { const r = s.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })() } : null;
@@ -564,9 +660,7 @@ export async function scrollPagingFlow(page) {
   );
 
   // Normal wheel scrolling in EPUB Scroll moves without fade.
-  await page.evaluate(
-    `(() => { const s = ${visibleEpubHost}?.querySelector('.epub-container'); if (s) s.scrollTop = 0; })()`,
-  );
+  await settleEpubScroll(page, { expectedChapter: 'Chapter Two', edge: 'top' });
   await armFadeProbe(page, `[${visibleEpubHost}]`);
   await page.wheel(endMetrics.rect, 220);
   await page.waitFor(
@@ -770,6 +864,12 @@ export async function scrollPagingFlow(page) {
     const s = ${visiblePdfScroll};
     if (s) s.scrollTop = s.scrollHeight - s.clientHeight;
   })()`);
+  await waitForScrollBoundary(page, {
+    scrollerExpr: visiblePdfScroll,
+    targetsExpr: pdfRowTargets,
+    edge: 'bottom',
+    description: 'PDF Continuous settled at bottom boundary',
+  });
   await new Promise((done) => setTimeout(done, 120));
   const pdfEndTop = await page.evaluate(`${visiblePdfScroll}?.scrollTop ?? 0`);
   await armFadeProbe(page, pdfRowTargets);
@@ -815,6 +915,12 @@ export async function scrollPagingFlow(page) {
 
   // Start boundary no-op in TXT without fade.
   await page.evaluate(`(() => { const s = ${visibleTxtScroll}; if (s) s.scrollTop = 0; })()`);
+  await waitForScrollBoundary(page, {
+    scrollerExpr: visibleTxtScroll,
+    targetsExpr: txtFadeTarget,
+    edge: 'top',
+    description: 'TXT settled at top boundary',
+  });
   await armFadeProbe(page, txtFadeTarget);
   await page.press('ArrowLeft');
   assertNoFade(await finishFadeProbe(page), 'TXT start boundary no-op');
@@ -948,10 +1054,12 @@ export async function scrollPagingFlow(page) {
 
   // Document end boundary no-op without fade.
   await page.press('End');
-  await page.waitFor(
-    `(() => { const s = ${visibleTxtScroll}; return s && s.scrollTop + s.clientHeight >= s.scrollHeight - 4; })()`,
-    'End jumps to bottom of TXT',
-  );
+  await waitForScrollBoundary(page, {
+    scrollerExpr: visibleTxtScroll,
+    targetsExpr: txtFadeTarget,
+    edge: 'bottom',
+    description: 'End jumps to bottom of TXT',
+  });
   const txtEndTop = await page.evaluate(`${visibleTxtScroll}?.scrollTop ?? 0`);
   await armFadeProbe(page, txtFadeTarget);
   await page.press('ArrowRight');
