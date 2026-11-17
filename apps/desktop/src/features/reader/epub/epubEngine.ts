@@ -33,6 +33,7 @@ import {
   type TurnDirection,
   type WheelSample,
 } from '@/features/reader/paging/pageTurn';
+import { computeScrollPageStep } from '@/features/reader/paging/scrollStep';
 import {
   type AnnotationStyle,
   DEFAULT_READING_PREFERENCES,
@@ -137,6 +138,13 @@ export interface EpubLocation {
   chapterEnd?: number;
 }
 
+export interface EpubFramePointerUp {
+  x: number;
+  y: number;
+  overContent: boolean;
+  hasSelection: boolean;
+}
+
 /** The whole of what the reader needs from epub.js; nothing else imports it. */
 export interface EpubHandle {
   readonly toc: readonly EpubTocItem[];
@@ -187,7 +195,9 @@ export interface EpubHandle {
    * A page turn. With `animate` the strip slides across a whole page — or across
    * a chapter seam — so both pages stay on screen; in `curl` mode the outgoing
    * spread stays pinned and peels away via conical clip; otherwise the next page
-   * or chapter is shown straight away. Resolves once the turn has settled.
+   * or chapter is shown straight away. Resolves with `true` when the page, scroll
+   * position, or chapter actually moved, or `false` when blocked at a boundary
+   * or canceled/superseded.
    */
   turnPage(
     direction: TurnDirection,
@@ -196,9 +206,11 @@ export interface EpubHandle {
       transition?: PageTransition | undefined;
       spread?: boolean | undefined;
     },
-  ): Promise<void>;
+  ): Promise<boolean>;
   /** Whether the current chapter has another page that way, without leaving it. */
   canTurnInPlace(direction: TurnDirection): boolean;
+  /** Whether any rendered chapter frame currently holds a non-collapsed selection. */
+  hasSelection(): boolean;
   /** Starts a live scrub from where the strip is now. */
   beginScrub(options?: {
     transition?: PageTransition | undefined;
@@ -248,6 +260,8 @@ export interface EpubHandle {
   onContextMenu(listener: (event: MouseEvent) => void): void;
   /** Pointer events in a chapter frame, in the top window's coordinates. */
   onGesture(listener: (sample: PageGestureSample) => void): void;
+  /** Primary button release inside a chapter frame when press began outside it. */
+  onFramePointerUp?(listener: (sample: EpubFramePointerUp) => void): void;
   /** Wheel events in a chapter frame; the listener reports whether it used one. */
   onWheel(listener: (wheel: WheelSample) => boolean): void;
   /** The copyable `<pre>` code block currently hovered or focused in a chapter frame, or null. */
@@ -913,17 +927,20 @@ export async function openEpubDocument(
   let keyDownListener: (event: KeyboardEvent) => void = () => undefined;
   let contextMenuListener: (event: MouseEvent) => void = () => undefined;
   let gestureListener: (sample: PageGestureSample) => void = () => undefined;
+  let framePointerUpListener: (sample: EpubFramePointerUp) => void = () => undefined;
   let wheelListener: (wheel: WheelSample) => boolean = () => false;
   let markClickListener: (annotationId: string, rect: ViewportRect | null) => void = () =>
     undefined;
   let pointerListener: (down: boolean) => void = () => undefined;
   let codeBlockHoverListener: (block: EpubCodeBlockHover | null) => void = () => undefined;
   let destroyed = false;
+  let framePointerDown = false;
   let frameCursor = '';
   /** One listener for every chapter document, so it can be removed again by identity. */
   const onChapterContextMenu = (event: MouseEvent) => contextMenuListener(event);
   const codeBlockIds = new WeakMap<Element, string>();
   let nextCodeBlockId = 0;
+  const wiredChapterDocs = new WeakSet<Document>();
   const hoveredCodeDocs = new WeakSet<Document>();
   const codeTabObservers = new Set<MutationObserver>();
   let lastHoveredBlock: {
@@ -1043,10 +1060,20 @@ export async function openEpubDocument(
       targetElement.hasAttribute('data-synapse-copy-buffer')
     );
   };
+  const clearFramePointerDown = () => {
+    if (!framePointerDown) return;
+    framePointerDown = false;
+    pressedSelection = null;
+    pointerListener(false);
+  };
   const onOwnerPointerDown = (event: PointerEvent) => {
+    if (event.button === 0) clearFramePointerDown();
     if (lastHoveredBlock !== null && !isCodeActionPillTarget(event.target)) {
       clearCodeBlockHover();
     }
+  };
+  const onOwnerPointerUp = () => {
+    clearFramePointerDown();
   };
   const onOwnerPointerMove = (event: PointerEvent) => {
     if (event.buttons !== 0 || lastHoveredBlock === null) return;
@@ -1074,6 +1101,8 @@ export async function openEpubDocument(
   };
   ownerDoc.addEventListener('pointermove', onOwnerPointerMove);
   ownerDoc.addEventListener('pointerdown', onOwnerPointerDown);
+  ownerDoc.addEventListener('pointerup', onOwnerPointerUp);
+  ownerDoc.addEventListener('pointercancel', onOwnerPointerUp);
   ownerDoc.addEventListener('focusin', onOwnerFocusIn);
 
   rendition.hooks.content.register((contents: Contents) => {
@@ -1173,143 +1202,173 @@ export async function openEpubDocument(
       const targetElement = target as Element | null;
       return typeof targetElement?.closest === 'function' ? targetElement.closest('pre') : null;
     };
-    // epub.js puts a click handler on every relative link that calls `display()`
-    // directly, before the viewer hears about it, so an internal link would jump
-    // without joining the reader's jump history or offering the way back. Capture
-    // the click first and let the viewer navigate. Absolute links keep their own
-    // behaviour (epub.js already sends them to a new tab).
-    chapterDoc.addEventListener(
-      'click',
-      (event: MouseEvent) => {
-        if (event.button !== 0) return;
-        const target = event.target as Element | null;
-        const anchor = target?.closest?.('a[href]') ?? null;
-        // Pandoc line-number anchors inside `<pre>` are decorative targets (and in
-        // `.html` spine chapters HTML5 parses `<a .../>` as wrapping the line's
-        // code spans): suppress LinkPeek/navigation, but still update hover on click.
-        const pre = anchor?.closest('pre') ?? null;
-        if (anchor?.getAttribute('aria-hidden') === 'true' && pre !== null) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (!hasSelection()) inspectCodeBlock(pre, { x: event.clientX, y: event.clientY });
-          return;
-        }
-        const raw = anchor?.getAttribute('href') ?? '';
-        const href = resolveChapterLink(raw, spineItems[contents.sectionIndex]?.href);
-        if (href === null) return;
-        event.preventDefault();
-        event.stopPropagation();
-        const frame = contents.window.frameElement?.getBoundingClientRect();
-        const box = anchor?.getBoundingClientRect?.();
-        const rect =
-          box && (box.width > 0 || box.height > 0)
-            ? {
-                top: box.top + (frame?.top ?? 0),
-                left: box.left + (frame?.left ?? 0),
-                bottom: box.bottom + (frame?.top ?? 0),
-                right: box.right + (frame?.left ?? 0),
-              }
-            : null;
-        internalLinkListener(href, {
-          noteref: anchor ? isNoteRef(anchor) : false,
-          rect,
-        });
-      },
-      true,
-    );
-    // `selected` only reports new selections, not one that has been cleared.
-    chapterDoc.addEventListener('selectionchange', () => {
-      const selection = contents.window.getSelection();
-      if (!selection || selection.isCollapsed) {
-        releasedSelection = null;
-        selectionListener(null);
-      }
-    });
-    chapterDoc.addEventListener('keydown', (event: KeyboardEvent) => {
-      if (
-        !event.defaultPrevented &&
-        !event.isComposing &&
-        event.key === 'Tab' &&
-        !event.shiftKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        !event.metaKey
-      ) {
-        const pre = preFromTarget(event.target);
-        if (pre && event.target === pre && isCopyableCodeBlock(pre)) {
-          if (lastHoveredBlock?.id !== blockIdOf(pre)) inspectCodeBlock(pre);
-          const scope = element.closest('[data-testid="epub-viewer"]') ?? ownerDoc;
-          const copyButton = scope.querySelector<HTMLElement>('[data-testid="epub-code-copy"]');
-          if (copyButton && !copyButton.hasAttribute('disabled')) {
+    chapterDoc.documentElement.style.cursor = frameCursor;
+    if (!wiredChapterDocs.has(chapterDoc)) {
+      wiredChapterDocs.add(chapterDoc);
+      // epub.js puts a click handler on every relative link that calls `display()`
+      // directly, before the viewer hears about it, so an internal link would jump
+      // without joining the reader's jump history or offering the way back. Capture
+      // the click first and let the viewer navigate. Absolute links keep their own
+      // behaviour (epub.js already sends them to a new tab).
+      chapterDoc.addEventListener(
+        'click',
+        (event: MouseEvent) => {
+          if (event.button !== 0) return;
+          const target = event.target as Element | null;
+          const anchor = target?.closest?.('a[href]') ?? null;
+          // Pandoc line-number anchors inside `<pre>` are decorative targets (and in
+          // `.html` spine chapters HTML5 parses `<a .../>` as wrapping the line's
+          // code spans): suppress LinkPeek/navigation, but still update hover on click.
+          const pre = anchor?.closest('pre') ?? null;
+          if (anchor?.getAttribute('aria-hidden') === 'true' && pre !== null) {
             event.preventDefault();
-            copyButton.focus({ preventScroll: true });
+            event.stopPropagation();
+            if (!hasSelection()) inspectCodeBlock(pre, { x: event.clientX, y: event.clientY });
             return;
           }
+          const raw = anchor?.getAttribute('href') ?? '';
+          const href = resolveChapterLink(raw, spineItems[contents.sectionIndex]?.href);
+          if (href === null) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const frame = contents.window.frameElement?.getBoundingClientRect();
+          const box = anchor?.getBoundingClientRect?.();
+          const rect =
+            box && (box.width > 0 || box.height > 0)
+              ? {
+                  top: box.top + (frame?.top ?? 0),
+                  left: box.left + (frame?.left ?? 0),
+                  bottom: box.bottom + (frame?.top ?? 0),
+                  right: box.right + (frame?.left ?? 0),
+                }
+              : null;
+          internalLinkListener(href, {
+            noteref: anchor ? isNoteRef(anchor) : false,
+            rect,
+          });
+        },
+        true,
+      );
+      // `selected` only reports new selections, not one that has been cleared.
+      chapterDoc.addEventListener('selectionchange', () => {
+        const selection = contents.window.getSelection();
+        if (!selection || selection.isCollapsed) {
+          releasedSelection = null;
+          selectionListener(null);
         }
-      }
-      keyDownListener(event);
-    });
-    // The app guards the webview's own context menu on the window, and a chapter is
-    // a frame: its right clicks never reach that listener. The same function serves
-    // every chapter, so a re-rendered document gets one listener, not two.
-    chapterDoc.addEventListener('contextmenu', onChapterContextMenu);
-    // Page turns are decided outside the frame, in the top window's coordinates.
-    chapterDoc.documentElement.style.cursor = frameCursor;
-    chapterDoc.addEventListener('pointerup', (event: PointerEvent) => {
-      if (event.button !== 0) return;
-      pointerListener(false);
-      const selection = selectionOf(contents);
-      const pressed = pressedSelection;
-      pressedSelection = null;
-      if (!selection) return;
-      // A click inside the existing selection leaves it in place; it is not a new
-      // one, and reporting it again would re-open a popover the reader dismissed.
-      if (pressed?.cfiRange === selection.cfiRange && pressed.text === selection.text) return;
-      reportSelection(selection, true);
-    });
-    chapterDoc.addEventListener('pointerdown', (event: PointerEvent) => {
-      if (event.button !== 0) return;
-      pressedSelection = selectionOf(contents);
-      pointerListener(true);
-      const { left, top } = offset();
-      gestureListener({
-        kind: 'down',
-        x: left + event.clientX,
-        y: top + event.clientY,
-        hasSelection: hasSelection(),
       });
-    });
-    chapterDoc.addEventListener('pointermove', (event: PointerEvent) => {
-      if (event.buttons !== 0) return;
-      const { left, top } = offset();
-      gestureListener({
-        kind: 'move',
-        x: left + event.clientX,
-        y: top + event.clientY,
-        overContent: isOverContent(event.target, event.clientX, event.clientY),
+      chapterDoc.addEventListener('keydown', (event: KeyboardEvent) => {
+        if (
+          !event.defaultPrevented &&
+          !event.isComposing &&
+          event.key === 'Tab' &&
+          !event.shiftKey &&
+          !event.ctrlKey &&
+          !event.altKey &&
+          !event.metaKey
+        ) {
+          const pre = preFromTarget(event.target);
+          if (pre && event.target === pre && isCopyableCodeBlock(pre)) {
+            if (lastHoveredBlock?.id !== blockIdOf(pre)) inspectCodeBlock(pre);
+            const scope = element.closest('[data-testid="epub-viewer"]') ?? ownerDoc;
+            const copyButton = scope.querySelector<HTMLElement>('[data-testid="epub-code-copy"]');
+            if (copyButton && !copyButton.hasAttribute('disabled')) {
+              event.preventDefault();
+              copyButton.focus({ preventScroll: true });
+              return;
+            }
+          }
+        }
+        keyDownListener(event);
       });
-    });
-    chapterDoc.documentElement.addEventListener('pointerleave', () => {
-      gestureListener({ kind: 'leave' });
-    });
-    chapterDoc.addEventListener('click', (event: MouseEvent) => {
-      if (event.button !== 0 || event.detail > 1 || event.defaultPrevented) return;
-      const { left, top } = offset();
-      gestureListener({
-        kind: 'click',
-        x: left + event.clientX,
-        y: top + event.clientY,
-        overContent: isOverContent(event.target, event.clientX, event.clientY),
-        hasSelection: hasSelection(),
+      // The app guards the webview's own context menu on the window, and a chapter is
+      // a frame: its right clicks never reach that listener. The same function serves
+      // every chapter, so a re-rendered document gets one listener, not two.
+      chapterDoc.addEventListener('contextmenu', onChapterContextMenu);
+      // Page turns are decided outside the frame, in the top window's coordinates.
+      chapterDoc.addEventListener('pointerup', (event: PointerEvent) => {
+        if (event.button !== 0) return;
+        const wasDownInFrame = framePointerDown;
+        framePointerDown = false;
+        pointerListener(false);
+        const selection = selectionOf(contents);
+        const pressed = pressedSelection;
+        pressedSelection = null;
+        if (!wasDownInFrame) {
+          const { left, top } = offset();
+          framePointerUpListener({
+            x: left + event.clientX,
+            y: top + event.clientY,
+            overContent: isOverContent(event.target, event.clientX, event.clientY),
+            hasSelection: hasSelection(),
+          });
+        }
+        if (!selection) return;
+        // A click inside the existing selection leaves it in place; it is not a new
+        // one, and reporting it again would re-open a popover the reader dismissed.
+        if (pressed?.cfiRange === selection.cfiRange && pressed.text === selection.text) return;
+        reportSelection(selection, true);
       });
-    });
-    chapterDoc.addEventListener(
-      'wheel',
-      (event: WheelEvent) => {
-        if (wheelListener(event)) event.preventDefault();
-      },
-      { passive: false },
-    );
+      chapterDoc.addEventListener('pointercancel', () => {
+        clearFramePointerDown();
+      });
+      chapterDoc.addEventListener('pointerdown', (event: PointerEvent) => {
+        if (event.button !== 0) return;
+        framePointerDown = true;
+        pressedSelection = selectionOf(contents);
+        pointerListener(true);
+        const { left, top } = offset();
+        gestureListener({
+          kind: 'down',
+          x: left + event.clientX,
+          y: top + event.clientY,
+          hasSelection: hasSelection(),
+        });
+      });
+      chapterDoc.addEventListener('pointermove', (event: PointerEvent) => {
+        if (event.buttons !== 0) return;
+        const { left, top } = offset();
+        gestureListener({
+          kind: 'move',
+          x: left + event.clientX,
+          y: top + event.clientY,
+          overContent: isOverContent(event.target, event.clientX, event.clientY),
+        });
+      });
+      chapterDoc.documentElement.addEventListener('pointerleave', () => {
+        gestureListener({ kind: 'leave' });
+      });
+      chapterDoc.addEventListener('click', (event: MouseEvent) => {
+        if (event.button !== 0 || event.defaultPrevented) return;
+        const { left, top } = offset();
+        gestureListener({
+          kind: 'click',
+          x: left + event.clientX,
+          y: top + event.clientY,
+          overContent: isOverContent(event.target, event.clientX, event.clientY),
+          hasSelection: hasSelection(),
+        });
+      });
+      chapterDoc.addEventListener(
+        'wheel',
+        (event: WheelEvent) => {
+          const sample: WheelSample = {
+            deltaX: event.deltaX,
+            deltaY: event.deltaY,
+            deltaMode: event.deltaMode,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            altKey: event.altKey,
+            shiftKey: event.shiftKey,
+            buttons: event.buttons,
+            defaultPrevented: event.defaultPrevented,
+            target: event.target,
+          };
+          if (wheelListener(sample)) event.preventDefault();
+        },
+        { passive: false },
+      );
+    }
     if (!hoveredCodeDocs.has(chapterDoc)) {
       hoveredCodeDocs.add(chapterDoc);
       chapterDoc.addEventListener('pointermove', (event: PointerEvent) => {
@@ -1439,9 +1498,32 @@ export async function openEpubDocument(
       }
     ).resize(width, height, target);
 
+  interface QueuedTurn {
+    direction: TurnDirection;
+    animate: boolean;
+    transition: PageTransition | undefined;
+    spread: boolean;
+    resolve: (turned: boolean) => void;
+  }
+
   /** A newer navigation; an older one must neither repair nor wait for it. */
   let navigation = 0;
-  const beginNavigation = () => ++navigation;
+  let seamEpoch: number | null = null;
+  let drainingTurns = false;
+  let queueGeneration = 0;
+  const pendingTurns: QueuedTurn[] = [];
+  const clearPendingTurns = () => {
+    queueGeneration += 1;
+    seamEpoch = null;
+    if (pendingTurns.length === 0) return;
+    const queued = pendingTurns.splice(0, pendingTurns.length);
+    for (const item of queued) item.resolve(false);
+  };
+  const beginNavigation = (preserveQueue = false) => {
+    if (!preserveQueue) clearPendingTurns();
+    else seamEpoch = null;
+    return ++navigation;
+  };
   /** Where a jump is heading, so a resize restores it instead of the old location. */
   let pendingTarget: string | undefined;
 
@@ -1934,14 +2016,15 @@ export async function openEpubDocument(
   };
 
   /** Arms the hold, and returns what settles it once the new chapter is up. */
-  const armSeam = (): ((direction: TurnDirection) => Promise<void>) | null => {
+  const armSeam = ():
+    ((direction: TurnDirection, options?: { animate?: boolean }) => Promise<void>) | null => {
     if (!ensureSeamHold()) return null;
     seam.armed = true;
     seam.held = [];
     // The turn this seam belongs to. A newer navigation — a contents jump, a link,
     // a relayout — owns the strip from then on, and this one must not write to it.
     const epoch = navigation;
-    return async (direction) => {
+    return async (direction, options) => {
       seam.armed = false;
       const held = seam.held;
       seam.held = [];
@@ -1958,6 +2041,7 @@ export async function openEpubDocument(
            * travel with the paper instead of standing still at the seam.
            */
           const slideSeam = async (target: number) => {
+            if (options?.animate === false) return;
             const paneWidth = beginSlideStage(direction);
             if (paneWidth === null) {
               await slideStrip(target, PAGE_SLIDE_MS);
@@ -2185,45 +2269,178 @@ export async function openEpubDocument(
     return true;
   };
 
-  const turn = async (
+  const currentChapterIndex = (direction: TurnDirection): number => {
+    const views = viewManager()?.views?._views;
+    const view = (direction > 0 ? views?.at(-1) : views?.[0]) as
+      (ChapterView & { index?: number; section?: { index?: number } }) | undefined;
+    if (typeof view?.section?.index === 'number') return view.section.index;
+    if (typeof view?.index === 'number') return view.index;
+    const contents = contentsList();
+    const frame = direction > 0 ? contents.at(-1) : contents[0];
+    const frameIndex = (frame as (Contents & { sectionIndex?: number }) | undefined)?.sectionIndex;
+    if (typeof frameIndex === 'number') return frameIndex;
+    const start = renditionState().location?.start as
+      { index?: number; href?: string; cfi?: string } | undefined;
+    if (typeof start?.index === 'number') return start.index;
+    if (start?.href) {
+      const byHref = spineIndexOf(start.href);
+      if (byHref >= 0) return byHref;
+    }
+    const cfi = start?.cfi ?? currentCfi;
+    if (cfi) {
+      const section = book.spine.get(cfi) as { index?: number; href?: string } | null;
+      if (typeof section?.index === 'number') return section.index;
+      if (section?.href) {
+        const byHref = spineIndexOf(section.href);
+        if (byHref >= 0) return byHref;
+      }
+    }
+    return -1;
+  };
+
+  const canCrossChapter = (direction: TurnDirection): boolean => {
+    if (spineItems.length === 0) return false;
+    const views = viewManager()?.views?._views;
+    const view = (direction > 0 ? views?.at(-1) : views?.[0]) as
+      (ChapterView & { section?: { next?: () => unknown; prev?: () => unknown } }) | undefined;
+    if (view?.section) {
+      return direction > 0 ? Boolean(view.section.next?.()) : Boolean(view.section.prev?.());
+    }
+    const index = currentChapterIndex(direction);
+    if (index < 0) return false;
+    return direction > 0 ? index < spineItems.length - 1 : index > 0;
+  };
+
+  const drainPendingTurns = async (gen: number): Promise<boolean> => {
+    drainingTurns = true;
+    let anyMoved = false;
+    try {
+      while (pendingTurns.length > 0 && gen === queueGeneration && !destroyed) {
+        const item = pendingTurns.shift();
+        if (!item) break;
+        const isFinal = pendingTurns.length === 0;
+        let moved = false;
+        try {
+          moved = await executeTurn(
+            item.direction,
+            isFinal ? item.animate : false,
+            isFinal ? item.transition : 'none',
+            item.spread,
+            isFinal,
+          );
+        } catch (err) {
+          item.resolve(false);
+          throw err;
+        }
+        if (gen !== queueGeneration || destroyed) {
+          item.resolve(false);
+          return anyMoved;
+        }
+        if (moved) anyMoved = true;
+        item.resolve(pendingTurns.length > 0 ? false : moved);
+      }
+    } finally {
+      drainingTurns = false;
+    }
+    return anyMoved;
+  };
+
+  const executeTurn = async (
     direction: TurnDirection,
     animate: boolean,
     transition?: PageTransition,
     spread = false,
-  ) => {
+    allowAnimation = true,
+  ): Promise<boolean> => {
     clearCodeBlockHover();
     // A turn starts from a whole page, so any slide or curl still running settles first.
     settleSlide();
     clearCurlStage();
-    const epoch = beginNavigation();
+    const epoch = beginNavigation(drainingTurns);
+    const gen = queueGeneration;
     pendingTarget = undefined;
+
+    const shouldAnimateFinal = () =>
+      allowAnimation && pendingTurns.length === 0 && epoch === navigation && !destroyed;
+
     if (currentMode === 'scroll') {
-      const scroller = element.querySelector<HTMLElement>('.epub-container');
+      const scroller =
+        element.querySelector<HTMLElement>('.epub-container') ??
+        (viewManager()?.container as HTMLElement | undefined) ??
+        null;
       if (scroller && scroller.clientHeight > 0) {
-        const step = Math.max(Math.floor(scroller.clientHeight * 0.85), 100);
-        if (direction > 0) {
-          if (scroller.scrollTop + scroller.clientHeight < scroller.scrollHeight - 4) {
-            scroller.scrollTop = Math.min(
-              scroller.scrollTop + step,
-              scroller.scrollHeight - scroller.clientHeight,
-            );
-            return;
-          }
-        } else if (scroller.scrollTop > 4) {
-          scroller.scrollTop = Math.max(scroller.scrollTop - step, 0);
-          return;
+        const contentRoot =
+          scroller.querySelector('iframe')?.contentDocument?.body ??
+          contentsList()[0]?.document?.body ??
+          scroller;
+        const nextTop = computeScrollPageStep({ scroller, contentRoot, direction });
+        if (nextTop !== null) {
+          scroller.scrollTop = nextTop;
+          syncCurrentCfiFromScroll();
+          return true;
         }
+        const atBoundary =
+          direction > 0
+            ? scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1
+            : scroller.scrollTop <= 1;
+        if (!atBoundary) return false;
       }
-    } else if (transition === 'curl' && !prefersReducedMotion() && (curlHost || curlShadow)) {
-      const captured = captureOutgoingSpread();
+      if (!canCrossChapter(direction)) return false;
+      seamEpoch = epoch;
+      try {
+        await (direction > 0 ? rendition.next() : rendition.prev());
+        if (epoch !== navigation || destroyed) return false;
+        if (direction < 0) {
+          for (const contents of contentsList()) {
+            (contents as unknown as { expand?: () => void }).expand?.();
+          }
+          await settled();
+          if (epoch !== navigation || destroyed) return false;
+          const nextScroller =
+            element.querySelector<HTMLElement>('.epub-container') ??
+            (viewManager()?.container as HTMLElement | undefined) ??
+            scroller;
+          if (nextScroller) {
+            nextScroller.scrollTop = Math.max(
+              0,
+              nextScroller.scrollHeight - nextScroller.clientHeight,
+            );
+          }
+        }
+        syncCurrentCfiFromScroll();
+        if (seamEpoch === epoch) seamEpoch = null;
+        if (!drainingTurns && pendingTurns.length > 0 && gen === queueGeneration) {
+          const laterMoved = await drainPendingTurns(gen);
+          return !laterMoved;
+        }
+        return true;
+      } catch (err) {
+        if (epoch === navigation) clearPendingTurns();
+        throw err;
+      } finally {
+        if (seamEpoch === epoch) seamEpoch = null;
+      }
+    }
+
+    if (transition === 'curl' && !prefersReducedMotion() && (curlHost || curlShadow)) {
       if (canTurnInPlace(direction)) {
         const current = strip();
         if (current) {
+          const captured = allowAnimation ? captureOutgoingSpread() : false;
           if (captured) applyPaperCurl(curlHost, curlShadow, 0, direction, { spread });
-          current.container.scrollLeft += direction * current.stride;
+          const maxLeft = Math.max(
+            0,
+            current.container.scrollWidth - current.container.clientWidth,
+          );
+          current.container.scrollLeft =
+            direction > 0
+              ? Math.min(current.container.scrollLeft + current.stride, maxLeft)
+              : Math.max(0, current.container.scrollLeft - current.stride);
+          syncCurrentCfiFromScroll();
+          if (!allowAnimation) return true;
           const token = Symbol('curl');
           curlRunToken = token;
-          await runCurlAnimation({
+          const completed = await runCurlAnimation({
             from: 0,
             to: 1,
             duration: PAGE_CURL_MS,
@@ -2232,76 +2449,162 @@ export async function openEpubDocument(
             captured,
             token,
           });
-          return;
+          return completed && epoch === navigation && !destroyed;
         }
       }
+      if (!canCrossChapter(direction)) return false;
+      const captured = captureOutgoingSpread();
       if (captured) applyPaperCurl(curlHost, curlShadow, 0, direction, { spread });
+      seamEpoch = epoch;
       try {
         await (direction > 0 ? rendition.next() : rendition.prev());
       } catch (err) {
-        if (epoch === navigation) clearCurlStage();
+        if (seamEpoch === epoch) seamEpoch = null;
+        if (epoch === navigation) {
+          clearPendingTurns();
+          clearCurlStage();
+        }
         throw err;
       }
-      if (epoch !== navigation || destroyed) return;
-      const token = Symbol('curl');
-      curlRunToken = token;
-      await runCurlAnimation({
-        from: 0,
-        to: 1,
-        duration: PAGE_CURL_MS,
-        direction,
-        spread,
-        captured,
-        token,
-      });
-      return;
-    } else if (animate && canTurnInPlace(direction)) {
+      if (seamEpoch === epoch) seamEpoch = null;
+      if (epoch !== navigation || destroyed) return false;
+      if (shouldAnimateFinal()) {
+        const token = Symbol('curl');
+        curlRunToken = token;
+        const completed = await runCurlAnimation({
+          from: 0,
+          to: 1,
+          duration: PAGE_CURL_MS,
+          direction,
+          spread,
+          captured,
+          token,
+        });
+        return completed && epoch === navigation && !destroyed;
+      }
+      clearCurlStage();
+      syncCurrentCfiFromScroll();
+      if (!drainingTurns && pendingTurns.length > 0 && gen === queueGeneration) {
+        const laterMoved = await drainPendingTurns(gen);
+        return !laterMoved;
+      }
+      return true;
+    }
+
+    if (canTurnInPlace(direction)) {
       const current = strip();
       if (current) {
-        const paneWidth = beginSlideStage(direction);
-        if (paneWidth !== null) {
-          const stage = slideStage;
-          await animateSlideStage(-direction * paneWidth, PAGE_SLIDE_MS);
-          // A newer turn may have taken the stage over; it owns the cleanup.
-          if (slideStage === stage) endSlideStage();
-          return;
+        if (animate && allowAnimation) {
+          const paneWidth = beginSlideStage(direction);
+          if (paneWidth !== null) {
+            const stage = slideStage;
+            await animateSlideStage(-direction * paneWidth, PAGE_SLIDE_MS);
+            // A newer turn may have taken the stage over; it owns the cleanup.
+            if (slideStage === stage) endSlideStage();
+            if (epoch !== navigation || destroyed) return false;
+            syncCurrentCfiFromScroll();
+            return true;
+          }
+          const maxLeft = Math.max(
+            0,
+            current.container.scrollWidth - current.container.clientWidth,
+          );
+          const targetLeft =
+            direction > 0
+              ? Math.min(current.container.scrollLeft + current.stride, maxLeft)
+              : Math.max(0, current.container.scrollLeft - current.stride);
+          await slideStrip(targetLeft, PAGE_SLIDE_MS);
+          if (epoch !== navigation || destroyed) return false;
+          syncCurrentCfiFromScroll();
+          return true;
         }
-        await slideStrip(current.container.scrollLeft + direction * current.stride, PAGE_SLIDE_MS);
-        return;
+        const maxLeft = Math.max(0, current.container.scrollWidth - current.container.clientWidth);
+        current.container.scrollLeft =
+          direction > 0
+            ? Math.min(current.container.scrollLeft + current.stride, maxLeft)
+            : Math.max(0, current.container.scrollLeft - current.stride);
+        syncCurrentCfiFromScroll();
+        return true;
       }
-    } else if (animate && !prefersReducedMotion() && curlHost) {
+    }
+
+    if (!canCrossChapter(direction)) return false;
+
+    if (animate && !prefersReducedMotion() && curlHost) {
       const paneWidth = curlHost.getBoundingClientRect().width;
       if (paneWidth > 0 && captureOutgoingSpread()) {
         // Freeze the outgoing page above the strip while epub.js parses and lays
         // out the next chapter so `views.clear()` / `scrollTo(0, 0)` never flashes.
         curlHost.style.transform = 'translateX(0px)';
+        seamEpoch = epoch;
         try {
           await (direction > 0 ? rendition.next() : rendition.prev());
         } catch (err) {
-          if (epoch === navigation) clearCurlStage();
+          if (seamEpoch === epoch) seamEpoch = null;
+          if (epoch === navigation) {
+            clearPendingTurns();
+            clearCurlStage();
+          }
           throw err;
         }
-        if (epoch !== navigation || destroyed) return;
-        const stagedWidth = beginSlideStage(direction, {
-          useExistingMirror: true,
-          advanceStrip: false,
-        });
-        if (stagedWidth !== null) {
-          const stage = slideStage;
-          await animateSlideStage(-direction * stagedWidth, PAGE_SLIDE_MS);
-          if (slideStage === stage) endSlideStage();
-          return;
+        if (seamEpoch === epoch) seamEpoch = null;
+        if (epoch !== navigation || destroyed) return false;
+        if (shouldAnimateFinal()) {
+          const stagedWidth = beginSlideStage(direction, {
+            useExistingMirror: true,
+            advanceStrip: false,
+          });
+          if (stagedWidth !== null) {
+            const stage = slideStage;
+            await animateSlideStage(-direction * stagedWidth, PAGE_SLIDE_MS);
+            if (slideStage === stage) endSlideStage();
+            if (epoch !== navigation || destroyed) return false;
+            syncCurrentCfiFromScroll();
+            return true;
+          }
         }
         clearCurlStage();
-        return;
+        syncCurrentCfiFromScroll();
+        if (!drainingTurns && pendingTurns.length > 0 && gen === queueGeneration) {
+          const laterMoved = await drainPendingTurns(gen);
+          return !laterMoved;
+        }
+        return true;
       }
     }
+
     const settleSeam = animate && !prefersReducedMotion() ? armSeam() : null;
+    seamEpoch = epoch;
     try {
       await (direction > 0 ? rendition.next() : rendition.prev());
+    } catch (err) {
+      if (epoch === navigation) clearPendingTurns();
+      throw err;
     } finally {
-      if (settleSeam) await settleSeam(direction);
+      if (seamEpoch === epoch) seamEpoch = null;
+      if (settleSeam) await settleSeam(direction, { animate: shouldAnimateFinal() });
     }
+    if (epoch !== navigation || destroyed) return false;
+    syncCurrentCfiFromScroll();
+    if (!drainingTurns && pendingTurns.length > 0 && gen === queueGeneration) {
+      const laterMoved = await drainPendingTurns(gen);
+      return !laterMoved;
+    }
+    return true;
+  };
+
+  const turn = async (
+    direction: TurnDirection,
+    animate: boolean,
+    transition?: PageTransition,
+    spread = false,
+  ): Promise<boolean> => {
+    if (seamEpoch !== null && seamEpoch === navigation) {
+      return new Promise<boolean>((resolve) => {
+        pendingTurns.push({ direction, animate, transition, spread, resolve });
+      });
+    }
+    return executeTurn(direction, animate, transition, spread);
   };
 
   const endScrub = async (committed: TurnDirection | null) => {
@@ -2591,8 +2894,12 @@ export async function openEpubDocument(
       );
       await display(cfi ?? href);
     },
-    next: () => turn(1, false),
-    previous: () => turn(-1, false),
+    next: async () => {
+      await turn(1, false);
+    },
+    previous: async () => {
+      await turn(-1, false);
+    },
     setCurlElements({ curlHost: nextHost, shadow }) {
       clearCurlStage();
       curlHost = nextHost;
@@ -2601,6 +2908,13 @@ export async function openEpubDocument(
     turnPage: (direction, options) =>
       turn(direction, options?.animate ?? true, options?.transition, options?.spread),
     canTurnInPlace,
+    hasSelection() {
+      return contentsList().some((contents) => {
+        const selection =
+          contents.window?.getSelection?.() ?? contents.document?.getSelection?.() ?? null;
+        return selection !== null && !selection.isCollapsed;
+      });
+    },
     beginScrub(options) {
       clearCodeBlockHover();
       // A scrub starts from a whole page and claims navigation ownership so any
@@ -2763,6 +3077,7 @@ export async function openEpubDocument(
       if (columns === currentColumns) return;
       // The column count changes the stride, so a slide in flight is already
       // measured in the wrong units.
+      clearPendingTurns();
       settleSlide();
       clearCurlStage();
       const before = spreadFor(currentMode, currentColumns);
@@ -2828,6 +3143,7 @@ export async function openEpubDocument(
           (contents as unknown as { expand?: () => void }).expand?.();
         }
         if (element.clientWidth > 0 && element.clientHeight > 0) {
+          clearPendingTurns();
           const target = pendingTarget ?? currentCfi;
           resizeTo(element.clientWidth, element.clientHeight, target);
           if (target && currentMode !== 'scroll') {
@@ -2914,6 +3230,7 @@ export async function openEpubDocument(
       clearCodeBlockHover();
       // A resize clears epub.js' views. Restore the jump in flight, or the current
       // location, rather than the stale location epub.js last reported (#41).
+      clearPendingTurns();
       settleSlide();
       clearCurlStage();
       resizeTo(width, height, pendingTarget ?? currentCfi);
@@ -2936,6 +3253,9 @@ export async function openEpubDocument(
     onGesture(listener) {
       gestureListener = listener;
     },
+    onFramePointerUp(listener) {
+      framePointerUpListener = listener;
+    },
     onWheel(listener) {
       wheelListener = listener;
     },
@@ -2952,11 +3272,16 @@ export async function openEpubDocument(
     destroy() {
       clearCodeBlockHover();
       destroyed = true;
+      framePointerDown = false;
+      clearPendingTurns();
+      framePointerUpListener = () => undefined;
       codeBlockHoverListener = () => undefined;
       for (const observer of codeTabObservers) observer.disconnect();
       codeTabObservers.clear();
       ownerDoc.removeEventListener('pointermove', onOwnerPointerMove);
       ownerDoc.removeEventListener('pointerdown', onOwnerPointerDown);
+      ownerDoc.removeEventListener('pointerup', onOwnerPointerUp);
+      ownerDoc.removeEventListener('pointercancel', onOwnerPointerUp);
       ownerDoc.removeEventListener('focusin', onOwnerFocusIn);
       cancelSlide();
       clearCurlStage();

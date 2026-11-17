@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { PageGestureSample, WheelSample } from '@/features/reader/paging/pageTurn';
 import { DEFAULT_READING_PREFERENCES } from '@/types/domain';
 import {
   decorateWithNoteMarker,
   type EpubCodeBlockHover,
+  type EpubFramePointerUp,
   type EpubSelection,
   openEpubDocument,
   type PaneMark,
@@ -801,7 +803,11 @@ describe('EPUB slide seam scrubbing', () => {
     });
     Reflect.set(fake.rendition, 'reportLocation', reportLocation);
 
-    const prevSpy = vi.spyOn(fake.rendition, 'prev').mockImplementation(async () => undefined);
+    const prevSpy = vi.spyOn(fake.rendition, 'prev').mockImplementation(async () => {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+    });
     const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(async () => {
       // Simulate epub.js `manager.clear()` hiding the outgoing view before `views.clear()`.
       heldView.style.visibility = 'hidden';
@@ -813,17 +819,20 @@ describe('EPUB slide seam scrubbing', () => {
       Object.defineProperty(incomingView, 'offsetWidth', { value: 640, configurable: true });
       container.appendChild(incomingView);
       containerScrollWidth = 1920;
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
     });
 
     try {
       fake.rendition.location = {
-        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
       };
       const host = document.createElement('div');
       const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
 
-      // 1. Backward seam scrub from page 1 (`scrubBase = 0`) still sees `!canTurnInPlace(-1)`
-      // even after `scrubTo` moves `scrollLeft > 1`.
+      // 1. Backward seam scrub from page 1 of chapter 2 (`scrubBase = 0`) still sees
+      // `!canTurnInPlace(-1)` even after `scrubTo` moves `scrollLeft > 1`.
       handle.beginScrub({ transition: 'slide', spread: false });
       handle.scrubTo(80);
       expect(container.scrollLeft).toBe(80);
@@ -2586,6 +2595,583 @@ describe('EPUB code blocks', () => {
       pill.remove();
       afterHost.remove();
       copyBuffer.remove();
+    }
+  });
+});
+
+describe('EPUB continuous scroll paging (#103)', () => {
+  beforeEach(() => {
+    fake.state.displays = [];
+    fake.state.resizes = [];
+    fake.state.pending = [];
+    fake.state.contents = [];
+    fake.state.views = [];
+    fake.state.spineHooks = [];
+    fake.state.renditionHooks = [];
+    fake.state.listeners = {};
+    for (const item of fake.spineItems) {
+      delete item.document;
+    }
+    fake.rendition.location = undefined;
+  });
+
+  const setupScrolledHost = () => {
+    const host = document.createElement('div');
+    const scroller = document.createElement('div');
+    scroller.className = 'epub-container';
+    let scrollTop = 0;
+    let scrollHeight = 2000;
+    const clientHeight = 400;
+    Object.defineProperty(scroller, 'clientHeight', { value: clientHeight, configurable: true });
+    Object.defineProperty(scroller, 'scrollHeight', {
+      get: () => scrollHeight,
+      configurable: true,
+    });
+    Object.defineProperty(scroller, 'scrollTop', {
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.min(Math.max(value, 0), Math.max(0, scrollHeight - clientHeight));
+      },
+      configurable: true,
+    });
+    vi.spyOn(scroller, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 600, clientHeight),
+    );
+    host.appendChild(scroller);
+    return {
+      host,
+      scroller,
+      get scrollTop() {
+        return scrollTop;
+      },
+      set scrollTop(value: number) {
+        scrollTop = value;
+      },
+      setScrollHeight(value: number) {
+        scrollHeight = value;
+      },
+    };
+  };
+
+  it('uses computeScrollPageStep with iframe body lines and enforces chapter seam boundaries', async () => {
+    const scrollState = setupScrolledHost();
+    const { host, scroller } = scrollState;
+    const reportLocation = vi.fn();
+    Reflect.set(fake.rendition, 'manager', { container: scroller, layout: {} });
+    Reflect.set(fake.rendition, 'reportLocation', reportLocation);
+
+    const ch1Doc = document.implementation.createHTMLDocument('');
+    ch1Doc.body.innerHTML = '<p id="p1">First</p><p id="p2">Straddling bottom line</p>';
+    const ch2Doc = document.implementation.createHTMLDocument('');
+    ch2Doc.body.innerHTML = '<p>Chapter two start</p>';
+
+    // Provide deterministic line rects inside chapter 1 so a line straddling y=388..412
+    // causes computeScrollPageStep to stop cleanly above it (~364) rather than blind 340.
+    const createRangeOrig = ch1Doc.createRange.bind(ch1Doc);
+    vi.spyOn(ch1Doc, 'createRange').mockImplementation(() => {
+      const range = createRangeOrig();
+      let selected: Node | null = null;
+      range.selectNodeContents = (node: Node) => {
+        selected = node;
+      };
+      range.getClientRects = () => {
+        const text = selected?.nodeValue ?? '';
+        if (text.includes('First')) return [new DOMRect(20, 20, 200, 24)] as unknown as DOMRectList;
+        if (text.includes('Straddling')) {
+          return [new DOMRect(20, 388, 220, 24)] as unknown as DOMRectList;
+        }
+        return [] as unknown as DOMRectList;
+      };
+      return range;
+    });
+
+    const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(async () => {
+      scrollState.scrollTop = 0;
+      scrollState.setScrollHeight(1200);
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      fake.state.contents = [{ document: ch2Doc, window, cfiFromRange: () => '', expand: vi.fn() }];
+    });
+    const prevExpand = vi.fn();
+    const prevSpy = vi.spyOn(fake.rendition, 'prev').mockImplementation(async () => {
+      // Simulate epubjs DefaultViewManager.prev() landing at scrollTop = 0 while loading ch1.
+      scrollState.scrollTop = 0;
+      scrollState.setScrollHeight(1650);
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      fake.state.contents = [
+        { document: ch1Doc, window, cfiFromRange: () => '', expand: prevExpand },
+      ];
+    });
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      fake.state.contents = [{ document: ch1Doc, window, cfiFromRange: () => '', expand: vi.fn() }];
+      const handle = await openEpubDocument(
+        { kind: 'bytes', bytes: new Uint8Array() },
+        host,
+        'scroll',
+      );
+
+      // At start of chapter 1 (book start): backward returns false without calling prev().
+      expect(await handle.turnPage(-1, { animate: false, transition: 'fade' })).toBe(false);
+      expect(prevSpy).not.toHaveBeenCalled();
+
+      // Forward within chapter 1: places straddling line (top=388, lineHeight=24 -> pad=24) at 364.
+      expect(await handle.turnPage(1, { animate: false, transition: 'fade' })).toBe(true);
+      expect(scrollState.scrollTop).toBe(364);
+      expect(nextSpy).not.toHaveBeenCalled();
+
+      // Still before bottom (2000 - 400 = 1600): does not cross chapter yet.
+      scrollState.scrollTop = 1500;
+      expect(await handle.turnPage(1, { animate: false, transition: 'fade' })).toBe(true);
+      expect(scrollState.scrollTop).toBe(1600);
+      expect(nextSpy).not.toHaveBeenCalled();
+
+      // Now at scroll bottom (>= 1599): crosses into chapter 2.
+      expect(await handle.turnPage(1, { animate: false, transition: 'fade' })).toBe(true);
+      expect(nextSpy).toHaveBeenCalledTimes(1);
+      expect(scrollState.scrollTop).toBe(0);
+
+      // At bottom of last chapter (chapter 2, scrollHeight=1200 -> maxTop=800): returns false.
+      scrollState.scrollTop = 800;
+      expect(await handle.turnPage(1, { animate: false, transition: 'fade' })).toBe(false);
+      expect(nextSpy).toHaveBeenCalledTimes(1);
+
+      // Back to top of chapter 2 (scrollTop=0): crosses backward into chapter 1 and lands at bottom!
+      scrollState.scrollTop = 0;
+      reportLocation.mockClear();
+      expect(await handle.turnPage(-1, { animate: false, transition: 'fade' })).toBe(true);
+      expect(prevSpy).toHaveBeenCalledTimes(1);
+      expect(prevExpand).toHaveBeenCalledTimes(1);
+      expect(scrollState.scrollTop).toBe(1250); // 1650 - 400
+      expect(reportLocation).toHaveBeenCalled();
+
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      Reflect.set(fake.rendition, 'reportLocation', undefined);
+      nextSpy.mockRestore();
+      prevSpy.mockRestore();
+    }
+  });
+});
+
+describe('EPUB chapter wheel, consecutive click, selection, and seam queue (#106, #107)', () => {
+  beforeEach(() => {
+    fake.state.displays = [];
+    fake.state.resizes = [];
+    fake.state.pending = [];
+    fake.state.contents = [];
+    fake.state.views = [];
+    fake.state.spineHooks = [];
+    fake.state.renditionHooks = [];
+    fake.state.listeners = {};
+    for (const item of fake.spineItems) {
+      delete item.document;
+    }
+    fake.rendition.location = undefined;
+  });
+
+  it('forwards full WheelSample fields, prevents default only when handled, and wires docs once', async () => {
+    const handle = await openEpubDocument(
+      { kind: 'bytes', bytes: new Uint8Array() },
+      document.createElement('div'),
+    );
+    const jump = handle.display('chapter1.xhtml');
+    fake.settle('chapter1.xhtml');
+    await jump;
+    const contents = fake.state.contents[0];
+    if (!contents) throw new Error('missing contents');
+
+    contents.document.body.innerHTML =
+      '<div id="scrollable" style="overflow-y:auto"><p id="p">Text</p></div>';
+    const target = contents.document.getElementById('p') as Element;
+
+    const received: WheelSample[] = [];
+    let shouldHandle = true;
+    handle.onWheel((wheel) => {
+      received.push(wheel);
+      return shouldHandle;
+    });
+
+    // Re-running rendition hook on the same document must not attach duplicate listeners.
+    for (const hook of fake.state.renditionHooks) {
+      hook(contents as unknown as Parameters<typeof hook>[0]);
+    }
+
+    const handledEvent = new WheelEvent('wheel', {
+      deltaX: 2,
+      deltaY: 40,
+      deltaMode: 1,
+      ctrlKey: false,
+      metaKey: true,
+      altKey: true,
+      shiftKey: true,
+      buttons: 1,
+      bubbles: true,
+      cancelable: true,
+    });
+    target.dispatchEvent(handledEvent);
+    expect(handledEvent.defaultPrevented).toBe(true);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({
+      deltaX: 2,
+      deltaY: 40,
+      deltaMode: 1,
+      ctrlKey: false,
+      metaKey: true,
+      altKey: true,
+      shiftKey: true,
+      buttons: 1,
+      defaultPrevented: false,
+      target,
+    });
+
+    shouldHandle = false;
+    const unhandledEvent = new WheelEvent('wheel', {
+      deltaX: 0,
+      deltaY: 40,
+      bubbles: true,
+      cancelable: true,
+    });
+    target.dispatchEvent(unhandledEvent);
+    expect(unhandledEvent.defaultPrevented).toBe(false);
+    expect(received).toHaveLength(2);
+    handle.destroy();
+  });
+
+  it('allows multi-detail blank clicks, exposes hasSelection(), and emits cross-frame pointerup', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+    const jump = handle.display('chapter1.xhtml');
+    fake.settle('chapter1.xhtml');
+    await jump;
+    const contents = fake.state.contents[0];
+    if (!contents) throw new Error('missing contents');
+
+    contents.document.body.innerHTML =
+      '<div id="blank" style="height:200px"></div><pre id="code"><code>let x = 1;</code></pre>';
+    const blank = contents.document.getElementById('blank') as Element;
+    const code = contents.document.getElementById('code') as Element;
+
+    const gestures: PageGestureSample[] = [];
+    const crossUps: EpubFramePointerUp[] = [];
+    const hoverSeen: (EpubCodeBlockHover | null)[] = [];
+    handle.onGesture((sample) => gestures.push(sample));
+    handle.onFramePointerUp?.((sample) => crossUps.push(sample));
+    handle.onCodeBlockHover?.((block) => hoverSeen.push(block));
+
+    const collapsed = { isCollapsed: true, rangeCount: 0 } as unknown as Selection;
+    const getSelectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue(collapsed);
+    try {
+      expect(handle.hasSelection()).toBe(false);
+
+      // Consecutive blank clicks (detail 1, 2, 3) all forward gesture click samples.
+      blank.dispatchEvent(
+        new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          detail: 1,
+          clientX: 90,
+          clientY: 80,
+        }),
+      );
+      blank.dispatchEvent(
+        new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          detail: 2,
+          clientX: 90,
+          clientY: 80,
+        }),
+      );
+      blank.dispatchEvent(
+        new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          detail: 3,
+          clientX: 90,
+          clientY: 80,
+        }),
+      );
+      expect(gestures.filter((g) => g.kind === 'click')).toHaveLength(3);
+      expect(
+        gestures.filter((g) => g.kind === 'click').every((g) => g.hasSelection === false),
+      ).toBe(true);
+
+      // Double-click selecting code sets hasSelection()=true and suppresses inspectCodeBlock.
+      getSelectionSpy.mockReturnValue({
+        isCollapsed: false,
+        rangeCount: 1,
+        toString: () => 'const',
+      } as unknown as Selection);
+      expect(handle.hasSelection()).toBe(true);
+      hoverSeen.length = 0;
+      code.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, detail: 2 }),
+      );
+      expect(hoverSeen).toEqual([]);
+      const lastClick = gestures.at(-1);
+      expect(lastClick?.kind === 'click' && lastClick.hasSelection).toBe(true);
+
+      // Cross-frame pointerup: pointerdown outside frame -> pointerup inside frame emits onFramePointerUp.
+      getSelectionSpy.mockReturnValue(collapsed);
+      blank.dispatchEvent(
+        new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 92, clientY: 81 }),
+      );
+      expect(crossUps).toEqual([{ x: 92, y: 81, overContent: false, hasSelection: false }]);
+
+      // In-frame pointerdown -> pointerup is a same-document press (browser synthesizes click).
+      crossUps.length = 0;
+      blank.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 92, clientY: 81 }),
+      );
+      blank.dispatchEvent(
+        new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 92, clientY: 81 }),
+      );
+      expect(crossUps).toEqual([]);
+
+      // In-frame pointerdown followed by ownerDoc pointerup clears framePointerDown cleanly.
+      blank.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 92, clientY: 81 }),
+      );
+      document.body.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, button: 0 }));
+      blank.dispatchEvent(
+        new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 95, clientY: 82 }),
+      );
+      expect(crossUps).toEqual([{ x: 95, y: 82, overContent: false, hasSelection: false }]);
+    } finally {
+      getSelectionSpy.mockRestore();
+      handle.destroy();
+      host.remove();
+    }
+  });
+
+  it('serializes rapid turns across a chapter seam, respects boundaries, and clears on cancellation', async () => {
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextFrame = 1;
+    let clock = 0;
+    const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = nextFrame;
+      nextFrame += 1;
+      frames.set(id, cb);
+      return id;
+    });
+    const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+      frames.delete(id);
+    });
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const tick = (at: number) => {
+      clock = at;
+      const due = [...frames.values()];
+      frames.clear();
+      for (const callback of due) callback(at);
+    };
+
+    const container = document.createElement('div');
+    let scrollWidth = 1280;
+    let scrollLeft = 640;
+    Object.defineProperty(container, 'clientWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'offsetWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'scrollWidth', {
+      get: () => scrollWidth,
+      configurable: true,
+    });
+    Object.defineProperty(container, 'scrollLeft', {
+      get: () => scrollLeft,
+      set: (value: number) => {
+        scrollLeft = value;
+      },
+      configurable: true,
+    });
+    const view = document.createElement('div');
+    view.className = 'epub-view';
+    Object.defineProperty(view, 'offsetLeft', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetTop', { value: 0, configurable: true });
+    Object.defineProperty(view, 'offsetWidth', { value: 1280, configurable: true });
+    Object.defineProperty(view, 'offsetHeight', { value: 480, configurable: true });
+    view.appendChild(document.createElement('iframe'));
+    container.appendChild(view);
+
+    Reflect.set(fake.rendition, 'manager', { container, layout: { delta: 640 } });
+    const host = document.createElement('div');
+    const curlHost = document.createElement('div');
+    document.body.append(curlHost);
+    vi.spyOn(curlHost, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 900, 600));
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(130, 0, 640, 600));
+
+    let resolveNext!: () => void;
+    const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveNext = resolve;
+        }),
+    );
+    let resolvePrev!: () => void;
+    const prevSpy = vi.spyOn(fake.rendition, 'prev').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolvePrev = resolve;
+        }),
+    );
+
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+      handle.setCurlElements?.({ curlHost, shadow: null });
+
+      // 1. Book start boundary returns false without calling rendition.prev() or capturing curlHost.
+      scrollLeft = 0;
+      expect(await handle.turnPage(-1, { animate: true, transition: 'slide', spread: false })).toBe(
+        false,
+      );
+      expect(prevSpy).not.toHaveBeenCalled();
+      expect(curlHost.style.visibility).not.toBe('visible');
+
+      // 2. Rapid +1, +1 across Ch1 -> Ch2 seam: second turn queues without wiping curlHost,
+      // skips Turn 1 post-load slide, and animates Turn 2 inside Ch2.
+      scrollLeft = 640;
+      const t1 = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      const t2 = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      expect(nextSpy).toHaveBeenCalledTimes(1);
+      expect(curlHost.style.visibility).toBe('visible');
+      const frozenMirror = curlHost.firstElementChild;
+      expect(frozenMirror).not.toBeNull();
+
+      // Resolve Ch1 -> Ch2 seam (Ch2 has 2 pages: scrollWidth=1280, scrollLeft=0).
+      scrollLeft = 0;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      // Turn 2 now slides Ch2 from page 1 -> page 2 (scrollLeft=640).
+      expect(scrollLeft).toBe(640);
+      expect(host.style.transform).toBe('translateX(900px)');
+      tick(300);
+      const [r1, r2] = await Promise.all([t1, t2]);
+      expect(r1).toBe(false);
+      expect(r2).toBe(true);
+      expect(scrollLeft).toBe(640);
+
+      // 3. Book end boundary on Ch2 page 2 returns false without calling rendition.next().
+      expect(await handle.turnPage(1, { animate: true, transition: 'slide', spread: false })).toBe(
+        false,
+      );
+      expect(nextSpy).toHaveBeenCalledTimes(1);
+
+      // 4. Rapid +1, -1 reversal across seam: Ch1 -> Ch2 seam in flight, -1 waits and crosses back!
+      scrollLeft = 640;
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const fwd = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      const rev = handle.turnPage(-1, { animate: true, transition: 'slide', spread: false });
+      // Must NOT step backward inside old Chapter 1 while seam is in flight.
+      expect(scrollLeft).toBe(640);
+      expect(prevSpy).not.toHaveBeenCalled();
+
+      scrollLeft = 0;
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      // Reversal drains on Ch2 (at scrollLeft=0) by crossing backward via rendition.prev()!
+      expect(prevSpy).toHaveBeenCalledTimes(1);
+      scrollLeft = 640;
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      resolvePrev();
+      await Promise.resolve();
+      await Promise.resolve();
+      tick(600);
+      const [fwdRes, revRes] = await Promise.all([fwd, rev]);
+      expect(fwdRes).toBe(false);
+      expect(revRes).toBe(true);
+
+      // 5. Cancellation (beginScrub / display / setColumns) clears pendingTurns as false.
+      scrollLeft = 640;
+      const seamTurn = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      const queuedTurn = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      handle.beginScrub({ transition: 'slide', spread: false });
+      expect(await queuedTurn).toBe(false);
+      resolveNext();
+      expect(await seamTurn).toBe(false);
+
+      // 6. Curl seam preserves curlHost mirror while queued and animates only the final step.
+      const shadow = document.createElement('div');
+      const leaf = document.createElement('div');
+      leaf.dataset.curlPart = 'leaf';
+      shadow.appendChild(leaf);
+      handle.setCurlElements?.({ curlHost, shadow });
+
+      scrollLeft = 640;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const curlSeam = handle.turnPage(1, { animate: false, transition: 'curl', spread: false });
+      const curlQueued = handle.turnPage(1, { animate: false, transition: 'curl', spread: false });
+      expect(curlHost.style.visibility).toBe('visible');
+      expect(curlHost.childElementCount).toBeGreaterThan(0);
+
+      // Chapter 2 has 2 pages -> queued turn advances from 0 to 640 with curl animation.
+      scrollLeft = 0;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      resolveNext();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scrollLeft).toBe(640);
+      tick(900);
+      tick(1400);
+      expect(await curlSeam).toBe(false);
+      expect(await curlQueued).toBe(true);
+
+      // 7. When Ch2 has only 1 page (book end), queued +1 is blocked at boundary and Ch1->Ch2 reports true.
+      scrollLeft = 640;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const endSeam = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      const blockedNext = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
+      scrollLeft = 0;
+      scrollWidth = 640;
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      resolveNext();
+      expect(await endSeam).toBe(true);
+      expect(await blockedNext).toBe(false);
+
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      nextSpy.mockRestore();
+      prevSpy.mockRestore();
+      curlHost.remove();
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+      nowSpy.mockRestore();
     }
   });
 });
