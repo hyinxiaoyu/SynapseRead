@@ -11,7 +11,7 @@ import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/co
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
-import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
+import { ReaderNotice } from '@/features/reader/ReaderNotice';
 import { ReaderPane } from '@/features/reader/ReaderPane';
 import {
   type ToolbarSlots,
@@ -202,6 +202,23 @@ export function StudyWorkspace() {
   // A card the collapsed MindMap could not show: say it was added, and offer to
   // open the map at it. An open map reveals it itself.
   const pendingReveal = ready && !mindMapOpen ? revealRequest : null;
+  const excerptNotice = pendingReveal ? (
+    <ReaderNotice
+      key={pendingReveal.nonce}
+      tone="info"
+      testId="excerpt-added-notice"
+      action={{
+        label: 'Show',
+        onClick: () => {
+          revealNode(pendingReveal.nodeId);
+          if (mindMapRef.current?.isCollapsed()) toggleMindMap();
+        },
+      }}
+      onDismiss={() => completeReveal(pendingReveal.nonce)}
+    >
+      Added to MindMap
+    </ReaderNotice>
+  ) : null;
 
   return (
     <ToolbarSlotsContext.Provider value={slots}>
@@ -301,32 +318,13 @@ export function StudyWorkspace() {
         )}
 
         <div className="relative min-h-0 flex-1">
-          {pendingReveal && (
-            <ReaderPopoverLayer hidden={immersive}>
-              <ReaderNotice
-                key={pendingReveal.nonce}
-                tone="info"
-                testId="excerpt-added-notice"
-                action={{
-                  label: 'Show',
-                  onClick: () => {
-                    revealNode(pendingReveal.nodeId);
-                    if (mindMapRef.current?.isCollapsed()) toggleMindMap();
-                  },
-                }}
-                onDismiss={() => completeReveal(pendingReveal.nonce)}
-              >
-                Added to MindMap
-              </ReaderNotice>
-            </ReaderPopoverLayer>
-          )}
           {status === 'ready' ? (
             <ResizablePanelGroup
               orientation="horizontal"
               defaultLayout={{ reader: 100, mindmap: 0, inspector: 0 }}
             >
               <ResizablePanel id="reader" defaultSize="100%" minSize="20%">
-                <ReaderPane />
+                <ReaderPane notice={excerptNotice} />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel

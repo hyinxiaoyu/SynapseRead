@@ -125,15 +125,20 @@ export function MindMapPane({ open }: { open: boolean }) {
   );
 
   // Esc on the canvas puts the selection away, and with it the nesting target.
-  useEscapeLayer(ESCAPE_LAYER.mindMap, (event) => {
-    const { target } = event;
-    if (!(target instanceof Node) || !sectionRef.current?.contains(target)) return false;
-    if (isEditableShortcutTarget(target)) return false;
-    const { selectedNodeId: selected, nestingTargetNodeId } = useStudySyncStore.getState();
-    if (selected === null && nestingTargetNodeId === null) return false;
-    selectNode(null);
-    return true;
-  });
+  useEscapeLayer(
+    ESCAPE_LAYER.mindMap,
+    open
+      ? (event) => {
+          const { target } = event;
+          if (!(target instanceof Node) || !sectionRef.current?.contains(target)) return false;
+          if (isEditableShortcutTarget(target)) return false;
+          const { selectedNodeId: selected, nestingTargetNodeId } = useStudySyncStore.getState();
+          if (selected === null && nestingTargetNodeId === null) return false;
+          selectNode(null);
+          return true;
+        }
+      : null,
+  );
 
   return (
     <section ref={sectionRef} aria-label="MindMap canvas" className="h-full">

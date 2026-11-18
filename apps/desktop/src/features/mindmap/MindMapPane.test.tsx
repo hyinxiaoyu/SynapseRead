@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ESCAPE_LAYER, registerEscapeLayer } from '@/features/commands/escape';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { MindMapNode, NoteCard, StudyNotebook } from '@/types/domain';
 
@@ -135,6 +136,25 @@ describe('MindMapPane', () => {
 
       expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
       expect(useStudySyncStore.getState().selectedNodeId).toBe('a');
+    });
+
+    it('does not consume Esc while the pane is collapsed', () => {
+      seed([node('a', 40, 40)], { selectedNodeId: 'a', nestingTargetNodeId: 'a' });
+      const below = vi.fn(() => true);
+      const stop = registerEscapeLayer(ESCAPE_LAYER.focusMode, () => below);
+      try {
+        render(<MindMapPane open={false} />);
+
+        fireEvent.keyDown(document.querySelector('.react-flow__pane') as HTMLElement, {
+          key: 'Escape',
+        });
+
+        expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+        expect(useStudySyncStore.getState().selectedNodeId).toBe('a');
+        expect(below).toHaveBeenCalledTimes(1);
+      } finally {
+        stop();
+      }
     });
   });
 

@@ -16,6 +16,7 @@ import { commandTooltip } from '@/features/commands/commands';
 import { isEditableShortcutTarget, useCommands } from '@/features/commands/registry';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { requestActivePageFocus } from '@/features/reader/focusPage';
+import { ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn, describeError } from '@/lib/utils';
 import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
@@ -96,7 +97,7 @@ class TabErrorBoundary extends Component<TabErrorBoundaryProps, TabErrorBoundary
   }
 }
 
-export function ReaderPane() {
+export function ReaderPane({ notice }: { notice?: ReactNode }) {
   const documents = useStudySyncStore((state) => state.documents);
   const openDocumentIds = useStudySyncStore((state) => state.openDocumentIds);
   const activeDocumentId = useStudySyncStore((state) => state.activeDocumentId);
@@ -300,7 +301,7 @@ export function ReaderPane() {
             aria-label="Recent documents"
             data-testid="recent-documents-menu"
             data-reader-popover=""
-            className="absolute top-10 right-2 z-30 w-80 origin-top-right animate-in rounded-md border bg-background p-1.5 shadow-md animation-duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
+            className="absolute top-10 right-2 z-40 w-80 origin-top-right animate-in rounded-md border bg-background p-1.5 shadow-md animation-duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
           >
             <p className="px-2 py-1 text-xs font-medium text-muted-foreground">Recent documents</p>
             <ol data-testid="recent-documents-list" className="max-h-60 divide-y overflow-y-auto">
@@ -396,6 +397,7 @@ export function ReaderPane() {
             )}
           </div>
         )}
+        {notice && <ReaderPopoverLayer hidden={immersive}>{notice}</ReaderPopoverLayer>}
       </div>
     </section>
   );

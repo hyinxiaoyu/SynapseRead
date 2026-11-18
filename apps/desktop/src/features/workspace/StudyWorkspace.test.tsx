@@ -167,6 +167,11 @@ describe('StudyWorkspace', () => {
       const notice = await screen.findByTestId('excerpt-added-notice');
       expect(notice).toHaveAttribute('data-tone', 'info');
       expect(within(notice).getByRole('status')).toHaveTextContent('Added to MindMap');
+      const reader = screen.getByRole('region', { name: 'Document reader' });
+      expect(reader).toContainElement(notice);
+      expect(reader.querySelector('header')).not.toContainElement(notice);
+      expect(screen.getByRole('region', { name: 'Card inspector' })).not.toContainElement(notice);
+      expect(screen.getByRole('region', { name: 'MindMap canvas' })).not.toContainElement(notice);
 
       const newest = useStudySyncStore.getState().nodes.at(-1)?.id;
       // Something else selected meanwhile; Show still lands on the new card.
@@ -639,6 +644,30 @@ describe('StudyWorkspace', () => {
       expect(screen.getByRole('button', { name: 'Hide MindMap' })).toBeInTheDocument(),
     );
     expect(screen.getByRole('tablist').closest('header')).not.toHaveClass('hidden');
+  });
+
+  it('lets Esc leave focus mode even when focus stayed inside the collapsed MindMap', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+    expect(screen.getByRole('button', { name: 'Hide MindMap' })).toBeInTheDocument();
+
+    const mindMapPane = document.querySelector('.react-flow__pane') as HTMLElement;
+    fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+    expect(useStudySyncStore.getState().immersive).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Show MindMap' })).toBeInTheDocument(),
+    );
+
+    // Even if focus remained inside the collapsed MindMap panel with a selected card,
+    // Esc reaches focusMode instead of being swallowed by the hidden MindMap layer.
+    const selectedBefore = useStudySyncStore.getState().selectedNodeId;
+    expect(selectedBefore).not.toBeNull();
+    fireEvent.keyDown(mindMapPane, { key: 'Escape' });
+    expect(useStudySyncStore.getState().immersive).toBe(false);
+    expect(useStudySyncStore.getState().selectedNodeId).toBe(selectedBefore);
   });
 
   it('leaves focus mode on Esc forwarded from a chapter frame, but not on Esc in a text field', async () => {
