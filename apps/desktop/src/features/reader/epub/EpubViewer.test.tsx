@@ -714,6 +714,7 @@ describe('EpubViewer', () => {
         scrollPageTransition: null,
         tintPdfPages: false,
         focusModeFullScreen: false,
+        wheelSensitivity: 3,
       }),
     );
     expect(engine.setPreferences).toHaveBeenLastCalledWith(
@@ -2398,6 +2399,64 @@ describe('EpubViewer', () => {
       fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
       expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(false);
       expect(engine.next).toHaveBeenCalledTimes(2);
+    });
+
+    it('applies wheelSensitivity from preferences in paginated EPUB modes and drops stale accumulation on change (#111)', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        act(() =>
+          engine.emitLocation({
+            cfi: CFI,
+            href: 'OEBPS/chapter1.xhtml',
+            page: 2,
+            totalPages: 4,
+            chapterIndex: 0,
+            totalChapters: 2,
+            fraction: 0.25,
+          }),
+        );
+
+        // At sensitivity 1 (Very low), a gentle [8, 8] = 16px gesture does not turn.
+        await act(async () => store.getState().updateReadingPreferences({ wheelSensitivity: 1 }));
+        act(() => {
+          expect(engine.emitWheel({ deltaX: 0, deltaY: 8, ctrlKey: false })).toBe(true);
+          vi.advanceTimersByTime(16);
+          expect(engine.emitWheel({ deltaX: 0, deltaY: 8, ctrlKey: false })).toBe(true);
+          vi.advanceTimersByTime(120);
+        });
+        expect(engine.next).not.toHaveBeenCalled();
+
+        // Partial 24px under sensitivity 1 is cleared when changing sensitivity to 5 (Very high).
+        act(() => {
+          expect(engine.emitWheel({ deltaX: 0, deltaY: 24, ctrlKey: false })).toBe(true);
+        });
+        await act(async () => store.getState().updateReadingPreferences({ wheelSensitivity: 5 }));
+        act(() => vi.advanceTimersByTime(120));
+        expect(engine.next).not.toHaveBeenCalled();
+
+        // At sensitivity 5, [8, 8] = 16px turns forward and [-8, -8] = -16px turns back in spread and paged modes.
+        act(() => {
+          expect(engine.emitWheel({ deltaX: 0, deltaY: 8, ctrlKey: false })).toBe(true);
+          vi.advanceTimersByTime(16);
+          expect(engine.emitWheel({ deltaX: 0, deltaY: 8, ctrlKey: false })).toBe(true);
+        });
+        expect(engine.next).toHaveBeenCalledTimes(1);
+
+        act(() => vi.advanceTimersByTime(120));
+        fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+        act(() => {
+          expect(engine.emitWheel({ deltaX: 0, deltaY: -8, ctrlKey: false })).toBe(true);
+          vi.advanceTimersByTime(16);
+          expect(engine.emitWheel({ deltaX: 0, deltaY: -8, ctrlKey: false })).toBe(true);
+        });
+        expect(engine.previous).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('keeps stationary edge zones during slides, dismisses iframe selection on outer margin click, and bridges cross-frame slide clicks (#107)', async () => {

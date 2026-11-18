@@ -295,6 +295,11 @@ export type EpubReadingMode = 'spread' | 'paged' | 'scroll';
 export type PageTransition = 'none' | 'slide' | 'fade' | 'curl' | 'stack';
 /** How a continuous-scrolling reader animates an explicit page turn; reduced motion turns instantly. */
 export type ScrollPageTransition = 'none' | 'fade';
+/** Sensitivity levels (`1..=5`, default `3`) for vertical wheel page turns in paginated modes. */
+export type WheelSensitivity = 1 | 2 | 3 | 4 | 5;
+export const MIN_WHEEL_SENSITIVITY = 1;
+export const MAX_WHEEL_SENSITIVITY = 5;
+export const DEFAULT_WHEEL_SENSITIVITY: WheelSensitivity = 3;
 
 export interface ReadingPreferences {
   theme: ReadingTheme;
@@ -323,6 +328,8 @@ export interface ReadingPreferences {
   tintPdfPages: boolean;
   /** Whether entering focus mode also enters full screen. */
   focusModeFullScreen: boolean;
+  /** Vertical wheel page-turn sensitivity (`1..=5`, default `3`); higher turns with less movement. */
+  wheelSensitivity: number;
 }
 
 export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
@@ -339,6 +346,7 @@ export const DEFAULT_READING_PREFERENCES: ReadingPreferences = {
   scrollPageTransition: null,
   tintPdfPages: false,
   focusModeFullScreen: false,
+  wheelSensitivity: DEFAULT_WHEEL_SENSITIVITY,
 };
 
 /** How a PDF lays out its pages. */

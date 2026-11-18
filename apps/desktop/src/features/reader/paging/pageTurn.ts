@@ -1,6 +1,12 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 
-import type { PageTransition } from '@/types/domain';
+import {
+  DEFAULT_WHEEL_SENSITIVITY,
+  MAX_WHEEL_SENSITIVITY,
+  MIN_WHEEL_SENSITIVITY,
+  type PageTransition,
+  type WheelSensitivity,
+} from '@/types/domain';
 
 export type TurnDirection = 1 | -1;
 export type TurnZone = 'previous' | 'next';
@@ -444,8 +450,108 @@ function measureWheelVelocity<T extends { at: number }>(
 }
 
 const VERTICAL_ACCUMULATING = 1;
-const VERTICAL_SINGLE_DETENT_MIN_PX = 12;
-const VERTICAL_FAST_FLICK_MIN_PX = 24;
+/**
+ * Gap between non-decaying events above which `VerticalWheelTurn` stops treating
+ * them as one trackpad ramp-up (trackpad frames arrive every ~8–33 ms; brisk
+ * discrete mouse clicks have wider gaps inside the 90 ms idle window).
+ */
+const VERTICAL_RAMP_GAP_MS = 45;
+
+/** Vertical wheel gesture thresholds derived from a `1..=5` sensitivity level. */
+export interface VerticalWheelThresholds {
+  readonly value: WheelSensitivity;
+  readonly label: string;
+  /** Accumulated vertical px required to commit mid-gesture (and discrete line/page travel). */
+  readonly travelPx: number;
+  /** Minimum pure-vertical single-sample delta (px) committed on idle release. */
+  readonly singleDetentMinPx: number;
+  /** Minimum accumulated px required alongside `SCRUB_COMMIT_VELOCITY` on idle release. */
+  readonly fastFlickMinPx: number;
+  /** Minimum delta (px) needed for a post-decay impulse to start a fresh turn. */
+  readonly spikeFloorPx: number;
+}
+
+const THRESHOLDS_VERY_LOW: VerticalWheelThresholds = {
+  value: 1,
+  label: 'Very low',
+  travelPx: 64,
+  singleDetentMinPx: 24,
+  fastFlickMinPx: 38,
+  spikeFloorPx: 24,
+};
+
+const THRESHOLDS_LOW: VerticalWheelThresholds = {
+  value: 2,
+  label: 'Low',
+  travelPx: 48,
+  singleDetentMinPx: 16,
+  fastFlickMinPx: 28,
+  spikeFloorPx: 24,
+};
+
+const THRESHOLDS_NORMAL: VerticalWheelThresholds = {
+  value: 3,
+  label: 'Normal',
+  travelPx: 32,
+  singleDetentMinPx: 10,
+  fastFlickMinPx: 20,
+  spikeFloorPx: 20,
+};
+
+const THRESHOLDS_HIGH: VerticalWheelThresholds = {
+  value: 4,
+  label: 'High',
+  travelPx: 20,
+  singleDetentMinPx: 6,
+  fastFlickMinPx: 12,
+  spikeFloorPx: 12,
+};
+
+const THRESHOLDS_VERY_HIGH: VerticalWheelThresholds = {
+  value: 5,
+  label: 'Very high',
+  travelPx: 12,
+  singleDetentMinPx: 4,
+  fastFlickMinPx: 8,
+  spikeFloorPx: 12,
+};
+
+export const WHEEL_SENSITIVITY_OPTIONS: readonly VerticalWheelThresholds[] = [
+  THRESHOLDS_VERY_LOW,
+  THRESHOLDS_LOW,
+  THRESHOLDS_NORMAL,
+  THRESHOLDS_HIGH,
+  THRESHOLDS_VERY_HIGH,
+];
+
+/** Clamps any incoming numeric sensitivity to a valid `1..=5` level (`3` fallback). */
+export function clampWheelSensitivity(value: number | undefined): WheelSensitivity {
+  if (value === undefined || !Number.isFinite(value)) return DEFAULT_WHEEL_SENSITIVITY;
+  const rounded = Math.round(value);
+  if (rounded <= MIN_WHEEL_SENSITIVITY) return 1;
+  if (rounded === 2) return 2;
+  if (rounded === 3) return 3;
+  if (rounded === 4) return 4;
+  return MAX_WHEEL_SENSITIVITY >= 5 ? 5 : 3;
+}
+
+/** Resolves vertical wheel thresholds for sensitivity `1..=5` (`3` = `Normal` default). */
+export function resolveVerticalWheelThresholds(
+  sensitivity?: number | undefined,
+): VerticalWheelThresholds {
+  switch (clampWheelSensitivity(sensitivity)) {
+    case 1:
+      return THRESHOLDS_VERY_LOW;
+    case 2:
+      return THRESHOLDS_LOW;
+    case 3:
+      return THRESHOLDS_NORMAL;
+    case 4:
+      return THRESHOLDS_HIGH;
+    case 5:
+      return THRESHOLDS_VERY_HIGH;
+  }
+}
 
 interface VerticalSample {
   deltaY: number;
@@ -467,6 +573,23 @@ export class VerticalWheelTurn {
   private lastAbs = 0;
   private lastAt = 0;
   private hasDecayed = false;
+  private thresholds: VerticalWheelThresholds;
+
+  constructor(sensitivity?: number | undefined) {
+    this.thresholds = resolveVerticalWheelThresholds(sensitivity);
+  }
+
+  /**
+   * Updates sensitivity thresholds and clears any accumulated travel so stale
+   * partial movement from an earlier setting cannot trigger an unexpected turn.
+   */
+  setSensitivity(sensitivity: number | undefined): void {
+    const next = resolveVerticalWheelThresholds(sensitivity);
+    if (next.value !== this.thresholds.value) {
+      this.thresholds = next;
+      this.reset();
+    }
+  }
 
   /** Whether an active accumulation or momentum latch is still in progress. */
   isActive(at = this.lastAt): boolean {
@@ -561,6 +684,8 @@ export class VerticalWheelTurn {
     if (!this.hasDecayed) {
       if (abs < this.lastAbs) {
         this.hasDecayed = true;
+      } else if (at - this.lastAt >= VERTICAL_RAMP_GAP_MS) {
+        return false;
       }
       this.lastDeltaY = deltaY;
       this.lastAbs = abs;
@@ -568,7 +693,7 @@ export class VerticalWheelTurn {
       return true;
     }
     if (
-      abs < VERTICAL_FAST_FLICK_MIN_PX ||
+      abs < this.thresholds.spikeFloorPx ||
       abs <= this.lastAbs * MOMENTUM_SPIKE_RATIO + MOMENTUM_SPIKE_SLACK
     ) {
       this.lastDeltaY = deltaY;
@@ -601,7 +726,7 @@ export class VerticalWheelTurn {
     this.lastDeltaY = deltaY;
     this.lastAbs = Math.abs(deltaY);
     this.lastAt = at;
-    if (Math.abs(this.travel) >= WHEEL_LINE_PX) {
+    if (Math.abs(this.travel) >= this.thresholds.travelPx) {
       const direction = directionOf(this.travel);
       this.phase = SETTLING;
       this.travel = 0;
@@ -620,13 +745,13 @@ export class VerticalWheelTurn {
       this.samples.length === 1 &&
       first !== undefined &&
       first.deltaX === 0 &&
-      Math.abs(this.travel) >= VERTICAL_SINGLE_DETENT_MIN_PX
+      Math.abs(this.travel) >= this.thresholds.singleDetentMinPx
     ) {
       return direction;
     }
     const velocity = measureWheelVelocity(this.samples, (sample) => sample.deltaY, at);
     if (
-      Math.abs(this.travel) >= VERTICAL_FAST_FLICK_MIN_PX &&
+      Math.abs(this.travel) >= this.thresholds.fastFlickMinPx &&
       Math.abs(velocity) >= SCRUB_COMMIT_VELOCITY &&
       directionOf(velocity) === direction
     ) {
@@ -667,6 +792,8 @@ export interface UsePageTurnGesturesOptions {
    * Defaults to `false` so continuous-scrolling readers keep native vertical scroll.
    */
   verticalWheel?: boolean | ((direction: TurnDirection, wheel: WheelSample) => boolean) | undefined;
+  /** Vertical wheel turn sensitivity (`1..=5`, default `3`). Higher turns with less movement. */
+  wheelSensitivity?: number | undefined;
   onScrubStart?: (() => void) | undefined;
   /** Follows the fingers: px of travel, signed, already rubber-banded. */
   onScrubMove?: ((displacement: number) => void) | undefined;
@@ -742,11 +869,14 @@ export function usePageTurnGestures({
   canTurn,
   hasSelection,
   verticalWheel = false,
+  wheelSensitivity,
   onScrubStart,
   onScrubMove,
   onScrubEnd,
 }: UsePageTurnGesturesOptions): PageTurnGestures {
   const [zone, setZone] = useState<TurnZone | null>(null);
+  const resolvedSensitivity = clampWheelSensitivity(wheelSensitivity);
+  const verticalThresholds = resolveVerticalWheelThresholds(resolvedSensitivity);
   const latest = useRef({
     enabled,
     onTurn,
@@ -754,6 +884,7 @@ export function usePageTurnGestures({
     canTurn,
     hasSelection,
     verticalWheel,
+    verticalThresholds,
     onScrubStart,
     onScrubMove,
     onScrubEnd,
@@ -766,6 +897,7 @@ export function usePageTurnGestures({
       canTurn,
       hasSelection,
       verticalWheel,
+      verticalThresholds,
       onScrubStart,
       onScrubMove,
       onScrubEnd,
@@ -786,7 +918,8 @@ export function usePageTurnGestures({
   const verticalDiscreteState = useRef<DiscreteWheelState>({ travel: 0, timer: undefined });
   const verticalNotchTail = useRef<NotchTail | null>(null);
   const [scrub] = useState(() => new WheelScrub());
-  const [verticalTurn] = useState(() => new VerticalWheelTurn());
+  const [verticalTurn] = useState(() => new VerticalWheelTurn(resolvedSensitivity));
+  const appliedSensitivityRef = useRef<WheelSensitivity>(resolvedSensitivity);
 
   const zoneFor = useCallback(
     (x: number): TurnZone | null => {
@@ -899,6 +1032,7 @@ export function usePageTurnGestures({
       rawDelta: number,
       mode: number,
       pageSize: number,
+      thresholdPx: number,
       onCommit: (direction: TurnDirection) => void,
     ): boolean => {
       const delta = normalizeWheelDelta(rawDelta, mode, mode === DOM_DELTA_PAGE ? pageSize : 0);
@@ -907,7 +1041,7 @@ export function usePageTurnGestures({
         state.travel = 0;
       }
       state.travel += delta;
-      if (Math.abs(state.travel) >= WHEEL_LINE_PX) {
+      if (Math.abs(state.travel) >= thresholdPx) {
         const direction = directionOf(state.travel);
         clearDiscreteState(state);
         onCommit(direction);
@@ -922,7 +1056,12 @@ export function usePageTurnGestures({
 
   const handleWheel = useCallback(
     (wheel: WheelSample): boolean => {
-      const { enabled: on, canSwipe: swipeAllowed, verticalWheel: allowVertical } = latest.current;
+      const {
+        enabled: on,
+        canSwipe: swipeAllowed,
+        verticalWheel: allowVertical,
+        verticalThresholds: activeThresholds,
+      } = latest.current;
       if (!on || wheel.defaultPrevented) return false;
       const mode = wheel.deltaMode ?? DOM_DELTA_PIXEL;
       const timestamp = now();
@@ -942,6 +1081,7 @@ export function usePageTurnGestures({
             wheel.deltaX,
             mode,
             mode === DOM_DELTA_PAGE ? pageWidth() : 0,
+            WHEEL_LINE_PX,
             (direction) => {
               if (commitTurn(direction, 'swipe')) {
                 notchTail.current = {
@@ -969,6 +1109,11 @@ export function usePageTurnGestures({
       }
 
       if (!allowVertical || scrub.isDragging()) return false;
+      if (appliedSensitivityRef.current !== activeThresholds.value) {
+        appliedSensitivityRef.current = activeThresholds.value;
+        verticalTurn.setSensitivity(activeThresholds.value);
+        resetVerticalWheel();
+      }
       if (Math.abs(wheel.deltaY) <= Math.abs(wheel.deltaX) * 1.5 || wheel.deltaY === 0) {
         return false;
       }
@@ -1000,6 +1145,7 @@ export function usePageTurnGestures({
           wheel.deltaY,
           mode,
           mode === DOM_DELTA_PAGE ? pageHeight() : 0,
+          activeThresholds.travelPx,
           (committedDirection) => {
             commitTurn(committedDirection, 'vertical-wheel');
           },
@@ -1140,6 +1286,14 @@ export function usePageTurnGestures({
   useEffect(() => {
     if (!verticalActive) resetVerticalWheel();
   }, [resetVerticalWheel, verticalActive]);
+
+  useEffect(() => {
+    if (appliedSensitivityRef.current !== resolvedSensitivity) {
+      appliedSensitivityRef.current = resolvedSensitivity;
+      verticalTurn.setSensitivity(resolvedSensitivity);
+      resetVerticalWheel();
+    }
+  }, [resetVerticalWheel, resolvedSensitivity, verticalTurn]);
 
   useEffect(() => {
     const discrete = discreteState.current;

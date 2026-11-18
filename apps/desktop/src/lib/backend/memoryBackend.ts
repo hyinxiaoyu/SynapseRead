@@ -20,6 +20,8 @@ import {
   defaultBookmarkLabel,
   type DocumentFormat,
   type IpcError,
+  MAX_WHEEL_SENSITIVITY,
+  MIN_WHEEL_SENSITIVITY,
   type MindMapEdge,
   type MindMapNode,
   type NoteCard,
@@ -749,7 +751,19 @@ export function createMemoryBackend({
       ) {
         throw fail('invalid_preferences', 'scrollPageTransition must be none, fade, or null');
       }
-      readingPreferences = { ...preferences, scrollPageTransition };
+      const wheelSensitivity =
+        preferences.wheelSensitivity ?? DEFAULT_READING_PREFERENCES.wheelSensitivity;
+      if (
+        !Number.isInteger(wheelSensitivity) ||
+        wheelSensitivity < MIN_WHEEL_SENSITIVITY ||
+        wheelSensitivity > MAX_WHEEL_SENSITIVITY
+      ) {
+        throw fail(
+          'invalid_preferences',
+          `wheelSensitivity must be between ${MIN_WHEEL_SENSITIVITY} and ${MAX_WHEEL_SENSITIVITY}`,
+        );
+      }
+      readingPreferences = { ...preferences, scrollPageTransition, wheelSensitivity };
       return { ...readingPreferences };
     },
 

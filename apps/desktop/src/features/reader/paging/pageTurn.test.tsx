@@ -8,6 +8,7 @@ import {
   animatePageTurn,
   animatePaperCurl,
   applyPaperCurl,
+  clampWheelSensitivity,
   computePaperCurl,
   directionOf,
   easeOut,
@@ -20,6 +21,7 @@ import {
   PAGE_TURN_ANIMATION_ID,
   type PageTurnGestures,
   resetPaperCurl,
+  resolveVerticalWheelThresholds,
   rubberBand,
   SCRUB_COMMIT_FRACTION,
   SCRUB_COMMIT_MAX_PX,
@@ -34,6 +36,7 @@ import {
   type UsePageTurnGesturesOptions,
   VerticalWheelTurn,
   WHEEL_LINE_PX,
+  WHEEL_SENSITIVITY_OPTIONS,
   type WheelSample,
   WheelScrub,
   zoneAt,
@@ -461,6 +464,7 @@ function Probe({
   canTurn,
   hasSelection,
   verticalWheel,
+  wheelSensitivity,
   children,
 }: {
   onTurn: (direction: TurnDirection) => void;
@@ -474,6 +478,7 @@ function Probe({
   canTurn?: UsePageTurnGesturesOptions['canTurn'];
   hasSelection?: UsePageTurnGesturesOptions['hasSelection'];
   verticalWheel?: UsePageTurnGesturesOptions['verticalWheel'];
+  wheelSensitivity?: UsePageTurnGesturesOptions['wheelSensitivity'];
   children?: ReactNode;
 }) {
   const areaRef = useRef<HTMLDivElement>(null);
@@ -485,6 +490,7 @@ function Probe({
       ...(canTurn === undefined ? {} : { canTurn }),
       ...(hasSelection === undefined ? {} : { hasSelection }),
       ...(verticalWheel === undefined ? {} : { verticalWheel }),
+      ...(wheelSensitivity === undefined ? {} : { wheelSensitivity }),
       ...(scrub === undefined
         ? {}
         : {
@@ -855,7 +861,26 @@ describe('usePageTurnGestures', () => {
 });
 
 describe('VerticalWheelTurn', () => {
-  it('accumulates sub-threshold travel and commits once at WHEEL_LINE_PX', () => {
+  it('clamps and maps wheel sensitivity levels monotonically across 1..5', () => {
+    expect(clampWheelSensitivity(undefined)).toBe(3);
+    expect(clampWheelSensitivity(Number.NaN)).toBe(3);
+    expect(clampWheelSensitivity(Number.POSITIVE_INFINITY)).toBe(3);
+    expect(clampWheelSensitivity(-2)).toBe(1);
+    expect(clampWheelSensitivity(0)).toBe(1);
+    expect(clampWheelSensitivity(2.6)).toBe(3);
+    expect(clampWheelSensitivity(9)).toBe(5);
+
+    expect(WHEEL_SENSITIVITY_OPTIONS.map((option) => option.value)).toEqual([1, 2, 3, 4, 5]);
+    for (let level = 1; level < 5; level += 1) {
+      const lower = resolveVerticalWheelThresholds(level);
+      const higher = resolveVerticalWheelThresholds(level + 1);
+      expect(higher.travelPx).toBeLessThan(lower.travelPx);
+      expect(higher.singleDetentMinPx).toBeLessThan(lower.singleDetentMinPx);
+      expect(higher.fastFlickMinPx).toBeLessThan(lower.fastFlickMinPx);
+    }
+  });
+
+  it('accumulates sub-threshold travel and commits once at the default threshold', () => {
     const controller = new VerticalWheelTurn();
     expect(controller.isActive(0)).toBe(false);
     expect(controller.push(15, 0)).toBeNull();
@@ -865,6 +890,64 @@ describe('VerticalWheelTurn', () => {
     expect(controller.isActive(32)).toBe(true);
     expect(controller.release(32 + SCRUB_IDLE_MS)).toBeNull();
     expect(controller.isActive(32 + SCRUB_IDLE_MS)).toBe(false);
+  });
+
+  it('scales travel, single-detent, and fast-flick thresholds across sensitivity levels in both directions', () => {
+    // A gentle 16px stream (8 + 8) triggers immediately at sensitivity 5 (travelPx=12),
+    // waits for release at 3 (singleDetentMinPx=10 requires single sample; 2 samples < 20 fastFlickMinPx),
+    // and never triggers at 1 (travelPx=64, fastFlickMinPx=38).
+    for (const sign of [1, -1] as const) {
+      const low = new VerticalWheelTurn(1);
+      expect(low.push(8 * sign, 0)).toBeNull();
+      expect(low.push(8 * sign, 16)).toBeNull();
+      expect(low.release(16 + SCRUB_IDLE_MS)).toBeNull();
+
+      const high = new VerticalWheelTurn(5);
+      expect(high.push(8 * sign, 0)).toBeNull();
+      expect(high.push(8 * sign, 16)).toBe(sign);
+      expect(high.release(16 + SCRUB_IDLE_MS)).toBeNull();
+
+      // Single 6px pure-vertical detent commits on release at sensitivity 4/5, ignored at 1/2/3.
+      const detentNormal = new VerticalWheelTurn(3);
+      expect(detentNormal.push(6 * sign, 0, 0)).toBeNull();
+      expect(detentNormal.release(SCRUB_IDLE_MS)).toBeNull();
+
+      const detentHigh = new VerticalWheelTurn(4);
+      expect(detentHigh.push(6 * sign, 0, 0)).toBeNull();
+      expect(detentHigh.release(SCRUB_IDLE_MS)).toBe(sign);
+    }
+
+    // Even at max sensitivity (5), a full trackpad ramp-up + decaying inertia is still 1 turn.
+    const maxTrackpad = new VerticalWheelTurn(5);
+    const trackpadTurns: TurnDirection[] = [];
+    const sequence = [4, 10, 22, 45, 95, 110, 80, 50, 30, 15, 5];
+    sequence.forEach((deltaY, index) => {
+      const committed = maxTrackpad.push(deltaY, index * 16);
+      if (committed !== null) trackpadTurns.push(committed);
+    });
+    expect(trackpadTurns).toEqual([1]);
+    expect(maxTrackpad.release(sequence.length * 16 + SCRUB_IDLE_MS)).toBeNull();
+  });
+
+  it('allows rapid physical mouse clicks >= 45ms apart while still absorbing 16ms trackpad ramp-ups', () => {
+    const mouse = new VerticalWheelTurn(5);
+    expect(mouse.push(12, 0)).toBe(1);
+    expect(mouse.push(12, 50)).toBe(1);
+    expect(mouse.push(12, 100)).toBe(1);
+
+    const trackpadPlateau = new VerticalWheelTurn(5);
+    expect(trackpadPlateau.push(12, 0)).toBe(1);
+    expect(trackpadPlateau.push(12, 16)).toBeNull();
+    expect(trackpadPlateau.push(8, 32)).toBeNull();
+  });
+
+  it('resets partial accumulation when sensitivity changes', () => {
+    const controller = new VerticalWheelTurn(1);
+    expect(controller.push(25, 0)).toBeNull();
+    controller.setSensitivity(5);
+    expect(controller.isActive(0)).toBe(false);
+    expect(controller.release(SCRUB_IDLE_MS)).toBeNull();
+    expect(controller.push(6, 100)).toBeNull();
   });
 
   it('absorbs an accelerating trackpad ramp-up and decaying inertia as one turn', () => {
@@ -1725,6 +1808,159 @@ describe('usePageTurnGestures consecutive clicks (#107) and vertical wheel (#106
       expect(g().handleWheel({ deltaX: 80, deltaY: 0, deltaMode: 0, ctrlKey: false })).toBe(true);
     });
     expect(onTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it('scales vertical wheel thresholds across pixel, line, and page modes without altering horizontal swipes', () => {
+    vi.useFakeTimers();
+
+    // 1. Pixel mode: [8, 8] = 16px triggers at sensitivity 5 (both directions), not at sensitivity 1.
+    const low = mountWith({ verticalWheel: true, wheelSensitivity: 1 });
+    for (const sign of [1, -1] as const) {
+      act(() => {
+        expect(
+          low.gestures().handleWheel({ deltaX: 0, deltaY: 8 * sign, deltaMode: 0, ctrlKey: false }),
+        ).toBe(true);
+        vi.advanceTimersByTime(16);
+        expect(
+          low.gestures().handleWheel({ deltaX: 0, deltaY: 8 * sign, deltaMode: 0, ctrlKey: false }),
+        ).toBe(true);
+        vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+      });
+    }
+    expect(low.onTurn).not.toHaveBeenCalled();
+
+    // At sensitivity 1, accumulating 64px in one direction commits once.
+    act(() => {
+      for (const deltaY of [32, 32]) {
+        low.gestures().handleWheel({ deltaX: 0, deltaY, deltaMode: 0, ctrlKey: false });
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(low.onTurn).toHaveBeenCalledTimes(1);
+    expect(low.onTurn).toHaveBeenLastCalledWith(1, { source: 'vertical-wheel' });
+
+    // Horizontal discrete wheel still uses WHEEL_LINE_PX (40px) regardless of wheelSensitivity: 1.
+    low.onTurn.mockClear();
+    act(() => {
+      vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+      low.gestures().handleWheel({ deltaX: 1, deltaY: 0, deltaMode: 1, ctrlKey: false });
+    });
+    expect(low.onTurn).toHaveBeenCalledTimes(1);
+    expect(low.onTurn).toHaveBeenLastCalledWith(1, { source: 'swipe' });
+
+    low.view.unmount();
+
+    const high = mountWith({ verticalWheel: true, wheelSensitivity: 5 });
+    for (const sign of [1, -1] as const) {
+      act(() => {
+        high.gestures().handleWheel({ deltaX: 0, deltaY: 8 * sign, deltaMode: 0, ctrlKey: false });
+        vi.advanceTimersByTime(16);
+        high.gestures().handleWheel({ deltaX: 0, deltaY: 8 * sign, deltaMode: 0, ctrlKey: false });
+        vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+      });
+    }
+    expect(high.onTurn.mock.calls).toEqual([
+      [1, { source: 'vertical-wheel' }],
+      [-1, { source: 'vertical-wheel' }],
+    ]);
+    high.view.unmount();
+
+    // 2. DOM_DELTA_LINE: 0.5 lines (20px) needs 4 ticks at sensitivity 1, 2 ticks at sensitivity 3, 1 tick at sensitivity 4.
+    const lineLow = mountWith({ verticalWheel: true, wheelSensitivity: 1 });
+    act(() => {
+      for (let tick = 0; tick < 3; tick += 1) {
+        lineLow.gestures().handleWheel({ deltaX: 0, deltaY: 0.5, deltaMode: 1, ctrlKey: false });
+      }
+      expect(lineLow.onTurn).not.toHaveBeenCalled();
+      lineLow.gestures().handleWheel({ deltaX: 0, deltaY: 0.5, deltaMode: 1, ctrlKey: false });
+    });
+    expect(lineLow.onTurn).toHaveBeenCalledTimes(1);
+    expect(lineLow.onTurn).toHaveBeenLastCalledWith(1, { source: 'vertical-wheel' });
+    lineLow.view.unmount();
+
+    const lineNormal = mountWith({ verticalWheel: true, wheelSensitivity: 3 });
+    act(() => {
+      lineNormal.gestures().handleWheel({ deltaX: 0, deltaY: 0.5, deltaMode: 1, ctrlKey: false });
+      expect(lineNormal.onTurn).not.toHaveBeenCalled();
+      lineNormal.gestures().handleWheel({ deltaX: 0, deltaY: 0.5, deltaMode: 1, ctrlKey: false });
+    });
+    expect(lineNormal.onTurn).toHaveBeenCalledTimes(1);
+    expect(lineNormal.onTurn).toHaveBeenLastCalledWith(1, { source: 'vertical-wheel' });
+    lineNormal.view.unmount();
+
+    const lineHigh = mountWith({ verticalWheel: true, wheelSensitivity: 4 });
+    act(() => {
+      lineHigh.gestures().handleWheel({ deltaX: 0, deltaY: -0.5, deltaMode: 1, ctrlKey: false });
+    });
+    expect(lineHigh.onTurn).toHaveBeenCalledTimes(1);
+    expect(lineHigh.onTurn).toHaveBeenLastCalledWith(-1, { source: 'vertical-wheel' });
+
+    // Full 3-line discrete notch turns exactly once across all sensitivity levels.
+    lineHigh.onTurn.mockClear();
+    act(() => {
+      lineHigh.gestures().handleWheel({ deltaX: 0, deltaY: 3, deltaMode: 1, ctrlKey: false });
+    });
+    expect(lineHigh.onTurn).toHaveBeenCalledTimes(1);
+    lineHigh.view.unmount();
+
+    // 3. DOM_DELTA_PAGE: full page notch turns once at every level; fractional page scales.
+    const pageLow = mountWith({ verticalWheel: true, wheelSensitivity: 1 });
+    act(() => {
+      pageLow.gestures().handleWheel({ deltaX: 0, deltaY: 0.05, deltaMode: 2, ctrlKey: false }); // 30px < 64px
+      expect(pageLow.onTurn).not.toHaveBeenCalled();
+      pageLow.gestures().handleWheel({ deltaX: 0, deltaY: 0.06, deltaMode: 2, ctrlKey: false }); // +36px = 66px >= 64px
+    });
+    expect(pageLow.onTurn).toHaveBeenCalledTimes(1);
+    pageLow.view.unmount();
+
+    const pageHigh = mountWith({ verticalWheel: true, wheelSensitivity: 5 });
+    act(() => {
+      pageHigh.gestures().handleWheel({ deltaX: 0, deltaY: -0.05, deltaMode: 2, ctrlKey: false }); // -30px >= 12px
+    });
+    expect(pageHigh.onTurn).toHaveBeenCalledTimes(1);
+    expect(pageHigh.onTurn).toHaveBeenLastCalledWith(-1, { source: 'vertical-wheel' });
+
+    // Horizontal scrub remains unaffected even at wheelSensitivity 5.
+    act(() => {
+      pageHigh.gestures().handleWheel({ deltaX: 25, deltaY: 0, deltaMode: 0, ctrlKey: false });
+    });
+    expect(pageHigh.scrub.start).toHaveBeenCalledTimes(1);
+    expect(pageHigh.scrub.move).toHaveBeenLastCalledWith(25);
+  });
+
+  it('clears stale partial travel and pending idle timers when wheelSensitivity changes', () => {
+    vi.useFakeTimers();
+    const onTurn = vi.fn();
+    let gestures: PageTurnGestures | null = null;
+    const expose = (value: PageTurnGestures) => {
+      gestures = value;
+    };
+    const view = render(
+      <Probe onTurn={onTurn} verticalWheel wheelSensitivity={1} expose={expose} />,
+    );
+    vi.spyOn(
+      view.container.firstElementChild as HTMLElement,
+      'getBoundingClientRect',
+    ).mockReturnValue(new DOMRect(0, 0, 1000, 600));
+    const g = () => gestures as unknown as PageTurnGestures;
+
+    // Accumulate 30px under sensitivity 1 (below 64px travel, above 12px travel at sensitivity 5),
+    // and also accumulate a partial 0.5 DOM_DELTA_LINE tick.
+    act(() => {
+      g().handleWheel({ deltaX: 0, deltaY: 30, deltaMode: 0, ctrlKey: false });
+    });
+    expect(onTurn).not.toHaveBeenCalled();
+
+    // Changing sensitivity mid-gesture drops the stale 30px and cancels its idle timer.
+    view.rerender(<Probe onTurn={onTurn} verticalWheel wheelSensitivity={5} expose={expose} />);
+    act(() => vi.advanceTimersByTime(SCRUB_IDLE_MS + 10));
+    expect(onTurn).not.toHaveBeenCalled();
+
+    // A small 6px tick afterward starts fresh and does not piggyback on the old 30px.
+    act(() => {
+      g().handleWheel({ deltaX: 0, deltaY: 6, deltaMode: 0, ctrlKey: false });
+    });
+    expect(onTurn).not.toHaveBeenCalled();
   });
 });
 

@@ -593,6 +593,14 @@ pub struct ReadingPreferences {
     /// take the default, so it needs no migration.
     #[serde(default)]
     pub focus_mode_full_screen: bool,
+    /// Sensitivity level (`1..=5`, default `3`) for vertical wheel page turns in
+    /// paginated modes. Higher values trigger with less wheel movement.
+    #[serde(default = "default_wheel_sensitivity")]
+    pub wheel_sensitivity: u8,
+}
+
+const fn default_wheel_sensitivity() -> u8 {
+    ReadingPreferences::DEFAULT_WHEEL_SENSITIVITY
 }
 
 impl Default for ReadingPreferences {
@@ -611,6 +619,7 @@ impl Default for ReadingPreferences {
             scroll_page_transition: None,
             tint_pdf_pages: false,
             focus_mode_full_screen: false,
+            wheel_sensitivity: Self::DEFAULT_WHEEL_SENSITIVITY,
         }
     }
 }
@@ -620,6 +629,9 @@ impl ReadingPreferences {
     pub const MAX_FONT_SIZE: u32 = 200;
     pub const MIN_LINE_SPACING: f64 = 1.2;
     pub const MAX_LINE_SPACING: f64 = 2.4;
+    pub const MIN_WHEEL_SENSITIVITY: u8 = 1;
+    pub const MAX_WHEEL_SENSITIVITY: u8 = 5;
+    pub const DEFAULT_WHEEL_SENSITIVITY: u8 = 3;
 
     pub fn validate(&self) -> CoreResult<()> {
         if !(Self::MIN_FONT_SIZE..=Self::MAX_FONT_SIZE).contains(&self.font_size) {
@@ -636,6 +648,15 @@ impl ReadingPreferences {
                 "lineSpacing must be between {:.1} and {:.1}",
                 Self::MIN_LINE_SPACING,
                 Self::MAX_LINE_SPACING
+            )));
+        }
+        if !(Self::MIN_WHEEL_SENSITIVITY..=Self::MAX_WHEEL_SENSITIVITY)
+            .contains(&self.wheel_sensitivity)
+        {
+            return Err(CoreError::InvalidPreferences(format!(
+                "wheelSensitivity must be between {} and {}",
+                Self::MIN_WHEEL_SENSITIVITY,
+                Self::MAX_WHEEL_SENSITIVITY
             )));
         }
         Ok(())
@@ -790,12 +811,28 @@ mod tests {
             Err(CoreError::InvalidPreferences(_))
         ));
 
-        let mut nan_spacing = prefs;
+        let mut nan_spacing = prefs.clone();
         nan_spacing.line_spacing = f64::NAN;
         assert!(matches!(
             nan_spacing.validate(),
             Err(CoreError::InvalidPreferences(_))
         ));
+
+        for invalid in [0_u8, 6_u8] {
+            let mut bad_sensitivity = prefs.clone();
+            bad_sensitivity.wheel_sensitivity = invalid;
+            assert!(matches!(
+                bad_sensitivity.validate(),
+                Err(CoreError::InvalidPreferences(_))
+            ));
+        }
+        for valid in
+            ReadingPreferences::MIN_WHEEL_SENSITIVITY..=ReadingPreferences::MAX_WHEEL_SENSITIVITY
+        {
+            let mut valid_sensitivity = prefs.clone();
+            valid_sensitivity.wheel_sensitivity = valid;
+            assert!(valid_sensitivity.validate().is_ok());
+        }
     }
 
     #[test]
@@ -905,9 +942,10 @@ mod tests {
         let prefs: ReadingPreferences = serde_json::from_value(stored).unwrap();
         assert_eq!(prefs.page_transition, PageTransition::Slide);
         assert_eq!(prefs.scroll_page_transition, None);
-        // The same row predates the appearance switches, so both stay off.
+        // The same row predates the appearance switches and wheel sensitivity.
         assert!(!prefs.tint_pdf_pages);
         assert!(!prefs.focus_mode_full_screen);
+        assert_eq!(prefs.wheel_sensitivity, 3);
     }
 
     #[test]
@@ -959,11 +997,13 @@ mod tests {
             theme: ReadingTheme::Dark,
             tint_pdf_pages: true,
             focus_mode_full_screen: true,
+            wheel_sensitivity: 5,
             ..ReadingPreferences::default()
         };
         let wire = serde_json::to_value(&prefs).unwrap();
         assert_eq!(wire["tintPdfPages"], true);
         assert_eq!(wire["focusModeFullScreen"], true);
+        assert_eq!(wire["wheelSensitivity"], 5);
 
         let sent = serde_json::json!({
             "theme": "sepia",
@@ -978,10 +1018,12 @@ mod tests {
             "pageTransition": "slide",
             "tintPdfPages": true,
             "focusModeFullScreen": false,
+            "wheelSensitivity": 2,
         });
         let parsed: ReadingPreferences = serde_json::from_value(sent).unwrap();
         assert!(parsed.tint_pdf_pages);
         assert!(!parsed.focus_mode_full_screen);
+        assert_eq!(parsed.wheel_sensitivity, 2);
     }
 
     #[test]

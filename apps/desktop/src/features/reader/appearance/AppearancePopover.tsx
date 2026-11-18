@@ -19,14 +19,21 @@ import {
   SCROLL_PAGE_TRANSITIONS,
   resolveScrollTransition,
 } from '@/features/reader/appearance/transition';
+import {
+  clampWheelSensitivity,
+  resolveVerticalWheelThresholds,
+} from '@/features/reader/paging/pageTurn';
 import { ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
 import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
-import type {
-  ReadingMargins,
-  ReadingPageWidth,
-  ReadingPreferences,
-  ReadingTheme,
+import {
+  MAX_WHEEL_SENSITIVITY,
+  MIN_WHEEL_SENSITIVITY,
+  type ReadingMargins,
+  type ReadingPageWidth,
+  type ReadingPreferences,
+  type ReadingTheme,
+  type WheelSensitivity,
 } from '@/types/domain';
 
 const FONT_SIZE_STEP = 10;
@@ -213,6 +220,77 @@ function Switch({
   );
 }
 
+function WheelSensitivityControl({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (sensitivity: WheelSensitivity) => void;
+}) {
+  const sliderId = useId();
+  const labelId = useId();
+  const descriptionId = useId();
+  const clamped = clampWheelSensitivity(value);
+  const option = resolveVerticalWheelThresholds(clamped);
+
+  const commitLevel = (next: number) => {
+    const resolved = clampWheelSensitivity(next);
+    if (resolved !== clamped) onChange(resolved);
+  };
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2">
+        <label
+          htmlFor={sliderId}
+          id={labelId}
+          className="text-xs font-medium text-muted-foreground"
+        >
+          Wheel sensitivity
+        </label>
+        <span
+          data-testid="wheel-sensitivity-value"
+          aria-live="polite"
+          className="text-xs font-medium text-foreground tabular-nums"
+        >
+          {option.label}
+        </span>
+      </div>
+      <input
+        id={sliderId}
+        type="range"
+        min={MIN_WHEEL_SENSITIVITY}
+        max={MAX_WHEEL_SENSITIVITY}
+        step={1}
+        value={clamped}
+        data-testid="wheel-sensitivity-slider"
+        aria-labelledby={labelId}
+        aria-describedby={descriptionId}
+        aria-valuetext={`${option.label} (${clamped} of ${MAX_WHEEL_SENSITIVITY})`}
+        onChange={(event) => commitLevel(Number(event.currentTarget.value))}
+        onKeyDown={(event) => {
+          let next: number | null = null;
+          if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = clamped + 1;
+          else if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = clamped - 1;
+          else if (event.key === 'Home') next = MIN_WHEEL_SENSITIVITY;
+          else if (event.key === 'End') next = MAX_WHEEL_SENSITIVITY;
+          if (next === null) return;
+          event.preventDefault();
+          commitLevel(next);
+        }}
+        className="h-2 w-full cursor-pointer rounded-full accent-primary outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      />
+      <div aria-hidden="true" className="flex justify-between text-[11px] text-muted-foreground">
+        <span>Less</span>
+        <span>More</span>
+      </div>
+      <p id={descriptionId} className="text-[11px] text-muted-foreground">
+        Higher turns pages with less wheel movement
+      </p>
+    </div>
+  );
+}
+
 /** A swatch in the theme's page colors; Auto shows Light and Dark halves. */
 function swatchBackground(theme: ReadingTheme): string {
   if (theme === 'auto') {
@@ -346,6 +424,13 @@ function AppearancePanel({
     />
   );
 
+  const wheelSensitivityControl = !isScrolled ? (
+    <WheelSensitivityControl
+      value={preferences.wheelSensitivity}
+      onChange={(wheelSensitivity) => onChange({ wheelSensitivity })}
+    />
+  ) : null;
+
   // Every format reads in focus mode, so every panel offers this.
   const focusModeSwitch = (
     <Switch
@@ -364,6 +449,7 @@ function AppearancePanel({
       <div className="flex flex-col gap-3.5">
         <ThemeChoices theme={preferences.theme} onChange={(theme) => onChange({ theme })} />
         {pageTurnControl}
+        {wheelSensitivityControl}
         <Switch
           label="Tint PDF pages"
           description="Darkens the page to match the theme. Captures keep the original colors."
@@ -504,6 +590,7 @@ function AppearancePanel({
                 onSelect={(margins) => onChange({ margins })}
               />
               {pageTurnControl}
+              {wheelSensitivityControl}
               <div className="flex flex-col gap-1">
                 <Switch
                   label="Justify"

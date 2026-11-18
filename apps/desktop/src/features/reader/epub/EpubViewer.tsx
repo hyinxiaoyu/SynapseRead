@@ -1444,6 +1444,7 @@ export function EpubViewer({
         (direction > 0 ? currentChapterIndex < chapterCount - 1 : currentChapterIndex > 0)),
     hasSelection: () => handle?.hasSelection() ?? false,
     verticalWheel: paged,
+    wheelSensitivity: effectivePreferences.wheelSensitivity,
     onScrubStart: scrub.start,
     onScrubMove: scrub.move,
     onScrubEnd: scrub.end,

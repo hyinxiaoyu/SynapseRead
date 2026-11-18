@@ -603,6 +603,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
             "scrollPageTransition": null,
             "tintPdfPages": false,
             "focusModeFullScreen": false,
+            "wheelSensitivity": 3,
         })
     );
 
@@ -620,6 +621,7 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         "scrollPageTransition": "none",
         "tintPdfPages": true,
         "focusModeFullScreen": true,
+        "wheelSensitivity": 4,
     });
     let saved = h.ok(
         "save_reading_preferences",
@@ -627,6 +629,30 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
     );
     assert_eq!(saved, updated);
     assert_eq!(h.ok("get_reading_preferences", json!({})), updated);
+
+    for sensitivity in 1..=5 {
+        let mut with_sensitivity = updated.clone();
+        with_sensitivity["wheelSensitivity"] = json!(sensitivity);
+        assert_eq!(
+            h.ok(
+                "save_reading_preferences",
+                json!({ "preferences": with_sensitivity })
+            ),
+            with_sensitivity
+        );
+        assert_eq!(h.ok("get_reading_preferences", json!({})), with_sensitivity);
+    }
+    for invalid_sensitivity in [0, 6] {
+        let mut bad_sensitivity = updated.clone();
+        bad_sensitivity["wheelSensitivity"] = json!(invalid_sensitivity);
+        let error = h
+            .call(
+                "save_reading_preferences",
+                json!({ "preferences": bad_sensitivity }),
+            )
+            .unwrap_err();
+        assert_eq!(error["code"], "invalid_preferences");
+    }
 
     // The newer modes survive the wire in both directions.
     for mode in ["curl", "stack"] {
@@ -704,11 +730,13 @@ fn reading_preferences_round_trip_and_reject_invalid_values() {
         .as_object_mut()
         .unwrap()
         .remove("focusModeFullScreen");
+    legacy.as_object_mut().unwrap().remove("wheelSensitivity");
     let saved_legacy = h.ok("save_reading_preferences", json!({ "preferences": legacy }));
     assert_eq!(saved_legacy["pageWidth"], "standard");
     assert_eq!(saved_legacy["scrollPageTransition"], json!(null));
     assert_eq!(saved_legacy["tintPdfPages"], false);
     assert_eq!(saved_legacy["focusModeFullScreen"], false);
+    assert_eq!(saved_legacy["wheelSensitivity"], 3);
 
     let bad = h
         .call(

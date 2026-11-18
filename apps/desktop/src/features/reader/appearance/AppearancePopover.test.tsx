@@ -423,6 +423,54 @@ describe('AppearanceMenu', () => {
       'true',
     );
   });
+
+  it('offers wheel sensitivity in paginated EPUB and PDF modes and hides it when scrolled', () => {
+    // Paginated EPUB shows the slider inside Customize with Normal (3) default and directional helper text.
+    const epubView = render(<Harness format="epub" scrolled={false} />);
+    fireEvent.click(trigger());
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+
+    const slider = screen.getByTestId('wheel-sensitivity-slider') as HTMLInputElement;
+    expect(slider).toHaveAccessibleName('Wheel sensitivity');
+    expect(slider).toHaveAccessibleDescription('Higher turns pages with less wheel movement');
+    expect(slider.value).toBe('3');
+    expect(screen.getByTestId('wheel-sensitivity-value')).toHaveTextContent('Normal');
+
+    fireEvent.keyDown(slider, { key: 'ArrowRight' });
+    expect(current().wheelSensitivity).toBe(4);
+    expect(screen.getByTestId('wheel-sensitivity-value')).toHaveTextContent('High');
+
+    fireEvent.keyDown(slider, { key: 'End' });
+    expect(current().wheelSensitivity).toBe(5);
+    expect(screen.getByTestId('wheel-sensitivity-value')).toHaveTextContent('Very high');
+
+    fireEvent.keyDown(slider, { key: 'Home' });
+    expect(current().wheelSensitivity).toBe(1);
+    expect(screen.getByTestId('wheel-sensitivity-value')).toHaveTextContent('Very low');
+
+    fireEvent.change(slider, { target: { value: '2' } });
+    expect(current().wheelSensitivity).toBe(2);
+    expect(screen.getByTestId('wheel-sensitivity-value')).toHaveTextContent('Low');
+
+    // Switching EPUB to scrolled mode hides wheel sensitivity.
+    epubView.rerender(<Harness format="epub" scrolled={true} />);
+    expect(screen.queryByTestId('wheel-sensitivity-slider')).not.toBeInTheDocument();
+    epubView.unmount();
+
+    // TXT (always scrolled) hides wheel sensitivity.
+    const txtView = render(<Harness format="txt" />);
+    fireEvent.click(trigger());
+    fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+    expect(screen.queryByTestId('wheel-sensitivity-slider')).not.toBeInTheDocument();
+    txtView.unmount();
+
+    // PDF hides wheel sensitivity in continuous mode and shows it directly in paginated mode.
+    const pdfView = render(<Harness format="pdf" scrolled={true} />);
+    fireEvent.click(trigger());
+    expect(screen.queryByTestId('wheel-sensitivity-slider')).not.toBeInTheDocument();
+    pdfView.rerender(<Harness format="pdf" scrolled={false} />);
+    expect(screen.getByTestId('wheel-sensitivity-slider')).toBeInTheDocument();
+  });
 });
 
 describe('transition helpers', () => {
