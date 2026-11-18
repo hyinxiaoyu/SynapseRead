@@ -762,6 +762,7 @@ export interface UsePageTurnGesturesOptions {
 }
 
 interface DiscreteWheelState {
+  mode: number | undefined;
   travel: number;
   timer: number | undefined;
   fractionalStream: boolean;
@@ -776,6 +777,7 @@ interface NotchTail {
 }
 
 function clearDiscreteState(state: DiscreteWheelState): void {
+  state.mode = undefined;
   state.travel = 0;
   state.fractionalStream = false;
   state.settledDirection = 0;
@@ -873,6 +875,7 @@ export function usePageTurnGestures({
   const press = useRef<{ x: number; y: number; hadSelection: boolean } | null>(null);
   const idleTimer = useRef<number | undefined>(undefined);
   const discreteState = useRef<DiscreteWheelState>({
+    mode: undefined,
     travel: 0,
     timer: undefined,
     fractionalStream: false,
@@ -889,6 +892,7 @@ export function usePageTurnGestures({
   const notchTail = useRef<NotchTail | null>(null);
   const verticalIdleTimer = useRef<number | undefined>(undefined);
   const verticalDiscreteState = useRef<DiscreteWheelState>({
+    mode: undefined,
     travel: 0,
     timer: undefined,
     fractionalStream: false,
@@ -1018,6 +1022,10 @@ export function usePageTurnGestures({
       const delta = normalizeWheelDelta(rawDelta, mode, mode === DOM_DELTA_PAGE ? pageSize : 0);
       if (delta === 0) return false;
       const timestamp = now();
+      if (state.mode !== undefined && state.mode !== mode) {
+        clearDiscreteState(state);
+      }
+      state.mode = mode;
       if (latchFractionalStream && state.settledDirection !== 0) {
         if (
           timestamp - state.settledAt < SCRUB_IDLE_MS &&
@@ -1047,6 +1055,7 @@ export function usePageTurnGestures({
         clearDiscreteState(state);
         onCommit(direction);
         if (shouldLatch) {
+          state.mode = mode;
           state.settledDirection = direction;
           state.settledAt = now();
           state.timer = window.setTimeout(() => clearDiscreteState(state), SCRUB_IDLE_MS);

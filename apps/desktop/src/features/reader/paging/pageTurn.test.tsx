@@ -2107,6 +2107,48 @@ describe('usePageTurnGestures consecutive clicks (#107) and vertical wheel (#106
       }
     });
     expect(lowOneLine.onTurn).toHaveBeenCalledTimes(2);
+    lowOneLine.view.unmount();
+  });
+
+  it('scopes the fractional latch to deltaMode so line-to-page detents stay independent', () => {
+    vi.useFakeTimers();
+
+    // Exact cross-mode sequence from review: (DOM_DELTA_LINE, 0.9), (DOM_DELTA_PAGE, 1), (DOM_DELTA_PAGE, 1) 50 ms apart.
+    const lineToPage = mountWith({ verticalWheel: true, wheelSensitivity: 3 });
+    act(() => {
+      expect(
+        lineToPage.gestures().handleWheel({ deltaX: 0, deltaY: 0.9, deltaMode: 1, ctrlKey: false }),
+      ).toBe(true);
+      vi.advanceTimersByTime(50);
+      expect(
+        lineToPage.gestures().handleWheel({ deltaX: 0, deltaY: 1, deltaMode: 2, ctrlKey: false }),
+      ).toBe(true);
+      vi.advanceTimersByTime(50);
+      expect(
+        lineToPage.gestures().handleWheel({ deltaX: 0, deltaY: 1, deltaMode: 2, ctrlKey: false }),
+      ).toBe(true);
+    });
+    expect(lineToPage.onTurn).toHaveBeenCalledTimes(3);
+    lineToPage.view.unmount();
+
+    // Reverse cross-mode order: fractional DOM_DELTA_PAGE stream followed 50 ms later by whole DOM_DELTA_LINE detents.
+    const pageToLine = mountWith({ verticalWheel: true, wheelSensitivity: 3 });
+    act(() => {
+      expect(
+        pageToLine
+          .gestures()
+          .handleWheel({ deltaX: 0, deltaY: 0.06, deltaMode: 2, ctrlKey: false }),
+      ).toBe(true);
+      vi.advanceTimersByTime(50);
+      expect(
+        pageToLine.gestures().handleWheel({ deltaX: 0, deltaY: 1, deltaMode: 1, ctrlKey: false }),
+      ).toBe(true);
+      vi.advanceTimersByTime(50);
+      expect(
+        pageToLine.gestures().handleWheel({ deltaX: 0, deltaY: 1, deltaMode: 1, ctrlKey: false }),
+      ).toBe(true);
+    });
+    expect(pageToLine.onTurn).toHaveBeenCalledTimes(3);
   });
 });
 
