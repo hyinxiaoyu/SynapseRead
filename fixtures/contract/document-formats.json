@@ -1,0 +1,9 @@
+{
+  "$comment": "The file formats SynapseRead opens, in the order the app names them. `extensions` is exactly `DocumentFormat::EXTENSIONS` in this order (the native picker filter), and `format` is what each extension registers as. The drop overlay and empty-state copy are built from `label`, so all three name the same formats. Markdown registers as `txt` until the Markdown reader exists: see docs/adr/0007-markdown-as-text.md.",
+  "formats": [
+    { "label": "PDF", "format": "pdf", "extensions": ["pdf"] },
+    { "label": "EPUB", "format": "epub", "extensions": ["epub"] },
+    { "label": "TXT", "format": "txt", "extensions": ["txt", "text", "log"] },
+    { "label": "Markdown", "format": "txt", "extensions": ["md", "markdown"] }
+  ]
+}

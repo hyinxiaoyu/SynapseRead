@@ -23,6 +23,7 @@ import { pageSurfaceStyle } from '@/features/reader/appearance/themes';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import { UnifiedToolbar } from '@/features/workspace/UnifiedToolbar';
+import { SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 
 const EMPTY_SLOTS: ToolbarSlots = { leading: null, center: null, trailing: null };
@@ -258,7 +259,7 @@ export function StudyWorkspace() {
             aria-label="Drop files to open"
             className="pointer-events-none absolute inset-2 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-primary bg-background/80 text-sm font-medium text-foreground backdrop-blur-xs"
           >
-            Drop PDF, EPUB, TXT, or Markdown files to open
+            Drop {SUPPORTED_FORMAT_LIST} files to open
           </div>
         )}
         <UnifiedToolbar

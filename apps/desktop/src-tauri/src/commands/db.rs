@@ -275,7 +275,7 @@ pub async fn relink_document<R: Runtime>(
             let picked = app
                 .dialog()
                 .file()
-                .add_filter("Documents", &[existing.format.as_str()])
+                .add_filter("Documents", existing.format.extensions())
                 .blocking_pick_file();
             let Some(picked) = picked else {
                 return Ok(None);

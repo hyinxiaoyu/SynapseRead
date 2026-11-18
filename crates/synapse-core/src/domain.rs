@@ -19,7 +19,20 @@ pub enum DocumentFormat {
 
 impl DocumentFormat {
     /// Every file extension [`Self::from_extension`] accepts, for the file picker.
+    /// `fixtures/contract/document-formats.json` names the same list for the
+    /// frontend's copy, and tests on both sides keep them equal.
     pub const EXTENSIONS: &[&str] = &["pdf", "epub", "txt", "text", "log", "md", "markdown"];
+
+    /// The extensions that register as this format, for the relink picker.
+    /// Empty for [`Self::Md`], which no extension produces yet.
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            Self::Pdf => &["pdf"],
+            Self::Epub => &["epub"],
+            Self::Txt => &["txt", "text", "log", "md", "markdown"],
+            Self::Md => &[],
+        }
+    }
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -40,12 +53,15 @@ impl DocumentFormat {
         }
     }
 
+    /// The format a file registers as. Markdown is read as plain text until the
+    /// Markdown reader exists, so it registers as [`Self::Txt`] and its anchors
+    /// are TXT byte ranges: see `docs/adr/0007-markdown-as-text.md`. Nothing
+    /// produces [`Self::Md`] until then.
     pub fn from_extension(extension: &str) -> CoreResult<Self> {
         match extension.to_ascii_lowercase().as_str() {
             "pdf" => Ok(Self::Pdf),
             "epub" => Ok(Self::Epub),
-            "txt" | "text" | "log" => Ok(Self::Txt),
-            "md" | "markdown" => Ok(Self::Md),
+            "txt" | "text" | "log" | "md" | "markdown" => Ok(Self::Txt),
             other => Err(CoreError::UnsupportedFormat(other.to_owned())),
         }
     }
@@ -1165,8 +1181,8 @@ mod tests {
             DocumentFormat::Pdf
         );
         assert_eq!(
-            DocumentFormat::from_extension("markdown").unwrap(),
-            DocumentFormat::Md
+            DocumentFormat::from_extension("MarkDown").unwrap(),
+            DocumentFormat::Txt
         );
         assert!(DocumentFormat::from_extension("docx").is_err());
     }
@@ -1176,5 +1192,84 @@ mod tests {
         for extension in DocumentFormat::EXTENSIONS {
             DocumentFormat::from_extension(extension).unwrap();
         }
+    }
+
+    /// Issue #99: `Md` has no reader, so a picked or dropped file must never
+    /// register as it, or it opens as a tab with nothing to read.
+    #[test]
+    fn markdown_registers_as_readable_text() {
+        for extension in ["md", "markdown", "MD"] {
+            assert_eq!(
+                DocumentFormat::from_extension(extension).unwrap(),
+                DocumentFormat::Txt
+            );
+        }
+        for extension in DocumentFormat::EXTENSIONS {
+            assert_ne!(
+                DocumentFormat::from_extension(extension).unwrap(),
+                DocumentFormat::Md
+            );
+        }
+    }
+
+    #[test]
+    fn per_format_extensions_partition_the_picker_list() {
+        let formats = [
+            DocumentFormat::Pdf,
+            DocumentFormat::Epub,
+            DocumentFormat::Txt,
+            DocumentFormat::Md,
+        ];
+        let mut all: Vec<&str> = Vec::new();
+        for format in formats {
+            for extension in format.extensions() {
+                assert_eq!(DocumentFormat::from_extension(extension).unwrap(), format);
+                all.push(extension);
+            }
+        }
+        all.sort_unstable();
+        let mut picker = DocumentFormat::EXTENSIONS.to_vec();
+        picker.sort_unstable();
+        assert_eq!(all, picker);
+    }
+
+    #[derive(Deserialize)]
+    struct FormatContract {
+        formats: Vec<FormatContractEntry>,
+    }
+
+    #[derive(Deserialize)]
+    struct FormatContractEntry {
+        label: String,
+        format: DocumentFormat,
+        extensions: Vec<String>,
+    }
+
+    /// The frontend builds the drop overlay and empty-state copy from this file,
+    /// so the formats it names are exactly the ones the picker offers.
+    #[test]
+    fn document_format_contract_matches_the_picker() {
+        let contract: FormatContract = serde_json::from_str(include_str!(
+            "../../../fixtures/contract/document-formats.json"
+        ))
+        .unwrap();
+        let mut listed = Vec::new();
+        for entry in &contract.formats {
+            assert!(!entry.label.is_empty());
+            assert!(
+                !entry.extensions.is_empty(),
+                "{} lists no extension",
+                entry.label
+            );
+            for extension in &entry.extensions {
+                assert_eq!(
+                    DocumentFormat::from_extension(extension).unwrap(),
+                    entry.format,
+                    "{extension}"
+                );
+                listed.push(extension.as_str());
+            }
+        }
+        assert_eq!(listed, DocumentFormat::EXTENSIONS);
     }
 }

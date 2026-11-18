@@ -368,7 +368,9 @@ describe('StudyWorkspace', () => {
     fireEvent.dragEnter(main, {
       dataTransfer: { files: [file], types: ['Files'] },
     });
-    expect(screen.getByRole('status', { name: 'Drop files to open' })).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'Drop files to open' })).toHaveTextContent(
+      'Drop PDF, EPUB, TXT, or Markdown files to open',
+    );
 
     fireEvent.drop(main, {
       dataTransfer: { files: [file], types: ['Files'] },
@@ -380,6 +382,22 @@ describe('StudyWorkspace', () => {
       'true',
     );
     expect(screen.getByRole('heading', { name: 'dropped-note' })).toBeInTheDocument();
+  });
+
+  it('opens a dropped Markdown file as a readable text document (#99)', async () => {
+    await renderReady();
+    const main = screen.getByRole('main');
+    const file = new File(['# Notes\n\nRead me.\n'], 'README.md', { type: 'text/markdown' });
+
+    fireEvent.drop(main, { dataTransfer: { files: [file], types: ['Files'] } });
+
+    expect(await screen.findByRole('tab', { name: 'README' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    const opened = useStudySyncStore.getState().documents.find((d) => d.title === 'README');
+    expect(opened?.format).toBe('txt');
+    expect(screen.queryByText(/Markdown support arrives/)).not.toBeInTheDocument();
   });
 
   it('lists recent documents with continue-reading progress and reopens them on click', async () => {

@@ -129,5 +129,6 @@ for task IDs, acceptance evidence, and measurements.
 
 - Multi-encoding support: `encoding_rs` decoders and a `chardetng` detector,
   registered in `DecoderRegistry`, with no pipeline changes.
-- Markdown reader using the reserved `MarkdownAnchor`.
+- Markdown reader using the reserved `MarkdownAnchor`. Markdown files open as text
+  until then; ADR 0007 covers migrating their TXT anchors.
 - Windows release: `tauri.conf.json` bundle targets, WebView2 checks, signing.

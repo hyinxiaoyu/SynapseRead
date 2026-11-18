@@ -65,7 +65,8 @@ from.
 **Planned**
 
 - Merging excerpts, collapsing subtrees, and multiple notebooks
-- Multi-encoding text and Markdown (V1.1)
+- Multi-encoding text and a rendered Markdown reader (V1.1). Until then, Markdown files
+  open as plain text in the TXT reader
 
 ## Platform support
 
