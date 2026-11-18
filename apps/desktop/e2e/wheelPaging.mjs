@@ -1,8 +1,10 @@
 import { assert } from './harness.mjs';
 import {
   chapterIs,
+  closeAppearance,
   createSyntheticEpubBase64,
   dropBinaryFile,
+  openAppearance,
   pdfPageField,
   titleIs,
   visibleEpubHost,
@@ -76,6 +78,46 @@ async function dispatchPdfSwipeStream(page, deltas) {
     }
     return true;
   })()`);
+}
+
+async function dispatchPdfVerticalStream(page, deltas) {
+  await page.evaluate(`(() => {
+    const target = ${visiblePdfScroll};
+    for (const deltaY of ${JSON.stringify(deltas)}) {
+      target?.dispatchEvent(
+        new WheelEvent('wheel', { deltaX: 0, deltaY, bubbles: true, cancelable: true }),
+      );
+    }
+    return true;
+  })()`);
+}
+
+async function setWheelSensitivity(page, level, expectedLabel, { customize }) {
+  await openAppearance(page, { customize });
+  await page.evaluate(`(() => {
+    const slider = document.querySelector('[data-testid="wheel-sensitivity-slider"]');
+    slider?.scrollIntoView({ block: 'center' });
+    slider?.focus();
+  })()`);
+  await page.waitFor(
+    `document.activeElement?.dataset?.testid === 'wheel-sensitivity-slider'`,
+    'wheel sensitivity slider focus',
+  );
+  if (level <= 1) {
+    await page.press('Home');
+  } else if (level >= 5) {
+    await page.press('End');
+  } else {
+    await page.press('Home');
+    for (let step = 1; step < level; step += 1) {
+      await page.press('ArrowRight');
+    }
+  }
+  await page.waitFor(
+    `document.querySelector('[data-testid="wheel-sensitivity-value"]')?.textContent?.trim() === ${JSON.stringify(expectedLabel)}`,
+    `wheel sensitivity label to become ${expectedLabel}`,
+  );
+  await closeAppearance(page);
 }
 
 async function waitForEpubSlideSettle(page) {
@@ -314,6 +356,52 @@ export async function wheelPagingFlow(page) {
   );
   await waitForSettle(300);
 
+  // Configurable wheel sensitivity in EPUB Customize popover (#111).
+  await setWheelSensitivity(page, 1, 'Very low', { customize: true });
+  await dispatchEpubWheelStream(page, [8, 8]);
+  await waitForSettle(200);
+  assert(
+    (await page.evaluate(`${epubScroller}?.scrollLeft ?? -1`)) === 0,
+    'EPUB at Very low (1) sensitivity must not turn on [8, 8] (16px) vertical wheel stream',
+  );
+  await setWheelSensitivity(page, 5, 'Very high', { customize: true });
+  await dispatchEpubWheelStream(page, [8, 8]);
+  await page.waitFor(
+    `(${epubScroller}?.scrollLeft ?? 0) > 0`,
+    'EPUB at Very high (5) sensitivity turns forward on [8, 8] (16px)',
+  );
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(150);
+  const singleColStepLeft = await page.evaluate(`${epubScroller}?.scrollLeft ?? 0`);
+  await dispatchEpubWheelStream(page, [-8, -8]);
+  await page.waitFor(
+    `(${epubScroller}?.scrollLeft ?? 1) === 0`,
+    'EPUB at Very high (5) sensitivity turns backward on [-8, -8] (-16px)',
+  );
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(150);
+  // A long fluctuating scroll stream at Very high sensitivity still advances only 1 page.
+  await dispatchEpubWheelStream(page, [15, 25, 12, 30, 10, 28, 35, 18, 24, 15, 8, 4]);
+  await page.waitFor(
+    `(${epubScroller}?.scrollLeft ?? 0) > 0`,
+    'EPUB long scroll stream advances from page start',
+  );
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(150);
+  const afterLongEpubLeft = await page.evaluate(`${epubScroller}?.scrollLeft ?? 0`);
+  assert(
+    Math.abs(afterLongEpubLeft - singleColStepLeft) <= 4,
+    `long EPUB vertical scroll stream must advance only 1 page (expected ~${singleColStepLeft}, got ${afterLongEpubLeft})`,
+  );
+  await dispatchEpubWheelStream(page, [-15, -25, -12, -30, -10, -28, -20, -10, -4]);
+  await page.waitFor(
+    `(${epubScroller}?.scrollLeft ?? 1) === 0`,
+    'long EPUB backward scroll stream returns only 1 page',
+  );
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(150);
+  await setWheelSensitivity(page, 3, 'Normal', { customize: true });
+
   // Nested scrollable container inside EPUB absorbs wheel without turning EPUB page.
   const nestedEpubBase64 = createNestedScrollEpubBase64();
   await dropBinaryFile(page, nestedEpubBase64, 'nested-scroll-test.epub', 'application/epub+zip');
@@ -457,6 +545,60 @@ export async function wheelPagingFlow(page) {
     'wheel up returns PDF two-page spread to page 1',
   );
   await waitForSettle(320);
+
+  // Configurable wheel sensitivity in PDF appearance popover (#111).
+  await setWheelSensitivity(page, 1, 'Very low', { customize: false });
+  await dispatchPdfVerticalStream(page, [8, 8]);
+  await waitForSettle(200);
+  assert(
+    (await page.evaluate(`${pdfPageField}?.value`)) === '1',
+    'PDF at Very low (1) sensitivity must not turn on [8, 8] (16px) vertical wheel stream',
+  );
+  await setWheelSensitivity(page, 5, 'Very high', { customize: false });
+  await dispatchPdfVerticalStream(page, [8, 8]);
+  await page.waitFor(
+    `Number(${pdfPageField}?.value) > 1`,
+    'PDF at Very high (5) sensitivity turns forward on [8, 8] (16px)',
+  );
+  await waitForSettle(320);
+  await dispatchPdfVerticalStream(page, [-8, -8]);
+  await page.waitFor(
+    `${pdfPageField}?.value === '1'`,
+    'PDF at Very high (5) sensitivity turns backward on [-8, -8] (-16px)',
+  );
+  await waitForSettle(320);
+  // A long fluctuating scroll stream at Very high sensitivity advances only 1 spread (not straight to page 4-5).
+  await dispatchPdfVerticalStream(page, [15, 25, 12, 30, 10, 28, 35, 18, 24, 15, 8, 4]);
+  await page.waitFor(
+    `Number(${pdfPageField}?.value) > 1`,
+    'PDF long vertical scroll stream advances from page 1',
+  );
+  await waitForSettle(320);
+  const afterLongPdfPage = Number(await page.evaluate(`${pdfPageField}?.value`));
+  assert(
+    afterLongPdfPage === 2 || afterLongPdfPage === 3,
+    `long PDF vertical scroll stream must advance only 1 spread (got page ${afterLongPdfPage})`,
+  );
+  await dispatchPdfVerticalStream(page, [-15, -25, -12, -30, -10, -28, -20, -10, -4]);
+  await page.waitFor(
+    `${pdfPageField}?.value === '1'`,
+    'long PDF backward scroll stream returns to page 1',
+  );
+  await waitForSettle(320);
+  // Horizontal swipe remains unaffected at Very high sensitivity; then restore Normal (3).
+  await dispatchPdfSwipeStream(page, [90, 90, 90]);
+  await page.waitFor(
+    `Number(${pdfPageField}?.value) > 1`,
+    'horizontal swipe still works at Very high sensitivity',
+  );
+  await waitForSettle(320);
+  await dispatchPdfSwipeStream(page, [-90, -90, -90]);
+  await page.waitFor(
+    `${pdfPageField}?.value === '1'`,
+    'horizontal swipe back at Very high sensitivity',
+  );
+  await waitForSettle(320);
+  await setWheelSensitivity(page, 3, 'Normal', { customize: false });
 
   const pdfMaxPage = await page.evaluate(`(() => {
     const label = document.querySelector('[data-testid="unified-toolbar"]')?.textContent ?? '';

@@ -1272,6 +1272,17 @@ fn reading_preferences_from_stored(
             object,
             "scrollPageTransition",
         );
+        if object.get("wheelSensitivity").is_some_and(|value| {
+            !matches!(
+                serde_json::from_value::<u8>(value.clone()),
+                Ok(level)
+                    if (ReadingPreferences::MIN_WHEEL_SENSITIVITY
+                        ..=ReadingPreferences::MAX_WHEEL_SENSITIVITY)
+                        .contains(&level)
+            )
+        }) {
+            object.remove("wheelSensitivity");
+        }
     }
     Ok(serde_json::from_value(stored)?)
 }
@@ -2239,17 +2250,27 @@ mod tests {
             scroll_page_transition: Some(crate::domain::ScrollPageTransition::None),
             tint_pdf_pages: true,
             focus_mode_full_screen: true,
+            wheel_sensitivity: 4,
         };
         let saved = db.save_reading_preferences(&updated).unwrap();
         assert_eq!(saved, updated);
         assert_eq!(db.get_reading_preferences().unwrap(), updated);
 
-        let mut invalid = updated;
+        let mut invalid = updated.clone();
         invalid.font_size = 300;
         assert!(matches!(
             db.save_reading_preferences(&invalid),
             Err(CoreError::InvalidPreferences(_))
         ));
+
+        for invalid_sensitivity in [0_u8, 6_u8] {
+            let mut bad = updated.clone();
+            bad.wheel_sensitivity = invalid_sensitivity;
+            assert!(matches!(
+                db.save_reading_preferences(&bad),
+                Err(CoreError::InvalidPreferences(_))
+            ));
+        }
     }
 
     #[test]
@@ -2293,9 +2314,14 @@ mod tests {
             assert_eq!(prefs.page_transition, expected, "stored {row}");
             assert_eq!(prefs.scroll_page_transition, None, "stored {row}");
             assert_eq!(prefs.font_size, 110);
-            // The row predates both appearance switches, which default to off.
+            // The row predates both appearance switches and wheel sensitivity.
             assert!(!prefs.tint_pdf_pages, "stored {row}");
             assert!(!prefs.focus_mode_full_screen, "stored {row}");
+            assert_eq!(
+                prefs.wheel_sensitivity,
+                ReadingPreferences::DEFAULT_WHEEL_SENSITIVITY,
+                "stored {row}"
+            );
         }
     }
 
@@ -2443,11 +2469,12 @@ mod tests {
     }
 
     #[test]
-    fn page_width_persists_across_database_reopen() {
+    fn page_width_and_wheel_sensitivity_persist_across_database_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("reading-width.sqlite");
         let preferences = ReadingPreferences {
             page_width: crate::domain::ReadingPageWidth::Full,
+            wheel_sensitivity: 5,
             ..ReadingPreferences::default()
         };
         {
@@ -2456,6 +2483,47 @@ mod tests {
         }
         let reopened = Database::open(&path).unwrap();
         assert_eq!(reopened.get_reading_preferences().unwrap(), preferences);
+    }
+
+    #[test]
+    fn stored_wheel_sensitivity_out_of_range_or_unknown_degrades_to_default() {
+        let db = Database::open_in_memory().unwrap();
+        for bad_value in [
+            serde_json::json!(0),
+            serde_json::json!(9),
+            serde_json::json!(-1),
+            serde_json::json!("fast"),
+            serde_json::Value::Null,
+        ] {
+            let stored = serde_json::json!({
+                "theme": "light",
+                "fontFamily": "original",
+                "fontSize": 100,
+                "lineSpacing": 1.75,
+                "margins": "normal",
+                "pageWidth": "standard",
+                "justify": true,
+                "dimImages": false,
+                "epubReadingMode": "spread",
+                "pageTransition": "slide",
+                "wheelSensitivity": bad_value,
+            });
+            db.conn
+                .execute(
+                    "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)
+                     ON CONFLICT (id) DO UPDATE SET preferences_json = excluded.preferences_json",
+                    params![stored.to_string()],
+                )
+                .unwrap();
+
+            let prefs = db.get_reading_preferences().unwrap();
+            assert_eq!(
+                prefs.wheel_sensitivity,
+                ReadingPreferences::DEFAULT_WHEEL_SENSITIVITY,
+                "stored {stored}"
+            );
+            assert_eq!(prefs.theme, crate::domain::ReadingTheme::Light);
+        }
     }
 
     #[test]

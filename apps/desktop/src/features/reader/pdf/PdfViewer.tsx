@@ -2905,6 +2905,7 @@ function PdfPages({
       }
       return true;
     },
+    wheelSensitivity: effectivePreferences.wheelSensitivity,
     // A page zoomed wider than the pane scrolls sideways instead.
     canSwipe: () => {
       const scroller = scrollRef.current;

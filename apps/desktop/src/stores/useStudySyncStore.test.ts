@@ -670,6 +670,7 @@ describe('useStudySyncStore', () => {
         dimImages: true,
         epubReadingMode: 'paged',
         pageTransition: 'fade',
+        wheelSensitivity: 5,
       });
       expect(state().readingPreferences).toMatchObject({
         theme: 'sepia',
@@ -681,6 +682,7 @@ describe('useStudySyncStore', () => {
         dimImages: true,
         epubReadingMode: 'paged',
         pageTransition: 'fade',
+        wheelSensitivity: 5,
       });
 
       const reopened = createStudySyncStore(backend);
@@ -695,6 +697,7 @@ describe('useStudySyncStore', () => {
         dimImages: true,
         epubReadingMode: 'paged',
         pageTransition: 'fade',
+        wheelSensitivity: 5,
       });
 
       await state().updateReadingPreferences({ pageWidth: 'invalid' as 'full' });
@@ -704,6 +707,12 @@ describe('useStudySyncStore', () => {
       await state().updateReadingPreferences({ fontSize: 300 });
       expect(state().readingPreferences.fontSize).toBe(120);
       expect(state().error).toMatch(/fontSize/);
+
+      for (const invalidSensitivity of [0, 6]) {
+        await state().updateReadingPreferences({ wheelSensitivity: invalidSensitivity });
+        expect(state().readingPreferences.wheelSensitivity).toBe(5);
+        expect(state().error).toMatch(/wheelSensitivity/);
+      }
 
       // The newer modes are accepted by the backend's validation list too.
       for (const pageTransition of ['curl', 'stack'] as const) {

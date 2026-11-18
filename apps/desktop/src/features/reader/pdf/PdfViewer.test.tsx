@@ -2857,6 +2857,67 @@ describe('PdfViewer', () => {
         vi.useRealTimers();
       }
     });
+
+    it('applies wheelSensitivity across PDF single and two-page modes while keeping continuous untouched (#111)', async () => {
+      const { store, documentId } = await setup();
+      function StorePrefsHarness() {
+        const prefs = store((s) => s.readingPreferences);
+        return (
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={prefs}
+            onPreferencesChange={(patch) => void store.getState().updateReadingPreferences(patch)}
+          />
+        );
+      }
+
+      render(<StorePrefsHarness />);
+      await pageElement(0);
+      const pane = await scroller();
+      vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout);
+
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        // Single page + Fit page: gentle [8, 8] = 16px does not turn at sensitivity 1, turns at 5.
+        fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Fit page' }));
+        await act(async () => store.getState().updateReadingPreferences({ wheelSensitivity: 1 }));
+        expect(fireEvent.wheel(pane, { deltaY: 8 })).toBe(false);
+        vi.advanceTimersByTime(16);
+        expect(fireEvent.wheel(pane, { deltaY: 8 })).toBe(false);
+        vi.advanceTimersByTime(120);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+
+        await act(async () => store.getState().updateReadingPreferences({ wheelSensitivity: 5 }));
+        expect(fireEvent.wheel(pane, { deltaY: 8 })).toBe(false);
+        vi.advanceTimersByTime(16);
+        expect(fireEvent.wheel(pane, { deltaY: 8 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 2 of 5');
+        vi.advanceTimersByTime(120);
+
+        // Two-page + Fit page also scales in both directions.
+        fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+        expect(fireEvent.wheel(pane, { deltaY: 8 })).toBe(false);
+        vi.advanceTimersByTime(16);
+        expect(fireEvent.wheel(pane, { deltaY: 8 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 3 of 5');
+        vi.advanceTimersByTime(120);
+        expect(fireEvent.wheel(pane, { deltaY: -8 })).toBe(false);
+        vi.advanceTimersByTime(16);
+        expect(fireEvent.wheel(pane, { deltaY: -8 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+
+        // Continuous mode still leaves wheel native even at sensitivity 5.
+        fireEvent.click(screen.getByRole('radio', { name: 'Continuous scroll' }));
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(true);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('consecutive blank-area clicks and curl reversal (#107)', () => {
