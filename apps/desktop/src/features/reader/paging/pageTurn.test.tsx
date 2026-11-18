@@ -2040,6 +2040,73 @@ describe('usePageTurnGestures consecutive clicks (#107) and vertical wheel (#106
       }
     });
     expect(line.onTurn).toHaveBeenCalledTimes(3);
+
+    // Fractional stream whose samples temporarily reach 1.0 mid-gesture remains latched to one turn.
+    act(() => {
+      vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+      for (const deltaY of [0.4, 0.8, 1, 0.9, 0.5]) {
+        line.gestures().handleWheel({ deltaX: 0, deltaY, deltaMode: 1, ctrlKey: false });
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(line.onTurn).toHaveBeenCalledTimes(4);
+    line.view.unmount();
+  });
+
+  it('preserves independent turns for rapid 1-line and 2-line discrete mouse detents', () => {
+    vi.useFakeTimers();
+
+    // Normal sensitivity (32 px): three rapid 1-line detents (40 px each) 50 ms apart turn 3 times.
+    const oneLine = mountWith({ verticalWheel: true, wheelSensitivity: 3 });
+    act(() => {
+      for (const deltaY of [1, 1, 1]) {
+        expect(
+          oneLine.gestures().handleWheel({ deltaX: 0, deltaY, deltaMode: 1, ctrlKey: false }),
+        ).toBe(true);
+        vi.advanceTimersByTime(50);
+      }
+      for (const deltaY of [-1, -1]) {
+        expect(
+          oneLine.gestures().handleWheel({ deltaX: 0, deltaY, deltaMode: 1, ctrlKey: false }),
+        ).toBe(true);
+        vi.advanceTimersByTime(50);
+      }
+    });
+    expect(oneLine.onTurn.mock.calls).toEqual([
+      [1, { source: 'vertical-wheel' }],
+      [1, { source: 'vertical-wheel' }],
+      [1, { source: 'vertical-wheel' }],
+      [-1, { source: 'vertical-wheel' }],
+      [-1, { source: 'vertical-wheel' }],
+    ]);
+    oneLine.view.unmount();
+
+    // Two-line detents (80 px each) 50 ms apart turn once per click even at Very low sensitivity (64 px).
+    for (const sensitivity of [1, 3, 5] as const) {
+      const twoLine = mountWith({ verticalWheel: true, wheelSensitivity: sensitivity });
+      act(() => {
+        for (let i = 0; i < 3; i += 1) {
+          expect(
+            twoLine.gestures().handleWheel({ deltaX: 0, deltaY: 2, deltaMode: 1, ctrlKey: false }),
+          ).toBe(true);
+          vi.advanceTimersByTime(50);
+        }
+      });
+      expect(twoLine.onTurn).toHaveBeenCalledTimes(3);
+      twoLine.view.unmount();
+    }
+
+    // At Low sensitivity (48 px), paired rapid 1-line detents (40 + 40 = 80 px) turn twice over 4 clicks.
+    const lowOneLine = mountWith({ verticalWheel: true, wheelSensitivity: 2 });
+    act(() => {
+      for (let i = 0; i < 4; i += 1) {
+        expect(
+          lowOneLine.gestures().handleWheel({ deltaX: 0, deltaY: 1, deltaMode: 1, ctrlKey: false }),
+        ).toBe(true);
+        vi.advanceTimersByTime(50);
+      }
+    });
+    expect(lowOneLine.onTurn).toHaveBeenCalledTimes(2);
   });
 });
 

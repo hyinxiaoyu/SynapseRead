@@ -764,6 +764,7 @@ export interface UsePageTurnGesturesOptions {
 interface DiscreteWheelState {
   travel: number;
   timer: number | undefined;
+  fractionalStream: boolean;
   settledDirection: TurnDirection | 0;
   settledAt: number;
 }
@@ -776,6 +777,7 @@ interface NotchTail {
 
 function clearDiscreteState(state: DiscreteWheelState): void {
   state.travel = 0;
+  state.fractionalStream = false;
   state.settledDirection = 0;
   state.settledAt = 0;
   window.clearTimeout(state.timer);
@@ -873,6 +875,7 @@ export function usePageTurnGestures({
   const discreteState = useRef<DiscreteWheelState>({
     travel: 0,
     timer: undefined,
+    fractionalStream: false,
     settledDirection: 0,
     settledAt: 0,
   });
@@ -888,6 +891,7 @@ export function usePageTurnGestures({
   const verticalDiscreteState = useRef<DiscreteWheelState>({
     travel: 0,
     timer: undefined,
+    fractionalStream: false,
     settledDirection: 0,
     settledAt: 0,
   });
@@ -1009,13 +1013,12 @@ export function usePageTurnGestures({
       pageSize: number,
       thresholdPx: number,
       onCommit: (direction: TurnDirection) => void,
-      latchSubNotchStream = false,
+      latchFractionalStream = false,
     ): boolean => {
       const delta = normalizeWheelDelta(rawDelta, mode, mode === DOM_DELTA_PAGE ? pageSize : 0);
       if (delta === 0) return false;
       const timestamp = now();
-      const subNotch = Math.abs(delta) < DISCRETE_PIXEL_WHEEL_PX;
-      if (latchSubNotchStream && subNotch && state.settledDirection !== 0) {
+      if (latchFractionalStream && state.settledDirection !== 0) {
         if (
           timestamp - state.settledAt < SCRUB_IDLE_MS &&
           Math.sign(delta) === state.settledDirection
@@ -1028,19 +1031,22 @@ export function usePageTurnGestures({
         state.settledDirection = 0;
         state.settledAt = 0;
       }
-      if (!subNotch) {
-        state.settledDirection = 0;
-        state.settledAt = 0;
-      }
       if (state.travel !== 0 && Math.sign(delta) !== Math.sign(state.travel)) {
         state.travel = 0;
+        state.fractionalStream = false;
+      }
+      if (latchFractionalStream && !Number.isInteger(rawDelta)) {
+        state.fractionalStream = true;
       }
       state.travel += delta;
       if (Math.abs(state.travel) >= thresholdPx) {
         const direction = directionOf(state.travel);
+        // Latch only when the committed travel came from a fractional stream so
+        // rapid whole-line/whole-page mouse detents turn once per click.
+        const shouldLatch = latchFractionalStream && state.fractionalStream;
         clearDiscreteState(state);
         onCommit(direction);
-        if (latchSubNotchStream && subNotch) {
+        if (shouldLatch) {
           state.settledDirection = direction;
           state.settledAt = now();
           state.timer = window.setTimeout(() => clearDiscreteState(state), SCRUB_IDLE_MS);
