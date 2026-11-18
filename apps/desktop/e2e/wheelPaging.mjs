@@ -372,10 +372,31 @@ export async function wheelPagingFlow(page) {
   );
   await waitForEpubSlideSettle(page);
   await waitForSettle(150);
+  const singleColStepLeft = await page.evaluate(`${epubScroller}?.scrollLeft ?? 0`);
   await dispatchEpubWheelStream(page, [-8, -8]);
   await page.waitFor(
     `(${epubScroller}?.scrollLeft ?? 1) === 0`,
     'EPUB at Very high (5) sensitivity turns backward on [-8, -8] (-16px)',
+  );
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(150);
+  // A long fluctuating scroll stream at Very high sensitivity still advances only 1 page.
+  await dispatchEpubWheelStream(page, [15, 25, 12, 30, 10, 28, 35, 18, 24, 15, 8, 4]);
+  await page.waitFor(
+    `(${epubScroller}?.scrollLeft ?? 0) > 0`,
+    'EPUB long scroll stream advances from page start',
+  );
+  await waitForEpubSlideSettle(page);
+  await waitForSettle(150);
+  const afterLongEpubLeft = await page.evaluate(`${epubScroller}?.scrollLeft ?? 0`);
+  assert(
+    Math.abs(afterLongEpubLeft - singleColStepLeft) <= 4,
+    `long EPUB vertical scroll stream must advance only 1 page (expected ~${singleColStepLeft}, got ${afterLongEpubLeft})`,
+  );
+  await dispatchEpubWheelStream(page, [-15, -25, -12, -30, -10, -28, -20, -10, -4]);
+  await page.waitFor(
+    `(${epubScroller}?.scrollLeft ?? 1) === 0`,
+    'long EPUB backward scroll stream returns only 1 page',
   );
   await waitForEpubSlideSettle(page);
   await waitForSettle(150);
@@ -544,6 +565,24 @@ export async function wheelPagingFlow(page) {
   await page.waitFor(
     `${pdfPageField}?.value === '1'`,
     'PDF at Very high (5) sensitivity turns backward on [-8, -8] (-16px)',
+  );
+  await waitForSettle(320);
+  // A long fluctuating scroll stream at Very high sensitivity advances only 1 spread (not straight to page 4-5).
+  await dispatchPdfVerticalStream(page, [15, 25, 12, 30, 10, 28, 35, 18, 24, 15, 8, 4]);
+  await page.waitFor(
+    `Number(${pdfPageField}?.value) > 1`,
+    'PDF long vertical scroll stream advances from page 1',
+  );
+  await waitForSettle(320);
+  const afterLongPdfPage = Number(await page.evaluate(`${pdfPageField}?.value`));
+  assert(
+    afterLongPdfPage === 2 || afterLongPdfPage === 3,
+    `long PDF vertical scroll stream must advance only 1 spread (got page ${afterLongPdfPage})`,
+  );
+  await dispatchPdfVerticalStream(page, [-15, -25, -12, -30, -10, -28, -20, -10, -4]);
+  await page.waitFor(
+    `${pdfPageField}?.value === '1'`,
+    'long PDF backward scroll stream returns to page 1',
   );
   await waitForSettle(320);
   // Horizontal swipe remains unaffected at Very high sensitivity; then restore Normal (3).

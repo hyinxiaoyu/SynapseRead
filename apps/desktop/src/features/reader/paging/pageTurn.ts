@@ -450,12 +450,6 @@ function measureWheelVelocity<T extends { at: number }>(
 }
 
 const VERTICAL_ACCUMULATING = 1;
-/**
- * Gap between non-decaying events above which `VerticalWheelTurn` stops treating
- * them as one trackpad ramp-up (trackpad frames arrive every ~8–33 ms; brisk
- * discrete mouse clicks have wider gaps inside the 90 ms idle window).
- */
-const VERTICAL_RAMP_GAP_MS = 45;
 
 /** Vertical wheel gesture thresholds derived from a `1..=5` sensitivity level. */
 export interface VerticalWheelThresholds {
@@ -467,8 +461,6 @@ export interface VerticalWheelThresholds {
   readonly singleDetentMinPx: number;
   /** Minimum accumulated px required alongside `SCRUB_COMMIT_VELOCITY` on idle release. */
   readonly fastFlickMinPx: number;
-  /** Minimum delta (px) needed for a post-decay impulse to start a fresh turn. */
-  readonly spikeFloorPx: number;
 }
 
 const THRESHOLDS_VERY_LOW: VerticalWheelThresholds = {
@@ -477,7 +469,6 @@ const THRESHOLDS_VERY_LOW: VerticalWheelThresholds = {
   travelPx: 64,
   singleDetentMinPx: 24,
   fastFlickMinPx: 38,
-  spikeFloorPx: 24,
 };
 
 const THRESHOLDS_LOW: VerticalWheelThresholds = {
@@ -486,7 +477,6 @@ const THRESHOLDS_LOW: VerticalWheelThresholds = {
   travelPx: 48,
   singleDetentMinPx: 16,
   fastFlickMinPx: 28,
-  spikeFloorPx: 24,
 };
 
 const THRESHOLDS_NORMAL: VerticalWheelThresholds = {
@@ -495,7 +485,6 @@ const THRESHOLDS_NORMAL: VerticalWheelThresholds = {
   travelPx: 32,
   singleDetentMinPx: 10,
   fastFlickMinPx: 20,
-  spikeFloorPx: 20,
 };
 
 const THRESHOLDS_HIGH: VerticalWheelThresholds = {
@@ -504,7 +493,6 @@ const THRESHOLDS_HIGH: VerticalWheelThresholds = {
   travelPx: 20,
   singleDetentMinPx: 6,
   fastFlickMinPx: 12,
-  spikeFloorPx: 12,
 };
 
 const THRESHOLDS_VERY_HIGH: VerticalWheelThresholds = {
@@ -513,7 +501,6 @@ const THRESHOLDS_VERY_HIGH: VerticalWheelThresholds = {
   travelPx: 12,
   singleDetentMinPx: 4,
   fastFlickMinPx: 8,
-  spikeFloorPx: 12,
 };
 
 export const WHEEL_SENSITIVITY_OPTIONS: readonly VerticalWheelThresholds[] = [
@@ -561,18 +548,17 @@ interface VerticalSample {
 
 /**
  * Turns vertical trackpad and low-delta wheel streams into single committed page
- * turns (`IDLE -> ACCUMULATING -> SETTLING`), absorbing accelerating ramp-ups and
- * decaying inertial tails while breaking immediately on direction reversals or a
- * true new impulse.
+ * turns (`IDLE -> ACCUMULATING -> SETTLING`), absorbing the remainder of the
+ * active same-direction scroll gesture (including fluctuations and inertial
+ * tails) while breaking immediately on direction reversals or after `SCRUB_IDLE_MS`
+ * of quiet.
  */
 export class VerticalWheelTurn {
   private phase = IDLE;
   private travel = 0;
   private samples: VerticalSample[] = [];
   private lastDeltaY = 0;
-  private lastAbs = 0;
   private lastAt = 0;
-  private hasDecayed = false;
   private thresholds: VerticalWheelThresholds;
 
   constructor(sensitivity?: number | undefined) {
@@ -659,9 +645,7 @@ export class VerticalWheelTurn {
     this.travel = 0;
     this.samples = [];
     this.lastDeltaY = 0;
-    this.lastAbs = 0;
     this.lastAt = 0;
-    this.hasDecayed = false;
   }
 
   /** Refreshes the settling timestamp after synchronous turn/capture callbacks finish. */
@@ -680,28 +664,9 @@ export class VerticalWheelTurn {
   private tryAbsorbSettling(deltaY: number, at: number): boolean {
     const reversed = this.lastDeltaY !== 0 && Math.sign(deltaY) !== Math.sign(this.lastDeltaY);
     if (reversed) return false;
-    const abs = Math.abs(deltaY);
-    if (!this.hasDecayed) {
-      if (abs < this.lastAbs) {
-        this.hasDecayed = true;
-      } else if (at - this.lastAt >= VERTICAL_RAMP_GAP_MS) {
-        return false;
-      }
-      this.lastDeltaY = deltaY;
-      this.lastAbs = abs;
-      this.lastAt = at;
-      return true;
-    }
-    if (
-      abs < this.thresholds.spikeFloorPx ||
-      abs <= this.lastAbs * MOMENTUM_SPIKE_RATIO + MOMENTUM_SPIKE_SLACK
-    ) {
-      this.lastDeltaY = deltaY;
-      this.lastAbs = abs;
-      this.lastAt = at;
-      return true;
-    }
-    return false;
+    this.lastDeltaY = deltaY;
+    this.lastAt = at;
+    return true;
   }
 
   private start(deltaY: number, at: number, deltaX: number): TurnDirection | null {
@@ -709,9 +674,7 @@ export class VerticalWheelTurn {
     this.travel = 0;
     this.samples = [];
     this.lastDeltaY = 0;
-    this.lastAbs = 0;
     this.lastAt = at;
-    this.hasDecayed = false;
     return this.advance(deltaY, at, deltaX);
   }
 
@@ -724,14 +687,12 @@ export class VerticalWheelTurn {
     this.samples.push({ deltaY, deltaX, at });
     if (this.samples.length > 32) this.samples.shift();
     this.lastDeltaY = deltaY;
-    this.lastAbs = Math.abs(deltaY);
     this.lastAt = at;
     if (Math.abs(this.travel) >= this.thresholds.travelPx) {
       const direction = directionOf(this.travel);
       this.phase = SETTLING;
       this.travel = 0;
       this.samples = [];
-      this.hasDecayed = false;
       return direction;
     }
     return null;
@@ -803,6 +764,8 @@ export interface UsePageTurnGesturesOptions {
 interface DiscreteWheelState {
   travel: number;
   timer: number | undefined;
+  settledDirection: TurnDirection | 0;
+  settledAt: number;
 }
 
 interface NotchTail {
@@ -813,6 +776,8 @@ interface NotchTail {
 
 function clearDiscreteState(state: DiscreteWheelState): void {
   state.travel = 0;
+  state.settledDirection = 0;
+  state.settledAt = 0;
   window.clearTimeout(state.timer);
   state.timer = undefined;
 }
@@ -905,7 +870,12 @@ export function usePageTurnGestures({
   });
   const press = useRef<{ x: number; y: number; hadSelection: boolean } | null>(null);
   const idleTimer = useRef<number | undefined>(undefined);
-  const discreteState = useRef<DiscreteWheelState>({ travel: 0, timer: undefined });
+  const discreteState = useRef<DiscreteWheelState>({
+    travel: 0,
+    timer: undefined,
+    settledDirection: 0,
+    settledAt: 0,
+  });
   /**
    * The notch that last turned a page, while the events after it may still be that
    * gesture's inertia. A mouse notch is a single event; a trackpad flick is a
@@ -915,7 +885,12 @@ export function usePageTurnGestures({
    */
   const notchTail = useRef<NotchTail | null>(null);
   const verticalIdleTimer = useRef<number | undefined>(undefined);
-  const verticalDiscreteState = useRef<DiscreteWheelState>({ travel: 0, timer: undefined });
+  const verticalDiscreteState = useRef<DiscreteWheelState>({
+    travel: 0,
+    timer: undefined,
+    settledDirection: 0,
+    settledAt: 0,
+  });
   const verticalNotchTail = useRef<NotchTail | null>(null);
   const [scrub] = useState(() => new WheelScrub());
   const [verticalTurn] = useState(() => new VerticalWheelTurn(resolvedSensitivity));
@@ -1034,9 +1009,29 @@ export function usePageTurnGestures({
       pageSize: number,
       thresholdPx: number,
       onCommit: (direction: TurnDirection) => void,
+      latchSubNotchStream = false,
     ): boolean => {
       const delta = normalizeWheelDelta(rawDelta, mode, mode === DOM_DELTA_PAGE ? pageSize : 0);
       if (delta === 0) return false;
+      const timestamp = now();
+      const subNotch = Math.abs(delta) < DISCRETE_PIXEL_WHEEL_PX;
+      if (latchSubNotchStream && subNotch && state.settledDirection !== 0) {
+        if (
+          timestamp - state.settledAt < SCRUB_IDLE_MS &&
+          Math.sign(delta) === state.settledDirection
+        ) {
+          state.settledAt = timestamp;
+          window.clearTimeout(state.timer);
+          state.timer = window.setTimeout(() => clearDiscreteState(state), SCRUB_IDLE_MS);
+          return true;
+        }
+        state.settledDirection = 0;
+        state.settledAt = 0;
+      }
+      if (!subNotch) {
+        state.settledDirection = 0;
+        state.settledAt = 0;
+      }
       if (state.travel !== 0 && Math.sign(delta) !== Math.sign(state.travel)) {
         state.travel = 0;
       }
@@ -1045,6 +1040,11 @@ export function usePageTurnGestures({
         const direction = directionOf(state.travel);
         clearDiscreteState(state);
         onCommit(direction);
+        if (latchSubNotchStream && subNotch) {
+          state.settledDirection = direction;
+          state.settledAt = now();
+          state.timer = window.setTimeout(() => clearDiscreteState(state), SCRUB_IDLE_MS);
+        }
       } else {
         window.clearTimeout(state.timer);
         state.timer = window.setTimeout(() => clearDiscreteState(state), SCRUB_IDLE_MS);
@@ -1149,6 +1149,7 @@ export function usePageTurnGestures({
           (committedDirection) => {
             commitTurn(committedDirection, 'vertical-wheel');
           },
+          true,
         );
       }
 

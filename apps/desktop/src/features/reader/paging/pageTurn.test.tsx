@@ -929,16 +929,26 @@ describe('VerticalWheelTurn', () => {
     expect(maxTrackpad.release(sequence.length * 16 + SCRUB_IDLE_MS)).toBeNull();
   });
 
-  it('allows rapid physical mouse clicks >= 45ms apart while still absorbing 16ms trackpad ramp-ups', () => {
-    const mouse = new VerticalWheelTurn(5);
-    expect(mouse.push(12, 0)).toBe(1);
-    expect(mouse.push(12, 50)).toBe(1);
-    expect(mouse.push(12, 100)).toBe(1);
+  it('turns only once per continuous scroll regardless of distance, fluctuations, or cadence until idle', () => {
+    const fluctuating = [12, 20, 14, 28, 10, 25, 35, 18, 24, 15, 8, 4];
+    for (const sensitivity of [1, 3, 5] as const) {
+      const controller = new VerticalWheelTurn(sensitivity);
+      const turns: TurnDirection[] = [];
+      fluctuating.forEach((deltaY, index) => {
+        const committed = controller.push(deltaY, index * 16);
+        if (committed !== null) turns.push(committed);
+      });
+      expect(turns).toEqual([1]);
+      expect(controller.release(fluctuating.length * 16 + SCRUB_IDLE_MS)).toBeNull();
+    }
 
-    const trackpadPlateau = new VerticalWheelTurn(5);
-    expect(trackpadPlateau.push(12, 0)).toBe(1);
-    expect(trackpadPlateau.push(12, 16)).toBeNull();
-    expect(trackpadPlateau.push(8, 32)).toBeNull();
+    // Slow continuous 50ms cadence (< SCRUB_IDLE_MS) stays latched to one turn,
+    // while separate gestures >= SCRUB_IDLE_MS apart turn once each.
+    const steady = new VerticalWheelTurn(5);
+    expect(steady.push(12, 0)).toBe(1);
+    expect(steady.push(12, 50)).toBeNull();
+    expect(steady.push(12, 100)).toBeNull();
+    expect(steady.push(12, 100 + SCRUB_IDLE_MS)).toBe(1);
   });
 
   it('resets partial accumulation when sensitivity changes', () => {
@@ -981,14 +991,18 @@ describe('VerticalWheelTurn', () => {
     expect(controller.push(-25, 48)).toBe(-1);
   });
 
-  it('starts a new turn when a second physical impulse spikes past decayed tail', () => {
+  it('keeps long fluctuating streams to one turn until reversed or idle', () => {
     const controller = new VerticalWheelTurn();
     const turns: TurnDirection[] = [];
     for (const [index, deltaY] of [30, 30, 20, 5, 25, 30].entries()) {
       const result = controller.push(deltaY, index * 16);
       if (result !== null) turns.push(result);
     }
-    expect(turns).toEqual([1, 1]);
+    expect(turns).toEqual([1]);
+    // Reversal or an idle pause starts a new turn.
+    expect(controller.push(-20, 96)).toBeNull();
+    expect(controller.push(-25, 112)).toBe(-1);
+    expect(controller.push(-35, 112 + SCRUB_IDLE_MS)).toBe(-1);
   });
 
   it('ignores noisy low-delta jitter after decay in the same drag', () => {
@@ -1961,6 +1975,71 @@ describe('usePageTurnGestures consecutive clicks (#107) and vertical wheel (#106
       g().handleWheel({ deltaX: 0, deltaY: 6, deltaMode: 0, ctrlKey: false });
     });
     expect(onTurn).not.toHaveBeenCalled();
+  });
+
+  it('triggers only one turn per continuous vertical scroll gesture across pixel and fractional line streams', () => {
+    vi.useFakeTimers();
+
+    // Long fluctuating pixel scroll (~210px) at Very high sensitivity (5) still turns only once.
+    const pixel = mountWith({ verticalWheel: true, wheelSensitivity: 5 });
+    act(() => {
+      for (const deltaY of [15, 25, 12, 30, 10, 28, 35, 18, 24, 15, 8, 4]) {
+        expect(
+          pixel.gestures().handleWheel({ deltaX: 0, deltaY, deltaMode: 0, ctrlKey: false }),
+        ).toBe(true);
+        vi.advanceTimersByTime(16);
+      }
+      vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+    });
+    expect(pixel.onTurn).toHaveBeenCalledTimes(1);
+    expect(pixel.onTurn).toHaveBeenLastCalledWith(1, { source: 'vertical-wheel' });
+
+    // After idle, a long backward scroll also turns only once.
+    act(() => {
+      for (const deltaY of [-12, -22, -10, -28, -16, -24, -10, -4]) {
+        expect(
+          pixel.gestures().handleWheel({ deltaX: 0, deltaY, deltaMode: 0, ctrlKey: false }),
+        ).toBe(true);
+        vi.advanceTimersByTime(50);
+      }
+      vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+    });
+    expect(pixel.onTurn).toHaveBeenCalledTimes(2);
+    expect(pixel.onTurn).toHaveBeenLastCalledWith(-1, { source: 'vertical-wheel' });
+    pixel.view.unmount();
+
+    // Fractional DOM_DELTA_LINE stream ([0.5 x 6] = 120px) turns once, breaks on reversal, and re-arms after idle.
+    const line = mountWith({ verticalWheel: true, wheelSensitivity: 3 });
+    act(() => {
+      for (let i = 0; i < 6; i += 1) {
+        expect(
+          line.gestures().handleWheel({ deltaX: 0, deltaY: 0.5, deltaMode: 1, ctrlKey: false }),
+        ).toBe(true);
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(line.onTurn).toHaveBeenCalledTimes(1);
+    expect(line.onTurn).toHaveBeenLastCalledWith(1, { source: 'vertical-wheel' });
+
+    // Immediate reversal breaks latch and turns backward once.
+    act(() => {
+      for (let i = 0; i < 4; i += 1) {
+        line.gestures().handleWheel({ deltaX: 0, deltaY: -0.5, deltaMode: 1, ctrlKey: false });
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(line.onTurn).toHaveBeenCalledTimes(2);
+    expect(line.onTurn).toHaveBeenLastCalledWith(-1, { source: 'vertical-wheel' });
+
+    // After idle, another fractional line stream turns once again.
+    act(() => {
+      vi.advanceTimersByTime(SCRUB_IDLE_MS + 10);
+      for (let i = 0; i < 4; i += 1) {
+        line.gestures().handleWheel({ deltaX: 0, deltaY: 0.5, deltaMode: 1, ctrlKey: false });
+        vi.advanceTimersByTime(16);
+      }
+    });
+    expect(line.onTurn).toHaveBeenCalledTimes(3);
   });
 });
 
