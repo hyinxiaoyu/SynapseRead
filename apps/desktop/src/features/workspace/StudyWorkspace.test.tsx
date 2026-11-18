@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useEffect, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -151,6 +151,90 @@ describe('StudyWorkspace', () => {
       useStudySyncStore.getState().cards.at(-1)?.title,
     );
     expect(screen.getByRole('button', { name: 'Excerpt to MindMap' })).toBeDisabled();
+  });
+
+  describe('excerpt confirmation (#98)', () => {
+    const excerpt = async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+    };
+
+    it('announces an excerpt while the MindMap is collapsed, and Show opens it at the card', async () => {
+      await renderReady();
+      await excerpt();
+
+      const notice = await screen.findByTestId('excerpt-added-notice');
+      expect(notice).toHaveAttribute('data-tone', 'info');
+      expect(within(notice).getByRole('status')).toHaveTextContent('Added to MindMap');
+
+      const newest = useStudySyncStore.getState().nodes.at(-1)?.id;
+      // Something else selected meanwhile; Show still lands on the new card.
+      act(() => useStudySyncStore.setState({ selectedNodeId: null }));
+      fireEvent.click(within(notice).getByRole('button', { name: 'Show' }));
+
+      expect(screen.getByRole('button', { name: 'Hide MindMap' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+      expect(useStudySyncStore.getState().selectedNodeId).toBe(newest);
+      // Showing it is not choosing it as the parent for the next excerpt.
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+      expect(document.querySelector(`.react-flow__node[data-id="${newest}"]`)).toHaveClass(
+        'selected',
+      );
+    });
+
+    it('drops the pending reveal when the notice is closed', async () => {
+      await renderReady();
+      await excerpt();
+
+      fireEvent.click(
+        within(await screen.findByTestId('excerpt-added-notice')).getByRole('button', {
+          name: 'Close notice',
+        }),
+      );
+
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+      expect(useStudySyncStore.getState().revealRequest).toBeNull();
+    });
+
+    it('shows no notice while the MindMap is open', async () => {
+      // The canvas has a size, so it can reveal the card itself.
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement,
+      ) {
+        const size = this.classList.contains('react-flow')
+          ? { width: 800, height: 600 }
+          : { width: 0, height: 0 };
+        return DOMRect.fromRect({ x: 0, y: 0, ...size });
+      });
+      await renderReady();
+      fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+      await excerpt();
+
+      await vi.waitFor(() => expect(useStudySyncStore.getState().revealRequest).toBeNull());
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+    });
+
+    it('reports a failed excerpt through the error banner, not the notice', async () => {
+      await renderReady();
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+      // As the store does when the write fails: an error, and nothing to reveal.
+      act(() =>
+        useStudySyncStore.setState({
+          excerptSelection: async () => {
+            useStudySyncStore.setState({ error: 'disk full' });
+          },
+        }),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('disk full');
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+    });
   });
 
   it('pulses the source highlight on a jump, then completes it', async () => {

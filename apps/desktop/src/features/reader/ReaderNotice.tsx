@@ -32,16 +32,19 @@ export function ReaderPopoverLayer({
  * One notice over the page, with a close button. An `info` notice only tells the
  * reader something, so it fades after a few seconds; it waits while the pointer
  * or focus is on it. A `warning` stays until it is closed or no longer true.
+ * An `action` is a button beside the message, outside the announced text.
  */
 export function ReaderNotice({
   tone,
   onDismiss,
   testId,
+  action,
   children,
 }: {
   tone: 'info' | 'warning';
   onDismiss: () => void;
   testId?: string;
+  action?: { label: string; onClick: () => void };
   children: ReactNode;
 }) {
   const [held, setHeld] = useState({ pointer: false, focus: false });
@@ -88,6 +91,15 @@ export function ReaderNotice({
       <p role="status" className="min-w-0 flex-1 py-0.5">
         {children}
       </p>
+      {action && (
+        <button
+          type="button"
+          onClick={action.onClick}
+          className="shrink-0 rounded px-1.5 py-0.5 font-medium text-primary outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {action.label}
+        </button>
+      )}
       <button
         type="button"
         aria-label="Close notice"

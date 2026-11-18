@@ -19,6 +19,18 @@ describe('ReaderNotice', () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
+  it('offers an action outside the announced message', () => {
+    const onClick = vi.fn();
+    render(
+      <ReaderNotice tone="info" onDismiss={vi.fn()} action={{ label: 'Show', onClick }}>
+        Added to MindMap
+      </ReaderNotice>,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(/^Added to MindMap$/);
+    fireEvent.click(screen.getByRole('button', { name: 'Show' }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
   it('fades an info notice after a few seconds', () => {
     const onDismiss = vi.fn();
     render(

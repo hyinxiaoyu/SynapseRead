@@ -11,6 +11,7 @@ import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/co
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
+import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import { ReaderPane } from '@/features/reader/ReaderPane';
 import {
   type ToolbarSlots,
@@ -51,6 +52,9 @@ export function StudyWorkspace() {
     useStudySyncStore((state) => state.readingPreferences.theme),
   );
   const readerChrome = useReaderChromeTheme();
+  const revealRequest = useStudySyncStore((state) => state.revealRequest);
+  const revealNode = useStudySyncStore((state) => state.revealNode);
+  const completeReveal = useStudySyncStore((state) => state.completeReveal);
   const onMenuCommand = useStudySyncStore((state) => state.onMenuCommand);
   const setMenuItemStates = useStudySyncStore((state) => state.setMenuItemStates);
 
@@ -195,6 +199,9 @@ export function StudyWorkspace() {
   };
 
   const showDropOverlay = isDraggingFile || htmlDragging;
+  // A card the collapsed MindMap could not show: say it was added, and offer to
+  // open the map at it. An open map reveals it itself.
+  const pendingReveal = ready && !mindMapOpen ? revealRequest : null;
 
   return (
     <ToolbarSlotsContext.Provider value={slots}>
@@ -293,7 +300,26 @@ export function StudyWorkspace() {
           </div>
         )}
 
-        <div className="min-h-0 flex-1">
+        <div className="relative min-h-0 flex-1">
+          {pendingReveal && (
+            <ReaderPopoverLayer hidden={immersive}>
+              <ReaderNotice
+                key={pendingReveal.nonce}
+                tone="info"
+                testId="excerpt-added-notice"
+                action={{
+                  label: 'Show',
+                  onClick: () => {
+                    revealNode(pendingReveal.nodeId);
+                    if (mindMapRef.current?.isCollapsed()) toggleMindMap();
+                  },
+                }}
+                onDismiss={() => completeReveal(pendingReveal.nonce)}
+              >
+                Added to MindMap
+              </ReaderNotice>
+            </ReaderPopoverLayer>
+          )}
           {status === 'ready' ? (
             <ResizablePanelGroup
               orientation="horizontal"
@@ -313,7 +339,7 @@ export function StudyWorkspace() {
                   if (!Number.isNaN(size.asPercentage)) setMindMapOpen(size.asPercentage > 0);
                 }}
               >
-                <MindMapPane />
+                <MindMapPane open={mindMapOpen} />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
