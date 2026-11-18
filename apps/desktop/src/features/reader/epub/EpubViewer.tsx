@@ -415,6 +415,23 @@ export function EpubViewer({
   const [initialJump] = useState(jumpRequest);
   const currentLocationRef = useRef<EpubLocation | null>(null);
 
+  /**
+   * Jumps still on their way. Until one lands, `currentLocationRef` is the page the
+   * reader is leaving, so a bookmark toggled now waits for it (#100).
+   */
+  const navigationsInFlight = useRef(0);
+  const [navigationsSettled, setNavigationsSettled] = useState(0);
+  const trackNavigation = useCallback(<T,>(navigation: Promise<T>): Promise<T> => {
+    navigationsInFlight.current += 1;
+    // A counter, not a flag: a jump that settles before React renders would leave a
+    // flag where it started, and nothing would run the waiting toggle.
+    const settle = () => {
+      navigationsInFlight.current -= 1;
+      if (navigationsInFlight.current === 0) setNavigationsSettled((count) => count + 1);
+    };
+    return navigation.finally(settle);
+  }, []);
+
   // Callbacks and flags the long-lived engine listeners read at the time they fire.
   const latest = useRef({ isActive, paged, onSelectionChange, onCursorChange });
   useEffect(() => {
@@ -698,8 +715,7 @@ export function EpubViewer({
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
       const origin = describeHereRef.current();
       cancelTurnAnimation();
-      void handle
-        .display(match.cfiRange)
+      void trackNavigation(handle.display(match.cfiRange))
         .then(() => {
           if (cancelled) return;
           // One history entry per search, not one per match.
@@ -710,7 +726,14 @@ export function EpubViewer({
         })
         .catch(() => undefined);
     },
-    [cancelTurnAnimation, handle, isSearchMatchOnScreen, offerBackChip, searchTrip],
+    [
+      cancelTurnAnimation,
+      handle,
+      isSearchMatchOnScreen,
+      offerBackChip,
+      searchTrip,
+      trackNavigation,
+    ],
   );
 
   useEffect(
@@ -764,8 +787,7 @@ export function EpubViewer({
       }
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
       cancelTurnAnimation();
-      void handle
-        .display(epubAnchor.cfiRange)
+      void trackNavigation(handle.display(epubAnchor.cfiRange))
         .then(() => {
           setMissedJump(false);
           if (previous && previous !== epubAnchor.cfiRange) {
@@ -777,7 +799,7 @@ export function EpubViewer({
           setMissedJump(true);
         });
     },
-    [cancelTurnAnimation, handle, pushHistory],
+    [cancelTurnAnimation, handle, pushHistory, trackNavigation],
   );
 
   const bookmarksController = useBookmarksController<'epub'>({
@@ -785,15 +807,12 @@ export function EpubViewer({
     bookmarks,
     onAddBookmark,
     onRemoveBookmark,
+    // Only a position the book has reported is bookmarkable: the saved cursor or a
+    // guessed first chapter may not be where the reader is, or even in the book.
     getCurrentLocation: () => {
       const loc = currentLocationRef.current;
-      const cfiRange = loc?.cfi ?? currentCfi ?? initialCursor?.cfiRange ?? 'epubcfi(/6/2!/4/2)';
-      const chapterHref =
-        loc?.href ??
-        currentHref ??
-        initialCursor?.chapterHref ??
-        handle?.toc[0]?.href ??
-        'chapter-1.xhtml';
+      if (!loc) return null;
+      const { cfi: cfiRange, href: chapterHref } = loc;
       const chapterTitle =
         findOutlineLabel(handle?.toc ?? [], chapterHref) ??
         (bookProgress ? `Ch. ${bookProgress.chapter}` : chapterHref);
@@ -809,13 +828,29 @@ export function EpubViewer({
     isActiveBookmark: (bookmark) => {
       const epubAnchor = asEpubAnchor(bookmark.anchor);
       if (!epubAnchor) return false;
-      const activeCfi = currentCfi ?? currentLocationRef.current?.cfi ?? initialCursor?.cfiRange;
-      if (activeCfi) return epubAnchor.cfiRange === activeCfi;
-      return currentHref !== null && epubAnchor.chapterHref === currentHref;
+      const activeCfi = currentCfi ?? currentLocationRef.current?.cfi;
+      return activeCfi !== undefined && activeCfi !== null && epubAnchor.cfiRange === activeCfi;
     },
     isStaleBookmark: (bookmark) => staleBookmarkIds.has(bookmark.id),
     onSelectBookmark: navigateToBookmark,
   });
+
+  // A toggle during a jump applies where the jump lands, once that render has the
+  // new location; a second toggle before then cancels the first, as it would there.
+  const bookmarkToggleQueued = useRef(false);
+  const { toggleCurrentBookmark } = bookmarksController;
+  const toggleBookmark = useCallback(() => {
+    if (navigationsInFlight.current > 0) {
+      bookmarkToggleQueued.current = !bookmarkToggleQueued.current;
+      return;
+    }
+    toggleCurrentBookmark();
+  }, [toggleCurrentBookmark]);
+  useEffect(() => {
+    if (!bookmarkToggleQueued.current || navigationsInFlight.current > 0) return;
+    bookmarkToggleQueued.current = false;
+    toggleCurrentBookmark();
+  }, [navigationsSettled, toggleCurrentBookmark]);
 
   const navigateToAnnotation = useCallback(
     (annotation: Annotation) => {
@@ -827,8 +862,7 @@ export function EpubViewer({
       }
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
       cancelTurnAnimation();
-      void handle
-        .display(epubAnchor.cfiRange)
+      void trackNavigation(handle.display(epubAnchor.cfiRange))
         .then(() => {
           setMissedJump(false);
           if (previous && previous !== epubAnchor.cfiRange) {
@@ -844,7 +878,7 @@ export function EpubViewer({
           setMissedJump(true);
         });
     },
-    [cancelTurnAnimation, handle, pushHistory],
+    [cancelTurnAnimation, handle, pushHistory, trackNavigation],
   );
 
   const clearSelectionAfterAnnotate = useCallback(() => {
@@ -1037,7 +1071,7 @@ export function EpubViewer({
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
       try {
         if (!anchor) throw new Error('not an EPUB anchor');
-        await handle.display(anchor.cfiRange);
+        await trackNavigation(handle.display(anchor.cfiRange));
       } catch {
         finish(false);
         return;
@@ -1068,7 +1102,7 @@ export function EpubViewer({
       window.clearTimeout(pollForMarks);
       handle.setPulse(annotationId, false);
     };
-  }, [cancelTurnAnimation, handle, jumpRequest, onJumpHandled, pushHistory]);
+  }, [cancelTurnAnimation, handle, jumpRequest, onJumpHandled, pushHistory, trackNavigation]);
 
   // ---- Reading mode, keyboard navigation, and pane changes -----------------
 
@@ -1222,7 +1256,7 @@ export function EpubViewer({
             sameChapter(target, loc.href) &&
             (loc.page ?? 1) === 1));
       const origin = describeHere();
-      void go()
+      void trackNavigation(go())
         .then(() => {
           if (previous && !alreadyAtTarget) {
             pushHistory(previous);
@@ -1231,7 +1265,7 @@ export function EpubViewer({
         })
         .catch(() => undefined);
     },
-    [cancelTurnAnimation, describeHere, offerBackChip, pushHistory],
+    [cancelTurnAnimation, describeHere, offerBackChip, pushHistory, trackNavigation],
   );
 
   const handleTocSelect = (target: string) => {
@@ -1343,16 +1377,16 @@ export function EpubViewer({
     if (!handle || href === undefined) return;
     cancelTurnAnimation();
     backChip.dismiss();
-    void handle.display(href).catch(() => undefined);
+    void trackNavigation(handle.display(href)).catch(() => undefined);
   };
 
   const goToChapterEdge = (edge: 'start' | 'end') => {
     if (!handle || !bookProgress) return;
     cancelTurnAnimation();
     backChip.dismiss();
-    void handle
-      .displayChapterFraction(currentChapterIndex, edge === 'start' ? 0 : 1)
-      .catch(() => undefined);
+    void trackNavigation(
+      handle.displayChapterFraction(currentChapterIndex, edge === 'start' ? 0 : 1),
+    ).catch(() => undefined);
   };
 
   const scrubber: ScrubberModel | null =
@@ -1548,7 +1582,7 @@ export function EpubViewer({
     const target = history.goBack(currentHistoryLocation());
     if (target) {
       cancelTurnAnimation();
-      void handle.display(target).catch(() => undefined);
+      void trackNavigation(handle.display(target)).catch(() => undefined);
     }
   };
 
@@ -1558,7 +1592,7 @@ export function EpubViewer({
     const target = history.goForward(currentHistoryLocation());
     if (target) {
       cancelTurnAnimation();
-      void handle.display(target).catch(() => undefined);
+      void trackNavigation(handle.display(target)).catch(() => undefined);
     }
   };
 
@@ -1597,7 +1631,7 @@ export function EpubViewer({
     focusPage,
     search,
     navigator,
-    bookmarks: bookmarksController,
+    bookmarks: { ...bookmarksController, toggleCurrentBookmark: toggleBookmark },
     annotations: annotationsController,
     selectionText: activeSelection?.text ?? null,
     markup,
@@ -1723,8 +1757,8 @@ export function EpubViewer({
             />
             <BookmarkToggleButton
               bookmarked={bookmarksController.isCurrentBookmarked}
-              disabled={!handle}
-              onToggle={bookmarksController.toggleCurrentBookmark}
+              disabled={!handle || currentCfi === null}
+              onToggle={toggleBookmark}
             />
             <ToolbarSearchField
               search={search}
