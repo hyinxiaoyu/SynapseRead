@@ -42,6 +42,7 @@ import { indexOutline, type OutlineNode } from '@/features/reader/navigator/Outl
 import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { AppearanceMenu, useAppearancePanel } from '@/features/reader/appearance/AppearancePopover';
+import { resolvePageTransition } from '@/features/reader/appearance/transition';
 import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import {
   computeReadingLayout,
@@ -69,6 +70,9 @@ import {
 } from '@/features/reader/ReaderToolbar';
 import {
   animatePageTurn,
+  cancelPageTurn,
+  hasSelectionIn,
+  isOverContent,
   type TurnDirection,
   usePageTurnGestures,
   zoneCursor,
@@ -287,6 +291,8 @@ export function EpubViewer({
   const curlHostRef = useRef<HTMLDivElement>(null);
   const turnShadowRef = useRef<HTMLDivElement>(null);
   const readerAreaRef = useRef<HTMLDivElement>(null);
+  const pendingAreaDownRef = useRef<{ x: number; y: number } | null>(null);
+  const pendingFrameDownRef = useRef<{ x: number; y: number } | null>(null);
   const [handle, setHandle] = useState<EpubHandle | null>(null);
   const [activeSelection, setActiveSelection] = useState<ReaderSelection | null>(null);
   const [hoveredCodeBlock, setHoveredCodeBlock] = useState<EpubCodeBlockHover | null>(null);
@@ -299,6 +305,10 @@ export function EpubViewer({
   );
   const effectivePreferences = preferences ?? localPreferences;
   const readingMode = effectivePreferences.epubReadingMode;
+  const paged = readingMode !== 'scroll';
+  const cancelTurnAnimation = useCallback(() => {
+    if (hostRef.current) cancelPageTurn(hostRef.current);
+  }, []);
   const preferencesPanel = useAppearancePanel();
   const theme = useResolvedReadingTheme(effectivePreferences.theme);
   // The engine paints the page; it gets the theme already settled against the system.
@@ -310,6 +320,7 @@ export function EpubViewer({
   // ---- Reading measure: column count and page width -------------------------
 
   const areaRef = useRef<HTMLDivElement>(null);
+  const pageFrameRef = useRef<HTMLDivElement>(null);
   const [availableWidth, setAvailableWidth] = useState(0);
   useLayoutEffect(() => {
     const area = areaRef.current;
@@ -404,9 +415,9 @@ export function EpubViewer({
   const currentLocationRef = useRef<EpubLocation | null>(null);
 
   // Callbacks and flags the long-lived engine listeners read at the time they fire.
-  const latest = useRef({ isActive, onSelectionChange, onCursorChange });
+  const latest = useRef({ isActive, paged, onSelectionChange, onCursorChange });
   useEffect(() => {
-    latest.current = { isActive, onSelectionChange, onCursorChange };
+    latest.current = { isActive, paged, onSelectionChange, onCursorChange };
   });
 
   // ---- Opening, and reporting the reading position -------------------------
@@ -685,6 +696,7 @@ export function EpubViewer({
 
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
       const origin = describeHereRef.current();
+      cancelTurnAnimation();
       void handle
         .display(match.cfiRange)
         .then(() => {
@@ -697,7 +709,7 @@ export function EpubViewer({
         })
         .catch(() => undefined);
     },
-    [handle, isSearchMatchOnScreen, offerBackChip, searchTrip],
+    [cancelTurnAnimation, handle, isSearchMatchOnScreen, offerBackChip, searchTrip],
   );
 
   useEffect(
@@ -750,6 +762,7 @@ export function EpubViewer({
         return;
       }
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+      cancelTurnAnimation();
       void handle
         .display(epubAnchor.cfiRange)
         .then(() => {
@@ -763,7 +776,7 @@ export function EpubViewer({
           setMissedJump(true);
         });
     },
-    [handle, pushHistory],
+    [cancelTurnAnimation, handle, pushHistory],
   );
 
   const bookmarksController = useBookmarksController<'epub'>({
@@ -812,6 +825,7 @@ export function EpubViewer({
         return;
       }
       const previous = currentLocationRef.current?.cfi ?? currentLocationRef.current?.href ?? null;
+      cancelTurnAnimation();
       void handle
         .display(epubAnchor.cfiRange)
         .then(() => {
@@ -829,7 +843,7 @@ export function EpubViewer({
           setMissedJump(true);
         });
     },
-    [handle, pushHistory],
+    [cancelTurnAnimation, handle, pushHistory],
   );
 
   const clearSelectionAfterAnnotate = useCallback(() => {
@@ -897,6 +911,7 @@ export function EpubViewer({
     handle.onPointer((down) => {
       // A press in the chapter never reaches the window, where a card listens.
       if (down) dismissLinkPeek();
+      else pendingFrameDownRef.current = null;
       reportPointer(down);
     });
     handle.onCodeBlockHover?.((block) => {
@@ -1003,6 +1018,7 @@ export function EpubViewer({
 
   useEffect(() => {
     if (!handle || !jumpRequest) return;
+    cancelTurnAnimation();
     const { nonce, annotationId } = jumpRequest;
     const anchor = asEpubAnchor(jumpRequest.anchor);
     let cancelled = false;
@@ -1050,14 +1066,15 @@ export function EpubViewer({
       window.clearTimeout(pollForMarks);
       handle.setPulse(annotationId, false);
     };
-  }, [handle, jumpRequest, onJumpHandled, pushHistory]);
+  }, [cancelTurnAnimation, handle, jumpRequest, onJumpHandled, pushHistory]);
 
   // ---- Reading mode, keyboard navigation, and pane changes -----------------
 
   useEffect(() => {
     if (!handle) return;
+    cancelTurnAnimation();
     void handle.setReadingMode(readingMode);
-  }, [handle, readingMode]);
+  }, [cancelTurnAnimation, handle, readingMode]);
 
   useEffect(() => {
     if (!handle) return;
@@ -1172,9 +1189,12 @@ export function EpubViewer({
     (currentHref ? findOutlineLabel(handle?.toc ?? [], currentHref) : null) ??
     chapterTitles[currentChapterIndex] ??
     (bookProgress ? `Chapter ${bookProgress.chapter}` : null);
-  const transition = effectivePreferences.pageTransition;
-  const paged = readingMode !== 'scroll';
+  const effectiveTransition = resolvePageTransition(effectivePreferences, { scrolled: !paged });
   const toolbarMargin = paged && chromeHidden;
+
+  useEffect(() => {
+    if (effectiveTransition === 'none') cancelTurnAnimation();
+  }, [effectiveTransition, cancelTurnAnimation]);
 
   /** Where the reader is, for "Back to …". */
   const describeHere = useCallback(() => {
@@ -1189,6 +1209,7 @@ export function EpubViewer({
   /** A big jump: remembered in history, with a chip that leads back. */
   const jumpWithBackChip = useCallback(
     (go: () => Promise<void>, target?: string) => {
+      cancelTurnAnimation();
       const loc = currentLocationRef.current;
       const previous = loc?.cfi ?? loc?.href ?? null;
       const alreadyAtTarget =
@@ -1208,7 +1229,7 @@ export function EpubViewer({
         })
         .catch(() => undefined);
     },
-    [describeHere, offerBackChip, pushHistory],
+    [cancelTurnAnimation, describeHere, offerBackChip, pushHistory],
   );
 
   const handleTocSelect = (target: string) => {
@@ -1265,14 +1286,15 @@ export function EpubViewer({
     // the page area and carries the incoming one with it, so the whole page turns,
     // not just the reading measure. For `curl`, the engine captures the outgoing
     // spread and sweeps a conical crease over the stationary incoming spread.
-    const slides = paged && transition === 'slide';
+    const slides = paged && effectiveTransition === 'slide';
     const engineCurls =
-      paged && transition === 'curl' && typeof handle.setCurlElements === 'function';
+      paged && effectiveTransition === 'curl' && typeof handle.setCurlElements === 'function';
     void handle
-      .turnPage(direction, { animate: slides, transition: paged ? transition : 'none', spread })
-      .then(() => {
-        if (paged && !slides && !engineCurls && transition !== 'none') {
-          animatePageTurn(hostRef.current, direction, transition, turnShadowRef.current, {
+      .turnPage(direction, { animate: slides, transition: effectiveTransition, spread })
+      .then((turned) => {
+        if (!turned) return;
+        if (!slides && !engineCurls && effectiveTransition !== 'none') {
+          animatePageTurn(hostRef.current, direction, effectiveTransition, turnShadowRef.current, {
             spread,
           });
         }
@@ -1283,7 +1305,7 @@ export function EpubViewer({
   // ---- A two-finger swipe scrubs the strip the chapter is laid out on ----
 
   const scrub = {
-    start: () => handle?.beginScrub({ transition: paged ? transition : 'none', spread }),
+    start: () => handle?.beginScrub({ transition: effectiveTransition, spread }),
     move: (displacement: number) => handle?.scrubTo(displacement),
     end: (_velocity: number, committed: TurnDirection | null) => {
       if (committed !== null) backChip.dismiss();
@@ -1292,14 +1314,22 @@ export function EpubViewer({
       // it, so the engine lands the page at once and the motion plays here — as a
       // turn of the same mode does, in place or across a seam.
       const motion =
-        committed !== null && paged && (transition === 'fade' || transition === 'stack');
+        committed !== null &&
+        paged &&
+        (effectiveTransition === 'fade' || effectiveTransition === 'stack');
       void handle
         .endScrub(committed)
         .then(() => {
           if (motion) {
-            animatePageTurn(hostRef.current, committed, transition, turnShadowRef.current, {
-              spread,
-            });
+            animatePageTurn(
+              hostRef.current,
+              committed,
+              effectiveTransition,
+              turnShadowRef.current,
+              {
+                spread,
+              },
+            );
           }
         })
         .catch(() => undefined);
@@ -1309,12 +1339,14 @@ export function EpubViewer({
   const goToChapter = (index: number) => {
     const href = handle?.spineHref(index);
     if (!handle || href === undefined) return;
+    cancelTurnAnimation();
     backChip.dismiss();
     void handle.display(href).catch(() => undefined);
   };
 
   const goToChapterEdge = (edge: 'start' | 'end') => {
     if (!handle || !bookProgress) return;
+    cancelTurnAnimation();
     backChip.dismiss();
     void handle
       .displayChapterFraction(currentChapterIndex, edge === 'start' ? 0 : 1)
@@ -1380,25 +1412,36 @@ export function EpubViewer({
 
   // ---- Page-turn gestures: edge clicks and swipes, also from inside the frame ----
 
+  const gesturesEnabled = handle !== null && isActive && paged && expandedCodeBlock === null;
   const gestures = usePageTurnGestures({
-    enabled: handle !== null && isActive && paged && expandedCodeBlock === null,
+    enabled: gesturesEnabled,
     areaRef,
-    pageRef: hostRef,
+    pageRef: pageFrameRef,
     // Both `slide` and `curl` act across the full page area, not the narrower
     // reading measure; a scrub must reach the pane's edge, not the measure's.
     // Fall back to the measure before the pane has been laid out.
     scrubWidth: () => {
       const paneWidth = areaRef.current?.getBoundingClientRect().width ?? 0;
-      if (paged && (transition === 'slide' || transition === 'curl') && paneWidth > 0) {
+      if (
+        paged &&
+        (effectiveTransition === 'slide' || effectiveTransition === 'curl') &&
+        paneWidth > 0
+      ) {
         return paneWidth;
       }
-      return hostRef.current?.getBoundingClientRect().width ?? 0;
+      return (
+        pageFrameRef.current?.getBoundingClientRect().width ||
+        hostRef.current?.getBoundingClientRect().width ||
+        0
+      );
     },
     onTurn: turnPage,
     canTurn: (direction) =>
       (handle?.canTurnInPlace(direction) ?? false) ||
       (chapterCount > 0 &&
         (direction > 0 ? currentChapterIndex < chapterCount - 1 : currentChapterIndex > 0)),
+    hasSelection: () => handle?.hasSelection() ?? false,
+    verticalWheel: paged,
     onScrubStart: scrub.start,
     onScrubMove: scrub.move,
     onScrubEnd: scrub.end,
@@ -1406,9 +1449,89 @@ export function EpubViewer({
   const { handleSample, handleWheel, zone } = gestures;
   useEffect(() => {
     if (!handle) return;
-    handle.onGesture(handleSample);
-    handle.onWheel(handleWheel);
-  }, [handle, handleSample, handleWheel]);
+    handle.onGesture((sample) => {
+      if (sample.kind === 'down') {
+        pendingAreaDownRef.current = null;
+        pendingFrameDownRef.current = { x: sample.x, y: sample.y };
+      } else if (sample.kind === 'click') {
+        pendingFrameDownRef.current = null;
+      }
+      handleSample(sample);
+    });
+    handle.onFramePointerUp?.((sample) => {
+      const down = pendingAreaDownRef.current;
+      pendingAreaDownRef.current = null;
+      if (!down) return;
+      handleSample({
+        kind: 'click',
+        x: sample.x,
+        y: sample.y,
+        overContent: sample.overContent,
+        hasSelection: sample.hasSelection,
+      });
+    });
+    handle.onWheel((sample) => {
+      if (!latest.current.paged && !sample.defaultPrevented && !sample.ctrlKey) {
+        cancelTurnAnimation();
+      }
+      return handleWheel(sample);
+    });
+    return () => {
+      handle.onGesture(() => undefined);
+      handle.onFramePointerUp?.(() => undefined);
+      handle.onWheel(() => false);
+    };
+  }, [cancelTurnAnimation, handle, handleSample, handleWheel]);
+  useEffect(() => {
+    const area = areaRef.current;
+    if (!area || !gesturesEnabled) {
+      pendingAreaDownRef.current = null;
+      pendingFrameDownRef.current = null;
+      return;
+    }
+    const doc = area.ownerDocument;
+    const view = doc.defaultView;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 || isOverContent(event.target, event.clientX, event.clientY)) return;
+      pendingFrameDownRef.current = null;
+      pendingAreaDownRef.current = { x: event.clientX, y: event.clientY };
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (event.button !== 0) return;
+      if (pendingAreaDownRef.current !== null) {
+        pendingAreaDownRef.current = null;
+        return;
+      }
+      if (pendingFrameDownRef.current === null) return;
+      pendingFrameDownRef.current = null;
+      // Do not call `reportPointer(false)` here: `pointerup` bubbles to `ownerDoc`,
+      // where `epubEngine` calls `clearFramePointerDown()` -> `onPointer(false)` once.
+      handleSample({
+        kind: 'click',
+        x: event.clientX,
+        y: event.clientY,
+        overContent: isOverContent(event.target, event.clientX, event.clientY),
+        hasSelection: hasSelectionIn(doc),
+      });
+    };
+    const clearPending = () => {
+      pendingAreaDownRef.current = null;
+      pendingFrameDownRef.current = null;
+    };
+    area.addEventListener('pointerdown', onPointerDown);
+    area.addEventListener('pointerup', onPointerUp);
+    area.addEventListener('pointercancel', clearPending);
+    view?.addEventListener('pointerup', clearPending);
+    view?.addEventListener('pointercancel', clearPending);
+    return () => {
+      clearPending();
+      area.removeEventListener('pointerdown', onPointerDown);
+      area.removeEventListener('pointerup', onPointerUp);
+      area.removeEventListener('pointercancel', clearPending);
+      view?.removeEventListener('pointerup', clearPending);
+      view?.removeEventListener('pointercancel', clearPending);
+    };
+  }, [areaRef, gesturesEnabled, handleSample]);
   useEffect(() => {
     handle?.setCursor(zoneCursor(zone));
   }, [handle, zone]);
@@ -1420,14 +1543,20 @@ export function EpubViewer({
     if (!handle) return;
     backChip.dismiss();
     const target = history.goBack(currentHistoryLocation());
-    if (target) void handle.display(target).catch(() => undefined);
+    if (target) {
+      cancelTurnAnimation();
+      void handle.display(target).catch(() => undefined);
+    }
   };
 
   const handleForward = () => {
     if (!handle) return;
     backChip.dismiss();
     const target = history.goForward(currentHistoryLocation());
-    if (target) void handle.display(target).catch(() => undefined);
+    if (target) {
+      cancelTurnAnimation();
+      void handle.display(target).catch(() => undefined);
+    }
   };
 
   // Entering focus mode puts the panels away; leaving it does not reopen them.
@@ -1571,6 +1700,7 @@ export function EpubViewer({
               preferences={effectivePreferences}
               onChange={updatePreferences}
               format="epub"
+              scrolled={!paged}
               disabled={!handle}
             />
             <MarkupToggleButton
@@ -1683,6 +1813,26 @@ export function EpubViewer({
             data-turn-zone={zone ?? undefined}
             data-toolbar-margin={toolbarMargin || undefined}
             className="group/page relative flex min-h-0 min-w-0 flex-1 justify-center overflow-hidden pt-1.5"
+            onWheel={(event) => {
+              if (!paged && !event.ctrlKey && !event.defaultPrevented) {
+                cancelTurnAnimation();
+              }
+            }}
+            onClick={(event) => {
+              if (
+                event.button !== 0 ||
+                event.defaultPrevented ||
+                !handle?.hasSelection() ||
+                isOverContent(event.target, event.clientX, event.clientY)
+              ) {
+                return;
+              }
+              handle.clearSelection();
+              if (activeSelection) {
+                setActiveSelection(null);
+                latest.current.onSelectionChange(null);
+              }
+            }}
             style={{
               ...pageSurfaceStyle(theme),
               // The slide's seam shadow reads the same calibrated cast colour as
@@ -1695,6 +1845,20 @@ export function EpubViewer({
               ...(toolbarMargin ? { paddingTop: TOOLBAR_HEIGHT_PX } : undefined),
             }}
           >
+            {/*
+              Stationary page measure box outside `epub-slide-pane` so page-turn
+              edge zones never drift while the slide pane or host animates (#107).
+            */}
+            <div
+              ref={pageFrameRef}
+              aria-hidden="true"
+              data-testid="epub-page-frame"
+              className={cn(
+                'pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2',
+                availableWidth === 0 && 'w-full',
+              )}
+              style={availableWidth > 0 ? { width: layout.pageWidth } : undefined}
+            />
             {/*
               The pane is the paper the turn moves: page-area wide, with the
               reading measure centred inside it. Translating the pane (rather than

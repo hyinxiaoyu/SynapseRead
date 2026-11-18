@@ -227,33 +227,35 @@ export async function txtFlow(page) {
   await page.hideSidebar();
 
   // Page turns: a click beside the page's right edge, Space, and Page Up, each a
-  // screen. Progress sits in a footer under the page.
+  // viewport screen with reading-continuity overlap (#103). Progress sits in a footer under the page.
   await page.evaluate(`${visibleScroller}.scrollTop = 0`);
   await page.waitFor(`${visibleScroller}.scrollTop === 0`, 'scrolling TXT to the top');
   await page.waitFor(
     `/^Line \\d+ of \\d+$/.test(${visibleTxtViewer}.querySelector('[data-testid="reader-footer-readout"]')?.textContent ?? '')`,
     'the TXT footer to show the line',
   );
-  const screenful = await page.evaluate(`${visibleScroller}.clientHeight * 0.9`);
+  const clientHeight = await page.evaluate(`${visibleScroller}.clientHeight`);
   const rightEdge = await page.evaluate(`(() => {
     const r = ${visibleScroller}.getBoundingClientRect();
-    return { x: r.right - 24, y: r.top + r.height / 2 };
+    return { x: r.right - 24, y: r.top + r.height - 40 };
   })()`);
   await page.click(rightEdge);
   await page.waitFor(
-    `Math.abs(${visibleScroller}.scrollTop - ${screenful}) < 2`,
-    'a click in the right page edge to turn a page',
+    `${visibleScroller}.scrollTop > ${clientHeight * 0.5} && ${visibleScroller}.scrollTop < ${clientHeight}`,
+    'a click in the right page edge to turn a page with overlap',
   );
+  const afterEdgeClick = await page.evaluate(`${visibleScroller}.scrollTop`);
   await page.evaluate(`${visibleScroller}.focus()`);
   await page.press(' ', 'Space');
   await page.waitFor(
-    `Math.abs(${visibleScroller}.scrollTop - ${2 * screenful}) < 2`,
-    'Space to turn a page',
+    `${visibleScroller}.scrollTop > ${afterEdgeClick + clientHeight * 0.5} && ${visibleScroller}.scrollTop < ${afterEdgeClick + clientHeight}`,
+    'Space to turn a page with overlap',
   );
+  const afterSpace = await page.evaluate(`${visibleScroller}.scrollTop`);
   await page.press('PageUp');
   await page.waitFor(
-    `Math.abs(${visibleScroller}.scrollTop - ${screenful}) < 2`,
-    'Page Up to turn back',
+    `${visibleScroller}.scrollTop < ${afterSpace - clientHeight * 0.5} && ${visibleScroller}.scrollTop > 0`,
+    'Page Up to turn back with overlap',
   );
   await page.press('Home');
   await page.waitFor(`${visibleScroller}.scrollTop === 0`, 'Home to go to the start');

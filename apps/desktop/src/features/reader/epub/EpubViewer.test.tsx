@@ -22,6 +22,7 @@ import {
 
 import {
   type EpubCodeBlockHover,
+  type EpubFramePointerUp,
   type EpubInternalLink,
   type EpubLocation,
   type EpubReadingMode,
@@ -68,6 +69,7 @@ const engine = vi.hoisted(() => ({
   emitKeyDown: (() => undefined) as (event: KeyboardEvent) => void,
   emitContextMenu: (() => undefined) as (event: MouseEvent) => void,
   emitGesture: (() => undefined) as (sample: PageGestureSample) => void,
+  emitFramePointerUp: (() => undefined) as (sample: EpubFramePointerUp) => void,
   emitWheel: (() => false) as (wheel: WheelSample) => boolean,
   emitMarkClick: (() => undefined) as (annotationId: string, rect: null) => void,
   emitPointer: (() => undefined) as (down: boolean) => void,
@@ -78,10 +80,14 @@ const engine = vi.hoisted(() => ({
   measure: null as ((index: number) => Promise<{ characters: number; cjk: number } | null>) | null,
   next: vi.fn(async () => undefined),
   previous: vi.fn(async () => undefined),
+  turnResult: true,
+  hasSelection: false,
   /** A page turn, recorded as the `next`/`previous` the rest of the suite watches. */
   turnPage: vi.fn(async (direction: 1 | -1) => {
+    if (!engine.turnResult) return false;
     if (direction > 0) await engine.next();
     else await engine.previous();
+    return true;
   }),
   /** Whether the chapter has another page that way; the fixture chapter does. */
   inPlace: true,
@@ -141,6 +147,7 @@ vi.mock('./epubEngine', () => ({
     previous: engine.previous,
     turnPage: engine.turnPage,
     canTurnInPlace: () => engine.inPlace,
+    hasSelection: () => engine.hasSelection,
     beginScrub: () => {
       engine.scrubs.length = 0;
     },
@@ -182,6 +189,7 @@ vi.mock('./epubEngine', () => ({
     },
     clearSelection() {
       engine.selectionCleared += 1;
+      engine.hasSelection = false;
     },
     resize: () => undefined,
     selectionRect: () => null,
@@ -212,6 +220,9 @@ vi.mock('./epubEngine', () => ({
     },
     onGesture(listener: (sample: PageGestureSample) => void) {
       engine.emitGesture = listener;
+    },
+    onFramePointerUp(listener: (sample: EpubFramePointerUp) => void) {
+      engine.emitFramePointerUp = listener;
     },
     onWheel(listener: (wheel: WheelSample) => boolean) {
       engine.emitWheel = listener;
@@ -350,11 +361,15 @@ describe('EpubViewer', () => {
     engine.measure = null;
     engine.peek = null;
     engine.inPlace = true;
+    engine.turnResult = true;
+    engine.hasSelection = false;
+    engine.emitFramePointerUp = () => undefined;
     engine.scrubs = [];
     engine.scrubEnds = [];
     window.localStorage.clear();
     engine.next.mockClear();
     engine.previous.mockClear();
+    engine.turnPage.mockClear();
     engine.setReadingMode.mockClear();
     engine.setPreferences.mockClear();
     engine.setColumns.mockClear();
@@ -696,6 +711,7 @@ describe('EpubViewer', () => {
         dimImages: true,
         epubReadingMode: 'paged',
         pageTransition: 'slide',
+        scrollPageTransition: null,
         tintPdfPages: false,
         focusModeFullScreen: false,
       }),
@@ -1068,7 +1084,7 @@ describe('EpubViewer', () => {
     const { store, documentId } = await setup();
     render(<Harness store={store} documentId={documentId} />);
     await opened();
-    vi.spyOn(screen.getByTestId('epub-host'), 'getBoundingClientRect').mockReturnValue(
+    vi.spyOn(screen.getByTestId('epub-page-frame'), 'getBoundingClientRect').mockReturnValue(
       new DOMRect(100, 0, 1000, 800),
     );
 
@@ -1104,17 +1120,24 @@ describe('EpubViewer', () => {
     expect(engine.scrubs.at(-1)).toBe(240);
     await waitFor(() => expect(engine.scrubEnds).toEqual([1]));
     expect(engine.next).toHaveBeenCalledTimes(2);
-    expect(engine.emitWheel({ deltaX: 0, deltaY: 40, ctrlKey: false })).toBe(false);
+    // Vertical mouse wheel also turns in paginated mode (#106).
+    let wheelUsed = false;
+    act(() => {
+      wheelUsed = engine.emitWheel({ deltaX: 0, deltaY: 40, ctrlKey: false });
+    });
+    expect(wheelUsed).toBe(true);
+    expect(engine.next).toHaveBeenCalledTimes(3);
 
     fireEvent.keyDown(window, { key: ' ', code: 'Space' });
     fireEvent.keyDown(window, { key: 'PageUp', code: 'PageUp' });
-    expect(engine.next).toHaveBeenCalledTimes(3);
+    expect(engine.next).toHaveBeenCalledTimes(4);
     expect(engine.previous).toHaveBeenCalledTimes(2);
 
-    // Scroll mode scrolls: no edge zones.
+    // Scroll mode scrolls: no edge zones and no wheel interception.
     fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
     click(1050);
-    expect(engine.next).toHaveBeenCalledTimes(3);
+    expect(engine.emitWheel({ deltaX: 0, deltaY: 40, ctrlKey: false })).toBe(false);
+    expect(engine.next).toHaveBeenCalledTimes(4);
     expect(screen.queryByRole('button', { name: 'Next Page' })).not.toBeInTheDocument();
   });
 
@@ -1122,7 +1145,7 @@ describe('EpubViewer', () => {
     const { store, documentId } = await setup();
     render(<Harness store={store} documentId={documentId} />);
     await opened();
-    vi.spyOn(screen.getByTestId('epub-host'), 'getBoundingClientRect').mockReturnValue(
+    vi.spyOn(screen.getByTestId('epub-page-frame'), 'getBoundingClientRect').mockReturnValue(
       new DOMRect(100, 0, 1000, 800),
     );
     act(() =>
@@ -2047,6 +2070,515 @@ describe('EpubViewer', () => {
         fireEvent.click(dialogCopy);
       });
       expect(dialogCopy).toHaveTextContent('Copy');
+    });
+  });
+
+  describe('scroll-mode fade, paginated vertical wheel, and consecutive clicks (#103, #106, #107)', () => {
+    it('plays fade only on moved explicit page turns in scroll mode and preserves paginated transitions (#103)', async () => {
+      const originalAnimate = HTMLElement.prototype.animate;
+      const animateSpy = vi.fn<HTMLElement['animate']>(
+        () => ({ id: '', cancel: vi.fn() }) as unknown as Animation,
+      );
+      HTMLElement.prototype.animate = animateSpy;
+
+      try {
+        const { store, documentId } = await setup();
+        await act(async () => {
+          await store.getState().updateReadingPreferences({ pageTransition: 'curl' });
+        });
+        render(<Harness store={store} documentId={documentId} />);
+        await opened();
+
+        act(() =>
+          engine.emitLocation({
+            cfi: CFI,
+            href: 'OEBPS/chapter1.xhtml',
+            page: 1,
+            totalPages: 2,
+            chapterIndex: 0,
+            totalChapters: 2,
+            bookProgress: 25,
+            fraction: 0.25,
+          }),
+        );
+
+        // Switch to Scroll mode: Appearance popover offers only None/Fade, resolving curl -> fade.
+        fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+        expect(screen.getByTestId('epub-viewer')).toHaveAttribute('data-reading-mode', 'scroll');
+
+        fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+        expect(screen.getByRole('radio', { name: 'Fade' })).toHaveAttribute('aria-checked', 'true');
+        expect(screen.queryByRole('radio', { name: 'Curl' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('radio', { name: 'Slide' })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+
+        // Explicit page turns in scroll mode animate with fade when moved === true.
+        const host = screen.getByTestId('epub-host');
+        await act(async () => {
+          fireEvent.keyDown(window, { key: 'ArrowRight' });
+          await Promise.resolve();
+        });
+        expect(engine.turnPage).toHaveBeenLastCalledWith(1, {
+          animate: false,
+          transition: 'fade',
+          spread: false,
+        });
+        expect(animateSpy).toHaveBeenCalledTimes(1);
+        expect(animateSpy.mock.instances[0]).toBe(host);
+        expect(animateSpy.mock.calls[0]?.[0]).toEqual([{ opacity: 0.2 }, { opacity: 1 }]);
+
+        await act(async () => {
+          fireEvent.keyDown(window, { key: ' ', code: 'Space' });
+          await Promise.resolve();
+        });
+        await act(async () => {
+          fireEvent.keyDown(window, { key: ' ', code: 'Space', shiftKey: true });
+          await Promise.resolve();
+        });
+        await act(async () => {
+          fireEvent.keyDown(window, { key: 'PageDown', code: 'PageDown' });
+          await Promise.resolve();
+        });
+        expect(animateSpy).toHaveBeenCalledTimes(4);
+
+        // Scrubber step page triggers fade in scroll mode.
+        const slider = screen.getByRole('slider', { name: 'Reading position' });
+        await act(async () => {
+          fireEvent.keyDown(slider, { key: 'ArrowRight' });
+          await Promise.resolve();
+        });
+        expect(animateSpy).toHaveBeenCalledTimes(5);
+
+        // Boundary no-op (turned === false) must not play fade.
+        engine.turnResult = false;
+        await act(async () => {
+          fireEvent.keyDown(window, { key: 'ArrowRight' });
+          await Promise.resolve();
+        });
+        expect(animateSpy).toHaveBeenCalledTimes(5);
+        engine.turnResult = true;
+
+        // Non-page-turn jumps (TOC, GoTo, Chapter, Back, internal links) stay instant without fade.
+        fireEvent.click(screen.getByTestId('sidebar-toggle'));
+        fireEvent.click(screen.getByRole('treeitem', { name: 'Two' }));
+        await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+        fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+        fireEvent.keyDown(window, { key: 'Home', code: 'Home' });
+        act(() => engine.emitInternalLink('OEBPS/chapter1.xhtml'));
+        await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter1.xhtml'));
+        expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(false);
+        expect(animateSpy).toHaveBeenCalledTimes(5);
+
+        // Choosing None in scroll mode skips fade while preserving pageTransition: 'curl' for paged mode.
+        fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+        fireEvent.click(screen.getByRole('radio', { name: 'None' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+        await act(async () => {
+          fireEvent.keyDown(window, { key: 'ArrowRight' });
+          await Promise.resolve();
+        });
+        expect(animateSpy).toHaveBeenCalledTimes(5);
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Two pages' }));
+        expect(store.getState().readingPreferences.pageTransition).toBe('curl');
+        expect(store.getState().readingPreferences.scrollPageTransition).toBe('none');
+
+        // Paged fade also gates animatePageTurn on turned === true.
+        await act(async () => {
+          await store.getState().updateReadingPreferences({ pageTransition: 'fade' });
+        });
+        engine.turnResult = false;
+        await act(async () => {
+          fireEvent.keyDown(window, { key: 'ArrowRight' });
+          await Promise.resolve();
+        });
+        expect(animateSpy).toHaveBeenCalledTimes(5);
+        engine.turnResult = true;
+        await act(async () => {
+          fireEvent.keyDown(window, { key: 'ArrowRight' });
+          await Promise.resolve();
+        });
+        expect(animateSpy).toHaveBeenCalledTimes(6);
+      } finally {
+        HTMLElement.prototype.animate = originalAnimate;
+      }
+    });
+
+    it('cancels in-flight page-turn animation on navigation jumps and scroll-mode wheeling', async () => {
+      const { store, documentId } = await setup();
+      await act(async () => {
+        await store.getState().updateReadingPreferences({ pageTransition: 'fade' });
+      });
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      const host = screen.getByTestId('epub-host');
+      const activeAnimations: { id: string; cancel: ReturnType<typeof vi.fn> }[] = [];
+      const cancelCalls: ReturnType<typeof vi.fn>[] = [];
+      host.animate = vi.fn(() => {
+        const cancel = vi.fn(() => {
+          const index = activeAnimations.indexOf(entry);
+          if (index >= 0) activeAnimations.splice(index, 1);
+        });
+        const entry = { id: '', cancel };
+        activeAnimations.push(entry);
+        cancelCalls.push(cancel);
+        return entry as unknown as Animation;
+      }) as unknown as HTMLElement['animate'];
+      host.getAnimations = vi.fn(
+        () => [...activeAnimations] as unknown as Animation[],
+      ) as unknown as HTMLElement['getAnimations'];
+
+      const emitCh1 = () =>
+        act(() =>
+          engine.emitLocation({
+            cfi: CFI,
+            href: 'OEBPS/chapter1.xhtml',
+            page: 1,
+            totalPages: 2,
+            chapterIndex: 0,
+            totalChapters: 2,
+            bookProgress: 25,
+            fraction: 0.25,
+          }),
+        );
+      emitCh1();
+
+      const triggerFade = async () => {
+        await act(async () => {
+          fireEvent.keyDown(window, { key: 'ArrowRight' });
+          await Promise.resolve();
+        });
+        expect(activeAnimations).toHaveLength(1);
+        expect(activeAnimations[0]?.id).toBe('page-turn');
+      };
+
+      // 1. jumpWithBackChip (via TOC) cancels in-flight fade.
+      await triggerFade();
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Two' }));
+      expect(activeAnimations).toHaveLength(0);
+      await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+
+      // 2. goToChapter cancels in-flight fade.
+      await triggerFade();
+      fireEvent.keyDown(window, { key: 'ArrowDown', code: 'ArrowDown', altKey: true });
+      expect(activeAnimations).toHaveLength(0);
+
+      // 3. goToChapterEdge cancels in-flight fade.
+      await triggerFade();
+      fireEvent.keyDown(window, { key: 'Home', code: 'Home' });
+      expect(activeAnimations).toHaveLength(0);
+
+      // 4. handleReturnBack and handleForward cancel in-flight fade.
+      await triggerFade();
+      fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+      expect(activeAnimations).toHaveLength(0);
+
+      await triggerFade();
+      fireEvent.click(screen.getByRole('button', { name: 'Go forward' }));
+      expect(activeAnimations).toHaveLength(0);
+
+      // 5. External jumpRequest cancels in-flight fade.
+      await triggerFade();
+      act(() =>
+        store.setState({
+          jumpRequest: {
+            nonce: 99,
+            documentId,
+            annotationId: 'ann-jump',
+            anchor: {
+              format: 'epub',
+              cfiRange: FAR_CFI,
+              chapterHref: 'OEBPS/chapter2.xhtml',
+            },
+          },
+        }),
+      );
+      expect(activeAnimations).toHaveLength(0);
+
+      // 6. Scroll-mode manual wheeling (both inside iframe and on outer page area) cancels in-flight fade.
+      fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+      await triggerFade();
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(false);
+      expect(activeAnimations).toHaveLength(0);
+
+      await triggerFade();
+      fireEvent.wheel(screen.getByTestId('epub-page-area'), { deltaX: 0, deltaY: 120 });
+      expect(activeAnimations).toHaveLength(0);
+      expect(cancelCalls.length).toBeGreaterThanOrEqual(8);
+    });
+
+    it('turns pages on vertical mouse wheel in spread/paged modes with modifier, drag, scrollable, and boundary guards (#106)', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      act(() =>
+        engine.emitLocation({
+          cfi: CFI,
+          href: 'OEBPS/chapter1.xhtml',
+          page: 1,
+          totalPages: 2,
+          chapterIndex: 0,
+          totalChapters: 2,
+          fraction: 0,
+        }),
+      );
+
+      // Discrete pixel notch and line-mode vertical wheel turn in Two pages (spread) mode.
+      act(() => {
+        expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(true);
+      });
+      expect(engine.next).toHaveBeenCalledTimes(1);
+      act(() => {
+        expect(engine.emitWheel({ deltaX: 0, deltaY: -3, deltaMode: 1, ctrlKey: false })).toBe(
+          true,
+        );
+      });
+      expect(engine.previous).toHaveBeenCalledTimes(1);
+
+      // Single page (paged) mode also handles vertical wheel.
+      fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+      act(() => {
+        expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(true);
+      });
+      expect(engine.next).toHaveBeenCalledTimes(2);
+
+      // Modifiers and active drag (buttons !== 0) do not turn.
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: true })).toBe(false);
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false, metaKey: true })).toBe(
+        false,
+      );
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false, altKey: true })).toBe(
+        false,
+      );
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false, shiftKey: true })).toBe(
+        false,
+      );
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false, buttons: 1 })).toBe(false);
+      expect(engine.next).toHaveBeenCalledTimes(2);
+
+      // Nested vertically scrollable container inside iframe keeps native scrolling.
+      const iframeDoc = document.implementation.createHTMLDocument('');
+      const scroller = iframeDoc.createElement('div');
+      scroller.style.overflowY = 'auto';
+      Object.defineProperty(scroller, 'scrollHeight', { value: 400 });
+      Object.defineProperty(scroller, 'clientHeight', { value: 100 });
+      const inner = iframeDoc.createElement('p');
+      scroller.appendChild(inner);
+      iframeDoc.body.appendChild(scroller);
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false, target: inner })).toBe(
+        false,
+      );
+      expect(engine.next).toHaveBeenCalledTimes(2);
+
+      // At book boundaries: does not turn, returns true to block bounce scroll.
+      engine.inPlace = false;
+      expect(engine.emitWheel({ deltaX: 0, deltaY: -120, ctrlKey: false })).toBe(true);
+      expect(engine.previous).toHaveBeenCalledTimes(1);
+
+      act(() =>
+        engine.emitLocation({
+          cfi: FAR_CFI,
+          href: 'OEBPS/chapter2.xhtml',
+          page: 1,
+          totalPages: 1,
+          chapterIndex: 1,
+          totalChapters: 2,
+          fraction: 0.5,
+        }),
+      );
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(true);
+      expect(engine.next).toHaveBeenCalledTimes(2);
+
+      // Scroll mode ignores vertical wheel.
+      fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+      expect(engine.emitWheel({ deltaX: 0, deltaY: 120, ctrlKey: false })).toBe(false);
+      expect(engine.next).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps stationary edge zones during slides, dismisses iframe selection on outer margin click, and bridges cross-frame slide clicks (#107)', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      const pageFrame = screen.getByTestId('epub-page-frame');
+      const host = screen.getByTestId('epub-host');
+      const area = screen.getByTestId('epub-page-area');
+      vi.spyOn(pageFrame, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 0, 1000, 800));
+      // Simulate epub-host translated off-screen during an active slide animation.
+      vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(1500, 0, 1000, 800));
+
+      // Stationary pageFrame still maps rapid consecutive edge clicks at x=1050 to next.
+      act(() => {
+        engine.emitGesture({ kind: 'down', x: 1050, y: 300, hasSelection: false });
+        engine.emitGesture({
+          kind: 'click',
+          x: 1050,
+          y: 300,
+          overContent: false,
+          hasSelection: false,
+        });
+        engine.emitGesture({ kind: 'down', x: 1050, y: 300, hasSelection: false });
+        engine.emitGesture({
+          kind: 'click',
+          x: 1050,
+          y: 300,
+          overContent: false,
+          hasSelection: false,
+        });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(2);
+
+      // Clicking outer margin while iframe text is selected dismisses selection instead of turning.
+      engine.hasSelection = true;
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.click(area, { button: 0, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(2);
+      expect(engine.selectionCleared).toBe(1);
+      expect(engine.hasSelection).toBe(false);
+
+      // Next click on the outer margin turns now that selection was dismissed.
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.click(area, { button: 0, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(3);
+
+      // Cross-iframe slide click: pointerdown on outer area -> pointerup inside iframe.
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        engine.emitFramePointerUp({ x: 1051, y: 300, overContent: false, hasSelection: false });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(4);
+
+      // Cross-iframe drag (> 4px slop) or overContent does not turn.
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        engine.emitFramePointerUp({ x: 1080, y: 300, overContent: false, hasSelection: false });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(4);
+
+      // Cross-iframe slide click: pointerdown inside iframe -> pointerup on outer area.
+      act(() => {
+        engine.emitGesture({ kind: 'down', x: 150, y: 300, hasSelection: false });
+        fireEvent.pointerUp(area, { button: 0, clientX: 151, clientY: 300 });
+      });
+      expect(engine.previous).toHaveBeenCalledTimes(1);
+
+      // Drag from iframe to outer margin (> 4px) does not turn (preserves selection drags).
+      act(() => {
+        engine.emitGesture({ kind: 'down', x: 300, y: 300, hasSelection: false });
+        fireEvent.pointerUp(area, { button: 0, clientX: 150, clientY: 300 });
+      });
+      expect(engine.previous).toHaveBeenCalledTimes(1);
+    });
+
+    it('prevents native multi-click selection on blank turn margins, ignores whitespace selections, and supports Click 1 dismissal + rapid Click 2 turn (#107)', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      const pageFrame = screen.getByTestId('epub-page-frame');
+      const host = screen.getByTestId('epub-host');
+      const area = screen.getByTestId('epub-page-area');
+      vi.spyOn(pageFrame, 'getBoundingClientRect').mockReturnValue(new DOMRect(100, 0, 1000, 800));
+      // Simulate epub-host translated during slide while pageFrame remains stationary.
+      vi.spyOn(host, 'getBoundingClientRect').mockReturnValue(new DOMRect(1500, 0, 1000, 800));
+
+      const fireMouseDown = (
+        target: Element,
+        init: { button?: number; detail?: number; clientX: number; clientY?: number },
+      ) => {
+        const event = new MouseEvent('mousedown', {
+          bubbles: true,
+          cancelable: true,
+          button: init.button ?? 0,
+          detail: init.detail ?? 1,
+          clientX: init.clientX,
+          clientY: init.clientY ?? 300,
+        });
+        target.dispatchEvent(event);
+        return event;
+      };
+
+      // Blank turn-margin mousedown prevents default on detail >= 2, not detail 1, not center, not interactive controls/code/text.
+      expect(fireMouseDown(area, { detail: 1, clientX: 1050 }).defaultPrevented).toBe(false);
+      expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(true);
+      expect(fireMouseDown(area, { detail: 2, clientX: 150 }).defaultPrevented).toBe(true);
+      expect(fireMouseDown(area, { detail: 2, clientX: 600 }).defaultPrevented).toBe(false);
+      const interactiveLink = document.createElement('a');
+      interactiveLink.href = '#note';
+      interactiveLink.textContent = 'Note';
+      const codeEl = document.createElement('code');
+      codeEl.textContent = 'let x = 1;';
+      area.append(interactiveLink, codeEl);
+      expect(fireMouseDown(interactiveLink, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(
+        false,
+      );
+      expect(fireMouseDown(codeEl, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(false);
+      interactiveLink.remove();
+      codeEl.remove();
+
+      // Whitespace-only host selection (" \n ") does not block cross-frame pointerup or outer multi-click turns.
+      const wsNode = document.createTextNode(' \n ');
+      area.append(wsNode);
+      const selection = window.getSelection();
+      if (!selection) throw new Error('missing selection');
+      const wsRange = document.createRange();
+      wsRange.setStart(wsNode, 0);
+      wsRange.setEnd(wsNode, wsNode.length);
+      selection.removeAllRanges();
+      selection.addRange(wsRange);
+
+      act(() => {
+        engine.emitGesture({ kind: 'down', x: 1050, y: 300, hasSelection: false });
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(1);
+
+      expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(true);
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.click(area, { button: 0, detail: 2, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(2);
+      selection.removeAllRanges();
+      wsNode.remove();
+
+      // Active real iframe selection: detail: 2 mousedown is not prevented while selection exists;
+      // Click 1 dismisses selection without turning, and rapid Click 2 prevents native selection and turns once.
+      engine.hasSelection = true;
+      expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(false);
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        expect(fireMouseDown(area, { detail: 1, clientX: 1050 }).defaultPrevented).toBe(false);
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.click(area, { button: 0, detail: 1, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(2);
+      expect(engine.selectionCleared).toBe(1);
+      expect(engine.hasSelection).toBe(false);
+
+      act(() => {
+        fireEvent.pointerDown(area, { button: 0, clientX: 1050, clientY: 300 });
+        expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(true);
+        fireEvent.pointerUp(area, { button: 0, clientX: 1050, clientY: 300 });
+        fireEvent.click(area, { button: 0, detail: 2, clientX: 1050, clientY: 300 });
+      });
+      expect(engine.next).toHaveBeenCalledTimes(3);
+
+      // Scroll mode disables edge gestures and never prevents native mousedown selection.
+      fireEvent.click(screen.getByRole('radio', { name: 'Scroll' }));
+      expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(false);
     });
   });
 });

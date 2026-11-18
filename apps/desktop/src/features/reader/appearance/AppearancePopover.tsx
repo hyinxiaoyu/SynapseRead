@@ -14,11 +14,15 @@ import {
   FONT_FACES,
   PAGE_PALETTES,
 } from '@/features/reader/appearance/themes';
+import {
+  PAGE_TRANSITIONS,
+  SCROLL_PAGE_TRANSITIONS,
+  resolveScrollTransition,
+} from '@/features/reader/appearance/transition';
 import { ToolbarButton } from '@/features/reader/ReaderToolbar';
 import { cn } from '@/lib/utils';
 import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 import type {
-  PageTransition,
   ReadingMargins,
   ReadingPageWidth,
   ReadingPreferences,
@@ -58,14 +62,6 @@ const PAGE_WIDTHS: readonly { value: ReadingPageWidth; label: string }[] = [
   { value: 'standard', label: 'Standard' },
   { value: 'wide', label: 'Wide' },
   { value: 'full', label: 'Full width' },
-];
-
-const PAGE_TRANSITIONS: readonly { value: PageTransition; label: string }[] = [
-  { value: 'none', label: 'None' },
-  { value: 'slide', label: 'Slide' },
-  { value: 'fade', label: 'Fade' },
-  { value: 'curl', label: 'Curl' },
-  { value: 'stack', label: 'Stack' },
 ];
 
 export function useAppearancePanel() {
@@ -300,10 +296,12 @@ function ThemeChoices({
 function AppearancePanel({
   preferences,
   format,
+  scrolled,
   onChange,
 }: {
   preferences: ReadingPreferences;
   format: 'epub' | 'txt' | 'pdf';
+  scrolled?: boolean | undefined;
   onChange: (patch: Partial<ReadingPreferences>) => void;
 }) {
   const ids = { fontSize: useId(), font: useId(), customize: useId() };
@@ -320,6 +318,32 @@ function AppearancePanel({
     FONT_FACES.map((face) => face.value),
     fontIndex,
     (fontFamily) => onChange({ fontFamily }),
+  );
+
+  const isScrolled =
+    scrolled ??
+    (format === 'txt' || (format === 'epub' && preferences.epubReadingMode === 'scroll'));
+
+  const pageTurnControl = isScrolled ? (
+    <TextChoices
+      key="scroll"
+      label="Page turn"
+      options={SCROLL_PAGE_TRANSITIONS}
+      checkedIndex={SCROLL_PAGE_TRANSITIONS.findIndex(
+        (transition) => transition.value === resolveScrollTransition(preferences),
+      )}
+      onSelect={(scrollPageTransition) => onChange({ scrollPageTransition })}
+    />
+  ) : (
+    <TextChoices
+      key="paged"
+      label="Page turn"
+      options={PAGE_TRANSITIONS}
+      checkedIndex={PAGE_TRANSITIONS.findIndex(
+        (transition) => transition.value === preferences.pageTransition,
+      )}
+      onSelect={(pageTransition) => onChange({ pageTransition })}
+    />
   );
 
   // Every format reads in focus mode, so every panel offers this.
@@ -339,14 +363,7 @@ function AppearancePanel({
     return (
       <div className="flex flex-col gap-3.5">
         <ThemeChoices theme={preferences.theme} onChange={(theme) => onChange({ theme })} />
-        <TextChoices
-          label="Page turn"
-          options={PAGE_TRANSITIONS}
-          checkedIndex={PAGE_TRANSITIONS.findIndex(
-            (transition) => transition.value === preferences.pageTransition,
-          )}
-          onSelect={(pageTransition) => onChange({ pageTransition })}
-        />
+        {pageTurnControl}
         <Switch
           label="Tint PDF pages"
           description="Darkens the page to match the theme. Captures keep the original colors."
@@ -486,14 +503,7 @@ function AppearancePanel({
                 checkedIndex={MARGINS.findIndex((margin) => margin.value === preferences.margins)}
                 onSelect={(margins) => onChange({ margins })}
               />
-              <TextChoices
-                label="Page turn"
-                options={PAGE_TRANSITIONS}
-                checkedIndex={PAGE_TRANSITIONS.findIndex(
-                  (transition) => transition.value === preferences.pageTransition,
-                )}
-                onSelect={(pageTransition) => onChange({ pageTransition })}
-              />
+              {pageTurnControl}
               <div className="flex flex-col gap-1">
                 <Switch
                   label="Justify"
@@ -532,6 +542,7 @@ export function AppearanceMenu({
   preferences,
   onChange,
   format,
+  scrolled,
   disabled = false,
 }: {
   open: boolean;
@@ -540,6 +551,7 @@ export function AppearanceMenu({
   preferences: ReadingPreferences;
   onChange: (patch: Partial<ReadingPreferences>) => void;
   format: 'epub' | 'txt' | 'pdf';
+  scrolled?: boolean | undefined;
   disabled?: boolean;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -603,7 +615,12 @@ export function AppearanceMenu({
           data-reader-popover=""
           className="absolute top-full right-0 z-50 mt-2 max-h-[min(75vh,640px)] w-72 origin-top-right animate-in overflow-y-auto rounded-xl border bg-background p-3 text-foreground shadow-xl animation-duration-150 fade-in-0 slide-in-from-top-1 select-none zoom-in-[0.96] motion-reduce:animate-none"
         >
-          <AppearancePanel preferences={preferences} format={format} onChange={onChange} />
+          <AppearancePanel
+            preferences={preferences}
+            format={format}
+            scrolled={scrolled}
+            onChange={onChange}
+          />
         </div>
       )}
     </div>

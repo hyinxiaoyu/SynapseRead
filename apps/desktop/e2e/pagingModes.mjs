@@ -270,6 +270,17 @@ export async function pagingModesFlow(page) {
     })()`,
     'the wide-area scrub to settle',
   );
+  // Wait past SCRUB_IDLE_MS (90 ms) so endScrub runs and confirm the cancelled drag stayed on Chapter One.
+  await new Promise((done) => setTimeout(done, 150));
+  const afterWideDrag = await page.evaluate(`(() => {
+    const host = ${visibleHost};
+    const ch = host?.querySelector('iframe')?.contentDocument?.querySelector('h1')?.textContent ?? '';
+    return { ch, left: ${strip}?.scrollLeft ?? 0 };
+  })()`);
+  assert(
+    afterWideDrag.ch === 'Chapter One' && afterWideDrag.left > 0,
+    `cancelled wide-area drag must keep the book on Chapter One page 2: ${JSON.stringify(afterWideDrag)}`,
+  );
 
   // Wide is wider than Standard but still narrower than the page area.
   await page.clickButton('Reading appearance');

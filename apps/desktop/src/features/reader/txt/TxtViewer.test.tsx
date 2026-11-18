@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
 import { readMarkupDefaults } from '@/features/reader/markup/markupDefaults';
+import { PAGE_TURN_ANIMATION_ID } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend, type MemoryFile } from '@/lib/backend/memoryBackend';
 import {
@@ -20,6 +21,29 @@ import { ROW_ESTIMATE_PX, TxtViewer } from './TxtViewer';
 // Matching the estimate keeps offsets exact for rows that have not been measured.
 const ROW_PX = ROW_ESTIMATE_PX;
 const VIEWPORT_PX = 400;
+// In jsdom without Range.getClientRects, computeScrollPageStep uses fallbackOverlap = 48 for H = 400.
+const FALLBACK_STEP_PX = VIEWPORT_PX - 48;
+
+type AnimateFn = (keyframes: Keyframe[], options?: KeyframeAnimationOptions) => Animation;
+
+const attachFadeSpy = () => {
+  const docEl = screen.getByRole('document');
+  const active: Array<{ id: string; cancel: ReturnType<typeof vi.fn> }> = [];
+  const animate = vi.fn<AnimateFn>(() => {
+    const entry = {
+      id: '',
+      cancel: vi.fn(() => {
+        const index = active.indexOf(entry);
+        if (index >= 0) active.splice(index, 1);
+      }),
+    };
+    active.push(entry);
+    return entry as unknown as Animation;
+  });
+  docEl.animate = animate as unknown as HTMLElement['animate'];
+  docEl.getAnimations = vi.fn(() => active as unknown as Animation[]);
+  return { docEl, animate, active };
+};
 
 type Store = ReturnType<typeof createStudySyncStore>;
 
@@ -183,25 +207,23 @@ describe('TxtViewer', () => {
       vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
         new DOMRect(0, 0, 800, VIEWPORT_PX),
       );
-      const step = VIEWPORT_PX * 0.9;
-      /** Waits for the eased slide to settle on `top`. */
-      const settlesAt = (top: number) => waitFor(() => expect(page.scrollTop).toBe(top));
+      const step = FALLBACK_STEP_PX;
 
       fireEvent.click(page, { clientX: 790, clientY: 100, button: 0, detail: 1 });
-      await settlesAt(step);
+      expect(page.scrollTop).toBe(step);
       fireEvent.click(page, { clientX: 10, clientY: 100, button: 0, detail: 1 });
-      await settlesAt(0);
+      expect(page.scrollTop).toBe(0);
       // The middle of the page never turns it.
       fireEvent.click(page, { clientX: 400, clientY: 100, button: 0, detail: 1 });
       expect(page.scrollTop).toBe(0);
 
       fireEvent.keyDown(page, { key: ' ', code: 'Space' });
-      await settlesAt(step);
+      expect(page.scrollTop).toBe(step);
       fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
-      await settlesAt(step * 2);
+      expect(page.scrollTop).toBe(step * 2);
       fireEvent.keyDown(page, { key: ' ', code: 'Space', shiftKey: true });
-      await settlesAt(step);
-      // A slide travels down the page; it never nudges the rows sideways.
+      expect(page.scrollTop).toBe(step);
+      // Page turns travel down the page; they never nudge the rows sideways.
       expect(page.scrollLeft).toBe(0);
       // Space on a focused button presses the button instead.
       fireEvent.keyDown(screen.getByRole('button', { name: 'Next Page' }), {
@@ -216,23 +238,26 @@ describe('TxtViewer', () => {
       expect(scroller().scrollTop).toBe(0);
     });
 
-    it('keeps both turns when a second page turn arrives during the first one', async () => {
+    it('keeps consecutive turns advancing from current scrollTop and lets jumps cancel fade', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);
       await segmentWith('SynapseRead sample text');
       const page = scroller();
-      const step = VIEWPORT_PX * 0.9;
+      const { animate, active } = attachFadeSpy();
+      const step = FALLBACK_STEP_PX;
 
-      // Two inputs before the first slide has drawn a frame. The second starts from
-      // where the first was heading, so the reader moves two pages, not one.
+      // Two consecutive turns step twice from current scrollTop and restart fade cleanly.
       fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
       fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
-      await waitFor(() => expect(page.scrollTop).toBe(step * 2));
+      expect(page.scrollTop).toBe(step * 2);
+      expect(animate).toHaveBeenCalledTimes(2);
+      expect(active).toHaveLength(1);
 
-      // An explicit jump still wins over the slide it interrupts.
-      fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      // An explicit jump cancels any in-flight fade and moves without starting another.
       fireEvent.keyDown(page, { key: 'End', code: 'End' });
       expect(page.scrollTop).toBe(ROW_PX * 10_000);
+      expect(animate).toHaveBeenCalledTimes(2);
+      expect(active).toHaveLength(0);
     });
 
     it('clamps a turn at either end so reversing it still moves the reader', async () => {
@@ -240,43 +265,52 @@ describe('TxtViewer', () => {
       render(<Harness store={store} documentId={documentId} />);
       await segmentWith('SynapseRead sample text');
       const page = scroller();
-      const step = VIEWPORT_PX * 0.9;
+      const { animate } = attachFadeSpy();
+      const step = FALLBACK_STEP_PX;
       const end = ROW_PX * 10_000 - VIEWPORT_PX;
 
-      // At the end, Next Page cannot move; the Previous Page that follows it must
-      // still move back, which it cannot if the unreachable destination was kept.
+      // At the end, Next Page cannot move (and does not animate); Previous Page moves back.
       scrollTo(end);
       fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      expect(animate).not.toHaveBeenCalled();
       fireEvent.keyDown(page, { key: 'PageUp', code: 'PageUp' });
-      await waitFor(() => expect(page.scrollTop).toBe(end - step));
+      expect(page.scrollTop).toBe(end - step);
+      expect(animate).toHaveBeenCalledTimes(1);
 
       // The same in reverse at the start of the file.
       scrollTo(0);
       fireEvent.keyDown(page, { key: 'PageUp', code: 'PageUp' });
+      expect(animate).toHaveBeenCalledTimes(1);
       fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
-      await waitFor(() => expect(page.scrollTop).toBe(step));
+      expect(page.scrollTop).toBe(step);
+      expect(animate).toHaveBeenCalledTimes(2);
     });
 
-    it('keeps the slide in flight when a repeated turn clamps to the same boundary', async () => {
+    it('clamps near either end and skips boundary animation when already at the boundary', async () => {
       const { store, documentId } = await setup(bytes);
       render(<Harness store={store} documentId={documentId} />);
       await segmentWith('SynapseRead sample text');
       const page = scroller();
+      const { animate } = attachFadeSpy();
       const end = ROW_PX * 10_000 - VIEWPORT_PX;
 
-      // 300 px before the end, two rapid Next Page inputs. The second clamps to the
-      // boundary the first is already heading for, so it must not stop that slide
-      // and leave the rows at the half-way point.
+      // 300 px before the end, first Next Page clamps to end and fades; second at end is a no-op.
       scrollTo(end - 300);
       fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
+      expect(page.scrollTop).toBe(end);
+      expect(animate).toHaveBeenCalledTimes(1);
       fireEvent.keyDown(page, { key: 'PageDown', code: 'PageDown' });
-      await waitFor(() => expect(page.scrollTop).toBe(end));
+      expect(page.scrollTop).toBe(end);
+      expect(animate).toHaveBeenCalledTimes(1);
 
       // The same at the start with Previous Page.
       scrollTo(300);
       fireEvent.keyDown(page, { key: 'PageUp', code: 'PageUp' });
+      expect(page.scrollTop).toBe(0);
+      expect(animate).toHaveBeenCalledTimes(2);
       fireEvent.keyDown(page, { key: 'PageUp', code: 'PageUp' });
-      await waitFor(() => expect(page.scrollTop).toBe(0));
+      expect(page.scrollTop).toBe(0);
+      expect(animate).toHaveBeenCalledTimes(2);
     });
 
     it('virtualizes: renders only rows near the viewport', async () => {
@@ -1437,82 +1471,493 @@ describe('TxtViewer', () => {
       fireEvent.keyDown(scroller(), { key: 'End', code: 'End' });
       expect(scroller().scrollTop).toBe(ROW_PX * 10_000);
     });
+  });
 
-    it('captures an inert curl snapshot stripped of virtualizer/annotation attributes and cleans up on settle', async () => {
-      const lines = Array.from({ length: 120 }, (_, i) => `Line ${i + 1} of the plain text book.`);
-      const { store, documentId } = await setup(new TextEncoder().encode(lines.join('\n')));
-      await store.getState().updateReadingPreferences({ pageTransition: 'curl' });
+  describe('continuous scroll paging, fade transitions, and gesture isolation (#103, #106, #107)', () => {
+    const sampleLines = Array.from(
+      { length: 120 },
+      (_, index) => `Line ${index + 1} of the plain text book.`,
+    );
+    const sampleBytes = new TextEncoder().encode(sampleLines.join('\n'));
+
+    it('uses fade-only transitions without slide or curl DOM regardless of paginated pageTransition', async () => {
+      for (const pageTransition of ['slide', 'curl', 'stack', 'fade'] as const) {
+        const { store, documentId } = await setup(sampleBytes);
+        await store.getState().updateReadingPreferences({
+          pageTransition,
+          scrollPageTransition: null,
+        });
+        const view = render(<Harness store={store} documentId={documentId} />);
+        await segmentWith('Line 1 of the plain text book.');
+
+        expect(screen.queryByTestId('txt-curl-host')).toBeNull();
+        expect(screen.queryByTestId('page-turn-shadow')).toBeNull();
+
+        const scroll = scroller();
+        Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
+        const { animate } = attachFadeSpy();
+        vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+          new DOMRect(0, 0, 800, VIEWPORT_PX),
+        );
+
+        fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+        expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX);
+        expect(animate).toHaveBeenCalledTimes(1);
+        expect(animate.mock.calls[0]?.[0]).toEqual([{ opacity: 0.2 }, { opacity: 1 }]);
+        expect(animate.mock.calls[0]?.[1]).toMatchObject({ duration: 200 });
+        expect(animate.mock.calls[0]?.[1]?.fill).toBeUndefined();
+        expect(animate.mock.results[0]?.value.id).toBe(PAGE_TURN_ANIMATION_ID);
+
+        fireEvent.keyDown(scroll, { key: 'ArrowRight', code: 'ArrowRight' });
+        expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX * 2);
+        expect(animate).toHaveBeenCalledTimes(2);
+
+        fireEvent.keyDown(screen.getByTestId('progress-scrubber'), {
+          key: 'ArrowLeft',
+          code: 'ArrowLeft',
+        });
+        expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX);
+        expect(animate).toHaveBeenCalledTimes(3);
+
+        fireEvent.click(scroll, { clientX: 10, clientY: 100, button: 0, detail: 1 });
+        expect(scroll.scrollTop).toBe(0);
+        expect(animate).toHaveBeenCalledTimes(4);
+
+        view.unmount();
+      }
+    });
+
+    it('preserves paginated pageTransition while toggling scrollPageTransition in the appearance menu', async () => {
+      const { store, documentId } = await setup(sampleBytes);
+      await store.getState().updateReadingPreferences({
+        pageTransition: 'curl',
+        scrollPageTransition: null,
+      });
       render(<Harness store={store} documentId={documentId} />);
       await segmentWith('Line 1 of the plain text book.');
 
       const scroll = scroller();
       Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
-      scroll.scrollBy = vi.fn(({ top }: ScrollToOptions = {}) => {
-        scroll.scrollTop += top ?? 0;
-      }) as unknown as HTMLElement['scrollBy'];
+      vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, VIEWPORT_PX),
+      );
+      const { animate } = attachFadeSpy();
 
-      const curlHost = screen.getByTestId('txt-curl-host');
-      const turnShadow = screen.getByTestId('page-turn-shadow');
-      const column = screen.getByRole('document');
-      const hostParent = curlHost.parentElement!;
-      const colRectSpy = vi
-        .spyOn(column, 'getBoundingClientRect')
-        .mockReturnValue(new DOMRect(20, 0, 620, 600));
-      const parentRectSpy = vi
-        .spyOn(hostParent, 'getBoundingClientRect')
-        .mockReturnValue(new DOMRect(10, 0, 640, 600));
+      fireEvent.click(screen.getByRole('button', { name: 'Reading appearance' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Customize' }));
+      const turnGroup = within(screen.getByRole('radiogroup', { name: 'Page turn' }));
+      expect(turnGroup.getAllByRole('radio').map((radio) => radio.textContent)).toEqual([
+        'None',
+        'Fade',
+      ]);
+      expect(turnGroup.getByRole('radio', { name: 'Fade' })).toHaveAttribute(
+        'aria-checked',
+        'true',
+      );
 
-      const frames: FrameRequestCallback[] = [];
-      let clock = 0;
-      const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
-        frames.push(cb);
-        return frames.length;
+      // Switching TXT to None sets scrollPageTransition without touching pageTransition='curl'.
+      fireEvent.click(turnGroup.getByRole('radio', { name: 'None' }));
+      await waitFor(() =>
+        expect(store.getState().readingPreferences.scrollPageTransition).toBe('none'),
+      );
+      expect(store.getState().readingPreferences.pageTransition).toBe('curl');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX);
+      expect(animate).not.toHaveBeenCalled();
+
+      // Switching back to Fade restores fade animations while still keeping pageTransition='curl'.
+      fireEvent.click(turnGroup.getByRole('radio', { name: 'Fade' }));
+      await waitFor(() =>
+        expect(store.getState().readingPreferences.scrollPageTransition).toBe('fade'),
+      );
+      expect(store.getState().readingPreferences.pageTransition).toBe('curl');
+
+      fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
+      expect(scroll.scrollTop).toBe(0);
+      expect(animate).toHaveBeenCalledTimes(1);
+    });
+
+    it('honors pre-existing pageTransition="none" when scrollPageTransition is null', async () => {
+      const { store, documentId } = await setup(sampleBytes);
+      await store.getState().updateReadingPreferences({
+        pageTransition: 'none',
+        scrollPageTransition: null,
       });
-      const cancelSpy = vi
-        .spyOn(window, 'cancelAnimationFrame')
-        .mockImplementation(() => undefined);
-      const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => clock);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('Line 1 of the plain text book.');
+
+      const scroll = scroller();
+      Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
+      vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, VIEWPORT_PX),
+      );
+      const { animate } = attachFadeSpy();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX);
+      expect(animate).not.toHaveBeenCalled();
+    });
+
+    it('steps with reading-continuity overlap for partially obscured bottom and top lines', async () => {
+      const { store, documentId } = await setup(sampleBytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('Line 1 of the plain text book.');
+
+      const scroll = scroller();
+      Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
+      vi.spyOn(scroll, 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 20, 800, VIEWPORT_PX),
+      );
+
+      const originalGetClientRects = Range.prototype.getClientRects;
+      Range.prototype.getClientRects = function (this: Range) {
+        const text = this.startContainer.nodeValue ?? '';
+        if (text.includes('Line 1 ')) {
+          return [new DOMRect(40, 20 + 24, 300, 24)] as unknown as DOMRectList;
+        }
+        if (text.includes('Line 15 ')) {
+          // Bottom-straddling line inside 400px viewport (viewport y = 386..410, height = 24).
+          return [new DOMRect(40, 20 + 386, 300, 24)] as unknown as DOMRectList;
+        }
+        if (text.includes('Line 39 ')) {
+          // Top-straddling line when scrolled to 1000px (viewport y = -10..14, height = 24).
+          return [new DOMRect(40, 20 - 10, 300, 24)] as unknown as DOMRectList;
+        }
+        return [] as unknown as DOMRectList;
+      };
 
       try {
+        // Forward from scrollTop=0: straddling line at y=386 moves to y=24 -> step = 386 - 24 = 362.
         fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+        expect(scroll.scrollTop).toBe(362);
 
-        const leaf = turnShadow.querySelector<HTMLElement>('[data-curl-part="leaf"]')!;
-
-        expect(curlHost.hasAttribute('inert')).toBe(true);
-        expect(curlHost.childElementCount).toBeGreaterThan(0);
-        // Cloned rows must not expose virtualizer or annotation attributes.
-        expect(curlHost.querySelector('[data-index]')).toBeNull();
-        expect(curlHost.querySelector('[data-annotation-id]')).toBeNull();
-        expect(curlHost.querySelector('[data-unit]')).toBeNull();
-        expect(curlHost.style.left).toBe('10px');
-        expect(curlHost.style.width).toBe('620px');
-        expect(curlHost.style.transform).toBe('none');
-        expect(curlHost.style.translate).toBe('none');
-        expect(turnShadow.style.translate).toBe('none');
-
-        clock = 40;
-        act(() => {
-          frames.shift()?.(clock);
-        });
-        expect(curlHost.style.clipPath).toContain('polygon(');
-        expect(Number(leaf.style.opacity)).toBeGreaterThan(0.5);
-
-        clock = 500;
-        act(() => {
-          frames.shift()?.(clock);
-        });
-        expect(curlHost.childElementCount).toBe(0);
-        expect(curlHost.style.clipPath).toBe('');
-        expect(curlHost.style.visibility).toBe('hidden');
-        expect(curlHost.style.translate).toBe('');
-        expect(turnShadow.style.translate).toBe('');
-        expect(leaf.style.opacity).toBe('0');
+        // Backward from scrollTop=1000: top-straddling line bottom=14 moves to 400-24=376 -> step=362.
+        scrollTo(1000);
+        await segmentWith('Line 39 ');
+        fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
+        expect(scroll.scrollTop).toBe(1000 - 362);
       } finally {
-        colRectSpy.mockRestore();
-        parentRectSpy.mockRestore();
-        rafSpy.mockRestore();
-        cancelSpy.mockRestore();
-        nowSpy.mockRestore();
+        Range.prototype.getClientRects = originalGetClientRects;
+      }
+    });
+
+    it('does not scroll or animate at document boundaries or when the file fits on one screen', async () => {
+      const { store, documentId } = await setup(sampleBytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('Line 1 of the plain text book.');
+
+      const scroll = scroller();
+      Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
+      vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, VIEWPORT_PX),
+      );
+      const { animate } = attachFadeSpy();
+      const maxTop = 3000 - VIEWPORT_PX;
+
+      // Within 1px of top boundary: Previous Page is a no-op.
+      scrollTo(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
+      scrollTo(1);
+      fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
+      expect(scroll.scrollTop).toBe(1);
+      expect(animate).not.toHaveBeenCalled();
+
+      // Within 1px of bottom boundary: Next Page is a no-op.
+      scrollTo(maxTop - 1);
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      scrollTo(maxTop);
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(scroll.scrollTop).toBe(maxTop);
+      expect(animate).not.toHaveBeenCalled();
+
+      // Non-scrollable document (scrollHeight <= clientHeight): neither direction animates.
+      Object.defineProperty(scroll, 'scrollHeight', { value: VIEWPORT_PX, configurable: true });
+      scrollTo(0);
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
+      expect(scroll.scrollTop).toBe(0);
+      expect(animate).not.toHaveBeenCalled();
+    });
+
+    it('moves synchronously without calling animate when prefers-reduced-motion is enabled', async () => {
+      vi.stubGlobal('matchMedia', (query: string) => ({
+        matches: query.includes('reduce'),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }));
+      try {
+        const { store, documentId } = await setup(sampleBytes);
+        await store.getState().updateReadingPreferences({ scrollPageTransition: 'fade' });
+        render(<Harness store={store} documentId={documentId} />);
+        await segmentWith('Line 1 of the plain text book.');
+
+        const scroll = scroller();
+        Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
+        const { animate } = attachFadeSpy();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+        expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX);
+        expect(animate).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('keeps non-page-turn jumps instant without fade and cancels any in-flight fade', async () => {
+      const chaptered = [
+        'Chapter 1',
+        ...Array.from({ length: 40 }, (_, i) => `One line ${i + 1}.`),
+        'Chapter 2',
+        ...Array.from({ length: 40 }, (_, i) => `Two line ${i + 1}.`),
+      ].join('\n');
+      const { store, documentId } = await setup(new TextEncoder().encode(chaptered));
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('One line 1.');
+      await waitFor(() => expect(screen.getAllByTestId('progress-scrubber-tick')).toHaveLength(1));
+
+      const scroll = scroller();
+      const { animate, active } = attachFadeSpy();
+
+      // Page turn starts a fade.
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(animate).toHaveBeenCalledTimes(1);
+      expect(active).toHaveLength(1);
+
+      // TOC jump cancels the active fade and does not trigger another animation.
+      fireEvent.click(screen.getByTestId('sidebar-toggle'));
+      fireEvent.click(screen.getByRole('treeitem', { name: 'Chapter 2' }));
+      expect(animate).toHaveBeenCalledTimes(1);
+      expect(active).toHaveLength(0);
+
+      // Back, GoTo, Home/End, and Search never call animate.
+      fireEvent.click(screen.getByRole('button', { name: 'Return to previous location' }));
+      const goToInput = screen.getByTestId('go-to-input');
+      fireEvent.change(goToInput, { target: { value: '20' } });
+      fireEvent.keyDown(goToInput, { key: 'Enter', code: 'Enter' });
+      fireEvent.keyDown(scroll, { key: 'End', code: 'End' });
+      fireEvent.keyDown(scroll, { key: 'Home', code: 'Home' });
+      expect(animate).toHaveBeenCalledTimes(1);
+
+      // Switching transition to 'none' mid-fade cancels the in-flight fade on the next turn.
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(animate).toHaveBeenCalledTimes(2);
+      expect(active).toHaveLength(1);
+      await store.getState().updateReadingPreferences({ scrollPageTransition: 'none' });
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(animate).toHaveBeenCalledTimes(2);
+      expect(active).toHaveLength(0);
+    });
+
+    it('leaves vertical wheel scrolling native (#106) and preserves horizontal overflow without scrubbing (#103)', async () => {
+      const { store, documentId } = await setup(sampleBytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('Line 1 of the plain text book.');
+
+      const scroll = scroller();
+      Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
+      vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, VIEWPORT_PX),
+      );
+      const { animate } = attachFadeSpy();
+
+      // Vertical wheel notches and trackpad scroll never trigger page turns or preventDefault.
+      for (const init of [
+        { deltaX: 0, deltaY: 120, deltaMode: 0 },
+        { deltaX: 0, deltaY: -120, deltaMode: 0 },
+        { deltaX: 0, deltaY: 3, deltaMode: 1 },
+        { deltaX: 0, deltaY: 20, deltaMode: 0 },
+        { deltaX: 0, deltaY: 20, deltaMode: 0 },
+      ]) {
+        const event = new WheelEvent('wheel', { ...init, bubbles: true, cancelable: true });
+        act(() => void scroll.dispatchEvent(event));
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(scroll.scrollTop).toBe(0);
+      expect(animate).not.toHaveBeenCalled();
+
+      // Horizontal overflow (e.g. long unwrapped lines / narrow pane) keeps native horizontal scroll.
+      Object.defineProperty(scroll, 'scrollWidth', { value: 1200, configurable: true });
+      for (const init of [
+        { deltaX: 120, deltaY: 0, deltaMode: 0 },
+        { deltaX: 25, deltaY: 0, deltaMode: 0 },
+      ]) {
+        const event = new WheelEvent('wheel', { ...init, bubbles: true, cancelable: true });
+        act(() => void scroll.dispatchEvent(event));
+        expect(event.defaultPrevented).toBe(false);
+      }
+      expect(scroll.scrollTop).toBe(0);
+      expect(animate).not.toHaveBeenCalled();
+
+      // Without horizontal overflow, intermediate horizontal trackpad moves do not scrub scrollTop,
+      // and a discrete horizontal notch steps one page with fade (gated by canTurn at boundaries).
+      Object.defineProperty(scroll, 'scrollWidth', { value: 800, configurable: true });
+      vi.useFakeTimers();
+      try {
+        const swipeMove = new WheelEvent('wheel', {
+          deltaX: 20,
+          deltaY: 0,
+          deltaMode: 0,
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => void scroll.dispatchEvent(swipeMove));
+        expect(swipeMove.defaultPrevented).toBe(true);
+        expect(scroll.scrollTop).toBe(0);
+        expect(animate).not.toHaveBeenCalled();
+
+        // Wait out idle without reaching commit threshold, then test discrete notch vs boundary.
+        act(() => void vi.advanceTimersByTime(120));
+        expect(scroll.scrollTop).toBe(0);
+
+        const notchNext = new WheelEvent('wheel', {
+          deltaX: 120,
+          deltaY: 0,
+          deltaMode: 0,
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => void scroll.dispatchEvent(notchNext));
+        expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX);
+        expect(animate).toHaveBeenCalledTimes(1);
+
+        // At top boundary, backward discrete notch does not turn or animate.
+        scrollTo(0);
+        const notchPrev = new WheelEvent('wheel', {
+          deltaX: -120,
+          deltaY: 0,
+          deltaMode: 0,
+          bubbles: true,
+          cancelable: true,
+        });
+        act(() => void scroll.dispatchEvent(notchPrev));
+        expect(scroll.scrollTop).toBe(0);
+        expect(animate).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('turns on rapid consecutive blank-area and chevron clicks (#107) while respecting selection and boundaries', async () => {
+      const { store, documentId } = await setup(sampleBytes);
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('Line 1 of the plain text book.');
+
+      const scroll = scroller();
+      Object.defineProperty(scroll, 'scrollHeight', { value: 3000, configurable: true });
+      vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, VIEWPORT_PX),
+      );
+      const { animate, active } = attachFadeSpy();
+
+      // Rapid consecutive right-margin clicks (detail 1 -> 2 -> 3) turn 3 pages and restart fade.
+      for (const detail of [1, 2, 3]) {
+        fireEvent.pointerDown(scroll, { clientX: 790, clientY: 100, button: 0 });
+        fireEvent.click(scroll, { clientX: 790, clientY: 100, button: 0, detail });
+      }
+      expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX * 3);
+      expect(animate).toHaveBeenCalledTimes(3);
+      expect(active).toHaveLength(1);
+
+      // Rapid consecutive left-margin clicks return cleanly to 0; extra click at 0 does not animate.
+      for (const detail of [1, 2, 3, 4]) {
+        fireEvent.pointerDown(scroll, { clientX: 10, clientY: 100, button: 0 });
+        fireEvent.click(scroll, { clientX: 10, clientY: 100, button: 0, detail });
+      }
+      expect(scroll.scrollTop).toBe(0);
+      expect(animate).toHaveBeenCalledTimes(6);
+
+      // Rapid chevron clicks step cleanly and clamp at end without extra boundary animation.
+      const nextBtn = screen.getByRole('button', { name: 'Next Page' });
+      const prevBtn = screen.getByRole('button', { name: 'Previous Page' });
+      fireEvent.click(nextBtn, { detail: 1 });
+      fireEvent.click(nextBtn, { detail: 2 });
+      fireEvent.click(prevBtn, { detail: 1 });
+      expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX);
+      expect(animate).toHaveBeenCalledTimes(9);
+
+      // Click 1 while text is selected dismisses without turning; Click 2 after clearing turns once.
+      scrollTo(0);
+      await selectText('Line 1 of the plain text book.');
+      fireEvent.pointerDown(scroll, { clientX: 790, clientY: 100, button: 0 });
+      clearSelection();
+      fireEvent.click(scroll, { clientX: 790, clientY: 100, button: 0, detail: 1 });
+      expect(scroll.scrollTop).toBe(0);
+      expect(animate).toHaveBeenCalledTimes(9);
+
+      fireEvent.pointerDown(scroll, { clientX: 790, clientY: 100, button: 0 });
+      fireEvent.click(scroll, { clientX: 790, clientY: 100, button: 0, detail: 2 });
+      expect(scroll.scrollTop).toBe(FALLBACK_STEP_PX);
+      expect(animate).toHaveBeenCalledTimes(10);
+    });
+
+    it('preserves double-click text selection on highlighted words and body text without opening edit popover or turning (#107)', async () => {
+      const { store, documentId } = await setup(documentFixture('sample.txt'));
+      render(<Harness store={store} documentId={documentId} />);
+      const scroll = scroller();
+      vi.spyOn(screen.getByRole('document'), 'getBoundingClientRect').mockReturnValue(
+        new DOMRect(0, 0, 800, VIEWPORT_PX),
+      );
+
+      // Highlight "quick brown fox" and clear the selection.
+      await selectText('quick brown fox');
+      const createPopover = await screen.findByTestId('selection-popover');
+      fireEvent.click(within(createPopover).getByTestId('popover-color-yellow'));
+      await waitFor(() => expect(store.getState().annotations).toHaveLength(1));
+      clearSelection();
+
+      const painted = await segmentWith('quick brown fox');
+      expect(painted).toHaveAttribute('data-annotation-id');
+
+      // Double-clicking a highlighted word (detail: 2) must NOT open the highlight edit popover or turn.
+      fireEvent.click(painted, { button: 0, detail: 2 });
+      expect(screen.queryByTestId('selection-popover')).toBeNull();
+      expect(scroll.scrollTop).toBe(0);
+
+      // Full realistic double-click over the highlight (click 1 -> pointerDown 2 + word selection -> click 2)
+      // leaves selection active instead of opening edit mode.
+      fireEvent.pointerDown(painted, { button: 0 });
+      fireEvent.click(painted, { button: 0, detail: 1 });
+      expect(await screen.findByTestId('selection-popover')).toHaveAttribute(
+        'data-popover-mode',
+        'edit',
+      );
+      fireEvent.pointerDown(painted, { button: 0 });
+      await selectText('quick');
+      fireEvent.click(painted, { button: 0, detail: 2 });
+      fireEvent.pointerUp(window, { button: 0 });
+      const selectionPopover = await screen.findByTestId('selection-popover');
+      expect(selectionPopover).toHaveAttribute('data-popover-mode', 'create');
+      expect(scroll.scrollTop).toBe(0);
+      clearSelection();
+
+      // Double-clicking body text glyphs inside the 12% edge zone never turns the page.
+      const textNode = painted.firstChild as Text;
+      const docWithCaret = document as Document & {
+        caretRangeFromPoint?: (x: number, y: number) => Range | null;
+      };
+      const originalCaretRange = docWithCaret.caretRangeFromPoint;
+      const originalGetClientRects = Range.prototype.getClientRects;
+      docWithCaret.caretRangeFromPoint = () => {
+        const range = document.createRange();
+        range.setStart(textNode, 0);
+        return range;
+      };
+      Range.prototype.getClientRects = () =>
+        [new DOMRect(770, 90, 40, 20)] as unknown as DOMRectList;
+      try {
+        fireEvent.pointerDown(painted, { clientX: 790, clientY: 100, button: 0 });
+        fireEvent.click(painted, { clientX: 790, clientY: 100, button: 0, detail: 1 });
+        fireEvent.pointerDown(painted, { clientX: 790, clientY: 100, button: 0 });
+        fireEvent.click(painted, { clientX: 790, clientY: 100, button: 0, detail: 2 });
+        expect(scroll.scrollTop).toBe(0);
+      } finally {
+        docWithCaret.caretRangeFromPoint = originalCaretRange;
+        Range.prototype.getClientRects = originalGetClientRects;
       }
     });
   });

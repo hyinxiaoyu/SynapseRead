@@ -708,7 +708,15 @@ export function createMemoryBackend({
           'pageTransition must be none, slide, fade, curl, or stack',
         );
       }
-      readingPreferences = { ...preferences };
+      const scrollPageTransition = preferences.scrollPageTransition ?? null;
+      if (
+        scrollPageTransition !== null &&
+        scrollPageTransition !== 'none' &&
+        scrollPageTransition !== 'fade'
+      ) {
+        throw fail('invalid_preferences', 'scrollPageTransition must be none, fade, or null');
+      }
+      readingPreferences = { ...preferences, scrollPageTransition };
       return { ...readingPreferences };
     },
 

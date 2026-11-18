@@ -13,8 +13,8 @@ use crate::domain::{
     CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document,
     DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode,
     NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout,
-    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, StudyNotebook, Viewport,
-    WorkspaceSession,
+    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, ScrollPageTransition, StudyNotebook,
+    Viewport, WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -1144,23 +1144,36 @@ fn conversion_failure(
     rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(error))
 }
 
+/// Drops `key` from `object` when its stored JSON fails to deserialize as `T`.
+fn drop_invalid_preference_field<T: DeserializeOwned>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) {
+    let invalid = object
+        .get(key)
+        .is_some_and(|value| serde_json::from_value::<T>(value.clone()).is_err());
+    if invalid {
+        object.remove(key);
+    }
+}
+
 /// Reads a stored preferences row, tolerating a page-turn mode this build lacks.
 ///
 /// Only the read path is lenient. A newer build may have written a
-/// `pageTransition` this one cannot parse, and rejecting it would fail the whole
-/// load, so the key is dropped and `#[serde(default)]` supplies the default.
-/// IPC input keeps strict enum validation, as the memory backend does, so a
-/// garbage value from the frontend is still an error.
+/// `pageTransition` or `scrollPageTransition` this one cannot parse, and
+/// rejecting it would fail the whole load, so the key is dropped and
+/// `#[serde(default)]` supplies the default. IPC input keeps strict enum
+/// validation, as the memory backend does, so a garbage value from the frontend
+/// is still an error.
 fn reading_preferences_from_stored(
     mut stored: serde_json::Value,
 ) -> CoreResult<ReadingPreferences> {
     if let Some(object) = stored.as_object_mut() {
-        let unknown = object
-            .get("pageTransition")
-            .is_some_and(|mode| serde_json::from_value::<PageTransition>(mode.clone()).is_err());
-        if unknown {
-            object.remove("pageTransition");
-        }
+        drop_invalid_preference_field::<PageTransition>(object, "pageTransition");
+        drop_invalid_preference_field::<Option<ScrollPageTransition>>(
+            object,
+            "scrollPageTransition",
+        );
     }
     Ok(serde_json::from_value(stored)?)
 }
@@ -1999,6 +2012,7 @@ mod tests {
             dim_images: true,
             epub_reading_mode: crate::domain::EpubReadingMode::Scroll,
             page_transition: crate::domain::PageTransition::Fade,
+            scroll_page_transition: Some(crate::domain::ScrollPageTransition::None),
             tint_pdf_pages: true,
             focus_mode_full_screen: true,
         };
@@ -2053,6 +2067,7 @@ mod tests {
 
             let prefs = db.get_reading_preferences().unwrap();
             assert_eq!(prefs.page_transition, expected, "stored {row}");
+            assert_eq!(prefs.scroll_page_transition, None, "stored {row}");
             assert_eq!(prefs.font_size, 110);
             // The row predates both appearance switches, which default to off.
             assert!(!prefs.tint_pdf_pages, "stored {row}");
@@ -2155,6 +2170,51 @@ mod tests {
         // The rest of the row still loads; only the unknown field degrades.
         assert_eq!(prefs.theme, crate::domain::ReadingTheme::Dark);
         assert_eq!(prefs.font_size, 120);
+    }
+
+    #[test]
+    fn stored_scroll_page_transition_loads_valid_values_and_tolerates_unknown_ones() {
+        let db = Database::open_in_memory().unwrap();
+        let cases = [
+            (serde_json::Value::Null, None),
+            (
+                serde_json::json!("none"),
+                Some(crate::domain::ScrollPageTransition::None),
+            ),
+            (
+                serde_json::json!("fade"),
+                Some(crate::domain::ScrollPageTransition::Fade),
+            ),
+            // A newer build (or unknown mode) degrades cleanly to `None`.
+            (serde_json::json!("glide"), None),
+        ];
+        for (stored_value, expected) in cases {
+            let stored = serde_json::json!({
+                "theme": "dark",
+                "fontFamily": "mono",
+                "fontSize": 120,
+                "lineSpacing": 1.9,
+                "margins": "narrow",
+                "pageWidth": "standard",
+                "justify": true,
+                "dimImages": false,
+                "epubReadingMode": "scroll",
+                "pageTransition": "curl",
+                "scrollPageTransition": stored_value,
+            });
+            db.conn
+                .execute(
+                    "INSERT INTO reading_preferences (id, preferences_json) VALUES (1, ?1)
+                     ON CONFLICT (id) DO UPDATE SET preferences_json = excluded.preferences_json",
+                    params![stored.to_string()],
+                )
+                .unwrap();
+
+            let prefs = db.get_reading_preferences().unwrap();
+            assert_eq!(prefs.scroll_page_transition, expected, "stored {stored}");
+            assert_eq!(prefs.page_transition, crate::domain::PageTransition::Curl);
+            assert_eq!(prefs.theme, crate::domain::ReadingTheme::Dark);
+        }
     }
 
     #[test]

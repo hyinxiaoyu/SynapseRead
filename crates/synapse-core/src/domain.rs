@@ -536,6 +536,15 @@ pub enum PageTransition {
     Stack,
 }
 
+/// How a continuous-scrolling reader animates an explicit page turn. Reduced
+/// motion always turns instantly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollPageTransition {
+    None,
+    Fade,
+}
+
 /// User-configurable appearance and layout preferences for EPUB and TXT readers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -561,6 +570,12 @@ pub struct ReadingPreferences {
     /// know, because only a stored row can have been written by a newer build.
     #[serde(default)]
     pub page_transition: PageTransition,
+    /// Used by continuous-scrolling modes (`EPUB` `scroll`, `PDF` `continuous`,
+    /// and `TXT`). When `None`, scrolling follows `page_transition` (`none`
+    /// stays `none`; every other mode fades) so switching modes preserves both
+    /// preferences independently.
+    #[serde(default)]
+    pub scroll_page_transition: Option<ScrollPageTransition>,
     /// Tints PDF page canvases to match the Dark or Sepia theme. Off by default,
     /// so a figure-heavy PDF is never inverted unexpectedly. The bitmap stays
     /// untouched: only the CSS filter on the canvas changes.
@@ -585,6 +600,7 @@ impl Default for ReadingPreferences {
             dim_images: false,
             epub_reading_mode: EpubReadingMode::Spread,
             page_transition: PageTransition::Slide,
+            scroll_page_transition: None,
             tint_pdf_pages: false,
             focus_mode_full_screen: false,
         }
@@ -880,9 +896,53 @@ mod tests {
         });
         let prefs: ReadingPreferences = serde_json::from_value(stored).unwrap();
         assert_eq!(prefs.page_transition, PageTransition::Slide);
+        assert_eq!(prefs.scroll_page_transition, None);
         // The same row predates the appearance switches, so both stay off.
         assert!(!prefs.tint_pdf_pages);
         assert!(!prefs.focus_mode_full_screen);
+    }
+
+    #[test]
+    fn scroll_page_transition_round_trips_and_rejects_paginated_only_modes() {
+        for (mode, wire) in [
+            (ScrollPageTransition::None, "none"),
+            (ScrollPageTransition::Fade, "fade"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(wire));
+            assert_eq!(
+                serde_json::from_value::<ScrollPageTransition>(serde_json::json!(wire)).unwrap(),
+                mode
+            );
+        }
+
+        let default_wire = serde_json::to_value(ReadingPreferences::default()).unwrap();
+        assert_eq!(
+            default_wire["scrollPageTransition"],
+            serde_json::Value::Null
+        );
+
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("none"),
+            serde_json::json!("fade"),
+        ] {
+            let mut sent = default_wire.clone();
+            sent["scrollPageTransition"] = value.clone();
+            let parsed: ReadingPreferences = serde_json::from_value(sent).unwrap();
+            assert_eq!(
+                serde_json::to_value(parsed.scroll_page_transition).unwrap(),
+                value
+            );
+        }
+
+        for invalid in ["slide", "curl", "stack", "peel"] {
+            let mut sent = default_wire.clone();
+            sent["scrollPageTransition"] = serde_json::json!(invalid);
+            assert!(
+                serde_json::from_value::<ReadingPreferences>(sent).is_err(),
+                "expected {invalid} to be rejected for scrollPageTransition"
+            );
+        }
     }
 
     #[test]

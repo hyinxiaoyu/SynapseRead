@@ -2,6 +2,7 @@
 
 import { fileURLToPath } from 'node:url';
 
+import { consecutiveClicksFlow } from './consecutiveClicks.mjs';
 import { epubFlow } from './epub.mjs';
 import { epubCodeBlocksFlow } from './epubCodeBlocks.mjs';
 import { epubProgressFlow } from './epubProgress.mjs';
@@ -12,15 +13,18 @@ import { linkPeekFlow } from './linkPeek.mjs';
 import { pagingFlow } from './paging.mjs';
 import { pagingModesFlow } from './pagingModes.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
+import { scrollPagingFlow } from './scrollPaging.mjs';
 import { txtFlow } from './txt.mjs';
 import { toolbarTitleFlow } from './toolbarTitle.mjs';
 import { txtChaptersFlow } from './txtChapters.mjs';
+import { wheelPagingFlow } from './wheelPaging.mjs';
 
 // The one CSP report that does not fail a flow, and only on a browser shown to send it
 // for an inert document. The EPUB flow separately asserts that the handler never ran.
 const PARSE_TIME_REPORT = 'script-src-attr inline ';
 
 const FLOWS = {
+  'consecutive-clicks': consecutiveClicksFlow,
   txt: txtFlow,
   pdf: pdfFlow,
   'pdf-layout': pdfLayoutFlow,
@@ -34,7 +38,9 @@ const FLOWS = {
   'link-peek': linkPeekFlow,
   paging: pagingFlow,
   'paging-modes': pagingModesFlow,
+  'scroll-paging': scrollPagingFlow,
   'toolbar-title': toolbarTitleFlow,
+  'wheel-paging': wheelPagingFlow,
 };
 
 // Screenshots of failed flows; CI uploads the folder.
