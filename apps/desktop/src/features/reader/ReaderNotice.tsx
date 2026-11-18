@@ -1,7 +1,29 @@
 import { X } from 'lucide-react';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from 'react';
 
 import { cn } from '@/lib/utils';
+
+type RegisterPopoverLayer = (element: HTMLDivElement | null) => void;
+
+const ReaderPopoverSlotContext = createContext<RegisterPopoverLayer | null>(null);
+
+/**
+ * Gives a viewer's `ReaderPopoverLayer` to its parent `ReaderPane` so workspace
+ * notices can join the active tab's notice stack instead of overlapping it.
+ */
+export function ReaderPopoverSlotProvider({
+  register,
+  children,
+}: {
+  register: RegisterPopoverLayer;
+  children: ReactNode;
+}) {
+  return (
+    <ReaderPopoverSlotContext.Provider value={register}>
+      {children}
+    </ReaderPopoverSlotContext.Provider>
+  );
+}
 
 /** How long an informational notice stays before it fades on its own. */
 export const INFO_NOTICE_MS = 6000;
@@ -20,9 +42,13 @@ export function ReaderPopoverLayer({
   hidden?: boolean;
   children: ReactNode;
 }) {
+  const register = useContext(ReaderPopoverSlotContext);
   if (hidden) return null;
   return (
-    <div className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:animation-duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none">
+    <div
+      ref={register ?? undefined}
+      className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:animation-duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none"
+    >
       {children}
     </div>
   );

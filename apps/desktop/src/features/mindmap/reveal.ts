@@ -9,12 +9,16 @@ export interface Rect {
 
 /** Space kept between a card and the canvas edge for it to count as in view, in pixels. */
 export const REVEAL_MARGIN = 24;
+/** Lowest zoom `viewportRevealing` will drop to; matches React Flow's `minZoom`. */
+export const MIN_REVEAL_ZOOM = 0.1;
 /** How long the pan to a card takes; reduced motion jumps instead. */
 export const REVEAL_DURATION_MS = 250;
 
 /**
- * The viewport that centers `node` (in flow coordinates) at the current zoom, or
- * `null` when it is already fully in view and the canvas should not move.
+ * The viewport that reveals `node` (in flow coordinates) centered in `pane`, or
+ * `null` when it is already fully in view and the canvas should not move. Keeps
+ * the current zoom when the card fits inside the margin, and zooms out only far
+ * enough to fit it otherwise.
  */
 export function viewportRevealing(
   node: Rect,
@@ -34,10 +38,19 @@ export function viewportRevealing(
   ) {
     return null;
   }
+
+  const usableWidth = pane.width - REVEAL_MARGIN * 2;
+  const usableHeight = pane.height - REVEAL_MARGIN * 2;
+  const fitWidth =
+    node.width > 0 ? (usableWidth > 0 ? usableWidth : pane.width) / node.width : zoom;
+  const fitHeight =
+    node.height > 0 ? (usableHeight > 0 ? usableHeight : pane.height) / node.height : zoom;
+  const nextZoom = Math.min(zoom, Math.max(MIN_REVEAL_ZOOM, Math.min(fitWidth, fitHeight)));
+
   return {
-    x: pane.width / 2 - (node.x + node.width / 2) * zoom,
-    y: pane.height / 2 - (node.y + node.height / 2) * zoom,
-    zoom,
+    x: pane.width / 2 - (node.x + node.width / 2) * nextZoom,
+    y: pane.height / 2 - (node.y + node.height / 2) * nextZoom,
+    zoom: nextZoom,
   };
 }
 

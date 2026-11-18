@@ -10,13 +10,14 @@ import {
   useMemo,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
 import { isEditableShortcutTarget, useCommands } from '@/features/commands/registry';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { requestActivePageFocus } from '@/features/reader/focusPage';
-import { ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
+import { ReaderPopoverLayer, ReaderPopoverSlotProvider } from '@/features/reader/ReaderNotice';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { cn, describeError } from '@/lib/utils';
 import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
@@ -112,7 +113,21 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
   const immersive = useStudySyncStore((state) => state.immersive);
   const [recentMenuOpen, setRecentMenuOpen] = useState(false);
+  const [viewerLayers, setViewerLayers] = useState<Record<string, HTMLDivElement>>({});
   const chromeTheme = useReaderChromeTheme();
+
+  const registerViewerLayer = useCallback((documentId: string, element: HTMLDivElement | null) => {
+    setViewerLayers((current) => {
+      if (element === null) {
+        if (!(documentId in current)) return current;
+        const next = { ...current };
+        delete next[documentId];
+        return next;
+      }
+      if (current[documentId] === element) return current;
+      return { ...current, [documentId]: element };
+    });
+  }, []);
 
   const openDocuments = useMemo(
     () =>
@@ -123,6 +138,8 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
   );
   const recentDocuments = useMemo(() => selectRecentDocuments(documents), [documents]);
   const activeDocument = openDocuments.find((document) => document.id === activeDocumentId);
+  const activeViewerLayer =
+    activeDocumentId !== null ? (viewerLayers[activeDocumentId] ?? null) : null;
   const canReopenClosedTab =
     selectReopenableDocumentId(closedDocumentIds, openDocumentIds, documents) !== null;
 
@@ -354,6 +371,7 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
                   document={document}
                   isActive={isActive}
                   onCloseTab={() => closeDocument(document.id)}
+                  onRegisterPopoverLayer={registerViewerLayer}
                 />
               </TabErrorBoundary>
             </div>
@@ -397,7 +415,13 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
             )}
           </div>
         )}
-        {notice && <ReaderPopoverLayer hidden={immersive}>{notice}</ReaderPopoverLayer>}
+        {notice &&
+          !immersive &&
+          (activeViewerLayer ? (
+            createPortal(notice, activeViewerLayer)
+          ) : (
+            <ReaderPopoverLayer hidden={immersive}>{notice}</ReaderPopoverLayer>
+          ))}
       </div>
     </section>
   );
@@ -548,10 +572,12 @@ function DocumentTab({
   document,
   isActive,
   onCloseTab,
+  onRegisterPopoverLayer,
 }: {
   document: StudyDocument;
   isActive: boolean;
   onCloseTab: () => void;
+  onRegisterPopoverLayer: (documentId: string, element: HTMLDivElement | null) => void;
 }) {
   const content = useStudySyncStore((state) => state.content);
   const sourceStatus = useStudySyncStore(
@@ -658,6 +684,10 @@ function DocumentTab({
   const onExcerptSelection = useCallback(() => {
     void excerptSelection();
   }, [excerptSelection]);
+  const registerPopoverLayer = useCallback(
+    (element: HTMLDivElement | null) => onRegisterPopoverLayer(document.id, element),
+    [onRegisterPopoverLayer, document.id],
+  );
 
   if (sourceStatus && sourceStatus.state !== 'ok') {
     return (
@@ -682,31 +712,33 @@ function DocumentTab({
   // Safe: the entry is looked up by this document's own format.
   const Viewer = viewerRegistry[document.format] as ComponentType<DocumentViewerProps>;
   return (
-    <Viewer
-      key={`${document.id}:${relinkedNonce}`}
-      document={document}
-      isActive={isActive}
-      chromeHidden={immersive}
-      content={content}
-      highlights={highlights}
-      jumpRequest={jumpRequest}
-      onSelectionChange={setSelection}
-      onJumpHandled={completeJump}
-      onCursorChange={onCursorChange}
-      preferences={readingPreferences}
-      onPreferencesChange={onPreferencesChange}
-      {...(pdfLayout ? { pdfLayout, onPdfLayoutChange } : {})}
-      bookmarks={bookmarks}
-      onAddBookmark={onAddBookmark}
-      onRemoveBookmark={onRemoveBookmark}
-      annotations={documentAnnotations}
-      onCreateAnnotation={onCreateAnnotation}
-      onUpdateAnnotation={onUpdateAnnotation}
-      onDeleteAnnotation={onDeleteAnnotation}
-      canUndoAnnotationDelete={deletedAnnotationHistory.length > 0}
-      onUndoAnnotationDelete={onUndoAnnotationDelete}
-      onExcerptSelection={onExcerptSelection}
-      canExcerpt={!isExcerpting}
-    />
+    <ReaderPopoverSlotProvider register={registerPopoverLayer}>
+      <Viewer
+        key={`${document.id}:${relinkedNonce}`}
+        document={document}
+        isActive={isActive}
+        chromeHidden={immersive}
+        content={content}
+        highlights={highlights}
+        jumpRequest={jumpRequest}
+        onSelectionChange={setSelection}
+        onJumpHandled={completeJump}
+        onCursorChange={onCursorChange}
+        preferences={readingPreferences}
+        onPreferencesChange={onPreferencesChange}
+        {...(pdfLayout ? { pdfLayout, onPdfLayoutChange } : {})}
+        bookmarks={bookmarks}
+        onAddBookmark={onAddBookmark}
+        onRemoveBookmark={onRemoveBookmark}
+        annotations={documentAnnotations}
+        onCreateAnnotation={onCreateAnnotation}
+        onUpdateAnnotation={onUpdateAnnotation}
+        onDeleteAnnotation={onDeleteAnnotation}
+        canUndoAnnotationDelete={deletedAnnotationHistory.length > 0}
+        onUndoAnnotationDelete={onUndoAnnotationDelete}
+        onExcerptSelection={onExcerptSelection}
+        canExcerpt={!isExcerpting}
+      />
+    </ReaderPopoverSlotProvider>
   );
 }

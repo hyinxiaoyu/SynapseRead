@@ -240,6 +240,26 @@ describe('StudyWorkspace', () => {
       expect(await screen.findByRole('alert')).toHaveTextContent('disk full');
       expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
     });
+
+    it('announces an excerpt politely during focus mode without a visible banner until focus mode ends', async () => {
+      await renderReady();
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      await screen.findByRole('tab');
+      fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+      expect(useStudySyncStore.getState().immersive).toBe(true);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+      fireEvent.keyDown(window, { key: 'E', code: 'KeyE', metaKey: true, shiftKey: true });
+
+      const status = await screen.findByRole('status');
+      expect(status).toHaveTextContent('Added to MindMap');
+      expect(status).toHaveClass('sr-only');
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(useStudySyncStore.getState().immersive).toBe(false);
+      expect(await screen.findByTestId('excerpt-added-notice')).toBeVisible();
+    });
   });
 
   it('pulses the source highlight on a jump, then completes it', async () => {

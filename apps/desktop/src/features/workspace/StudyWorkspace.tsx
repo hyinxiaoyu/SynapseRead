@@ -360,6 +360,13 @@ export function StudyWorkspace() {
           )}
         </div>
         {shortcutsOpen && <KeyboardShortcutsDialog onClose={closeShortcuts} />}
+        {immersive && pendingReveal && (
+          // Focus mode keeps the reading surface visually clear while still letting
+          // screen readers announce the excerpt right when it succeeds.
+          <p key={pendingReveal.nonce} role="status" className="sr-only">
+            Added to MindMap
+          </p>
+        )}
       </main>
     </ToolbarSlotsContext.Provider>
   );

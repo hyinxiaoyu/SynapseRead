@@ -18,6 +18,7 @@ import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { isEditableShortcutTarget } from '@/features/commands/registry';
 import { CardNode, type CardFlowNode } from '@/features/mindmap/CardNode';
 import {
+  MIN_REVEAL_ZOOM,
   prefersReducedMotion,
   REVEAL_DURATION_MS,
   viewportRevealing,
@@ -156,7 +157,7 @@ export function MindMapPane({ open }: { open: boolean }) {
         onNodeDragStop={(_event, node) => void commitNodeLayout(node.id)}
         onMoveEnd={(_event, viewport) => void saveViewport(viewport)}
         {...(initialViewport ? { defaultViewport: initialViewport } : {})}
-        minZoom={0.1}
+        minZoom={MIN_REVEAL_ZOOM}
         maxZoom={2.5}
         multiSelectionKeyCode={null}
       >
