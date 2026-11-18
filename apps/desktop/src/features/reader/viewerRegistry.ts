@@ -8,7 +8,9 @@ import type { DocumentFormat, DocumentViewerProps } from '@/types/domain';
 
 /**
  * Maps each format to its engine; this is the only place readers are wired in.
- * Markdown stays reserved until V1.1.
+ * Markdown files register as `txt` and open in the TXT engine (ADR 0007). `md`
+ * stays reserved for the Markdown reader; only a legacy document holding
+ * Markdown anchors can still reach the placeholder.
  */
 export const viewerRegistry: {
   [F in DocumentFormat]: ComponentType<DocumentViewerProps<F>>;

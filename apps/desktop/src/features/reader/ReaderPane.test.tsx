@@ -272,6 +272,23 @@ describe('ReaderPane tab commands', () => {
     await waitFor(() => expect(store().openDocumentIds).toEqual([first, second]));
   });
 
+  it('names the picker formats in the empty state and labels Markdown in Recent (#99)', async () => {
+    await openDocuments(['README.md', 'notes.txt']);
+    const store = useStudySyncStore.getState;
+    expect(store().documents.map((document) => document.format)).toEqual(['txt', 'txt']);
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    render(<ReaderPane />);
+
+    expect(
+      screen.getByText('Open a PDF, EPUB, TXT, or Markdown file to start reading.'),
+    ).toBeInTheDocument();
+    const recent = screen.getByTestId('empty-state-recent-documents');
+    const labels = [...recent.querySelectorAll('[data-testid="recent-document-item"] > span')].map(
+      (badge) => badge.textContent,
+    );
+    expect(labels.toSorted()).toEqual(['Markdown', 'TXT']);
+  });
+
   it('stacks workspace notices into the active viewer popover layer and follows tab switches', async () => {
     await openDocuments(['a.txt', 'b.txt']);
     const store = useStudySyncStore.getState;

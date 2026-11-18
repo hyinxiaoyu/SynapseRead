@@ -1,5 +1,6 @@
 import { DEFAULT_CHUNK_BYTES, streamUtf8Lossy } from '@/lib/backend/memoryTextStream';
 import type { StudyBackend } from '@/lib/backend/types';
+import { formatForPath } from '@/lib/documentFormats';
 import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
 import sampleCodeEpubUrl from '../../../../../fixtures/documents/sample-code.epub?url&no-inline';
 import sampleLabelsPdfUrl from '../../../../../fixtures/documents/sample-labels.pdf?url&no-inline';
@@ -63,7 +64,9 @@ const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample.txt': fetchBytes(sampleTxtUrl),
   '/preview/sample.pdf': fetchBytes(samplePdfUrl),
   '/preview/sample.epub': fetchBytes(sampleEpubUrl),
-  '/preview/sample.md': encodePreview('In-memory preview of a Markdown file\n'),
+  '/preview/sample.md': encodePreview(
+    '# Markdown sample\n\nMarkdown opens as plain text until the Markdown reader arrives.\n',
+  ),
   // Last, so earlier picks are unchanged: printed page labels, and a second PDF.
   '/preview/sample-labels.pdf': fetchBytes(sampleLabelsPdfUrl),
   // An EPUB whose ten short front-matter files would skew progress by file (#52).
@@ -83,13 +86,6 @@ export interface MemoryBackendOptions {
   /** Text stream chunk size, so tests can vary where chunks split. */
   chunkBytes?: number;
 }
-
-const FORMAT_BY_EXTENSION: Record<string, DocumentFormat> = {
-  pdf: 'pdf',
-  epub: 'epub',
-  txt: 'txt',
-  md: 'md',
-};
 
 const fail = (code: string, message: string): IpcError => ({ code, message });
 
@@ -234,11 +230,13 @@ export function createMemoryBackend({
 
   const parseExtensionFormat = (path: string): { title: string; format: DocumentFormat } => {
     const fileName = path.split('/').pop() ?? path;
-    const extension = fileName.includes('.')
-      ? (fileName.split('.').pop()?.toLowerCase() ?? '')
-      : '';
-    const format = FORMAT_BY_EXTENSION[extension];
-    if (!format) throw fail('unsupported_format', `unsupported document format: ${extension}`);
+    const format = formatForPath(fileName);
+    if (!format) {
+      const extension = fileName.includes('.')
+        ? (fileName.split('.').pop()?.toLowerCase() ?? '')
+        : '';
+      throw fail('unsupported_format', `unsupported document format: ${extension}`);
+    }
     return { title: fileName.replace(/\.[^.]+$/, ''), format };
   };
 

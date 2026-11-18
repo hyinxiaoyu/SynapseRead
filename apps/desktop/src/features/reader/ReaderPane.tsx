@@ -19,6 +19,7 @@ import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChro
 import { requestActivePageFocus } from '@/features/reader/focusPage';
 import { ReaderPopoverLayer, ReaderPopoverSlotProvider } from '@/features/reader/ReaderNotice';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
+import { documentFormatLabel, SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
 import { cn, describeError } from '@/lib/utils';
 import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 import {
@@ -338,7 +339,7 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
                       </p>
                     </div>
                     <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
-                      {document.format}
+                      {documentFormatLabel(document)}
                     </span>
                   </button>
                 </li>
@@ -379,7 +380,7 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
         })}
         {!activeDocument && (
           <div className="flex h-full flex-col items-center justify-center gap-5 p-6 text-center text-sm text-muted-foreground">
-            <p>Open a PDF, EPUB, or TXT file to start reading.</p>
+            <p>Open a {SUPPORTED_FORMAT_LIST} file to start reading.</p>
             {recentDocuments.length > 0 && (
               <div
                 role="region"
@@ -405,7 +406,7 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
                           </p>
                         </div>
                         <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
-                          {document.format}
+                          {documentFormatLabel(document)}
                         </span>
                       </button>
                     </li>

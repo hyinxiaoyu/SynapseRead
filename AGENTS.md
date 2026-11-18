@@ -107,8 +107,10 @@ A change to a command or a domain type must be made together in:
 3. `apps/desktop/src/lib/backend/` (`types.ts`, `tauriBackend.ts`, `memoryBackend.ts`)
 4. `apps/desktop/src-tauri/src/ipc_tests.rs` (the JSON the frontend actually sends)
 5. `fixtures/contract/anchors.json` when anchors change,
-   `fixtures/contract/text-chunks.json` when text chunks change, and
-   `fixtures/contract/commands.json` when menu commands change; both languages test them
+   `fixtures/contract/text-chunks.json` when text chunks change,
+   `fixtures/contract/commands.json` when menu commands change, and
+   `fixtures/contract/document-formats.json` when openable extensions change; both
+   languages test them
 
 Tauri maps camelCase JS argument names to snake_case Rust parameters.
 

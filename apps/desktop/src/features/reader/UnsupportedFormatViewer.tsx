@@ -3,7 +3,8 @@ import { useEffect } from 'react';
 import type { DocumentViewerProps } from '@/types/domain';
 
 /**
- * For a format with no engine yet. Markdown is reserved for V1.1. A jump must
+ * For a format with no engine yet. New Markdown files open as text (ADR 0007),
+ * so only a legacy `md` document holding Markdown anchors lands here. A jump must
  * still complete, or the store would hold it open forever.
  */
 export function UnsupportedFormatViewer({

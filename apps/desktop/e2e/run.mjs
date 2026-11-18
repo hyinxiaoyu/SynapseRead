@@ -10,6 +10,7 @@ import { goToFlow } from './goTo.mjs';
 import { launchPage, serveDist, warmUp } from './harness.mjs';
 import { keyboardFlow } from './keyboard.mjs';
 import { linkPeekFlow } from './linkPeek.mjs';
+import { markdownFlow } from './markdown.mjs';
 import { pagingFlow } from './paging.mjs';
 import { pagingModesFlow } from './pagingModes.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
@@ -36,6 +37,7 @@ const FLOWS = {
   'txt-chapters': txtChaptersFlow,
   'go-to': goToFlow,
   'link-peek': linkPeekFlow,
+  markdown: markdownFlow,
   paging: pagingFlow,
   'paging-modes': pagingModesFlow,
   'scroll-paging': scrollPagingFlow,

@@ -33,6 +33,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0010_document_progress.sql"),
     include_str!("../migrations/0011_page_transition_curl.sql"),
     include_str!("../migrations/0012_annotation_soft_delete.sql"),
+    include_str!("../migrations/0013_markdown_as_text.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -1672,6 +1673,103 @@ mod tests {
             db.register_document(&path),
             Err(CoreError::UnsupportedFormat(_))
         ));
+        // Declined before anything is written, so it never reaches Recent documents.
+        assert!(db.list_documents().unwrap().is_empty());
+    }
+
+    /// Issue #99: the picker and the drop overlay offer Markdown, so it must open
+    /// as something readable, with excerpts anchored like any other text file.
+    #[test]
+    fn registering_markdown_creates_a_readable_text_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open_in_memory().unwrap();
+        let notebook_id = db.create_notebook("Study").unwrap().id;
+        for name in ["README.md", "notes.MARKDOWN"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("# {name}\n\nSome *notes*.\n")).unwrap();
+            let document = db.register_document(&path).unwrap();
+            assert_eq!(document.format, DocumentFormat::Txt, "{name}");
+
+            let annotation = |anchor| CreateAnnotationInput {
+                document_id: document.id.clone(),
+                notebook_id: notebook_id.clone(),
+                anchor,
+                excerpt_text: Some("Some".to_owned()),
+                excerpt_image_png: None,
+                note: None,
+                color: "#fde047".to_owned(),
+                style: AnnotationStyle::Highlight,
+            };
+            db.create_annotation(&annotation(txt_anchor())).unwrap();
+            assert!(matches!(
+                db.create_annotation(&annotation(AnchorLocation::Md {
+                    ast_node_id: "paragraph-1".to_owned(),
+                    offset: 0,
+                })),
+                Err(CoreError::InvalidAnchor(_))
+            ));
+        }
+        assert_eq!(db.list_documents().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn markdown_document_relinks_to_another_text_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_in_memory().unwrap();
+        let original = dir.path().join("notes.md");
+        std::fs::write(&original, "# Notes\n").unwrap();
+        let document = db.register_document(&original).unwrap();
+        let moved = dir.path().join("notes.markdown");
+        std::fs::rename(&original, &moved).unwrap();
+        let relinked = db.relink_document(&document.id, &moved).unwrap();
+        assert_eq!(relinked.document.format, DocumentFormat::Txt);
+        assert!(DocumentFormat::Txt.extensions().contains(&"markdown"));
+    }
+
+    #[test]
+    fn markdown_migration_makes_readerless_documents_text() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // Bring the database to version 12, as the previous release left it.
+        for (version, sql) in (1_u32..).zip(&MIGRATIONS[..12]) {
+            conn.execute_batch(sql).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        conn.execute_batch(
+            r#"
+            INSERT INTO documents (id, title, file_path, file_hash, format, last_cursor_anchor, last_progress)
+            VALUES
+                ('plain', 'README', '/notes/README.md', 'h1', 'md',
+                 '{"format":"md","astNodeId":"heading-1","offset":0}', 0.5),
+                ('anchored', 'Old', '/notes/old.md', 'h2', 'md', NULL, NULL),
+                ('book', 'Book', '/books/book.txt', 'h3', 'txt',
+                 '{"format":"txt","startByteOffset":0,"endByteOffset":4,"lineIndex":0}', 0.25);
+            INSERT INTO study_notebooks (id, title) VALUES ('nb', 'Study');
+            INSERT INTO annotations (id, document_id, notebook_id, anchor_type, anchor_payload_json, color)
+            VALUES ('a1', 'anchored', 'nb', 'md',
+                    '{"format":"md","astNodeId":"paragraph-1","offset":0}', '#fde047');
+            "#,
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let db = Database {
+            conn,
+            captures: None,
+            _session_lock: None,
+        };
+
+        let plain = db.get_document("plain").unwrap();
+        assert_eq!(plain.format, DocumentFormat::Txt);
+        assert_eq!(plain.last_cursor_anchor, None);
+        assert_eq!(plain.last_progress, None);
+        // Converting it would orphan an anchor only a Markdown reader understands.
+        assert_eq!(
+            db.get_document("anchored").unwrap().format,
+            DocumentFormat::Md
+        );
+        let book = db.get_document("book").unwrap();
+        assert_eq!(book.format, DocumentFormat::Txt);
+        assert_eq!(book.last_cursor_anchor, Some(txt_anchor()));
+        assert_eq!(book.last_progress, Some(0.25));
     }
 
     #[test]

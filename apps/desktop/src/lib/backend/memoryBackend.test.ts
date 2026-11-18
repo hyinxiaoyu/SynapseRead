@@ -57,3 +57,40 @@ describe('memory backend annotation delete and restore', () => {
     await expect(backend.restoreAnnotation(id)).rejects.toMatchObject(notFound);
   });
 });
+
+/** Mirrors core's registration tests for #99, so the preview matches the app. */
+describe('memory backend Markdown registration', () => {
+  it('registers Markdown as readable text that takes TXT excerpts', async () => {
+    const backend = createMemoryBackend();
+    const { documents, error } = await backend.dropFiles([
+      new File(['# Notes\n\nSome text.\n'], 'README.md', { type: 'text/markdown' }),
+      new File(['# Plan\n'], 'plan.markdown', { type: 'text/markdown' }),
+    ]);
+    expect(error).toBeNull();
+    expect(documents.map((document) => document.format)).toEqual(['txt', 'txt']);
+
+    const notebook = await backend.createNotebook('Study');
+    const created = await backend.createExcerpt({
+      documentId: documents[0]?.id as string,
+      notebookId: notebook.id,
+      anchor: { format: 'txt', startByteOffset: 2, endByteOffset: 7, lineIndex: 0 },
+      excerptText: 'Notes',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 0,
+      posY: 0,
+    });
+    expect(created.annotation.anchor.format).toBe('txt');
+  });
+
+  it('declines an unsupported file without registering it', async () => {
+    const backend = createMemoryBackend();
+    const { documents, error } = await backend.dropFiles([
+      new File(['x'], 'sheet.docx', { type: 'application/octet-stream' }),
+    ]);
+    expect(documents).toEqual([]);
+    expect(error?.code).toBe('unsupported_format');
+    expect(await backend.listDocuments()).toEqual([]);
+  });
+});
