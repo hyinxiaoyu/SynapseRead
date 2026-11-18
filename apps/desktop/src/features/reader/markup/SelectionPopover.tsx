@@ -17,6 +17,7 @@ import {
   COLOR_TARGET_CLASS,
   ColorDot,
 } from '@/features/reader/AnnotationsPanel';
+import { CardSourceDeleteConfirm } from '@/features/reader/CardSourceDeleteConfirm';
 import { useColorShortcut } from '@/features/reader/markup/colorShortcut';
 import { ANNOTATION_COLORS } from '@/features/reader/markup/palette';
 import { NoteEditor } from '@/features/reader/markup/NoteEditor';
@@ -207,6 +208,11 @@ export function SelectionPopover({
     setEditNote(annotation.note ?? '');
   }
   if (!popover.noteOpen && editNoteFor !== null) setEditNoteFor(null);
+
+  // Deleting a card's source asks first; the question goes with the popover.
+  const [confirmDeleteFor, setConfirmDeleteFor] = useState<string | null>(null);
+  if (!editing && confirmDeleteFor !== null) setConfirmDeleteFor(null);
+  const confirmingDelete = editing && confirmDeleteFor === annotation.id;
   const noteValue = editing ? editNote : annotations.draftNote;
 
   // Esc from the page, or forwarded from an EPUB chapter, while focus is not in
@@ -409,12 +415,30 @@ export function SelectionPopover({
             label="Delete Highlight"
             testId="popover-delete"
             onClick={() => {
+              if (annotations.isCardSource?.(annotation.id) && !confirmingDelete) {
+                setConfirmDeleteFor(annotation.id);
+                return;
+              }
               annotations.deleteAnnotation(annotation.id);
               close();
             }}
           />
         )}
       </div>
+      {annotation && confirmingDelete && (
+        <CardSourceDeleteConfirm
+          className="px-2 pt-1.5 pb-1"
+          keepSelection={keepSelection}
+          onCancel={() => {
+            setConfirmDeleteFor(null);
+            rootRef.current?.querySelector<HTMLElement>('[data-testid="popover-delete"]')?.focus();
+          }}
+          onConfirm={() => {
+            annotations.deleteAnnotation(annotation.id);
+            close();
+          }}
+        />
+      )}
       {annotation && hasNote && !popover.noteOpen && (
         // A clicked highlight opens with its note showing, as written.
         <div data-testid="popover-note-view" className="flex flex-col gap-1 px-2 pt-1.5 pb-1">

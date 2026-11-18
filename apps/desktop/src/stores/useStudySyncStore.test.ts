@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import type { FileDropEvent, StudyBackend } from '@/lib/backend/types';
 import {
+  type Annotation,
   DEFAULT_PDF_LAYOUT,
   type PdfLayout,
   type ReaderSelection,
@@ -780,6 +781,103 @@ describe('useStudySyncStore', () => {
         note: 'Updated note text',
       });
       expect(selectDocumentAnnotations(state().annotations, documentId)).toHaveLength(1);
+    });
+
+    // #97: Undo must give back the card's source, not a new, unlinked highlight.
+    it('relinks a card to its source when a deleted excerpt is undone', async () => {
+      const documentId = await openDocument();
+      select(documentId, 'card source');
+      await state().excerptSelection();
+      const card = state().cards[0];
+      const node = state().nodes[0];
+      const annotationId = card?.annotationIds[0] as string;
+
+      await state().removeAnnotation(annotationId);
+      expect(state().cards[0]?.annotationIds).toEqual([]);
+
+      const restored = await state().undoRemoveAnnotation();
+      expect(restored?.id).toBe(annotationId);
+      expect(state().annotations.map((annotation) => annotation.id)).toEqual([annotationId]);
+      expect(state().cards).toEqual([card]);
+      expect(state().deletedAnnotationHistory).toEqual([]);
+
+      state().jumpToNode(node?.id as string);
+      expect(state().jumpRequest).toMatchObject({ documentId, annotationId, anchor: pdfAnchor });
+
+      // The link is in the backend too, not just in memory.
+      const reopened = createStudySyncStore(backend);
+      await reopened.getState().initialize();
+      expect(reopened.getState().cards[0]?.annotationIds).toEqual([annotationId]);
+      expect(reopened.getState().annotations.map((annotation) => annotation.id)).toEqual([
+        annotationId,
+      ]);
+    });
+
+    it('restores an area capture with its image', async () => {
+      const documentId = await openDocument();
+      state().setSelection({
+        documentId,
+        anchor: pdfAnchor as ReaderSelection['anchor'],
+        text: '',
+        imagePng: 'iVBORw0KGgo=',
+      });
+      await state().excerptSelection();
+      const annotation = state().annotations[0] as Annotation;
+      const image = await state().captureUrl(annotation.id);
+      expect(image).not.toBeNull();
+
+      await state().removeAnnotation(annotation.id);
+      await state().undoRemoveAnnotation();
+
+      expect(state().annotations).toEqual([annotation]);
+      expect(state().cards[0]?.annotationIds).toEqual([annotation.id]);
+      expect(await state().captureUrl(annotation.id)).toBe(image);
+    });
+
+    it('waits for a delete to reach the backend before undoing it', async () => {
+      const documentId = await openDocument();
+      select(documentId);
+      await state().excerptSelection();
+      const annotationId = state().annotations[0]?.id as string;
+
+      let finishDelete = () => {};
+      const deleteAnnotation = backend.deleteAnnotation.bind(backend);
+      vi.spyOn(backend, 'deleteAnnotation').mockImplementation(
+        (id) =>
+          new Promise<void>((resolve, reject) => {
+            finishDelete = () => void deleteAnnotation(id).then(resolve, reject);
+          }),
+      );
+      const restoreAnnotation = vi.spyOn(backend, 'restoreAnnotation');
+
+      const removing = state().removeAnnotation(annotationId);
+      const undoing = state().undoRemoveAnnotation();
+      await Promise.resolve();
+      expect(restoreAnnotation).not.toHaveBeenCalled();
+
+      finishDelete();
+      await Promise.all([removing, undoing]);
+      expect(restoreAnnotation).toHaveBeenCalledWith(annotationId);
+      expect(state().cards[0]?.annotationIds).toEqual([annotationId]);
+      expect(state().error).toBeNull();
+    });
+
+    it('does not restore a delete that failed and was rolled back', async () => {
+      const documentId = await openDocument();
+      select(documentId);
+      await state().excerptSelection();
+      const annotationId = state().annotations[0]?.id as string;
+      vi.spyOn(backend, 'deleteAnnotation').mockRejectedValueOnce(new Error('disk full'));
+      const restoreAnnotation = vi.spyOn(backend, 'restoreAnnotation');
+
+      const removing = state().removeAnnotation(annotationId);
+      const undone = await state().undoRemoveAnnotation();
+      await removing;
+
+      expect(undone).toBeNull();
+      expect(restoreAnnotation).not.toHaveBeenCalled();
+      expect(state().annotations.map((annotation) => annotation.id)).toEqual([annotationId]);
+      expect(state().cards[0]?.annotationIds).toEqual([annotationId]);
     });
   });
 

@@ -15,6 +15,7 @@ import type {
   PdfLayout,
   ReadingPreferences,
   RelinkDocumentResult,
+  RestoredAnnotation,
   StudyDocument,
   StudyNotebook,
   TextChunk,
@@ -105,6 +106,8 @@ export function createTauriBackend(): StudyBackend {
     updateAnnotation: (annotationId, patch) =>
       invoke<Annotation>('update_annotation', { annotationId, patch }),
     deleteAnnotation: (annotationId) => invoke('delete_annotation', { annotationId }),
+    restoreAnnotation: (annotationId) =>
+      invoke<RestoredAnnotation>('restore_annotation', { annotationId }),
     updateCard: (cardId, patch) => invoke<NoteCard>('update_card', { cardId, patch }),
     updateNodeLayout: (nodeId, patch) => invoke('update_node_layout', { nodeId, patch }),
     createEdge: (notebookId, sourceNodeId, targetNodeId, label) =>

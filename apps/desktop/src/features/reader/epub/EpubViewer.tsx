@@ -283,6 +283,7 @@ export function EpubViewer({
   onDeleteAnnotation,
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
+  cardSourceAnnotationIds,
   onExcerptSelection,
   canExcerpt,
 }: DocumentViewerProps<'epub'>) {
@@ -873,6 +874,7 @@ export function EpubViewer({
     onDeleteAnnotation,
     canUndoAnnotationDelete,
     onUndoAnnotationDelete,
+    cardSourceAnnotationIds,
     isStaleAnnotation: (annotation) => staleAnnotationIds.has(annotation.id),
     onSelectAnnotation: navigateToAnnotation,
   });

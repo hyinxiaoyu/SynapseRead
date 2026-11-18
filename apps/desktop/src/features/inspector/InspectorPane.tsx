@@ -128,6 +128,12 @@ function CardEditor({ card, nodeId }: { card: NoteCard; nodeId: string }) {
       </label>
       <div className="flex flex-col gap-2">
         <h3 className="text-sm font-medium">Excerpts</h3>
+        {excerpts.length === 0 && (
+          <p data-testid="inspector-source-removed" className="text-xs text-muted-foreground">
+            Source removed. The highlight this card came from was deleted; its notes and tags are
+            kept.
+          </p>
+        )}
         {excerpts.map((annotation) => (
           <div key={annotation.id} className="flex items-start gap-1 rounded-md bg-muted p-2">
             {annotation.excerptImagePath ? (

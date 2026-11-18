@@ -13,8 +13,8 @@ use crate::domain::{
     CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document,
     DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode,
     NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout,
-    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, ScrollPageTransition, StudyNotebook,
-    Viewport, WorkspaceSession,
+    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, RestoredAnnotation,
+    ScrollPageTransition, StudyNotebook, Viewport, WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -32,6 +32,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0009_pdf_document_layout.sql"),
     include_str!("../migrations/0010_document_progress.sql"),
     include_str!("../migrations/0011_page_transition_curl.sql"),
+    include_str!("../migrations/0012_annotation_soft_delete.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -62,7 +63,9 @@ impl Database {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut conn)?;
-        Ok(Self { conn, captures })
+        let mut database = Self { conn, captures };
+        database.purge_deleted_annotations()?;
+        Ok(database)
     }
 
     pub fn captures_directory(&self) -> Option<PathBuf> {
@@ -340,7 +343,7 @@ impl Database {
         let notebook = self.get_notebook(notebook_id)?;
 
         let mut statement = self.conn.prepare(&format!(
-            "{ANNOTATION_SELECT} WHERE notebook_id = ?1 ORDER BY created_at, id"
+            "{ANNOTATION_SELECT} WHERE notebook_id = ?1 AND deleted_at IS NULL ORDER BY created_at, id"
         ))?;
         let annotations = statement
             .query_map([notebook_id], map_annotation)?
@@ -636,7 +639,7 @@ impl Database {
                  note = CASE WHEN ?2 THEN ?3 ELSE note END,
                  color = COALESCE(?4, color),
                  style = COALESCE(?5, style)
-             WHERE id = ?1",
+             WHERE id = ?1 AND deleted_at IS NULL",
             params![
                 annotation_id,
                 update_note,
@@ -653,24 +656,77 @@ impl Database {
         )?)
     }
 
-    /// Deletes an annotation and removes its `card_annotations` links (via `ON DELETE CASCADE`).
-    /// Shared `NoteCard`s and `MindMapNode`s remain intact with their titles, notes, and tags;
-    /// their `annotation_ids` list simply no longer includes the deleted annotation.
+    /// Deletes an annotation as the reader sees it. The row, its `card_annotations`
+    /// links, and its capture stay until the next launch, so `restore_annotation`
+    /// can undo this exactly; meanwhile every read skips it, and its cards no
+    /// longer list it. Cards and nodes are never deleted with it.
     pub fn delete_annotation(&mut self, annotation_id: &str) -> CoreResult<()> {
-        let image_path: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT excerpt_image_path FROM annotations WHERE id = ?1",
-                [annotation_id],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or_else(|| not_found("annotation", annotation_id))?;
+        let changed = self.conn.execute(
+            "UPDATE annotations SET deleted_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1 AND deleted_at IS NULL",
+            [annotation_id],
+        )?;
+        expect_changed(changed, "annotation", annotation_id)
+    }
 
-        self.conn
-            .execute("DELETE FROM annotations WHERE id = ?1", [annotation_id])?;
-        if let (Some(path), Some(store)) = (image_path, &self.captures) {
-            store.remove(&path);
+    /// Undoes `delete_annotation`: the annotation returns with its id, capture, and
+    /// card links, and the cards are returned as they now read.
+    pub fn restore_annotation(&mut self, annotation_id: &str) -> CoreResult<RestoredAnnotation> {
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE annotations SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
+            [annotation_id],
+        )?;
+        expect_changed(changed, "deleted annotation", annotation_id)?;
+        let annotation = tx.query_row(
+            &format!("{ANNOTATION_SELECT} WHERE id = ?1"),
+            [annotation_id],
+            map_annotation,
+        )?;
+        let card_ids = {
+            let mut statement = tx.prepare(
+                "SELECT card_id FROM card_annotations WHERE annotation_id = ?1 ORDER BY card_id",
+            )?;
+            statement
+                .query_map([annotation_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        tx.commit()?;
+
+        let cards = card_ids
+            .iter()
+            .map(|card_id| {
+                let card = self.conn.query_row(
+                    &format!("{CARD_SELECT} WHERE id = ?1"),
+                    [card_id],
+                    map_card,
+                )?;
+                self.with_annotation_ids(card)
+            })
+            .collect::<CoreResult<Vec<_>>>()?;
+        Ok(RestoredAnnotation { annotation, cards })
+    }
+
+    /// Removes annotations deleted in an earlier session, with their links and
+    /// captures. Files go only after the rows commit, so a failure never leaves a
+    /// row pointing at a missing capture.
+    fn purge_deleted_annotations(&mut self) -> CoreResult<()> {
+        let tx = self.conn.transaction()?;
+        let image_paths = {
+            let mut statement = tx.prepare(
+                "SELECT excerpt_image_path FROM annotations
+                 WHERE deleted_at IS NOT NULL AND excerpt_image_path IS NOT NULL",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        tx.execute("DELETE FROM annotations WHERE deleted_at IS NOT NULL", [])?;
+        tx.commit()?;
+        if let Some(store) = &self.captures {
+            for path in &image_paths {
+                store.remove(path);
+            }
         }
         Ok(())
     }
@@ -680,7 +736,8 @@ impl Database {
         let stored: Option<String> = self
             .conn
             .query_row(
-                "SELECT excerpt_image_path FROM annotations WHERE id = ?1",
+                "SELECT excerpt_image_path FROM annotations
+                 WHERE id = ?1 AND deleted_at IS NULL",
                 [annotation_id],
                 |row| row.get(0),
             )
@@ -715,7 +772,7 @@ impl Database {
         let mut statement = self.conn.prepare_cached(
             "SELECT ca.annotation_id FROM card_annotations ca
              JOIN annotations a ON a.id = ca.annotation_id
-             WHERE ca.card_id = ?1 ORDER BY a.created_at, a.id",
+             WHERE ca.card_id = ?1 AND a.deleted_at IS NULL ORDER BY a.created_at, a.id",
         )?;
         card.annotation_ids = statement
             .query_map([&card.id], |row| row.get(0))?
@@ -1406,6 +1463,7 @@ mod tests {
                     "created_at",
                     "note",
                     "style",
+                    "deleted_at",
                 ],
             ),
             (
@@ -1807,6 +1865,105 @@ mod tests {
             f.dir.path().join("captures").join(format!("{id}.png"))
         );
         assert!(std::fs::read(path).unwrap().starts_with(b"\x89PNG"));
+    }
+
+    /// Undo Delete must restore exactly what was deleted (#97).
+    #[test]
+    fn a_deleted_capture_excerpt_restores_with_its_id_card_link_and_image() {
+        let mut f = on_disk();
+        let created =
+            f.db.create_excerpt(&capture_input(&f, Some(PNG_BASE64)))
+                .unwrap();
+        let id = created.annotation.id.clone();
+        let path = f.db.capture_path(&id).unwrap().unwrap();
+
+        f.db.delete_annotation(&id).unwrap();
+        let graph = f.db.load_notebook_graph(&f.notebook_id).unwrap();
+        assert!(graph.annotations.is_empty());
+        assert_eq!(graph.cards.len(), 1, "the card is never deleted with it");
+        assert!(graph.cards[0].annotation_ids.is_empty());
+        assert_eq!(graph.nodes.len(), 1);
+        assert!(path.exists(), "the capture is kept for Undo");
+
+        let restored = f.db.restore_annotation(&id).unwrap();
+        assert_eq!(restored.annotation, created.annotation);
+        assert_eq!(restored.cards, vec![created.card.clone()]);
+        assert_eq!(f.db.capture_path(&id).unwrap(), Some(path.clone()));
+        assert!(std::fs::read(&path).unwrap().starts_with(b"\x89PNG"));
+
+        let graph = f.db.load_notebook_graph(&f.notebook_id).unwrap();
+        assert_eq!(graph.annotations, vec![created.annotation]);
+        assert_eq!(graph.cards, vec![created.card]);
+    }
+
+    #[test]
+    fn a_deleted_annotation_is_gone_to_every_read_until_restored() {
+        let mut f = on_disk();
+        let created =
+            f.db.create_excerpt(&capture_input(&f, Some(PNG_BASE64)))
+                .unwrap();
+        let id = created.annotation.id.clone();
+        let not_found = |result: CoreResult<_>| matches!(result, Err(CoreError::NotFound { .. }));
+
+        assert!(not_found(f.db.restore_annotation(&id).map(|_| ())));
+        f.db.delete_annotation(&id).unwrap();
+        assert!(not_found(f.db.delete_annotation(&id)));
+        assert!(not_found(f.db.capture_path(&id).map(|_| ())));
+        let patch = AnnotationPatch {
+            note: Some("late".to_owned()),
+            color: None,
+            style: None,
+        };
+        assert!(not_found(f.db.update_annotation(&id, &patch).map(|_| ())));
+        let card =
+            f.db.update_card(
+                &created.card.id,
+                &CardPatch {
+                    title: Some("Renamed".to_owned()),
+                    markdown_notes: None,
+                    tags: None,
+                },
+            )
+            .unwrap();
+        assert!(card.annotation_ids.is_empty());
+
+        f.db.restore_annotation(&id).unwrap();
+        assert!(not_found(f.db.restore_annotation(&id).map(|_| ())));
+        assert_eq!(
+            f.db.update_annotation(&id, &patch).unwrap().note.as_deref(),
+            Some("late")
+        );
+    }
+
+    /// Undo history is in memory, so a delete becomes final on the next launch.
+    #[test]
+    fn reopening_purges_deleted_annotations_their_links_and_captures() {
+        let mut f = on_disk();
+        let deleted =
+            f.db.create_excerpt(&capture_input(&f, Some(PNG_BASE64)))
+                .unwrap();
+        let kept =
+            f.db.create_excerpt(&capture_input(&f, Some(PNG_BASE64)))
+                .unwrap();
+        f.db.delete_annotation(&deleted.annotation.id).unwrap();
+        assert_eq!(capture_files(&f), 2);
+
+        let db = Database::open(&f.dir.path().join("app.sqlite3")).unwrap();
+        assert_eq!(count(&db, "annotations"), 1);
+        assert_eq!(count(&db, "card_annotations"), 1);
+        assert_eq!(count(&db, "note_cards"), 2, "cards outlive their source");
+        assert_eq!(capture_files(&f), 1);
+        assert!(
+            db.capture_path(&kept.annotation.id)
+                .unwrap()
+                .unwrap()
+                .exists()
+        );
+        f.db = db;
+        assert!(matches!(
+            f.db.restore_annotation(&deleted.annotation.id),
+            Err(CoreError::NotFound { .. })
+        ));
     }
 
     #[test]

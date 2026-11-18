@@ -9,6 +9,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { commandDefinition, formatShortcut } from '@/features/commands/commands';
+import { CardSourceDeleteConfirm } from '@/features/reader/CardSourceDeleteConfirm';
 import {
   formatShortDate,
   NavigatorEmptyState,
@@ -83,6 +84,8 @@ export interface AnnotationsController {
   deleteAnnotation: (annotationId: string) => void;
   undoDelete: () => void;
   isAnnotationStale: (annotation: Annotation) => boolean;
+  /** The annotation is a MindMap card's source, so deleting it asks first. */
+  isCardSource?: (annotationId: string) => boolean;
 }
 
 export interface UseAnnotationsOptions {
@@ -94,6 +97,7 @@ export interface UseAnnotationsOptions {
   onDeleteAnnotation?: ((annotationId: string) => void) | undefined;
   canUndoAnnotationDelete?: boolean | undefined;
   onUndoAnnotationDelete?: (() => void) | undefined;
+  cardSourceAnnotationIds?: ReadonlySet<string> | undefined;
   isStaleAnnotation?: (annotation: Annotation) => boolean;
   onSelectAnnotation: (annotation: Annotation) => void;
 }
@@ -107,6 +111,7 @@ export function useAnnotationsController({
   onDeleteAnnotation,
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
+  cardSourceAnnotationIds,
   isStaleAnnotation,
   onSelectAnnotation,
 }: UseAnnotationsOptions): AnnotationsController {
@@ -233,6 +238,7 @@ export function useAnnotationsController({
     deleteAnnotation,
     undoDelete,
     isAnnotationStale: (annotation) => (isStaleAnnotation ? isStaleAnnotation(annotation) : false),
+    isCardSource: (annotationId) => cardSourceAnnotationIds?.has(annotationId) ?? false,
   };
 }
 
@@ -307,6 +313,9 @@ function AnnotationRow({
   onSelect,
   onUpdate,
   onDelete,
+  confirmingDelete,
+  onConfirmDelete,
+  onCancelDelete,
 }: {
   annotation: Annotation;
   locationLabel: string;
@@ -318,8 +327,13 @@ function AnnotationRow({
   onSelect: () => void;
   onUpdate: (patch: AnnotationPatch) => void;
   onDelete: (from: HTMLElement) => void;
+  /** Deleting this card's source is waiting for the reader to confirm. */
+  confirmingDelete: boolean;
+  onConfirmDelete: (from: HTMLElement) => void;
+  onCancelDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const rowRef = useRef<HTMLLIElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [clamped, setClamped] = useState(false);
   const [noteDraft, setNoteDraft] = useState(annotation.note ?? '');
@@ -369,6 +383,7 @@ function AnnotationRow({
 
   return (
     <li
+      ref={rowRef}
       data-testid="annotation-item"
       data-expanded={expanded ? 'true' : undefined}
       className="group/row flex flex-col"
@@ -495,6 +510,21 @@ function AnnotationRow({
           />
         </div>
       </div>
+      {confirmingDelete && (
+        <CardSourceDeleteConfirm
+          className="mb-1 ml-6 pr-1"
+          onCancel={() => {
+            onCancelDelete();
+            rowRef.current
+              ?.querySelector<HTMLElement>('[data-testid="annotation-jump-button"]')
+              ?.focus();
+          }}
+          onConfirm={() => {
+            const row = rowRef.current;
+            if (row) onConfirmDelete(row);
+          }}
+        />
+      )}
       {editing && (
         <div className="mb-1 ml-6 flex flex-col gap-1 pr-1">
           <div role="group" aria-label="Change highlight color" className="flex items-center">
@@ -648,6 +678,8 @@ export function AnnotationsList({
   onDeleted?: () => void;
 }) {
   const [filters, setFilters] = useState<AnnotationFilters>(NO_FILTERS);
+  /** The card-source row whose delete is waiting for the reader to confirm it. */
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   const placed = filterAnnotations(controller.annotations, filter, filters)
     .map((annotation, index) => ({
       annotation,
@@ -709,8 +741,16 @@ export function AnnotationsList({
             placement.group !== undefined && placed[index - 1]?.placement.group !== placement.group;
           const remove = (from: HTMLElement) => {
             roving.refocusAfterRemoval(from, index);
+            setConfirmingDeleteId(null);
             controller.deleteAnnotation(annotation.id);
             onDeleted?.();
+          };
+          const requestRemove = (from: HTMLElement) => {
+            if (controller.isCardSource?.(annotation.id) && confirmingDeleteId !== annotation.id) {
+              setConfirmingDeleteId(annotation.id);
+              return;
+            }
+            remove(from);
           };
           return (
             <Fragment key={annotation.id}>
@@ -726,7 +766,11 @@ export function AnnotationsList({
               <AnnotationRow
                 annotation={annotation}
                 locationLabel={placement.label ?? formatAnnotationLocation(annotation)}
-                linkedToCard={linkedAnnotationIds?.has(annotation.id) ?? false}
+                linkedToCard={
+                  linkedAnnotationIds?.has(annotation.id) ??
+                  controller.isCardSource?.(annotation.id) ??
+                  false
+                }
                 stale={controller.isAnnotationStale(annotation)}
                 tabIndex={roving.tabIndexFor(index)}
                 onFocus={() => roving.onRowFocus(index)}
@@ -734,12 +778,15 @@ export function AnnotationsList({
                   if (roving.onRowKeyDown(event, index)) return;
                   if (isDeleteKey(event)) {
                     event.preventDefault();
-                    remove(event.currentTarget);
+                    requestRemove(event.currentTarget);
                   }
                 }}
                 onSelect={() => controller.selectAnnotation(annotation)}
                 onUpdate={(patch) => controller.updateAnnotation(annotation.id, patch)}
-                onDelete={remove}
+                onDelete={requestRemove}
+                confirmingDelete={confirmingDeleteId === annotation.id}
+                onConfirmDelete={remove}
+                onCancelDelete={() => setConfirmingDeleteId(null)}
               />
             </Fragment>
           );

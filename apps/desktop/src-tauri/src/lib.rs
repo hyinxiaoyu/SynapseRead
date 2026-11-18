@@ -29,6 +29,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::create_annotation,
         commands::db::update_annotation,
         commands::db::delete_annotation,
+        commands::db::restore_annotation,
         commands::db::capture_path,
         commands::db::update_card,
         commands::db::update_node_layout,
