@@ -94,7 +94,18 @@ export interface StudySyncState {
   /** Reader -> MindMap: what the reader currently has selected. */
   selection: ReaderSelection | null;
   isExcerpting: boolean;
+  /** The card highlighted on the canvas and shown in the inspector. */
   selectedNodeId: string | null;
+  /**
+   * The card the next excerpt nests under. Only the reader sets it, by selecting a
+   * card on the canvas: the card an excerpt selects is not a choice they made, so
+   * consecutive excerpts stay separate roots instead of chaining (#96).
+   */
+  nestingTargetNodeId: string | null;
+  /** Store -> MindMap: a card to bring into view once the canvas is showing. */
+  revealRequest: RevealRequest | null;
+  /** Monotonic count of successful excerpts, so announcements fire even back-to-back. */
+  excerptNonce: number;
   /** MindMap -> Reader: the jump the reader for that document should perform. */
   jumpRequest: JumpRequest | null;
 
@@ -138,7 +149,11 @@ export interface StudySyncState {
   jumpToNode(nodeId: string, annotationId?: string): void;
   completeJump(nonce: number): void;
 
+  /** The reader's own selection on the canvas; it also sets the nesting target. */
   selectNode(nodeId: string | null): void;
+  /** Selects a card without making it the nesting target, and asks the canvas to show it. */
+  revealNode(nodeId: string): void;
+  completeReveal(nonce: number): void;
   /** Updates position in memory only: called for every frame of a drag. */
   dragNode(nodeId: string, posX: number, posY: number): void;
   /** Persists the node's current layout: called when a drag ends. */
@@ -157,6 +172,11 @@ export interface StudySyncState {
   removeBookmark(bookmarkId: string): Promise<void>;
   toggleBookmark(documentId: string, anchor: AnchorLocation, label?: string): Promise<void>;
   jumpToBookmark(bookmarkId: string): void;
+}
+
+export interface RevealRequest {
+  nonce: number;
+  nodeId: string;
 }
 
 /** Children stack to the right of their parent; roots cascade from the origin. */
@@ -241,6 +261,7 @@ export function selectReopenableDocumentId(
  */
 export function createStudySyncStore(backend: StudyBackend) {
   let jumpNonce = 0;
+  let revealNonce = 0;
   let preferencesSaveSeq = 0;
   let preferencesWriteChain: Promise<void> = Promise.resolve();
 
@@ -412,6 +433,9 @@ export function createStudySyncStore(backend: StudyBackend) {
       selection: null,
       isExcerpting: false,
       selectedNodeId: null,
+      nestingTargetNodeId: null,
+      revealRequest: null,
+      excerptNonce: 0,
       jumpRequest: null,
 
       async initialize() {
@@ -626,10 +650,13 @@ export function createStudySyncStore(backend: StudyBackend) {
       setSelection: (selection) => set({ selection }),
 
       async excerptSelection() {
-        const { selection, notebook, isExcerpting, selectedNodeId, nodes } = get();
+        const { selection, notebook, isExcerpting, nestingTargetNodeId, nodes } = get();
         if (!selection || !notebook || isExcerpting) return;
 
-        const position = nextNodePosition(nodes, selectedNodeId);
+        const parentNodeId = nodes.some((node) => node.id === nestingTargetNodeId)
+          ? nestingTargetNodeId
+          : null;
+        const position = nextNodePosition(nodes, parentNodeId);
         set({ isExcerpting: true });
         try {
           const created = await backend.createExcerpt({
@@ -639,7 +666,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             excerptText: selection.text,
             excerptImagePng: selection.imagePng,
             color: DEFAULT_EXCERPT_COLOR,
-            parentNodeId: selectedNodeId,
+            parentNodeId,
             posX: position.x,
             posY: position.y,
           });
@@ -651,9 +678,12 @@ export function createStudySyncStore(backend: StudyBackend) {
             nodes: [...state.nodes, created.node],
             edges: created.edge ? [...state.edges, created.edge] : state.edges,
             selection: state.selection === selection ? null : state.selection,
-            selectedNodeId: created.node.id,
             isExcerpting: false,
+            excerptNonce: state.excerptNonce + 1,
           }));
+          // The new card is selected and shown so it can be found, but the
+          // nesting target stays whatever the reader chose.
+          get().revealNode(created.node.id);
         } catch (error) {
           // The selection stays so the user can retry.
           set({ isExcerpting: false, error: describeError(error) });
@@ -826,7 +856,17 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().jumpRequest?.nonce === nonce) set({ jumpRequest: null });
       },
 
-      selectNode: (selectedNodeId) => set({ selectedNodeId }),
+      selectNode: (nodeId) => set({ selectedNodeId: nodeId, nestingTargetNodeId: nodeId }),
+
+      revealNode(nodeId) {
+        revealNonce += 1;
+        set({ selectedNodeId: nodeId, revealRequest: { nonce: revealNonce, nodeId } });
+      },
+
+      completeReveal(nonce) {
+        // A newer reveal may already be pending; never clear that one.
+        if (get().revealRequest?.nonce === nonce) set({ revealRequest: null });
+      },
 
       dragNode(nodeId, posX, posY) {
         set((state) => ({

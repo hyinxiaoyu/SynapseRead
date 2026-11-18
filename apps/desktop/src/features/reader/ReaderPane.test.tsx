@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { commandState, forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
 import { useFocusPageOnActivate } from '@/features/reader/focusPage';
+import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { DocumentViewerProps } from '@/types/domain';
 
@@ -13,10 +14,22 @@ import { describeResumeLocation, ReaderPane } from './ReaderPane';
  * These tests are about the tab commands, so a small stand-in fulfils the viewer
  * contract; each real engine has its own tests.
  */
-function FakeViewer({ document, isActive }: DocumentViewerProps) {
+function FakeViewer({ document, isActive, chromeHidden }: DocumentViewerProps) {
   const pageRef = useRef<HTMLDivElement>(null);
   useFocusPageOnActivate(pageRef, isActive);
-  return <div ref={pageRef} data-testid={`fake-viewer-${document.id}`} tabIndex={-1} />;
+  return (
+    <div ref={pageRef} data-testid={`fake-viewer-${document.id}`} tabIndex={-1}>
+      <ReaderPopoverLayer hidden={Boolean(chromeHidden)}>
+        <ReaderNotice
+          tone="warning"
+          testId={`viewer-warning-${document.id}`}
+          onDismiss={() => undefined}
+        >
+          Warning for {document.title}
+        </ReaderNotice>
+      </ReaderPopoverLayer>
+    </div>
+  );
 }
 
 vi.mock('@/features/reader/viewerRegistry', () => ({
@@ -257,6 +270,31 @@ describe('ReaderPane tab commands', () => {
 
     press('t', 'KeyT', { metaKey: true, shiftKey: true });
     await waitFor(() => expect(store().openDocumentIds).toEqual([first, second]));
+  });
+
+  it('stacks workspace notices into the active viewer popover layer and follows tab switches', async () => {
+    await openDocuments(['a.txt', 'b.txt']);
+    const store = useStudySyncStore.getState;
+    const [first, second] = store().openDocumentIds;
+    render(
+      <ReaderPane
+        notice={
+          <ReaderNotice tone="info" testId="excerpt-added-notice" onDismiss={() => undefined}>
+            Added to MindMap
+          </ReaderNotice>
+        }
+      />,
+    );
+
+    const excerptNotice = screen.getByTestId('excerpt-added-notice');
+    const secondWarning = screen.getByTestId(`viewer-warning-${second}`);
+    expect(excerptNotice.parentElement).toBe(secondWarning.parentElement);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'a' }));
+    const firstWarning = screen.getByTestId(`viewer-warning-${first}`);
+    expect(screen.getByTestId('excerpt-added-notice').parentElement).toBe(
+      firstWarning.parentElement,
+    );
   });
 });
 
