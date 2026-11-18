@@ -1,7 +1,8 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { createRef, useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
+import { dispatchEscape } from '@/features/commands/escape';
 import { useAnnotationsController } from '@/features/reader/AnnotationsPanel';
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import type { SelectionPopoverController } from '@/features/reader/markup/useSelectionPopover';
@@ -90,6 +91,7 @@ function HighlightHarness({
   dismiss: () => void;
 }) {
   const boundsRef = createRef<HTMLDivElement>();
+  const [noteOpen, setNoteOpen] = useState(false);
   const annotations = useAnnotationsController({
     documentId: 'doc-1',
     annotations: [highlight],
@@ -100,12 +102,12 @@ function HighlightHarness({
   const popover: SelectionPopoverController = {
     target: { kind: 'annotation', annotationId: highlight.id, rect: null },
     focusRequest: 0,
-    noteOpen: false,
+    noteOpen,
     selectionRect: () => null,
     openForAnnotation: vi.fn(),
     showFromKeyboard: vi.fn(),
-    openNote: vi.fn(),
-    closeNote: vi.fn(),
+    openNote: () => setNoteOpen(true),
+    closeNote: () => setNoteOpen(false),
     dismiss,
     reportPointer: vi.fn(),
   };
@@ -147,6 +149,15 @@ describe('SelectionPopover Delete Highlight', () => {
     expect(confirm).toHaveFocus();
     expect(confirm).toHaveAccessibleDescription(/source of a MindMap card/);
 
+    // Clicking the toolbar delete button again cannot bypass the confirmation.
+    const deleteButton = screen.getByTestId('popover-delete');
+    deleteButton.focus();
+    fireEvent.click(deleteButton);
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(dismiss).not.toHaveBeenCalled();
+    expect(confirm).toBeInTheDocument();
+    expect(confirm).toHaveFocus();
+
     fireEvent.click(confirm);
     expect(onDelete).toHaveBeenCalledWith(highlight.id);
     expect(dismiss).toHaveBeenCalled();
@@ -168,5 +179,56 @@ describe('SelectionPopover Delete Highlight', () => {
     // Esc took back the question only; the popover is still open.
     expect(dismiss).not.toHaveBeenCalled();
     expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it('cancels delete confirmation on Esc even when focus is on the toolbar or outside the popover', () => {
+    const onDelete = vi.fn();
+    const dismiss = vi.fn();
+    render(<HighlightHarness cardSource onDelete={onDelete} dismiss={dismiss} />);
+
+    // Focus moved back to a toolbar button (e.g. Shift+Tab).
+    fireEvent.click(screen.getByTestId('popover-delete'));
+    const colorButton = screen.getByTestId('popover-color-yellow');
+    colorButton.focus();
+    fireEvent.keyDown(colorButton, { key: 'Escape' });
+    expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
+    expect(screen.getByTestId('popover-delete')).toHaveFocus();
+    expect(dismiss).not.toHaveBeenCalled();
+
+    // Focus outside the popover (e.g. reader page or EPUB iframe forwarding Escape).
+    fireEvent.click(screen.getByTestId('popover-delete'));
+    act(() => {
+      expect(
+        dispatchEscape(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })),
+      ).toBe(true);
+    });
+    expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
+    expect(dismiss).not.toHaveBeenCalled();
+
+    // A second Esc closes the popover.
+    act(() => {
+      expect(
+        dispatchEscape(new KeyboardEvent('keydown', { key: 'Escape', cancelable: true })),
+      ).toBe(true);
+    });
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it('closes delete confirmation when opening the note editor, and vice versa', () => {
+    const onDelete = vi.fn();
+    const dismiss = vi.fn();
+    render(<HighlightHarness cardSource onDelete={onDelete} dismiss={dismiss} />);
+
+    fireEvent.click(screen.getByTestId('popover-delete'));
+    expect(screen.getByTestId('card-source-delete-confirm')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('popover-note'));
+    expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
+    expect(screen.getByTestId('popover-note-input').closest('[inert]')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('popover-delete'));
+    expect(screen.getByTestId('popover-note-input').closest('[inert]')).not.toBeNull();
+    expect(screen.getByTestId('card-source-delete-confirm')).toBeInTheDocument();
   });
 });

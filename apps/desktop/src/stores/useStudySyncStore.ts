@@ -729,12 +729,16 @@ export function createStudySyncStore(backend: StudyBackend) {
       async removeAnnotation(annotationId) {
         const removed = get().annotations.find((annotation) => annotation.id === annotationId);
         if (!removed) return;
-        const previousCards = get().cards;
+        const removedFromCards = new Map(
+          get()
+            .cards.filter((card) => card.annotationIds.includes(annotationId))
+            .map((card) => [card.id, card.annotationIds.indexOf(annotationId)]),
+        );
         set((state) => ({
           annotations: state.annotations.filter((annotation) => annotation.id !== annotationId),
           deletedAnnotationHistory: [...state.deletedAnnotationHistory, { annotation: removed }],
           cards: state.cards.map((card) =>
-            card.annotationIds.includes(annotationId)
+            removedFromCards.has(card.id)
               ? {
                   ...card,
                   annotationIds: card.annotationIds.filter((id) => id !== annotationId),
@@ -750,7 +754,13 @@ export function createStudySyncStore(backend: StudyBackend) {
               deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
                 (entry) => entry.annotation.id !== removed.id,
               ),
-              cards: previousCards,
+              cards: state.cards.map((card) => {
+                const index = removedFromCards.get(card.id);
+                if (index === undefined || card.annotationIds.includes(annotationId)) return card;
+                const annotationIds = [...card.annotationIds];
+                annotationIds.splice(Math.min(index, annotationIds.length), 0, annotationId);
+                return { ...card, annotationIds };
+              }),
             })),
         );
         pendingDeletes.set(annotationId, deleting);
@@ -779,7 +789,10 @@ export function createStudySyncStore(backend: StudyBackend) {
             const restoredCards = new Map(result.cards.map((card) => [card.id, card]));
             set((state) => ({
               annotations: [...state.annotations, result.annotation],
-              cards: state.cards.map((card) => restoredCards.get(card.id) ?? card),
+              cards: state.cards.map((card) => {
+                const restoredCard = restoredCards.get(card.id);
+                return restoredCard ? { ...card, annotationIds: restoredCard.annotationIds } : card;
+              }),
             }));
           },
           () =>
@@ -903,8 +916,14 @@ export function createStudySyncStore(backend: StudyBackend) {
       async updateCard(cardId, patch) {
         await guarded(async () => {
           const card = await backend.updateCard(cardId, patch);
+          // CardPatch never edits annotationIds; keeping the store's links avoids
+          // clobbering concurrent delete/restore updates with an older snapshot (#97).
           set((state) => ({
-            cards: state.cards.map((candidate) => (candidate.id === cardId ? card : candidate)),
+            cards: state.cards.map((candidate) =>
+              candidate.id === cardId
+                ? { ...card, annotationIds: candidate.annotationIds }
+                : candidate,
+            ),
           }));
         });
       },

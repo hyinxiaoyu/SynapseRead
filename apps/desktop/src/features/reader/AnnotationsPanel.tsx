@@ -690,6 +690,12 @@ export function AnnotationsList({
         a.placement.order - b.placement.order ||
         (compareWithinOrder?.(a.annotation, b.annotation) ?? 0),
     );
+  if (
+    confirmingDeleteId !== null &&
+    !placed.some(({ annotation }) => annotation.id === confirmingDeleteId)
+  ) {
+    setConfirmingDeleteId(null);
+  }
   const roving = useRovingList(placed.length);
   const filtering = filters.colors.size > 0 || filters.noteOnly;
 
@@ -746,8 +752,12 @@ export function AnnotationsList({
             onDeleted?.();
           };
           const requestRemove = (from: HTMLElement) => {
-            if (controller.isCardSource?.(annotation.id) && confirmingDeleteId !== annotation.id) {
+            if (controller.isCardSource?.(annotation.id)) {
               setConfirmingDeleteId(annotation.id);
+              from
+                .closest('[data-testid="annotation-item"]')
+                ?.querySelector<HTMLElement>('[data-testid="card-source-delete-confirm-button"]')
+                ?.focus();
               return;
             }
             remove(from);

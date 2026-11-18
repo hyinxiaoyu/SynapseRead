@@ -211,13 +211,18 @@ export function SelectionPopover({
 
   // Deleting a card's source asks first; the question goes with the popover.
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<string | null>(null);
-  if (!editing && confirmDeleteFor !== null) setConfirmDeleteFor(null);
+  if ((!editing || popover.noteOpen) && confirmDeleteFor !== null) setConfirmDeleteFor(null);
   const confirmingDelete = editing && confirmDeleteFor === annotation.id;
   const noteValue = editing ? editNote : annotations.draftNote;
 
+  const cancelDelete = () => {
+    setConfirmDeleteFor(null);
+    rootRef.current?.querySelector<HTMLElement>('[data-testid="popover-delete"]')?.focus();
+  };
+
   // Esc from the page, or forwarded from an EPUB chapter, while focus is not in
-  // the popover: the note closes first, then the popover. Inside the popover its
-  // own key handler does the same.
+  // the popover: the note or delete confirmation closes first, then the popover.
+  // Inside the popover its own key handler does the same.
   const { closeNote } = popover;
   useEscapeLayer(
     ESCAPE_LAYER.noteField,
@@ -232,6 +237,10 @@ export function SelectionPopover({
     ESCAPE_LAYER.selectionPopover,
     shown
       ? () => {
+          if (confirmingDelete) {
+            setConfirmDeleteFor(null);
+            return true;
+          }
           dismiss();
           onReturnFocus();
           return true;
@@ -253,6 +262,10 @@ export function SelectionPopover({
       if (popover.noteOpen) {
         popover.closeNote();
         rootRef.current?.querySelector<HTMLElement>('[data-testid="popover-note"]')?.focus();
+        return;
+      }
+      if (confirmingDelete) {
+        cancelDelete();
         return;
       }
       close();
@@ -415,8 +428,12 @@ export function SelectionPopover({
             label="Delete Highlight"
             testId="popover-delete"
             onClick={() => {
-              if (annotations.isCardSource?.(annotation.id) && !confirmingDelete) {
+              if (annotations.isCardSource?.(annotation.id)) {
+                if (popover.noteOpen) popover.closeNote();
                 setConfirmDeleteFor(annotation.id);
+                rootRef.current
+                  ?.querySelector<HTMLElement>('[data-testid="card-source-delete-confirm-button"]')
+                  ?.focus();
                 return;
               }
               annotations.deleteAnnotation(annotation.id);
@@ -429,10 +446,7 @@ export function SelectionPopover({
         <CardSourceDeleteConfirm
           className="px-2 pt-1.5 pb-1"
           keepSelection={keepSelection}
-          onCancel={() => {
-            setConfirmDeleteFor(null);
-            rootRef.current?.querySelector<HTMLElement>('[data-testid="popover-delete"]')?.focus();
-          }}
+          onCancel={cancelDelete}
           onConfirm={() => {
             annotations.deleteAnnotation(annotation.id);
             close();

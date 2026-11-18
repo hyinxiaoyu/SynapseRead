@@ -958,6 +958,76 @@ describe('useStudySyncStore', () => {
       expect(state().annotations.map((annotation) => annotation.id)).toEqual([annotationId]);
       expect(state().cards[0]?.annotationIds).toEqual([annotationId]);
     });
+
+    it('keeps restored card links when an in-flight card edit finishes after Undo', async () => {
+      const documentId = await openDocument();
+      select(documentId, 'card source');
+      await state().excerptSelection();
+      const cardId = state().cards[0]?.id as string;
+      const annotationId = state().cards[0]?.annotationIds[0] as string;
+
+      await state().removeAnnotation(annotationId);
+      expect(state().cards[0]?.annotationIds).toEqual([]);
+
+      let finishCardUpdate = () => {};
+      const realUpdateCard = backend.updateCard.bind(backend);
+      vi.spyOn(backend, 'updateCard').mockImplementation(
+        (id, patch) =>
+          new Promise((resolve, reject) => {
+            // Execute against backend now (while annotation is still soft-deleted so the
+            // returned card has `annotationIds: []`), then delay delivery until after Undo.
+            const pending = realUpdateCard(id, patch);
+            finishCardUpdate = () => void pending.then(resolve, reject);
+          }),
+      );
+
+      const updating = state().updateCard(cardId, {
+        title: 'Renamed while deleted',
+        markdownNotes: null,
+        tags: null,
+      });
+      await state().undoRemoveAnnotation();
+      expect(state().cards[0]?.annotationIds).toEqual([annotationId]);
+
+      finishCardUpdate();
+      await updating;
+      expect(state().cards[0]).toMatchObject({
+        id: cardId,
+        title: 'Renamed while deleted',
+        annotationIds: [annotationId],
+      });
+    });
+
+    it('preserves concurrent card edits when a failed delete rolls back', async () => {
+      const documentId = await openDocument();
+      select(documentId, 'card source');
+      await state().excerptSelection();
+      const cardId = state().cards[0]?.id as string;
+      const annotationId = state().cards[0]?.annotationIds[0] as string;
+
+      let rejectDelete: (error: Error) => void = () => {};
+      vi.spyOn(backend, 'deleteAnnotation').mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectDelete = reject;
+          }),
+      );
+
+      const removing = state().removeAnnotation(annotationId);
+      await state().updateCard(cardId, {
+        title: 'Edited during delete',
+        markdownNotes: null,
+        tags: null,
+      });
+      rejectDelete(new Error('disk full'));
+      await removing;
+
+      expect(state().cards[0]).toMatchObject({
+        id: cardId,
+        title: 'Edited during delete',
+        annotationIds: [annotationId],
+      });
+    });
   });
 
   describe('recent documents and workspace session restoration', () => {

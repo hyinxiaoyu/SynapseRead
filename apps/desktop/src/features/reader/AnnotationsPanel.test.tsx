@@ -386,6 +386,12 @@ describe('AnnotationsList card sources', () => {
     expect(controller.deleteAnnotation).not.toHaveBeenCalled();
     expect(within(row()).getByTestId('card-source-delete-confirm-button')).toHaveFocus();
 
+    // Clicking the row's delete button or pressing Delete again cannot bypass confirmation.
+    fireEvent.click(within(row()).getByTestId('annotation-delete-button'));
+    fireEvent.keyDown(within(row()).getByTestId('annotation-jump-button'), { key: 'Backspace' });
+    expect(controller.deleteAnnotation).not.toHaveBeenCalled();
+    expect(within(row()).getByTestId('card-source-delete-confirm-button')).toHaveFocus();
+
     fireEvent.click(within(row()).getByTestId('card-source-delete-cancel'));
     expect(within(row()).queryByTestId('card-source-delete-confirm')).toBeNull();
     expect(within(row()).getByTestId('annotation-jump-button')).toHaveFocus();
@@ -400,5 +406,26 @@ describe('AnnotationsList card sources', () => {
     fireEvent.keyDown(within(row()).getByTestId('annotation-jump-button'), { key: 'Delete' });
     fireEvent.click(within(row()).getByTestId('card-source-delete-confirm-button'));
     expect(controller.deleteAnnotation).toHaveBeenCalledWith('a');
+  });
+
+  it('clears pending delete confirmation when filtering hides the row', () => {
+    const controller = controllerFor(
+      [
+        annotation('a', { excerptText: 'alpha passage' }),
+        annotation('b', { excerptText: 'beta passage' }),
+      ],
+      { isCardSource: (annotationId) => annotationId === 'a' },
+    );
+    const { rerender } = render(<AnnotationsList controller={controller} filter="" />);
+
+    const firstRow = () => screen.getAllByTestId('annotation-item')[0] as HTMLElement;
+    fireEvent.click(within(firstRow()).getByTestId('annotation-delete-button'));
+    expect(within(firstRow()).getByTestId('card-source-delete-confirm')).toBeVisible();
+
+    rerender(<AnnotationsList controller={controller} filter="beta" />);
+    expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
+
+    rerender(<AnnotationsList controller={controller} filter="" />);
+    expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
   });
 });

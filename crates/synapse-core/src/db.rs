@@ -42,6 +42,29 @@ pub struct Database {
     conn: Connection,
     /// `None` only for a purely in-memory database, which has no data directory.
     captures: Option<CaptureStore>,
+    /// Shared advisory lock held while this connection is alive so a concurrent
+    /// `Database::open` does not purge pending Undo rows or captures under it.
+    _session_lock: Option<std::fs::File>,
+}
+
+fn acquire_session_lock(path: &Path) -> CoreResult<(std::fs::File, bool)> {
+    let mut lock_os = path.as_os_str().to_os_string();
+    lock_os.push(".session.lock");
+    let lock_path = PathBuf::from(lock_os);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    match file.try_lock() {
+        Ok(()) => Ok((file, true)),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            file.lock_shared()?;
+            Ok((file, false))
+        }
+        Err(std::fs::TryLockError::Error(err)) => Err(err.into()),
+    }
 }
 
 impl Database {
@@ -49,22 +72,40 @@ impl Database {
     /// Captures are stored next to the database file.
     pub fn open(path: &Path) -> CoreResult<Self> {
         let captures = path.parent().map(CaptureStore::new);
-        Self::init(Connection::open(path)?, captures)
+        let conn = Connection::open(path)?;
+        let (session_lock, is_sole_connection) = acquire_session_lock(path)?;
+        let database = Self::init(conn, captures, Some(session_lock), is_sole_connection)?;
+        if is_sole_connection && let Some(lock) = &database._session_lock {
+            lock.unlock()?;
+            lock.lock_shared()?;
+        }
+        Ok(database)
     }
 
     pub fn open_in_memory() -> CoreResult<Self> {
-        Self::init(Connection::open_in_memory()?, None)
+        Self::init(Connection::open_in_memory()?, None, None, true)
     }
 
-    fn init(mut conn: Connection, captures: Option<CaptureStore>) -> CoreResult<Self> {
+    fn init(
+        mut conn: Connection,
+        captures: Option<CaptureStore>,
+        session_lock: Option<std::fs::File>,
+        is_sole_connection: bool,
+    ) -> CoreResult<Self> {
         // foreign_keys is per-connection and off by default in SQLite.
         conn.pragma_update(None, "foreign_keys", true)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&mut conn)?;
-        let mut database = Self { conn, captures };
-        database.purge_deleted_annotations()?;
+        let mut database = Self {
+            conn,
+            captures,
+            _session_lock: session_lock,
+        };
+        if is_sole_connection {
+            database.purge_deleted_annotations()?;
+        }
         Ok(database)
     }
 
@@ -1948,6 +1989,8 @@ mod tests {
         f.db.delete_annotation(&deleted.annotation.id).unwrap();
         assert_eq!(capture_files(&f), 2);
 
+        // Close the first session before relaunching so the session lock is released.
+        f.db = Database::open_in_memory().unwrap();
         let db = Database::open(&f.dir.path().join("app.sqlite3")).unwrap();
         assert_eq!(count(&db, "annotations"), 1);
         assert_eq!(count(&db, "card_annotations"), 1);
@@ -1964,6 +2007,30 @@ mod tests {
             f.db.restore_annotation(&deleted.annotation.id),
             Err(CoreError::NotFound { .. })
         ));
+    }
+
+    #[test]
+    fn opening_a_second_connection_while_live_keeps_pending_undo_and_captures() {
+        let mut f = on_disk();
+        let deleted =
+            f.db.create_excerpt(&capture_input(&f, Some(PNG_BASE64)))
+                .unwrap();
+        f.db.delete_annotation(&deleted.annotation.id).unwrap();
+        assert_eq!(capture_files(&f), 1);
+
+        let second = Database::open(&f.dir.path().join("app.sqlite3")).unwrap();
+        assert_eq!(count(&second, "annotations"), 1);
+        assert_eq!(capture_files(&f), 1);
+
+        let restored = f.db.restore_annotation(&deleted.annotation.id).unwrap();
+        assert_eq!(restored.annotation, deleted.annotation);
+        assert_eq!(restored.cards, vec![deleted.card]);
+        assert!(
+            f.db.capture_path(&deleted.annotation.id)
+                .unwrap()
+                .unwrap()
+                .exists()
+        );
     }
 
     #[test]
@@ -2251,6 +2318,7 @@ mod tests {
         let db = Database {
             conn,
             captures: None,
+            _session_lock: None,
         };
 
         assert_eq!(
@@ -2430,6 +2498,7 @@ mod tests {
             let db = Database {
                 conn,
                 captures: None,
+                _session_lock: None,
             };
 
             let prefs = db.get_reading_preferences().unwrap();
@@ -2664,6 +2733,7 @@ mod tests {
         let db = Database {
             conn,
             captures: None,
+            _session_lock: None,
         };
         // Registered as the version 8 schema stores it: today's registration
         // would select columns that schema does not have yet.
@@ -2680,6 +2750,7 @@ mod tests {
         let db = Database {
             conn,
             captures: None,
+            _session_lock: None,
         };
 
         assert_eq!(db.schema_version().unwrap() as usize, MIGRATIONS.len());
