@@ -589,6 +589,7 @@ function DocumentTab({
   const relinkDocument = useStudySyncStore((state) => state.relinkDocument);
   const annotations = useStudySyncStore((state) => state.annotations);
   const deletedAnnotationHistory = useStudySyncStore((state) => state.deletedAnnotationHistory);
+  const cards = useStudySyncStore((state) => state.cards);
   const allBookmarks = useStudySyncStore((state) => state.bookmarks);
   const readingPreferences = useStudySyncStore((state) => state.readingPreferences);
   const updateReadingPreferences = useStudySyncStore((state) => state.updateReadingPreferences);
@@ -623,6 +624,10 @@ function DocumentTab({
   const documentAnnotations = useMemo(
     () => selectDocumentAnnotations(annotations, document.id),
     [annotations, document.id],
+  );
+  const cardSourceAnnotationIds = useMemo(
+    () => new Set(cards.flatMap((card) => card.annotationIds)),
+    [cards],
   );
   const bookmarks = useMemo(
     () => selectBookmarks(allBookmarks, document.id),
@@ -736,6 +741,7 @@ function DocumentTab({
         onDeleteAnnotation={onDeleteAnnotation}
         canUndoAnnotationDelete={deletedAnnotationHistory.length > 0}
         onUndoAnnotationDelete={onUndoAnnotationDelete}
+        cardSourceAnnotationIds={cardSourceAnnotationIds}
         onExcerptSelection={onExcerptSelection}
         canExcerpt={!isExcerpting}
       />

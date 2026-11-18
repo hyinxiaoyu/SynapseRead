@@ -437,6 +437,44 @@ fn a_capture_round_trips_and_is_loadable() {
     assert!(!h.asset_allowed(&nested.join("x.png")));
 }
 
+/// Undo Delete brings back the same annotation, its card link, and its capture (#97).
+#[test]
+fn a_deleted_capture_is_restored_with_its_card_and_image() {
+    let h = Harness::new();
+    let document = h.register("book.pdf", "pdf bytes");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+    let created = h.capture(&document, &notebook, json!({})).unwrap();
+    let id = created["annotation"]["id"].clone();
+    let path = h.ok("capture_path", json!({ "annotationId": id }));
+    let path = std::path::PathBuf::from(path.as_str().unwrap());
+
+    h.ok("delete_annotation", json!({ "annotationId": id }));
+    let graph = h.ok(
+        "load_notebook_graph",
+        json!({ "notebookId": notebook["id"] }),
+    );
+    assert_eq!(graph["annotations"].as_array().unwrap().len(), 0);
+    assert_eq!(graph["cards"][0]["annotationIds"], json!([]));
+    assert!(
+        path.exists(),
+        "the capture outlives the delete so Undo can restore it"
+    );
+
+    let restored = h.ok("restore_annotation", json!({ "annotationId": id }));
+    assert_eq!(restored["annotation"], created["annotation"]);
+    assert_eq!(restored["cards"][0]["id"], created["card"]["id"]);
+    assert_eq!(restored["cards"][0]["annotationIds"], json!([id]));
+    assert_eq!(
+        h.ok("capture_path", json!({ "annotationId": id })),
+        json!(path.to_str().unwrap())
+    );
+
+    let error = h
+        .call("restore_annotation", json!({ "annotationId": id }))
+        .unwrap_err();
+    assert_eq!(error["code"], "not_found");
+}
+
 #[test]
 fn a_capture_needs_a_real_png() {
     let h = Harness::new();

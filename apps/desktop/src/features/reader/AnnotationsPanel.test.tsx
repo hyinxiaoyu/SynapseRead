@@ -357,3 +357,75 @@ describe('useAnnotationsController', () => {
     }
   });
 });
+
+// #97: deleting a card's source from the sidebar asks first.
+describe('AnnotationsList card sources', () => {
+  const cardSourceController = () =>
+    controllerFor([annotation('a'), annotation('b')], {
+      isCardSource: (annotationId) => annotationId === 'a',
+    });
+
+  it('marks card sources and deletes other rows at once', () => {
+    const controller = cardSourceController();
+    render(<AnnotationsList controller={controller} filter="" />);
+
+    const [first, second] = screen.getAllByTestId('annotation-item');
+    expect(within(first as HTMLElement).getByTestId('annotation-card-badge')).toBeVisible();
+    expect(within(second as HTMLElement).queryByTestId('annotation-card-badge')).toBeNull();
+
+    fireEvent.click(within(second as HTMLElement).getByTestId('annotation-delete-button'));
+    expect(controller.deleteAnnotation).toHaveBeenCalledWith('b');
+  });
+
+  it('warns before deleting a card source by button or by key', () => {
+    const controller = cardSourceController();
+    render(<AnnotationsList controller={controller} filter="" />);
+    const row = () => screen.getAllByTestId('annotation-item')[0] as HTMLElement;
+
+    fireEvent.click(within(row()).getByTestId('annotation-delete-button'));
+    expect(controller.deleteAnnotation).not.toHaveBeenCalled();
+    expect(within(row()).getByTestId('card-source-delete-confirm-button')).toHaveFocus();
+
+    // Clicking the row's delete button or pressing Delete again cannot bypass confirmation.
+    fireEvent.click(within(row()).getByTestId('annotation-delete-button'));
+    fireEvent.keyDown(within(row()).getByTestId('annotation-jump-button'), { key: 'Backspace' });
+    expect(controller.deleteAnnotation).not.toHaveBeenCalled();
+    expect(within(row()).getByTestId('card-source-delete-confirm-button')).toHaveFocus();
+
+    fireEvent.click(within(row()).getByTestId('card-source-delete-cancel'));
+    expect(within(row()).queryByTestId('card-source-delete-confirm')).toBeNull();
+    expect(within(row()).getByTestId('annotation-jump-button')).toHaveFocus();
+
+    fireEvent.keyDown(within(row()).getByTestId('annotation-jump-button'), { key: 'Backspace' });
+    expect(controller.deleteAnnotation).not.toHaveBeenCalled();
+    fireEvent.keyDown(within(row()).getByTestId('card-source-delete-confirm-button'), {
+      key: 'Escape',
+    });
+    expect(within(row()).queryByTestId('card-source-delete-confirm')).toBeNull();
+
+    fireEvent.keyDown(within(row()).getByTestId('annotation-jump-button'), { key: 'Delete' });
+    fireEvent.click(within(row()).getByTestId('card-source-delete-confirm-button'));
+    expect(controller.deleteAnnotation).toHaveBeenCalledWith('a');
+  });
+
+  it('clears pending delete confirmation when filtering hides the row', () => {
+    const controller = controllerFor(
+      [
+        annotation('a', { excerptText: 'alpha passage' }),
+        annotation('b', { excerptText: 'beta passage' }),
+      ],
+      { isCardSource: (annotationId) => annotationId === 'a' },
+    );
+    const { rerender } = render(<AnnotationsList controller={controller} filter="" />);
+
+    const firstRow = () => screen.getAllByTestId('annotation-item')[0] as HTMLElement;
+    fireEvent.click(within(firstRow()).getByTestId('annotation-delete-button'));
+    expect(within(firstRow()).getByTestId('card-source-delete-confirm')).toBeVisible();
+
+    rerender(<AnnotationsList controller={controller} filter="beta" />);
+    expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
+
+    rerender(<AnnotationsList controller={controller} filter="" />);
+    expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
+  });
+});

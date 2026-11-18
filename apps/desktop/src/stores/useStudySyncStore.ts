@@ -267,6 +267,12 @@ export function createStudySyncStore(backend: StudyBackend) {
 
   return create<StudySyncState>((set, get) => {
     /** Runs a backend write, routing failures to the error banner. */
+    /**
+     * Deletes still on their way to the backend, by annotation id. Undo waits for
+     * one, so a quick ⌘Z cannot reach the backend before the delete it undoes.
+     */
+    const pendingDeletes = new Map<string, Promise<void>>();
+
     const guarded = async (write: () => Promise<void>, rollback?: () => void) => {
       try {
         await write();
@@ -723,12 +729,16 @@ export function createStudySyncStore(backend: StudyBackend) {
       async removeAnnotation(annotationId) {
         const removed = get().annotations.find((annotation) => annotation.id === annotationId);
         if (!removed) return;
-        const previousCards = get().cards;
+        const removedFromCards = new Map(
+          get()
+            .cards.filter((card) => card.annotationIds.includes(annotationId))
+            .map((card) => [card.id, card.annotationIds.indexOf(annotationId)]),
+        );
         set((state) => ({
           annotations: state.annotations.filter((annotation) => annotation.id !== annotationId),
           deletedAnnotationHistory: [...state.deletedAnnotationHistory, { annotation: removed }],
           cards: state.cards.map((card) =>
-            card.annotationIds.includes(annotationId)
+            removedFromCards.has(card.id)
               ? {
                   ...card,
                   annotationIds: card.annotationIds.filter((id) => id !== annotationId),
@@ -736,7 +746,7 @@ export function createStudySyncStore(backend: StudyBackend) {
               : card,
           ),
         }));
-        await guarded(
+        const deleting = guarded(
           () => backend.deleteAnnotation(annotationId),
           () =>
             set((state) => ({
@@ -744,34 +754,45 @@ export function createStudySyncStore(backend: StudyBackend) {
               deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
                 (entry) => entry.annotation.id !== removed.id,
               ),
-              cards: previousCards,
+              cards: state.cards.map((card) => {
+                const index = removedFromCards.get(card.id);
+                if (index === undefined || card.annotationIds.includes(annotationId)) return card;
+                const annotationIds = [...card.annotationIds];
+                annotationIds.splice(Math.min(index, annotationIds.length), 0, annotationId);
+                return { ...card, annotationIds };
+              }),
             })),
         );
+        pendingDeletes.set(annotationId, deleting);
+        await deleting;
+        pendingDeletes.delete(annotationId);
       },
 
       async undoRemoveAnnotation() {
         const last = get().deletedAnnotationHistory.at(-1);
         if (!last) return null;
+        const annotationId = last.annotation.id;
         set((state) => ({
           deletedAnnotationHistory: state.deletedAnnotationHistory.slice(0, -1),
         }));
+        await pendingDeletes.get(annotationId);
+        // The delete failed and was rolled back: the highlight is already back.
+        if (get().annotations.some((annotation) => annotation.id === annotationId)) return null;
 
+        // Core restores the original row, so the id, the capture, and the cards that
+        // cite it all come back, and the card's jump link works again (#97).
         let restored: Annotation | null = null;
         await guarded(
           async () => {
-            const saved = await backend.createAnnotation({
-              documentId: last.annotation.documentId,
-              notebookId: last.annotation.notebookId,
-              anchor: last.annotation.anchor,
-              excerptText: last.annotation.excerptText,
-              excerptImagePng: null,
-              note: last.annotation.note ?? null,
-              color: last.annotation.color,
-              style: last.annotation.style,
-            });
-            restored = saved;
+            const result = await backend.restoreAnnotation(annotationId);
+            restored = result.annotation;
+            const restoredCards = new Map(result.cards.map((card) => [card.id, card]));
             set((state) => ({
-              annotations: [...state.annotations, saved],
+              annotations: [...state.annotations, result.annotation],
+              cards: state.cards.map((card) => {
+                const restoredCard = restoredCards.get(card.id);
+                return restoredCard ? { ...card, annotationIds: restoredCard.annotationIds } : card;
+              }),
             }));
           },
           () =>
@@ -895,8 +916,14 @@ export function createStudySyncStore(backend: StudyBackend) {
       async updateCard(cardId, patch) {
         await guarded(async () => {
           const card = await backend.updateCard(cardId, patch);
+          // CardPatch never edits annotationIds; keeping the store's links avoids
+          // clobbering concurrent delete/restore updates with an older snapshot (#97).
           set((state) => ({
-            cards: state.cards.map((candidate) => (candidate.id === cardId ? card : candidate)),
+            cards: state.cards.map((candidate) =>
+              candidate.id === cardId
+                ? { ...card, annotationIds: candidate.annotationIds }
+                : candidate,
+            ),
           }));
         });
       },

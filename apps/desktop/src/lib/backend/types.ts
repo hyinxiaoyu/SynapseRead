@@ -18,6 +18,7 @@ import type {
   PdfLayout,
   ReadingPreferences,
   RelinkDocumentResult,
+  RestoredAnnotation,
   StudyDocument,
   StudyNotebook,
   Viewport,
@@ -93,7 +94,13 @@ export interface StudyBackend extends DocumentContentReader {
   createExcerpt(input: CreateExcerptInput): Promise<CreatedExcerpt>;
   createAnnotation(input: CreateAnnotationInput): Promise<Annotation>;
   updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<Annotation>;
+  /**
+   * Deletes an annotation for the reader. Its id, card links, and capture are kept
+   * until the next launch so `restoreAnnotation` can undo it exactly.
+   */
   deleteAnnotation(annotationId: string): Promise<void>;
+  /** Undoes `deleteAnnotation` in this session; `not_found` once it is final. */
+  restoreAnnotation(annotationId: string): Promise<RestoredAnnotation>;
   updateCard(cardId: string, patch: CardPatch): Promise<NoteCard>;
   updateNodeLayout(nodeId: string, patch: NodeLayoutPatch): Promise<void>;
   createEdge(

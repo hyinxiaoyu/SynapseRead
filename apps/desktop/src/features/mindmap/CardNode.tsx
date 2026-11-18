@@ -20,7 +20,16 @@ export function CardNode({ id, data, selected }: NodeProps<CardFlowNode>) {
       )}
     >
       <Handle type="target" position={Position.Left} />
-      <p className="line-clamp-3 min-w-0 flex-1 text-sm">{card?.title}</p>
+      <div className="min-w-0 flex-1">
+        <p className="line-clamp-3 text-sm">{card?.title}</p>
+        {card && !hasSource && (
+          // Cards cannot be deleted yet (M3), so one whose highlight is gone says so
+          // rather than looking broken.
+          <p data-testid="card-source-removed" className="mt-1 text-xs text-muted-foreground">
+            Source removed
+          </p>
+        )}
+      </div>
       {hasSource && (
         <Button
           variant="ghost"

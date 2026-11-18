@@ -129,6 +129,8 @@ export function createMemoryBackend({
   const nodes = new Map<string, MindMapNode>();
   const edges = new Map<string, MindMapEdge>();
   const captures = new Map<string, string>();
+  /** Deleted this session, with the cards that cited them, until restored. */
+  const deletedAnnotations = new Map<string, { annotation: Annotation; cardIds: string[] }>();
   const bookmarks = new Map<string, Bookmark>();
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
   /** In save order: a save deletes and re-adds its entry, so the last is the latest. */
@@ -619,17 +621,48 @@ export function createMemoryBackend({
     },
 
     async deleteAnnotation(annotationId) {
-      require(annotations, annotationId, 'annotation');
+      const annotation = require(annotations, annotationId, 'annotation');
       annotations.delete(annotationId);
-      captures.delete(annotationId);
+      const cardIds: string[] = [];
       for (const [cardId, card] of cards) {
         if (card.annotationIds.includes(annotationId)) {
+          cardIds.push(cardId);
           cards.set(cardId, {
             ...card,
             annotationIds: card.annotationIds.filter((id) => id !== annotationId),
           });
         }
       }
+      // Kept, capture included, so Undo restores exactly what was deleted.
+      deletedAnnotations.set(annotationId, { annotation, cardIds: cardIds.sort() });
+    },
+
+    async restoreAnnotation(annotationId) {
+      const {
+        annotation,
+        cardIds,
+      } = require(deletedAnnotations, annotationId, 'deleted annotation');
+      deletedAnnotations.delete(annotationId);
+      annotations.set(annotationId, annotation);
+      const restoredCards = cardIds.flatMap((cardId) => {
+        const card = cards.get(cardId);
+        if (!card) return [];
+        // Core lists a card's annotations by creation time, then id.
+        const annotationIds = [...card.annotationIds, annotationId]
+          .flatMap((id) => {
+            const linked = annotations.get(id);
+            return linked ? [linked] : [];
+          })
+          .sort(
+            (a, b) =>
+              a.createdAt.localeCompare(b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+          )
+          .map((linked) => linked.id);
+        const restored: NoteCard = { ...card, annotationIds };
+        cards.set(cardId, restored);
+        return [restored];
+      });
+      return { annotation, cards: restoredCards };
     },
 
     async updateCard(cardId, patch) {

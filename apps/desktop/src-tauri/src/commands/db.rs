@@ -7,7 +7,7 @@ use synapse_core::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
     CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentSourceStatus,
     MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, PdfLayout, ReadingPreferences,
-    RelinkDocumentResult, StudyNotebook, Viewport, WorkspaceSession,
+    RelinkDocumentResult, RestoredAnnotation, StudyNotebook, Viewport, WorkspaceSession,
 };
 use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
@@ -117,6 +117,14 @@ pub fn update_annotation(
 #[tauri::command]
 pub fn delete_annotation(annotation_id: String, state: State<'_, AppState>) -> IpcResult<()> {
     Ok(state.database()?.delete_annotation(&annotation_id)?)
+}
+
+#[tauri::command]
+pub fn restore_annotation(
+    annotation_id: String,
+    state: State<'_, AppState>,
+) -> IpcResult<RestoredAnnotation> {
+    Ok(state.database()?.restore_annotation(&annotation_id)?)
 }
 
 /// Where an annotation's capture lives, for the asset protocol to load.

@@ -430,6 +430,14 @@ pub struct CreatedExcerpt {
     pub edge: Option<MindMapEdge>,
 }
 
+/// An annotation brought back by Undo Delete, with the cards that cite it again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredAnnotation {
+    pub annotation: Annotation,
+    pub cards: Vec<NoteCard>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CardPatch {

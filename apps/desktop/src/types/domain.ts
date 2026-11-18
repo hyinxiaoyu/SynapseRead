@@ -210,6 +210,12 @@ export interface CreatedExcerpt {
   edge: MindMapEdge | null;
 }
 
+/** An annotation brought back by Undo Delete, with the cards that cite it again. */
+export interface RestoredAnnotation {
+  annotation: Annotation;
+  cards: NoteCard[];
+}
+
 export interface CardPatch {
   title: string | null;
   markdownNotes: string | null;
@@ -497,6 +503,11 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   /** Undoes the most recent annotation deletion in this session, if available. */
   canUndoAnnotationDelete?: boolean;
   onUndoAnnotationDelete?: () => void;
+  /**
+   * Annotations a MindMap card cites as its source. Deleting one of them asks
+   * first, because the card then loses its link back to the text.
+   */
+  cardSourceAnnotationIds?: ReadonlySet<string>;
   /** Sends the published selection to the MindMap, as the Excerpt to MindMap button does. */
   onExcerptSelection?: () => void;
   /** False while an excerpt is being written. */
