@@ -1,7 +1,7 @@
 # SynapseRead
 
-SynapseRead is a local-first desktop app for reading and synthesizing knowledge,
-inspired by MarginNote. Read on one side, and excerpts become connected cards on an
+SynapseRead is a local-first desktop app for reading and synthesizing knowledge.
+Read on one side, and excerpts become connected cards on an
 infinite mind map on the other. Every card links back to the exact passage it came
 from.
 
