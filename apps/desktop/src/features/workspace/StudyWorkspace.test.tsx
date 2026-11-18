@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useEffect, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -151,6 +151,150 @@ describe('StudyWorkspace', () => {
       useStudySyncStore.getState().cards.at(-1)?.title,
     );
     expect(screen.getByRole('button', { name: 'Excerpt to MindMap' })).toBeDisabled();
+  });
+
+  describe('excerpt confirmation (#98)', () => {
+    const excerpt = async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+    };
+
+    it('announces an excerpt while the MindMap is collapsed, and Show opens it at the card', async () => {
+      await renderReady();
+      // The live region is mounted empty before any excerpt so AT sees updates.
+      const status = screen.getByTestId('excerpt-status');
+      expect(status).toHaveAttribute('role', 'status');
+      expect(status).toHaveTextContent('');
+
+      await excerpt();
+
+      const notice = await screen.findByTestId('excerpt-added-notice');
+      expect(notice).toHaveAttribute('data-tone', 'info');
+      expect(notice).toHaveTextContent('Added to MindMap');
+      expect(within(notice).queryByRole('status')).toBeNull();
+      expect(screen.getByTestId('excerpt-status')).toBe(status);
+      expect(status).toHaveTextContent('Added to MindMap');
+      const reader = screen.getByRole('region', { name: 'Document reader' });
+      expect(reader).toContainElement(notice);
+      expect(reader.querySelector('header')).not.toContainElement(notice);
+      expect(screen.getByRole('region', { name: 'Card inspector' })).not.toContainElement(notice);
+      expect(screen.getByRole('region', { name: 'MindMap canvas' })).not.toContainElement(notice);
+
+      const newest = useStudySyncStore.getState().nodes.at(-1)?.id;
+      // Something else selected meanwhile; Show still lands on the new card.
+      act(() => useStudySyncStore.setState({ selectedNodeId: null }));
+      fireEvent.click(within(notice).getByRole('button', { name: 'Show' }));
+
+      expect(screen.getByRole('button', { name: 'Hide MindMap' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+      expect(useStudySyncStore.getState().selectedNodeId).toBe(newest);
+      // Showing it is not choosing it as the parent for the next excerpt.
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+      expect(document.querySelector(`.react-flow__node[data-id="${newest}"]`)).toHaveClass(
+        'selected',
+      );
+    });
+
+    it('clears and repopulates the same status node on consecutive excerpts', async () => {
+      await renderReady();
+      const status = screen.getByTestId('excerpt-status');
+      const seenTexts: string[] = [];
+      const observer = new MutationObserver(() => {
+        seenTexts.push(status.textContent ?? '');
+      });
+      observer.observe(status, { childList: true, characterData: true, subtree: true });
+      try {
+        await excerpt();
+        await waitFor(() => expect(status).toHaveTextContent('Added to MindMap'));
+
+        fireEvent.click(screen.getByRole('button', { name: 'Simulate selection' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+        await waitFor(() =>
+          expect(seenTexts).toEqual(['Added to MindMap', '', 'Added to MindMap']),
+        );
+        expect(screen.getByTestId('excerpt-status')).toBe(status);
+      } finally {
+        observer.disconnect();
+      }
+    });
+
+    it('drops the pending reveal when the notice is closed', async () => {
+      await renderReady();
+      await excerpt();
+
+      fireEvent.click(
+        within(await screen.findByTestId('excerpt-added-notice')).getByRole('button', {
+          name: 'Close notice',
+        }),
+      );
+
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+      expect(useStudySyncStore.getState().revealRequest).toBeNull();
+    });
+
+    it('shows no notice while the MindMap is open', async () => {
+      // The canvas has a size, so it can reveal the card itself.
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement,
+      ) {
+        const size = this.classList.contains('react-flow')
+          ? { width: 800, height: 600 }
+          : { width: 0, height: 0 };
+        return DOMRect.fromRect({ x: 0, y: 0, ...size });
+      });
+      await renderReady();
+      fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+      await excerpt();
+
+      await vi.waitFor(() => expect(useStudySyncStore.getState().revealRequest).toBeNull());
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+    });
+
+    it('reports a failed excerpt through the error banner, not the notice', async () => {
+      await renderReady();
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+      // As the store does when the write fails: an error, and nothing to reveal.
+      act(() =>
+        useStudySyncStore.setState({
+          excerptSelection: async () => {
+            useStudySyncStore.setState({ error: 'disk full' });
+          },
+        }),
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('disk full');
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+    });
+
+    it('announces an excerpt politely during focus mode without a visible banner until focus mode ends', async () => {
+      await renderReady();
+      const status = screen.getByTestId('excerpt-status');
+      expect(status).toHaveTextContent('');
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      await screen.findByRole('tab');
+      fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+      expect(useStudySyncStore.getState().immersive).toBe(true);
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+      fireEvent.keyDown(window, { key: 'E', code: 'KeyE', metaKey: true, shiftKey: true });
+
+      await waitFor(() => expect(status).toHaveTextContent('Added to MindMap'));
+      expect(screen.getByTestId('excerpt-status')).toBe(status);
+      expect(status).toHaveClass('sr-only');
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(useStudySyncStore.getState().immersive).toBe(false);
+      const notice = await screen.findByTestId('excerpt-added-notice');
+      expect(notice).toBeVisible();
+      expect(within(notice).queryByRole('status')).toBeNull();
+    });
   });
 
   it('pulses the source highlight on a jump, then completes it', async () => {
@@ -555,6 +699,30 @@ describe('StudyWorkspace', () => {
       expect(screen.getByRole('button', { name: 'Hide MindMap' })).toBeInTheDocument(),
     );
     expect(screen.getByRole('tablist').closest('header')).not.toHaveClass('hidden');
+  });
+
+  it('lets Esc leave focus mode even when focus stayed inside the collapsed MindMap', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+    expect(screen.getByRole('button', { name: 'Hide MindMap' })).toBeInTheDocument();
+
+    const mindMapPane = document.querySelector('.react-flow__pane') as HTMLElement;
+    fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+    expect(useStudySyncStore.getState().immersive).toBe(true);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Show MindMap' })).toBeInTheDocument(),
+    );
+
+    // Even if focus remained inside the collapsed MindMap panel with a selected card,
+    // Esc reaches focusMode instead of being swallowed by the hidden MindMap layer.
+    const selectedBefore = useStudySyncStore.getState().selectedNodeId;
+    expect(selectedBefore).not.toBeNull();
+    fireEvent.keyDown(mindMapPane, { key: 'Escape' });
+    expect(useStudySyncStore.getState().immersive).toBe(false);
+    expect(useStudySyncStore.getState().selectedNodeId).toBe(selectedBefore);
   });
 
   it('leaves focus mode on Esc forwarded from a chapter frame, but not on Esc in a text field', async () => {

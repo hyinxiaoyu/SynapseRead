@@ -137,11 +137,12 @@ describe('useStudySyncStore', () => {
       expect(selectHighlights(state().annotations, documentId)[0]?.hasNote).toBe(false);
     });
 
-    it('nests under the selected node with a connecting edge', async () => {
+    it('nests under a card the reader selected, with a connecting edge', async () => {
       const documentId = await openDocument();
       select(documentId);
       await state().excerptSelection();
-      const parentId = state().selectedNodeId;
+      const parentId = state().nodes[0]?.id as string;
+      state().selectNode(parentId);
 
       select(documentId, 'second');
       await state().excerptSelection();
@@ -151,15 +152,92 @@ describe('useStudySyncStore', () => {
       expect(state().edges).toEqual([
         expect.objectContaining({ sourceNodeId: parentId, targetNodeId: child?.id }),
       ]);
+      // The new card is selected so it can be found; the reader's choice stays the target.
+      expect(state().selectedNodeId).toBe(child?.id);
+      expect(state().nestingTargetNodeId).toBe(parentId);
     });
 
-    it('creates a floating root when nothing is selected', async () => {
+    it('keeps consecutive excerpts as separate roots when the canvas is untouched (#96)', async () => {
       const documentId = await openDocument();
-      state().selectNode(null);
+      for (const text of ['one', 'two', 'three']) {
+        select(documentId, text);
+        await state().excerptSelection();
+      }
+
+      expect(state().nodes).toHaveLength(3);
+      expect(state().nodes.map((node) => node.parentNodeId)).toEqual([null, null, null]);
+      expect(state().edges).toEqual([]);
+      expect(state().selectedNodeId).toBe(state().nodes[2]?.id);
+      expect(state().nestingTargetNodeId).toBeNull();
+
+      // The memory backend agrees: nothing was linked behind the store's back.
+      const reopened = createStudySyncStore(backend);
+      await reopened.getState().initialize();
+      expect(reopened.getState().edges).toEqual([]);
+      expect(reopened.getState().nodes.every((node) => node.parentNodeId === null)).toBe(true);
+    });
+
+    it('nests each excerpt under the chosen card as siblings, not a chain', async () => {
+      const documentId = await openDocument();
+      select(documentId, 'topic');
+      await state().excerptSelection();
+      const parentId = state().nodes[0]?.id as string;
+      state().selectNode(parentId);
+
+      for (const text of ['first', 'second']) {
+        select(documentId, text);
+        await state().excerptSelection();
+      }
+
+      const [, first, second] = state().nodes;
+      expect(first?.parentNodeId).toBe(parentId);
+      expect(second?.parentNodeId).toBe(parentId);
+      expect(second?.posY).not.toBe(first?.posY);
+      expect(state().edges.map((edge) => edge.sourceNodeId)).toEqual([parentId, parentId]);
+    });
+
+    it('creates a floating root once the reader clears the canvas selection', async () => {
+      const documentId = await openDocument();
       select(documentId);
       await state().excerptSelection();
-      expect(state().nodes[0]?.parentNodeId).toBeNull();
+      state().selectNode(state().nodes[0]?.id as string);
+      state().selectNode(null);
+      expect(state().nestingTargetNodeId).toBeNull();
+
+      select(documentId, 'second');
+      await state().excerptSelection();
+      expect(state().nodes[1]?.parentNodeId).toBeNull();
       expect(state().edges).toEqual([]);
+    });
+
+    it('asks the canvas to reveal each new card, without making it the nesting target', async () => {
+      const documentId = await openDocument();
+      const beforeExcerptNonce = state().excerptNonce;
+      select(documentId);
+      await state().excerptSelection();
+      const first = state().revealRequest;
+      expect(first).toEqual({ nonce: expect.any(Number), nodeId: state().nodes[0]?.id });
+      expect(state().excerptNonce).toBe(beforeExcerptNonce + 1);
+
+      select(documentId, 'second');
+      await state().excerptSelection();
+      const second = state().revealRequest;
+      expect(second?.nodeId).toBe(state().nodes[1]?.id);
+      expect(second?.nonce).not.toBe(first?.nonce);
+      expect(state().excerptNonce).toBe(beforeExcerptNonce + 2);
+
+      // A stale completion leaves the newer request pending.
+      state().completeReveal(first?.nonce as number);
+      expect(state().revealRequest).toBe(second);
+      state().completeReveal(second?.nonce as number);
+      expect(state().revealRequest).toBeNull();
+
+      // Revealing an existing card is not a new excerpt.
+      state().revealNode(state().nodes[0]?.id as string);
+      expect(state().selectedNodeId).toBe(state().nodes[0]?.id);
+      expect(state().nestingTargetNodeId).toBeNull();
+      expect(state().revealRequest?.nodeId).toBe(state().nodes[0]?.id);
+      expect(state().excerptNonce).toBe(beforeExcerptNonce + 2);
     });
 
     it('does nothing without a selection', async () => {
@@ -197,6 +275,7 @@ describe('useStudySyncStore', () => {
       expect(state().nodes).toEqual([]);
       expect(state().error).toBe('disk full');
       expect(state().isExcerpting).toBe(false);
+      expect(state().revealRequest).toBeNull();
     });
   });
 

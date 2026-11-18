@@ -19,6 +19,8 @@ export const ESCAPE_LAYER = {
   find: 20,
   /** The sidebar's lists: Esc hands the keyboard back to the page, sidebar open. */
   sidebar: 15,
+  /** The MindMap's selection, while focus is on the canvas. */
+  mindMap: 12,
   focusMode: 10,
 } as const;
 

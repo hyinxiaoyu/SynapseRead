@@ -11,6 +11,7 @@ import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/co
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
+import { ReaderNotice } from '@/features/reader/ReaderNotice';
 import { ReaderPane } from '@/features/reader/ReaderPane';
 import {
   type ToolbarSlots,
@@ -51,11 +52,16 @@ export function StudyWorkspace() {
     useStudySyncStore((state) => state.readingPreferences.theme),
   );
   const readerChrome = useReaderChromeTheme();
+  const revealRequest = useStudySyncStore((state) => state.revealRequest);
+  const excerptNonce = useStudySyncStore((state) => state.excerptNonce);
+  const revealNode = useStudySyncStore((state) => state.revealNode);
+  const completeReveal = useStudySyncStore((state) => state.completeReveal);
   const onMenuCommand = useStudySyncStore((state) => state.onMenuCommand);
   const setMenuItemStates = useStudySyncStore((state) => state.setMenuItemStates);
 
   const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
+  const excerptStatusRef = useRef<HTMLParagraphElement>(null);
   const dragDepthRef = useRef(0);
   const [mindMapOpen, setMindMapOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -68,6 +74,24 @@ export function StudyWorkspace() {
   useEffect(() => {
     void initialize();
   }, [initialize]);
+
+  const ready = status === 'ready';
+
+  useEffect(() => {
+    const statusNode = excerptStatusRef.current;
+    if (!statusNode || !ready || excerptNonce === 0) return;
+    // Keep one live region mounted from startup and clear before re-populating so
+    // consecutive excerpts with identical text still trigger an announcement.
+    if (statusNode.textContent === '') {
+      statusNode.textContent = 'Added to MindMap';
+      return;
+    }
+    statusNode.textContent = '';
+    const timer = window.setTimeout(() => {
+      if (excerptStatusRef.current) excerptStatusRef.current.textContent = 'Added to MindMap';
+    }, 30);
+    return () => window.clearTimeout(timer);
+  }, [ready, excerptNonce]);
 
   // The webview's own context menu is a browser's, not the app's: it acts on the
   // document the app is showing. The browser preview keeps it, which is a
@@ -134,7 +158,6 @@ export function StudyWorkspace() {
   );
 
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
-  const ready = status === 'ready';
 
   useCommands({
     'window.mindMap': {
@@ -195,6 +218,27 @@ export function StudyWorkspace() {
   };
 
   const showDropOverlay = isDraggingFile || htmlDragging;
+  // A card the collapsed MindMap could not show: say it was added, and offer to
+  // open the map at it. An open map reveals it itself.
+  const pendingReveal = ready && !mindMapOpen ? revealRequest : null;
+  const excerptNotice = pendingReveal ? (
+    <ReaderNotice
+      key={pendingReveal.nonce}
+      tone="info"
+      testId="excerpt-added-notice"
+      announce={false}
+      action={{
+        label: 'Show',
+        onClick: () => {
+          revealNode(pendingReveal.nodeId);
+          if (mindMapRef.current?.isCollapsed()) toggleMindMap();
+        },
+      }}
+      onDismiss={() => completeReveal(pendingReveal.nonce)}
+    >
+      Added to MindMap
+    </ReaderNotice>
+  ) : null;
 
   return (
     <ToolbarSlotsContext.Provider value={slots}>
@@ -293,14 +337,14 @@ export function StudyWorkspace() {
           </div>
         )}
 
-        <div className="min-h-0 flex-1">
+        <div className="relative min-h-0 flex-1">
           {status === 'ready' ? (
             <ResizablePanelGroup
               orientation="horizontal"
               defaultLayout={{ reader: 100, mindmap: 0, inspector: 0 }}
             >
               <ResizablePanel id="reader" defaultSize="100%" minSize="20%">
-                <ReaderPane />
+                <ReaderPane notice={excerptNotice} />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
@@ -313,7 +357,7 @@ export function StudyWorkspace() {
                   if (!Number.isNaN(size.asPercentage)) setMindMapOpen(size.asPercentage > 0);
                 }}
               >
-                <MindMapPane />
+                <MindMapPane open={mindMapOpen} />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
@@ -336,6 +380,13 @@ export function StudyWorkspace() {
           )}
         </div>
         {shortcutsOpen && <KeyboardShortcutsDialog onClose={closeShortcuts} />}
+        <p
+          ref={excerptStatusRef}
+          data-testid="excerpt-status"
+          role="status"
+          aria-atomic="true"
+          className="sr-only"
+        />
       </main>
     </ToolbarSlotsContext.Provider>
   );

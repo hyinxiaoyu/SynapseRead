@@ -1,7 +1,29 @@
 import { X } from 'lucide-react';
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { createContext, type ReactNode, useContext, useEffect, useRef, useState } from 'react';
 
 import { cn } from '@/lib/utils';
+
+type RegisterPopoverLayer = (element: HTMLDivElement | null) => void;
+
+const ReaderPopoverSlotContext = createContext<RegisterPopoverLayer | null>(null);
+
+/**
+ * Gives a viewer's `ReaderPopoverLayer` to its parent `ReaderPane` so workspace
+ * notices can join the active tab's notice stack instead of overlapping it.
+ */
+export function ReaderPopoverSlotProvider({
+  register,
+  children,
+}: {
+  register: RegisterPopoverLayer;
+  children: ReactNode;
+}) {
+  return (
+    <ReaderPopoverSlotContext.Provider value={register}>
+      {children}
+    </ReaderPopoverSlotContext.Provider>
+  );
+}
 
 /** How long an informational notice stays before it fades on its own. */
 export const INFO_NOTICE_MS = 6000;
@@ -20,9 +42,13 @@ export function ReaderPopoverLayer({
   hidden?: boolean;
   children: ReactNode;
 }) {
+  const register = useContext(ReaderPopoverSlotContext);
   if (hidden) return null;
   return (
-    <div className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:animation-duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none">
+    <div
+      ref={register ?? undefined}
+      className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:animation-duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none"
+    >
       {children}
     </div>
   );
@@ -32,16 +58,21 @@ export function ReaderPopoverLayer({
  * One notice over the page, with a close button. An `info` notice only tells the
  * reader something, so it fades after a few seconds; it waits while the pointer
  * or focus is on it. A `warning` stays until it is closed or no longer true.
+ * An `action` is a button beside the message, outside the announced text.
  */
 export function ReaderNotice({
   tone,
   onDismiss,
   testId,
+  action,
+  announce = true,
   children,
 }: {
   tone: 'info' | 'warning';
   onDismiss: () => void;
   testId?: string;
+  action?: { label: string; onClick: () => void };
+  announce?: boolean;
   children: ReactNode;
 }) {
   const [held, setHeld] = useState({ pointer: false, focus: false });
@@ -85,9 +116,18 @@ export function ReaderNotice({
       )}
       style={{ transitionDuration: `${NOTICE_FADE_MS}ms` }}
     >
-      <p role="status" className="min-w-0 flex-1 py-0.5">
+      <p role={announce ? 'status' : undefined} className="min-w-0 flex-1 py-0.5">
         {children}
       </p>
+      {action && (
+        <button
+          type="button"
+          onClick={action.onClick}
+          className="shrink-0 rounded px-1.5 py-0.5 font-medium text-primary outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {action.label}
+        </button>
+      )}
       <button
         type="button"
         aria-label="Close notice"
