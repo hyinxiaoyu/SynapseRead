@@ -53,6 +53,7 @@ export function StudyWorkspace() {
   );
   const readerChrome = useReaderChromeTheme();
   const revealRequest = useStudySyncStore((state) => state.revealRequest);
+  const excerptNonce = useStudySyncStore((state) => state.excerptNonce);
   const revealNode = useStudySyncStore((state) => state.revealNode);
   const completeReveal = useStudySyncStore((state) => state.completeReveal);
   const onMenuCommand = useStudySyncStore((state) => state.onMenuCommand);
@@ -60,6 +61,7 @@ export function StudyWorkspace() {
 
   const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
+  const excerptStatusRef = useRef<HTMLParagraphElement>(null);
   const dragDepthRef = useRef(0);
   const [mindMapOpen, setMindMapOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -72,6 +74,24 @@ export function StudyWorkspace() {
   useEffect(() => {
     void initialize();
   }, [initialize]);
+
+  const ready = status === 'ready';
+
+  useEffect(() => {
+    const statusNode = excerptStatusRef.current;
+    if (!statusNode || !ready || excerptNonce === 0) return;
+    // Keep one live region mounted from startup and clear before re-populating so
+    // consecutive excerpts with identical text still trigger an announcement.
+    if (statusNode.textContent === '') {
+      statusNode.textContent = 'Added to MindMap';
+      return;
+    }
+    statusNode.textContent = '';
+    const timer = window.setTimeout(() => {
+      if (excerptStatusRef.current) excerptStatusRef.current.textContent = 'Added to MindMap';
+    }, 30);
+    return () => window.clearTimeout(timer);
+  }, [ready, excerptNonce]);
 
   // The webview's own context menu is a browser's, not the app's: it acts on the
   // document the app is showing. The browser preview keeps it, which is a
@@ -138,7 +158,6 @@ export function StudyWorkspace() {
   );
 
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
-  const ready = status === 'ready';
 
   useCommands({
     'window.mindMap': {
@@ -207,6 +226,7 @@ export function StudyWorkspace() {
       key={pendingReveal.nonce}
       tone="info"
       testId="excerpt-added-notice"
+      announce={false}
       action={{
         label: 'Show',
         onClick: () => {
@@ -360,13 +380,13 @@ export function StudyWorkspace() {
           )}
         </div>
         {shortcutsOpen && <KeyboardShortcutsDialog onClose={closeShortcuts} />}
-        {immersive && pendingReveal && (
-          // Focus mode keeps the reading surface visually clear while still letting
-          // screen readers announce the excerpt right when it succeeds.
-          <p key={pendingReveal.nonce} role="status" className="sr-only">
-            Added to MindMap
-          </p>
-        )}
+        <p
+          ref={excerptStatusRef}
+          data-testid="excerpt-status"
+          role="status"
+          aria-atomic="true"
+          className="sr-only"
+        />
       </main>
     </ToolbarSlotsContext.Provider>
   );

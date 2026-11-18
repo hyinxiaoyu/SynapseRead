@@ -31,6 +31,16 @@ describe('ReaderNotice', () => {
     expect(onClick).toHaveBeenCalledTimes(1);
   });
 
+  it('can omit its own status role when a workspace live region announces the message', () => {
+    render(
+      <ReaderNotice tone="info" announce={false} onDismiss={vi.fn()}>
+        Added to MindMap
+      </ReaderNotice>,
+    );
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByText('Added to MindMap')).toBeVisible();
+  });
+
   it('fades an info notice after a few seconds', () => {
     const onDismiss = vi.fn();
     render(

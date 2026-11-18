@@ -212,16 +212,19 @@ describe('useStudySyncStore', () => {
 
     it('asks the canvas to reveal each new card, without making it the nesting target', async () => {
       const documentId = await openDocument();
+      const beforeExcerptNonce = state().excerptNonce;
       select(documentId);
       await state().excerptSelection();
       const first = state().revealRequest;
       expect(first).toEqual({ nonce: expect.any(Number), nodeId: state().nodes[0]?.id });
+      expect(state().excerptNonce).toBe(beforeExcerptNonce + 1);
 
       select(documentId, 'second');
       await state().excerptSelection();
       const second = state().revealRequest;
       expect(second?.nodeId).toBe(state().nodes[1]?.id);
       expect(second?.nonce).not.toBe(first?.nonce);
+      expect(state().excerptNonce).toBe(beforeExcerptNonce + 2);
 
       // A stale completion leaves the newer request pending.
       state().completeReveal(first?.nonce as number);
@@ -229,10 +232,12 @@ describe('useStudySyncStore', () => {
       state().completeReveal(second?.nonce as number);
       expect(state().revealRequest).toBeNull();
 
+      // Revealing an existing card is not a new excerpt.
       state().revealNode(state().nodes[0]?.id as string);
       expect(state().selectedNodeId).toBe(state().nodes[0]?.id);
       expect(state().nestingTargetNodeId).toBeNull();
       expect(state().revealRequest?.nodeId).toBe(state().nodes[0]?.id);
+      expect(state().excerptNonce).toBe(beforeExcerptNonce + 2);
     });
 
     it('does nothing without a selection', async () => {

@@ -65,12 +65,14 @@ export function ReaderNotice({
   onDismiss,
   testId,
   action,
+  announce = true,
   children,
 }: {
   tone: 'info' | 'warning';
   onDismiss: () => void;
   testId?: string;
   action?: { label: string; onClick: () => void };
+  announce?: boolean;
   children: ReactNode;
 }) {
   const [held, setHeld] = useState({ pointer: false, focus: false });
@@ -114,7 +116,7 @@ export function ReaderNotice({
       )}
       style={{ transitionDuration: `${NOTICE_FADE_MS}ms` }}
     >
-      <p role="status" className="min-w-0 flex-1 py-0.5">
+      <p role={announce ? 'status' : undefined} className="min-w-0 flex-1 py-0.5">
         {children}
       </p>
       {action && (

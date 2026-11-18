@@ -104,6 +104,8 @@ export interface StudySyncState {
   nestingTargetNodeId: string | null;
   /** Store -> MindMap: a card to bring into view once the canvas is showing. */
   revealRequest: RevealRequest | null;
+  /** Monotonic count of successful excerpts, so announcements fire even back-to-back. */
+  excerptNonce: number;
   /** MindMap -> Reader: the jump the reader for that document should perform. */
   jumpRequest: JumpRequest | null;
 
@@ -427,6 +429,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       selectedNodeId: null,
       nestingTargetNodeId: null,
       revealRequest: null,
+      excerptNonce: 0,
       jumpRequest: null,
 
       async initialize() {
@@ -670,6 +673,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             edges: created.edge ? [...state.edges, created.edge] : state.edges,
             selection: state.selection === selection ? null : state.selection,
             isExcerpting: false,
+            excerptNonce: state.excerptNonce + 1,
           }));
           // The new card is selected and shown so it can be found, but the
           // nesting target stays whatever the reader chose.

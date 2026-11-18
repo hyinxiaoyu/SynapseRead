@@ -162,11 +162,19 @@ describe('StudyWorkspace', () => {
 
     it('announces an excerpt while the MindMap is collapsed, and Show opens it at the card', async () => {
       await renderReady();
+      // The live region is mounted empty before any excerpt so AT sees updates.
+      const status = screen.getByTestId('excerpt-status');
+      expect(status).toHaveAttribute('role', 'status');
+      expect(status).toHaveTextContent('');
+
       await excerpt();
 
       const notice = await screen.findByTestId('excerpt-added-notice');
       expect(notice).toHaveAttribute('data-tone', 'info');
-      expect(within(notice).getByRole('status')).toHaveTextContent('Added to MindMap');
+      expect(notice).toHaveTextContent('Added to MindMap');
+      expect(within(notice).queryByRole('status')).toBeNull();
+      expect(screen.getByTestId('excerpt-status')).toBe(status);
+      expect(status).toHaveTextContent('Added to MindMap');
       const reader = screen.getByRole('region', { name: 'Document reader' });
       expect(reader).toContainElement(notice);
       expect(reader.querySelector('header')).not.toContainElement(notice);
@@ -189,6 +197,29 @@ describe('StudyWorkspace', () => {
       expect(document.querySelector(`.react-flow__node[data-id="${newest}"]`)).toHaveClass(
         'selected',
       );
+    });
+
+    it('clears and repopulates the same status node on consecutive excerpts', async () => {
+      await renderReady();
+      const status = screen.getByTestId('excerpt-status');
+      const seenTexts: string[] = [];
+      const observer = new MutationObserver(() => {
+        seenTexts.push(status.textContent ?? '');
+      });
+      observer.observe(status, { childList: true, characterData: true, subtree: true });
+      try {
+        await excerpt();
+        await waitFor(() => expect(status).toHaveTextContent('Added to MindMap'));
+
+        fireEvent.click(screen.getByRole('button', { name: 'Simulate selection' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+        await waitFor(() =>
+          expect(seenTexts).toEqual(['Added to MindMap', '', 'Added to MindMap']),
+        );
+        expect(screen.getByTestId('excerpt-status')).toBe(status);
+      } finally {
+        observer.disconnect();
+      }
     });
 
     it('drops the pending reveal when the notice is closed', async () => {
@@ -243,6 +274,8 @@ describe('StudyWorkspace', () => {
 
     it('announces an excerpt politely during focus mode without a visible banner until focus mode ends', async () => {
       await renderReady();
+      const status = screen.getByTestId('excerpt-status');
+      expect(status).toHaveTextContent('');
       fireEvent.click(screen.getByRole('button', { name: 'Open' }));
       await screen.findByRole('tab');
       fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
@@ -251,14 +284,16 @@ describe('StudyWorkspace', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
       fireEvent.keyDown(window, { key: 'E', code: 'KeyE', metaKey: true, shiftKey: true });
 
-      const status = await screen.findByRole('status');
-      expect(status).toHaveTextContent('Added to MindMap');
+      await waitFor(() => expect(status).toHaveTextContent('Added to MindMap'));
+      expect(screen.getByTestId('excerpt-status')).toBe(status);
       expect(status).toHaveClass('sr-only');
       expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
 
       fireEvent.keyDown(window, { key: 'Escape' });
       expect(useStudySyncStore.getState().immersive).toBe(false);
-      expect(await screen.findByTestId('excerpt-added-notice')).toBeVisible();
+      const notice = await screen.findByTestId('excerpt-added-notice');
+      expect(notice).toBeVisible();
+      expect(within(notice).queryByRole('status')).toBeNull();
     });
   });
 
