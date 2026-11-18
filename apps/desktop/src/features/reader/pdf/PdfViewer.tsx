@@ -2538,7 +2538,7 @@ function PdfPages({
     };
   }, [cancelActiveSlide, clearContinuousFade]);
 
-  const turnPage = (direction: TurnDirection) => {
+  const turnPage = (direction: TurnDirection, options?: { landAtBottom?: boolean }) => {
     if (!paged) {
       const scroller = scrollRef.current;
       const nextTop = computeScrollPageStep({
@@ -2602,6 +2602,14 @@ function PdfPages({
     settleActiveSlide();
     const target = turnTarget(direction);
     if (target === null) return;
+    const scroller = scrollRef.current;
+    const targetOffset =
+      options?.landAtBottom && direction < 0 && scroller && scroller.clientHeight > 0
+        ? Math.min(
+            offsetWithin(target, 1),
+            Math.max(0, rowHeight(rowOfPage(target)) - scroller.clientHeight),
+          )
+        : offsetWithin(target, 0);
     cancelCurlRef.current?.();
     cancelCurlRef.current = null;
     // Whatever the previous turn was doing is over; each mode below says whether the
@@ -2612,7 +2620,7 @@ function PdfPages({
       settleStage(
         -direction * stageStride,
         PAGE_SLIDE_MS,
-        () => scrollToPageOffset(target, offsetWithin(target, 0)),
+        () => scrollToPageOffset(target, targetOffset),
         target,
       );
       return;
@@ -2651,10 +2659,10 @@ function PdfPages({
           });
         }
       }
-      scrollToPageOffset(target, offsetWithin(target, 0), { preserveCurl: true });
+      scrollToPageOffset(target, targetOffset, { preserveCurl: true });
       return;
     }
-    scrollToPageOffset(target, offsetWithin(target, 0));
+    scrollToPageOffset(target, targetOffset);
     if (transition !== 'none') {
       animatePageTurn(pageContentRef.current, direction, transition, turnShadowRef.current, {
         spread: displayMode === 'two-page',
@@ -2871,7 +2879,8 @@ function PdfPages({
   const gestures = usePageTurnGestures({
     enabled: isActive && paged && !captureMode,
     areaRef: scrollRef,
-    onTurn: turnPage,
+    onTurn: (direction, { source }) =>
+      turnPage(direction, { landAtBottom: source === 'vertical-wheel' && direction < 0 }),
     verticalWheel: (direction) => {
       const scroller = scrollRef.current;
       if (!scroller || !paged) return false;

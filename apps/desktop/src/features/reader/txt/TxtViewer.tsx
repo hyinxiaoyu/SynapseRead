@@ -850,6 +850,7 @@ export function TxtViewer({
     if (targetTop === scroller.scrollTop) return;
     unpin();
     backChip.dismiss();
+    cancelTurnAnimation();
     scroller.scrollTop = targetTop;
     animatePageTurn(pageRef.current, direction, effectiveTransition);
   };

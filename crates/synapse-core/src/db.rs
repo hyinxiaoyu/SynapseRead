@@ -1144,14 +1144,7 @@ fn conversion_failure(
     rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(error))
 }
 
-/// Reads a stored preferences row, tolerating a page-turn mode this build lacks.
-///
-/// Only the read path is lenient. A newer build may have written a
-/// `pageTransition` or `scrollPageTransition` this one cannot parse, and
-/// rejecting it would fail the whole load, so the key is dropped and
-/// `#[serde(default)]` supplies the default. IPC input keeps strict enum
-/// validation, as the memory backend does, so a garbage value from the frontend
-/// is still an error.
+/// Drops `key` from `object` when its stored JSON fails to deserialize as `T`.
 fn drop_invalid_preference_field<T: DeserializeOwned>(
     object: &mut serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -1164,6 +1157,14 @@ fn drop_invalid_preference_field<T: DeserializeOwned>(
     }
 }
 
+/// Reads a stored preferences row, tolerating a page-turn mode this build lacks.
+///
+/// Only the read path is lenient. A newer build may have written a
+/// `pageTransition` or `scrollPageTransition` this one cannot parse, and
+/// rejecting it would fail the whole load, so the key is dropped and
+/// `#[serde(default)]` supplies the default. IPC input keeps strict enum
+/// validation, as the memory backend does, so a garbage value from the frontend
+/// is still an error.
 fn reading_preferences_from_stored(
     mut stored: serde_json::Value,
 ) -> CoreResult<ReadingPreferences> {

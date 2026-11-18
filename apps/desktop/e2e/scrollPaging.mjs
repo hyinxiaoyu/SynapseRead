@@ -1028,6 +1028,7 @@ export async function scrollPagingFlow(page) {
   assertFadePlayed(await finishFadeProbe(page, { waitForFade: true }), 'TXT scrubber ArrowRight');
   await page.evaluate(`document.activeElement?.blur?.()`);
 
+  const preGoTo = await page.evaluate(`${visibleTxtScroll}?.scrollTop ?? 0`);
   await page.press('g', 'KeyG', ALT | META);
   await page.waitFor(
     `document.activeElement === document.querySelector('[data-testid="unified-toolbar"] [data-testid="go-to-input"]')`,
@@ -1037,7 +1038,7 @@ export async function scrollPagingFlow(page) {
   await armFadeProbe(page, txtFadeTarget);
   await page.press('Enter');
   await page.waitFor(
-    `document.activeElement === ${visibleTxtScroll} && (${visibleTxtScroll}?.scrollTop ?? 0) > ${preTxtScrub}`,
+    `document.activeElement === ${visibleTxtScroll} && (${visibleTxtScroll}?.scrollTop ?? 0) !== ${preGoTo}`,
     'GoTo Return jumps TXT without fade',
   );
   assertNoFade(await finishFadeProbe(page), 'TXT GoTo jump');

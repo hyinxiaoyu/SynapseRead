@@ -3268,7 +3268,8 @@ describe('EPUB chapter wheel, consecutive click, selection, and seam queue (#106
       expect(fwdRes).toBe(false);
       expect(revRes).toBe(true);
 
-      // 5. Cancellation (beginScrub / display / setColumns) clears pendingTurns as false.
+      // 5. Cancellation (beginScrub) clears pendingTurns as false. (display / setColumns / resize / destroy
+      //    cancellations and scroll-mode seam queue are covered in dedicated tests below.)
       scrollLeft = 640;
       const seamTurn = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
       const queuedTurn = handle.turnPage(1, { animate: true, transition: 'slide', spread: false });
@@ -3348,7 +3349,8 @@ describe('EPUB chapter wheel, consecutive click, selection, and seam queue (#106
       expect(await Promise.all([batchSeam, batchMove, batchBlocked])).toEqual([false, true, false]);
       expect(scrollLeft).toBe(640);
 
-      // 9. Throw inside drainPendingTurns clears remaining queued turns instead of leaving them dangling.
+      // 9. Throw inside drainPendingTurns rejects only the failing queued item, resolves remaining
+      //    queued turns false, and leaves the original seam turn resolved true.
       scrollLeft = 640;
       scrollWidth = 1280;
       fake.rendition.location = {
@@ -3364,8 +3366,8 @@ describe('EPUB chapter wheel, consecutive click, selection, and seam queue (#106
         start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
       };
       resolveNext();
-      await expect(errSeam).rejects.toThrow('seam failed');
-      expect(await errQueued1).toBe(false);
+      await expect(errQueued1).rejects.toThrow('seam failed');
+      expect(await errSeam).toBe(true);
       expect(await errQueued2).toBe(false);
 
       // 10. canCrossChapter falls back to currentChapterIndex when view.section lacks .next/.prev.
@@ -3396,6 +3398,183 @@ describe('EPUB chapter wheel, consecutive click, selection, and seam queue (#106
       rafSpy.mockRestore();
       cancelSpy.mockRestore();
       nowSpy.mockRestore();
+    }
+  });
+
+  it('resolves queued seam turns with false on display, setColumns, resize, and destroy, and keeps resize from reopening the seam queue', async () => {
+    const container = document.createElement('div');
+    let scrollWidth = 1280;
+    let scrollLeft = 640;
+    Object.defineProperty(container, 'clientWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'offsetWidth', { value: 640, configurable: true });
+    Object.defineProperty(container, 'scrollWidth', {
+      get: () => scrollWidth,
+      configurable: true,
+    });
+    Object.defineProperty(container, 'scrollLeft', {
+      get: () => scrollLeft,
+      set: (value: number) => {
+        scrollLeft = value;
+      },
+      configurable: true,
+    });
+    Reflect.set(fake.rendition, 'manager', { container, layout: { delta: 640 } });
+
+    let resolveNext!: () => void;
+    const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveNext = resolve;
+        }),
+    );
+
+    const host = document.createElement('div');
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument({ kind: 'bytes', bytes: new Uint8Array() }, host);
+
+      // 1. display() resolves queued turns with false.
+      const displaySeam = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      const displayQueued = handle.turnPage(1, {
+        animate: false,
+        transition: 'fade',
+        spread: false,
+      });
+      const displayDone = handle.display('chapter1.xhtml');
+      expect(await displayQueued).toBe(false);
+      resolveNext();
+      expect(await displaySeam).toBe(false);
+      fake.settle('chapter1.xhtml');
+      await displayDone;
+
+      // 2. setColumns() resolves queued turns with false.
+      scrollLeft = 640;
+      const colSeam = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      const colQueued = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      handle.setColumns(1);
+      expect(await colQueued).toBe(false);
+      resolveNext();
+      expect(await colSeam).toBe(false);
+      handle.setColumns(2);
+
+      // 3. resize() resolves pre-resize queued turns with false while keeping the seam queue
+      //    closed so post-resize turns still queue until rendition.next() finishes.
+      scrollLeft = 640;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const callsBeforeResize = nextSpy.mock.calls.length;
+      const resizeSeam = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      const resizeQueuedBefore = handle.turnPage(1, {
+        animate: false,
+        transition: 'fade',
+        spread: false,
+      });
+      handle.resize(640, 600);
+      expect(await resizeQueuedBefore).toBe(false);
+      const resizeQueuedAfter = handle.turnPage(1, {
+        animate: false,
+        transition: 'fade',
+        spread: false,
+      });
+      expect(nextSpy).toHaveBeenCalledTimes(callsBeforeResize + 1);
+      scrollLeft = 0;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      resolveNext();
+      expect(await resizeSeam).toBe(false);
+      expect(await resizeQueuedAfter).toBe(true);
+      expect(scrollLeft).toBe(640);
+
+      // 4. destroy() resolves queued turns with false.
+      scrollLeft = 640;
+      scrollWidth = 1280;
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const destroySeam = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      const destroyQueued = handle.turnPage(1, {
+        animate: false,
+        transition: 'fade',
+        spread: false,
+      });
+      handle.destroy();
+      expect(await destroyQueued).toBe(false);
+      resolveNext();
+      expect(await destroySeam).toBe(false);
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      nextSpy.mockRestore();
+    }
+  });
+
+  it('queues and drains turns issued during a scroll-mode chapter seam', async () => {
+    const epubContainer = document.createElement('div');
+    epubContainer.className = 'epub-container';
+    let scrollTop = 600;
+    let scrollHeight = 1200;
+    Object.defineProperty(epubContainer, 'clientHeight', { value: 600, configurable: true });
+    Object.defineProperty(epubContainer, 'scrollHeight', {
+      get: () => scrollHeight,
+      configurable: true,
+    });
+    Object.defineProperty(epubContainer, 'scrollTop', {
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+      configurable: true,
+    });
+    Reflect.set(fake.rendition, 'manager', {
+      container: epubContainer,
+      views: { _views: [{ section: { index: 0 } }] },
+    });
+
+    let resolveNext!: () => void;
+    const nextSpy = vi.spyOn(fake.rendition, 'next').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveNext = resolve;
+        }),
+    );
+
+    const host = document.createElement('div');
+    host.appendChild(epubContainer);
+    try {
+      fake.rendition.location = {
+        start: { href: 'chapter1.xhtml', cfi: 'epubcfi(/6/2!/4/2/1:0)' },
+      };
+      const handle = await openEpubDocument(
+        { kind: 'bytes', bytes: new Uint8Array() },
+        host,
+        'scroll',
+      );
+      const seam = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      const queued = handle.turnPage(1, { animate: false, transition: 'fade', spread: false });
+      expect(nextSpy).toHaveBeenCalledTimes(1);
+
+      scrollTop = 0;
+      scrollHeight = 1800;
+      Reflect.set(fake.rendition, 'manager', {
+        container: epubContainer,
+        views: { _views: [{ section: { index: 1 } }] },
+      });
+      fake.rendition.location = {
+        start: { href: 'chapter2.xhtml', cfi: 'epubcfi(/6/4!/4/2/1:0)' },
+      };
+      resolveNext();
+      expect(await seam).toBe(false);
+      expect(await queued).toBe(true);
+      expect(scrollTop).toBeGreaterThan(0);
+      handle.destroy();
+    } finally {
+      Reflect.set(fake.rendition, 'manager', undefined);
+      nextSpy.mockRestore();
     }
   });
 });

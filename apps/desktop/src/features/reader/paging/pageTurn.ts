@@ -4,6 +4,7 @@ import type { PageTransition } from '@/types/domain';
 
 export type TurnDirection = 1 | -1;
 export type TurnZone = 'previous' | 'next';
+export type TurnSource = 'vertical-wheel' | 'click' | 'swipe';
 
 /** How much of each side of the page turns it when clicked, as in Books. */
 export const CLICK_ZONE_FRACTION = 0.12;
@@ -118,6 +119,7 @@ function parentElementOf(node: Node): Element | null {
 export function hasScrollableAncestor(
   target: EventTarget | null,
   boundary: Element | null,
+  direction?: TurnDirection,
 ): boolean {
   if (!target || typeof (target as Node).nodeType !== 'number') return false;
   const node = target as Node;
@@ -134,7 +136,14 @@ export function hasScrollableAncestor(
         ? view.getComputedStyle(current).overflowY
         : '';
     if (SCROLLABLE_OVERFLOW_Y.has(overflowY) && current.scrollHeight > current.clientHeight + 1) {
-      return true;
+      if (
+        direction === undefined ||
+        (direction > 0
+          ? current.scrollTop + current.clientHeight < current.scrollHeight - 1
+          : current.scrollTop > 1)
+      ) {
+        return true;
+      }
     }
     current = parentElementOf(current);
   }
@@ -461,8 +470,38 @@ export class VerticalWheelTurn {
 
   /** Whether an active accumulation or momentum latch is still in progress. */
   isActive(at = this.lastAt): boolean {
-    this.expire(at);
-    return this.phase !== IDLE;
+    if (this.phase === SETTLING && at - this.lastAt >= SCRUB_IDLE_MS) {
+      this.reset();
+    }
+    return this.phase !== IDLE && at - this.lastAt < SCRUB_IDLE_MS;
+  }
+
+  /**
+   * Flushes any expired accumulation as an isolated detent or fast flick before
+   * resetting. Prevents slow detents from being dropped when an input event
+   * arrives ahead of the idle timer.
+   */
+  flushExpired(at: number): TurnDirection | null {
+    if (this.phase === IDLE || at - this.lastAt < SCRUB_IDLE_MS) return null;
+    const committed =
+      this.phase === VERTICAL_ACCUMULATING
+        ? this.commitOnRelease(this.lastAt + SCRUB_IDLE_MS)
+        : null;
+    this.reset();
+    return committed;
+  }
+
+  /**
+   * Absorbs a wheel event if this controller is actively settling a committed
+   * flick's ramp-up or decaying inertial tail without starting a new gesture.
+   */
+  absorbSettling(deltaY: number, at: number): boolean {
+    if (this.phase !== SETTLING || deltaY === 0) return false;
+    if (at - this.lastAt >= SCRUB_IDLE_MS) {
+      this.reset();
+      return false;
+    }
+    return this.tryAbsorbSettling(deltaY, at);
   }
 
   /** Feeds one vertical pixel-mode wheel event, returning a committed direction if any. */
@@ -470,26 +509,7 @@ export class VerticalWheelTurn {
     this.expire(at);
     if (deltaY === 0) return null;
     if (this.phase === SETTLING) {
-      const reversed = this.lastDeltaY !== 0 && Math.sign(deltaY) !== Math.sign(this.lastDeltaY);
-      if (reversed) {
-        return this.start(deltaY, at, deltaX);
-      }
-      const abs = Math.abs(deltaY);
-      if (!this.hasDecayed) {
-        if (abs < this.lastAbs) {
-          this.hasDecayed = true;
-        }
-        this.lastDeltaY = deltaY;
-        this.lastAbs = abs;
-        this.lastAt = at;
-        return null;
-      }
-      if (abs <= this.lastAbs * MOMENTUM_SPIKE_RATIO + MOMENTUM_SPIKE_SLACK) {
-        this.lastDeltaY = deltaY;
-        this.lastAbs = abs;
-        this.lastAt = at;
-        return null;
-      }
+      if (this.tryAbsorbSettling(deltaY, at)) return null;
       return this.start(deltaY, at, deltaX);
     }
     if (this.phase === IDLE) {
@@ -532,6 +552,31 @@ export class VerticalWheelTurn {
     if (this.phase !== IDLE && at - this.lastAt >= SCRUB_IDLE_MS) {
       this.reset();
     }
+  }
+
+  private tryAbsorbSettling(deltaY: number, at: number): boolean {
+    const reversed = this.lastDeltaY !== 0 && Math.sign(deltaY) !== Math.sign(this.lastDeltaY);
+    if (reversed) return false;
+    const abs = Math.abs(deltaY);
+    if (!this.hasDecayed) {
+      if (abs < this.lastAbs) {
+        this.hasDecayed = true;
+      }
+      this.lastDeltaY = deltaY;
+      this.lastAbs = abs;
+      this.lastAt = at;
+      return true;
+    }
+    if (
+      abs < VERTICAL_FAST_FLICK_MIN_PX ||
+      abs <= this.lastAbs * MOMENTUM_SPIKE_RATIO + MOMENTUM_SPIKE_SLACK
+    ) {
+      this.lastDeltaY = deltaY;
+      this.lastAbs = abs;
+      this.lastAt = at;
+      return true;
+    }
+    return false;
   }
 
   private start(deltaY: number, at: number, deltaX: number): TurnDirection | null {
@@ -610,7 +655,7 @@ export interface UsePageTurnGesturesOptions {
    * page width.
    */
   scrubWidth?: (() => number) | undefined;
-  onTurn: (direction: TurnDirection) => void;
+  onTurn: (direction: TurnDirection, meta: { source: TurnSource }) => void;
   /** False while the page scrolls sideways itself (a zoomed PDF). */
   canSwipe?: (() => boolean) | undefined;
   /** Whether a page exists in that direction, for the end-of-document rubber band. */
@@ -784,7 +829,7 @@ export function usePageTurnGestures({
             return;
           }
           const turnZone = zoneFor(sample.x);
-          if (turnZone) latest.current.onTurn(turnZone === 'next' ? 1 : -1);
+          if (turnZone) latest.current.onTurn(turnZone === 'next' ? 1 : -1, { source: 'click' });
         }
       }
     },
@@ -804,7 +849,7 @@ export function usePageTurnGestures({
           const { onScrubEnd: end, onTurn: turn } = latest.current;
           // A page that cannot follow the fingers still turns on a committed swipe.
           if (end) end(update.velocity, update.committed);
-          else if (update.committed !== null) turn(update.committed);
+          else if (update.committed !== null) turn(update.committed, { source: 'swipe' });
           break;
         }
       }
@@ -830,23 +875,23 @@ export function usePageTurnGestures({
     }, SCRUB_IDLE_MS);
   }, [emit, scrub]);
 
-  const armVerticalIdle = useCallback(() => {
-    window.clearTimeout(verticalIdleTimer.current);
-    verticalIdleTimer.current = window.setTimeout(() => {
-      const committed = verticalTurn.release(now());
-      if (committed !== null && (latest.current.canTurn?.(committed) ?? true)) {
-        latest.current.onTurn(committed);
-      }
-    }, SCRUB_IDLE_MS);
-  }, [verticalTurn]);
-
-  const commitTurn = useCallback((direction: TurnDirection): boolean => {
+  const commitTurn = useCallback((direction: TurnDirection, source: TurnSource): boolean => {
     if (latest.current.canTurn?.(direction) ?? true) {
-      latest.current.onTurn(direction);
+      latest.current.onTurn(direction, { source });
       return true;
     }
     return false;
   }, []);
+
+  const armVerticalIdle = useCallback(() => {
+    window.clearTimeout(verticalIdleTimer.current);
+    verticalIdleTimer.current = window.setTimeout(() => {
+      const committed = verticalTurn.release(now());
+      if (committed !== null) {
+        commitTurn(committed, 'vertical-wheel');
+      }
+    }, SCRUB_IDLE_MS);
+  }, [commitTurn, verticalTurn]);
 
   const pushDiscreteAxis = useCallback(
     (
@@ -898,7 +943,7 @@ export function usePageTurnGestures({
             mode,
             mode === DOM_DELTA_PAGE ? pageWidth() : 0,
             (direction) => {
-              if (commitTurn(direction)) {
+              if (commitTurn(direction, 'swipe')) {
                 notchTail.current = {
                   delta: wheel.deltaX,
                   peak: Math.abs(wheel.deltaX),
@@ -929,8 +974,15 @@ export function usePageTurnGestures({
       }
       if (wheel.ctrlKey || wheel.metaKey || wheel.altKey || wheel.shiftKey) return false;
       if ((wheel.buttons ?? 0) !== 0) return false;
-      if (hasScrollableAncestor(wheel.target ?? null, areaRef.current)) return false;
       const direction = directionOf(wheel.deltaY);
+      if (hasScrollableAncestor(wheel.target ?? null, areaRef.current, direction)) return false;
+      if (mode !== DOM_DELTA_LINE && mode !== DOM_DELTA_PAGE) {
+        if (absorbTailInto(verticalNotchTail, wheel.deltaY, timestamp)) return true;
+        if (verticalTurn.absorbSettling(wheel.deltaY, timestamp)) {
+          armVerticalIdle();
+          return true;
+        }
+      }
       if (typeof allowVertical === 'function' && !allowVertical(direction, wheel)) {
         resetVerticalWheel();
         return false;
@@ -949,20 +1001,23 @@ export function usePageTurnGestures({
           mode,
           mode === DOM_DELTA_PAGE ? pageHeight() : 0,
           (committedDirection) => {
-            commitTurn(committedDirection);
+            commitTurn(committedDirection, 'vertical-wheel');
           },
         );
       }
 
       clearDiscreteState(verticalDiscreteState.current);
-      if (absorbTailInto(verticalNotchTail, wheel.deltaY, timestamp)) return true;
       verticalNotchTail.current = null;
+      const expiredTurn = verticalTurn.flushExpired(timestamp);
+      if (expiredTurn !== null) {
+        commitTurn(expiredTurn, 'vertical-wheel');
+      }
       if (
         wheel.deltaX === 0 &&
         Math.abs(wheel.deltaY) >= DISCRETE_PIXEL_WHEEL_PX &&
         !verticalTurn.isActive(timestamp)
       ) {
-        if (commitTurn(direction)) {
+        if (commitTurn(direction, 'vertical-wheel')) {
           verticalNotchTail.current = {
             delta: wheel.deltaY,
             peak: Math.abs(wheel.deltaY),
@@ -973,7 +1028,7 @@ export function usePageTurnGestures({
       }
       const committed = verticalTurn.push(wheel.deltaY, timestamp, wheel.deltaX);
       if (committed !== null) {
-        commitTurn(committed);
+        commitTurn(committed, 'vertical-wheel');
         verticalTurn.touch(now());
       }
       armVerticalIdle();

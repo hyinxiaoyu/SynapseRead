@@ -627,10 +627,10 @@ export async function consecutiveClicksFlow(page) {
   await waitSettle(260);
   const txtAfterDouble = await page.evaluate(`${visibleTxtScroll}?.scrollTop ?? 0`);
 
-  // Double-click blank left margin steps back 2 steps.
+  // Double-click blank left margin steps back 2 steps (> singleStep + half viewport).
   await page.multiClick(txtPts.left, 2);
   await page.waitFor(
-    `(${visibleTxtScroll}?.scrollTop ?? ${txtAfterDouble}) < ${txtAfterDouble - Math.round(txtPts.clientHeight * 0.9)}`,
+    `(${visibleTxtScroll}?.scrollTop ?? ${txtAfterDouble}) < ${txtAfterDouble - txtSingleTop - Math.round(txtPts.clientHeight * 0.45)}`,
     'TXT consecutive double blank left click retreats 2 steps',
   );
   await waitSettle(260);

@@ -1538,6 +1538,7 @@ export async function openEpubDocument(
     transition: PageTransition | undefined;
     spread: boolean;
     resolve: (turned: boolean) => void;
+    reject: (reason?: unknown) => void;
   }
 
   /** A newer navigation; an older one must neither repair nor wait for it. */
@@ -1548,7 +1549,6 @@ export async function openEpubDocument(
   const pendingTurns: QueuedTurn[] = [];
   const clearPendingTurns = () => {
     queueGeneration += 1;
-    seamEpoch = null;
     if (pendingTurns.length === 0) return;
     const queued = pendingTurns.splice(0, pendingTurns.length);
     for (const item of queued) item.resolve(false);
@@ -2367,9 +2367,17 @@ export async function openEpubDocument(
             isFinal,
           );
         } catch (err) {
-          item.resolve(false);
-          clearPendingTurns();
-          throw err;
+          item.reject(err);
+          for (const remaining of pendingTurns.splice(0, pendingTurns.length)) {
+            remaining.resolve(false);
+          }
+          if (lastMovedItem) {
+            const winner = lastMovedItem;
+            lastMovedItem = null;
+            winner.resolve(true);
+            return true;
+          }
+          return false;
         }
         if (gen !== queueGeneration || destroyed) {
           item.resolve(false);
@@ -2395,11 +2403,13 @@ export async function openEpubDocument(
     }
   };
 
-  const finishSeamTurn = async (gen: number): Promise<boolean> => {
+  const finishSeamTurn = async (epoch: number): Promise<boolean> => {
     syncCurrentCfiFromScroll();
-    if (!drainingTurns && pendingTurns.length > 0 && gen === queueGeneration) {
-      const laterMoved = await drainPendingTurns(gen);
-      if (gen !== queueGeneration || destroyed) return false;
+    if (epoch !== navigation || destroyed) return false;
+    if (!drainingTurns && pendingTurns.length > 0) {
+      const drainGen = queueGeneration;
+      const laterMoved = await drainPendingTurns(drainGen);
+      if (drainGen !== queueGeneration || destroyed) return false;
       return !laterMoved;
     }
     return true;
@@ -2416,8 +2426,8 @@ export async function openEpubDocument(
     // A turn starts from a whole page, so any slide or curl still running settles first.
     settleSlide();
     clearCurlStage();
-    const epoch = beginNavigation(drainingTurns);
-    const gen = queueGeneration;
+    const inDrain = drainingTurns;
+    const epoch = beginNavigation(inDrain);
     pendingTarget = undefined;
 
     const shouldAnimateFinal = () =>
@@ -2468,9 +2478,9 @@ export async function openEpubDocument(
           }
         }
         if (seamEpoch === epoch) seamEpoch = null;
-        return finishSeamTurn(gen);
+        return finishSeamTurn(epoch);
       } catch (err) {
-        if (epoch === navigation) clearPendingTurns();
+        if (!inDrain && epoch === navigation) clearPendingTurns();
         throw err;
       } finally {
         if (seamEpoch === epoch) seamEpoch = null;
@@ -2516,7 +2526,7 @@ export async function openEpubDocument(
       } catch (err) {
         if (seamEpoch === epoch) seamEpoch = null;
         if (epoch === navigation) {
-          clearPendingTurns();
+          if (!inDrain) clearPendingTurns();
           clearCurlStage();
         }
         throw err;
@@ -2538,7 +2548,7 @@ export async function openEpubDocument(
         return completed && epoch === navigation && !destroyed;
       }
       clearCurlStage();
-      return finishSeamTurn(gen);
+      return finishSeamTurn(epoch);
     }
 
     if (canTurnInPlace(direction)) {
@@ -2592,7 +2602,7 @@ export async function openEpubDocument(
         } catch (err) {
           if (seamEpoch === epoch) seamEpoch = null;
           if (epoch === navigation) {
-            clearPendingTurns();
+            if (!inDrain) clearPendingTurns();
             clearCurlStage();
           }
           throw err;
@@ -2614,7 +2624,7 @@ export async function openEpubDocument(
           }
         }
         clearCurlStage();
-        return finishSeamTurn(gen);
+        return finishSeamTurn(epoch);
       }
     }
 
@@ -2623,14 +2633,14 @@ export async function openEpubDocument(
     try {
       await (direction > 0 ? rendition.next() : rendition.prev());
     } catch (err) {
-      if (epoch === navigation) clearPendingTurns();
+      if (!inDrain && epoch === navigation) clearPendingTurns();
       throw err;
     } finally {
       if (seamEpoch === epoch) seamEpoch = null;
       if (settleSeam) await settleSeam(direction, { animate: shouldAnimateFinal() });
     }
     if (epoch !== navigation || destroyed) return false;
-    return finishSeamTurn(gen);
+    return finishSeamTurn(epoch);
   };
 
   const turn = async (
@@ -2640,8 +2650,8 @@ export async function openEpubDocument(
     spread = false,
   ): Promise<boolean> => {
     if (seamEpoch !== null && seamEpoch === navigation) {
-      return new Promise<boolean>((resolve) => {
-        pendingTurns.push({ direction, animate, transition, spread, resolve });
+      return new Promise<boolean>((resolve, reject) => {
+        pendingTurns.push({ direction, animate, transition, spread, resolve, reject });
       });
     }
     return executeTurn(direction, animate, transition, spread);

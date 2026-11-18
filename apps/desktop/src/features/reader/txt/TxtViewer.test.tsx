@@ -1742,6 +1742,15 @@ describe('TxtViewer', () => {
       fireEvent.keyDown(scroll, { key: 'End', code: 'End' });
       fireEvent.keyDown(scroll, { key: 'Home', code: 'Home' });
       expect(animate).toHaveBeenCalledTimes(1);
+
+      // Switching transition to 'none' mid-fade cancels the in-flight fade on the next turn.
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(animate).toHaveBeenCalledTimes(2);
+      expect(active).toHaveLength(1);
+      await store.getState().updateReadingPreferences({ scrollPageTransition: 'none' });
+      fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+      expect(animate).toHaveBeenCalledTimes(2);
+      expect(active).toHaveLength(0);
     });
 
     it('leaves vertical wheel scrolling native (#106) and preserves horizontal overflow without scrubbing (#103)', async () => {

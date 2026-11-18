@@ -572,4 +572,62 @@ describe('computeScrollPageStep', () => {
     expect(scrollTop).toBe(0);
     expect(seenBackward.size).toBe(totalLines);
   });
+
+  it('culls subtrees and .textLayer containers far outside the viewport', () => {
+    const scroller = document.createElement('div');
+    const contentRoot = document.createElement('div');
+
+    const farAboveLayer = document.createElement('div');
+    farAboveLayer.className = 'textLayer';
+    farAboveLayer.textContent = 'Far above';
+
+    const visibleLayer = document.createElement('div');
+    visibleLayer.className = 'textLayer';
+    const nearSpan = document.createElement('span');
+    nearSpan.textContent = 'Near bottom';
+    const farChildBlock = document.createElement('div');
+    farChildBlock.textContent = 'Far below child';
+    visibleLayer.append(nearSpan, farChildBlock);
+
+    const farBelowLayer = document.createElement('div');
+    farBelowLayer.className = 'textLayer';
+    farBelowLayer.textContent = 'Far below';
+
+    contentRoot.append(farAboveLayer, visibleLayer, farBelowLayer);
+    scroller.append(contentRoot);
+    document.body.append(scroller);
+
+    Object.defineProperty(scroller, 'scrollTop', { value: 2000, configurable: true });
+    Object.defineProperty(scroller, 'clientHeight', { value: 600, configurable: true });
+    Object.defineProperty(scroller, 'scrollHeight', { value: 6000, configurable: true });
+    vi.spyOn(scroller, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 600));
+    vi.spyOn(farAboveLayer, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, -1500, 800, 500),
+    );
+    vi.spyOn(visibleLayer, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 800, 1600));
+    vi.spyOn(nearSpan, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 586, 300, 24));
+    vi.spyOn(farChildBlock, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 1300, 300, 24));
+    vi.spyOn(farBelowLayer, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 1500, 800, 500),
+    );
+
+    const inspected: string[] = [];
+    Range.prototype.getClientRects = function (this: Range) {
+      const text = this.startContainer.nodeValue ?? '';
+      inspected.push(text);
+      if (text === 'Near bottom') {
+        return [new DOMRect(40, 586, 300, 24)] as unknown as DOMRectList;
+      }
+      return [] as unknown as DOMRectList;
+    };
+
+    const nextTop = computeScrollPageStep({
+      scroller,
+      contentRoot,
+      direction: 1,
+    });
+
+    expect(inspected).toEqual(['Near bottom']);
+    expect(nextTop).toBe(2000 + 586 - 24);
+  });
 });

@@ -2771,6 +2771,92 @@ describe('PdfViewer', () => {
         HTMLElement.prototype.animate = originalAnimate;
       }
     });
+
+    it('absorbs decaying fling inertia after a zoomed wheel turn and lands backward wheel turns at the bottom', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const { store, documentId } = await setup();
+        render(
+          <Harness
+            store={store}
+            documentId={documentId}
+            preferences={{ ...DEFAULT_READING_PREFERENCES, pageTransition: 'none' }}
+          />,
+        );
+        await pageElement(0);
+        const pane = await scroller();
+        vi.spyOn(pane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, PANE_PX, 600));
+        const readout = screen.getByTestId('reader-footer-readout');
+        fireEvent.click(readout);
+        fireEvent.click(screen.getByRole('radio', { name: 'Single page' }));
+
+        // At bottom of overflowing Page 1 (800px tall in 600px viewport): trackpad fling
+        // [30, 30, 25, 15, 5] commits to Page 2 and absorbs all remaining tail deltas.
+        pane.scrollTop = 200;
+        expect(fireEvent.wheel(pane, { deltaY: 30 })).toBe(false);
+        vi.advanceTimersByTime(16);
+        expect(fireEvent.wheel(pane, { deltaY: 30 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 2 of 5');
+        expect(pane.scrollTop).toBe(0);
+
+        for (const tail of [25, 15, 5]) {
+          vi.advanceTimersByTime(16);
+          expect(fireEvent.wheel(pane, { deltaY: tail })).toBe(false);
+          expect(pane.scrollTop).toBe(0);
+        }
+
+        // After idle (> 90ms), a fresh downward wheel scrolls Page 2 natively.
+        vi.advanceTimersByTime(110);
+        expect(fireEvent.wheel(pane, { deltaY: 40 })).toBe(true);
+
+        // Discrete pixel notch fling [120, 90, 60, 30] at bottom of Page 2 absorbs tail at scrollTop = 0.
+        pane.scrollTop = 200;
+        vi.advanceTimersByTime(300);
+        expect(fireEvent.wheel(pane, { deltaY: 120 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 3 of 5');
+        expect(pane.scrollTop).toBe(0);
+        for (const tail of [90, 60, 30]) {
+          vi.advanceTimersByTime(16);
+          expect(fireEvent.wheel(pane, { deltaY: tail })).toBe(false);
+          expect(pane.scrollTop).toBe(0);
+        }
+
+        // Scrolling UP past top of Page 3 via wheel lands at the bottom of Page 2 (800 - 600 = 200)
+        // and absorbs the upward fling tail without scrolling up from the bottom.
+        vi.advanceTimersByTime(110);
+        expect(fireEvent.wheel(pane, { deltaY: -120 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 2 of 5');
+        expect(pane.scrollTop).toBe(200);
+        for (const tail of [-80, -40]) {
+          vi.advanceTimersByTime(16);
+          expect(fireEvent.wheel(pane, { deltaY: tail })).toBe(false);
+          expect(pane.scrollTop).toBe(200);
+        }
+
+        // Non-wheel backward turns (blank left-margin click and toolbar Previous Page) still land at the top.
+        fireEvent.pointerDown(pane, { button: 0, clientX: 20, clientY: 120 });
+        fireEvent.click(pane, { button: 0, detail: 1, clientX: 20, clientY: 120 });
+        expect(readout).toHaveTextContent('Page 1 of 5');
+        expect(pane.scrollTop).toBe(0);
+
+        // Toolbar Next -> Previous also lands at the top.
+        fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+        expect(readout).toHaveTextContent('Page 2 of 5');
+        fireEvent.click(screen.getByRole('button', { name: 'Previous Page' }));
+        expect(readout).toHaveTextContent('Page 1 of 5');
+        expect(pane.scrollTop).toBe(0);
+
+        // Horizontal discrete tilt-wheel backward on a tall fit-width page lands at the top,
+        // matching click, keyboard, and trackpad swipe semantics.
+        fireEvent.click(screen.getByRole('button', { name: 'Next Page' }));
+        expect(readout).toHaveTextContent('Page 2 of 5');
+        expect(fireEvent.wheel(pane, { deltaX: -120, deltaY: 0 })).toBe(false);
+        expect(readout).toHaveTextContent('Page 1 of 5');
+        expect(pane.scrollTop).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('consecutive blank-area clicks and curl reversal (#107)', () => {

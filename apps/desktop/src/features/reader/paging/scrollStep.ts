@@ -48,32 +48,44 @@ function parentElementOf(node: Node): Element | null {
   return parent && parent.nodeType === 1 ? (parent as Element) : null;
 }
 
-function isExcludedElement(element: Element, stopAt: Element, extraSelector?: string): boolean {
-  let cursor: Element | null = element;
-  while (cursor) {
-    const tag = cursor.localName?.toLowerCase() ?? '';
-    if (
-      tag === 'script' ||
-      tag === 'style' ||
-      tag === 'noscript' ||
-      tag === 'template' ||
-      tag === 'title'
-    ) {
-      return true;
-    }
-    if (cursor.hasAttribute?.('hidden') || cursor.hasAttribute?.('inert')) {
-      return true;
-    }
-    if (cursor.classList?.contains('sr-only')) {
-      return true;
-    }
-    if (extraSelector && cursor.matches?.(extraSelector)) {
-      return true;
-    }
-    if (cursor === stopAt) break;
-    cursor = parentElementOf(cursor);
+function isExcludedSelf(element: Element, extraSelector?: string): boolean {
+  const tag = element.localName?.toLowerCase() ?? '';
+  if (
+    tag === 'script' ||
+    tag === 'style' ||
+    tag === 'noscript' ||
+    tag === 'template' ||
+    tag === 'title'
+  ) {
+    return true;
   }
-  return false;
+  if (element.hasAttribute?.('hidden') || element.hasAttribute?.('inert')) {
+    return true;
+  }
+  if (element.classList?.contains('sr-only')) {
+    return true;
+  }
+  return Boolean(extraSelector && element.matches?.(extraSelector));
+}
+
+function isOutsideViewportCullBounds(
+  element: Element,
+  viewportOriginTop: number,
+  viewportHeight: number,
+): boolean {
+  if (viewportHeight <= 0 || typeof element.getBoundingClientRect !== 'function') return false;
+  const rect = element.getBoundingClientRect();
+  if (!Number.isFinite(rect.top) || !Number.isFinite(rect.bottom) || rect.height <= 0) {
+    return false;
+  }
+  const relTop = rect.top - viewportOriginTop;
+  const relBottom = rect.bottom - viewportOriginTop;
+  // Keep a one-viewport buffer above and below so straddling lines and median line-height
+  // estimation never miss nearby content while skipping far-off chapter subtrees.
+  // Culling uses the element's own box, assuming flowing EPUB prose and PDF `.textLayer`
+  // containers enclose their descendants vertically (fixed-height overflowing or out-of-flow
+  // positioned descendants outside the parent box are not expected here).
+  return relBottom < -viewportHeight || relTop > viewportHeight * 2;
 }
 
 function frameTopOffset(contentDoc: Document, scrollerDoc: Document | null): number {
@@ -108,57 +120,78 @@ function pushValidRect(
 function collectTextNodeRects(
   root: Element,
   viewportOriginTop: number,
+  viewportHeight: number,
   rangeCache: WeakMap<Document, Range>,
   out: NormalizedLineRect[],
   options: { extraExcludeSelector?: string; allowParentRectFallback: boolean },
 ): void {
+  if (isExcludedSelf(root, options.extraExcludeSelector)) return;
   const doc = root.ownerDocument;
   if (!doc || typeof doc.createTreeWalker !== 'function') return;
+  const showElement = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_ELEMENT : 1;
   const showText = typeof NodeFilter !== 'undefined' ? NodeFilter.SHOW_TEXT : 4;
-  const walker = doc.createTreeWalker(root, showText);
+  const filterAccept = typeof NodeFilter !== 'undefined' ? NodeFilter.FILTER_ACCEPT : 1;
+  const filterReject = typeof NodeFilter !== 'undefined' ? NodeFilter.FILTER_REJECT : 2;
+  const filterSkip = typeof NodeFilter !== 'undefined' ? NodeFilter.FILTER_SKIP : 3;
+
+  const walker = doc.createTreeWalker(root, showElement | showText, {
+    acceptNode(node) {
+      if (node.nodeType === 1) {
+        const el = node as Element;
+        if (isExcludedSelf(el, options.extraExcludeSelector)) return filterReject;
+        if (el !== root && isOutsideViewportCullBounds(el, viewportOriginTop, viewportHeight)) {
+          return filterReject;
+        }
+        return filterSkip;
+      }
+      if (node.nodeType === 3) {
+        const value = node.nodeValue;
+        return value && value.trim().length > 0 ? filterAccept : filterSkip;
+      }
+      return filterSkip;
+    },
+  });
+
   let node = walker.nextNode();
   while (node) {
-    const value = node.nodeValue;
-    if (value && value.trim().length > 0) {
-      const parent = parentElementOf(node);
-      if (parent && !isExcludedElement(parent, root, options.extraExcludeSelector)) {
-        const nodeDoc = node.ownerDocument ?? doc;
-        let collectedFromRange = false;
-        if (typeof nodeDoc.createRange === 'function') {
-          let range = rangeCache.get(nodeDoc);
-          if (!range) {
-            range = nodeDoc.createRange();
-            rangeCache.set(nodeDoc, range);
-          }
-          range.selectNodeContents(node);
-          if (typeof range.getClientRects === 'function') {
-            for (const rect of range.getClientRects()) {
-              if (rect.width > 0 && rect.height > 0) {
-                collectedFromRange = true;
-                pushValidRect(
-                  out,
-                  rect.top - viewportOriginTop,
-                  rect.bottom - viewportOriginTop,
-                  rect.height,
-                );
-              }
+    const parent = parentElementOf(node);
+    if (parent) {
+      const nodeDoc = node.ownerDocument ?? doc;
+      let collectedFromRange = false;
+      if (typeof nodeDoc.createRange === 'function') {
+        let range = rangeCache.get(nodeDoc);
+        if (!range) {
+          range = nodeDoc.createRange();
+          rangeCache.set(nodeDoc, range);
+        }
+        range.selectNodeContents(node);
+        if (typeof range.getClientRects === 'function') {
+          for (const rect of range.getClientRects()) {
+            if (rect.width > 0 && rect.height > 0) {
+              collectedFromRange = true;
+              pushValidRect(
+                out,
+                rect.top - viewportOriginTop,
+                rect.bottom - viewportOriginTop,
+                rect.height,
+              );
             }
           }
         }
-        if (
-          !collectedFromRange &&
-          options.allowParentRectFallback &&
-          typeof parent.getBoundingClientRect === 'function'
-        ) {
-          const rect = parent.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            pushValidRect(
-              out,
-              rect.top - viewportOriginTop,
-              rect.bottom - viewportOriginTop,
-              rect.height,
-            );
-          }
+      }
+      if (
+        !collectedFromRange &&
+        options.allowParentRectFallback &&
+        typeof parent.getBoundingClientRect === 'function'
+      ) {
+        const rect = parent.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          pushValidRect(
+            out,
+            rect.top - viewportOriginTop,
+            rect.bottom - viewportOriginTop,
+            rect.height,
+          );
         }
       }
     }
@@ -169,6 +202,7 @@ function collectTextNodeRects(
 function collectDomLineRects(scroller: ScrollViewport, contentRoot: Element): NormalizedLineRect[] {
   const scrollerTop =
     typeof scroller.getBoundingClientRect === 'function' ? scroller.getBoundingClientRect().top : 0;
+  const viewportHeight = scroller.clientHeight;
   const scrollerDoc = scroller.ownerDocument ?? null;
   const rangeCache = new WeakMap<Document, Range>();
   const out: NormalizedLineRect[] = [];
@@ -190,7 +224,8 @@ function collectDomLineRects(scroller: ScrollViewport, contentRoot: Element): No
 
     if (textLayers.length > 0) {
       for (const layer of textLayers) {
-        collectTextNodeRects(layer, viewportOriginTop, rangeCache, out, {
+        if (isOutsideViewportCullBounds(layer, viewportOriginTop, viewportHeight)) continue;
+        collectTextNodeRects(layer, viewportOriginTop, viewportHeight, rangeCache, out, {
           extraExcludeSelector: '.endOfContent',
           allowParentRectFallback: true,
         });
@@ -198,12 +233,13 @@ function collectDomLineRects(scroller: ScrollViewport, contentRoot: Element): No
       return;
     }
 
-    collectTextNodeRects(root, viewportOriginTop, rangeCache, out, {
+    collectTextNodeRects(root, viewportOriginTop, viewportHeight, rangeCache, out, {
       allowParentRectFallback: false,
     });
 
     if (typeof root.querySelectorAll === 'function') {
       for (const frame of root.querySelectorAll('iframe')) {
+        if (isOutsideViewportCullBounds(frame, scrollerTop, viewportHeight)) continue;
         try {
           const frameBody = (frame as HTMLIFrameElement).contentDocument?.body;
           if (frameBody) inspectRoot(frameBody);
