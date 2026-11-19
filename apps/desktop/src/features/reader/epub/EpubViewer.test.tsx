@@ -10,6 +10,7 @@ import {
   searchMatchId,
 } from '@/features/reader/DocumentSearch';
 import { suppressDefaultContextMenu } from '@/features/commands/contextMenu';
+import { commandState } from '@/features/commands/registry';
 import type { PageGestureSample, WheelSample } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
@@ -61,6 +62,8 @@ const engine = vi.hoisted(() => ({
   selectionCleared: 0,
   destroyed: 0,
   failCfi: null as string | null,
+  /** Holds every jump until released, as a slow machine holds epub.js' `relocated`. */
+  gate: null as Promise<void> | null,
   emitSelection: (() => undefined) as (selection: unknown) => void,
   emitLocation: (() => undefined) as (location: unknown) => void,
   emitInternalLink: (() => undefined) as (href: string, link?: EpubInternalLink) => void,
@@ -130,6 +133,7 @@ vi.mock('./epubEngine', () => ({
     async display(target?: string) {
       if (target && target === engine.failCfi) throw new Error('no such location');
       engine.displayed.push(target);
+      await engine.gate;
     },
     // Stands in for `EpubCFI.compare`: the fixture's CFIs sort in book order.
     compareCfi: (one: string, two: string) => (one === two ? 0 : one < two ? -1 : 1),
@@ -142,6 +146,7 @@ vi.mock('./epubEngine', () => ({
     async displayChapterFraction(index: number, fraction: number) {
       engine.displayedFractions.push([index, fraction]);
       engine.displayed.push(engine.chapters[index]?.href);
+      await engine.gate;
     },
     next: engine.next,
     previous: engine.previous,
@@ -356,6 +361,7 @@ describe('EpubViewer', () => {
     engine.selectionCleared = 0;
     engine.destroyed = 0;
     engine.failCfi = null;
+    engine.gate = null;
     engine.displayedFractions = [];
     engine.cursor = '';
     engine.measure = null;
@@ -1489,6 +1495,295 @@ describe('EpubViewer', () => {
     const removeButtons = screen.getAllByTestId('bookmark-remove-button');
     fireEvent.click(removeButtons[0] as HTMLElement);
     await waitFor(() => expect(reopened.getState().bookmarks).toHaveLength(1));
+  });
+
+  describe('bookmarking during a jump (#100)', () => {
+    const chapterOne: EpubLocation = {
+      cfi: CFI,
+      href: 'OEBPS/chapter1.xhtml',
+      page: 1,
+      totalPages: 2,
+      chapterIndex: 0,
+      totalChapters: 2,
+      bookProgress: 25,
+    };
+    const chapterTwo: EpubLocation = {
+      cfi: FAR_CFI,
+      href: 'OEBPS/chapter2.xhtml',
+      page: 1,
+      totalPages: 2,
+      chapterIndex: 1,
+      totalChapters: 2,
+      bookProgress: 75,
+    };
+
+    /** Holds the next jumps until `land` reports where they arrived. */
+    const holdJumps = () => {
+      let release = () => undefined as void;
+      engine.gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return async (location: EpubLocation) => {
+        // epub.js reports the destination, then `display()` settles.
+        act(() => engine.emitLocation(location));
+        engine.gate = null;
+        await act(async () => {
+          release();
+          await Promise.resolve();
+        });
+      };
+    };
+
+    const pressShortcut = () =>
+      act(() =>
+        engine.emitKeyDown(
+          new KeyboardEvent('keydown', { key: 'd', metaKey: true, cancelable: true }),
+        ),
+      );
+
+    const openAtChapterOne = async () => {
+      const opened_ = await setup();
+      render(<Harness store={opened_.store} documentId={opened_.documentId} />);
+      await opened();
+      act(() => engine.emitLocation(chapterOne));
+      return opened_;
+    };
+
+    const jumps: [string, () => void | Promise<void>][] = [
+      [
+        'a Contents entry',
+        () => {
+          fireEvent.click(screen.getByTestId('sidebar-toggle'));
+          fireEvent.click(screen.getByRole('treeitem', { name: 'Two' }));
+        },
+      ],
+      ['a book link', () => act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml'))],
+      [
+        'Go To',
+        () => {
+          const input = screen.getByTestId('go-to-input');
+          fireEvent.change(input, { target: { value: '75' } });
+          fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+        },
+      ],
+    ];
+
+    it.each(jumps)('bookmarks the destination when toggled right after %s', async (_name, jump) => {
+      const { store } = await openAtChapterOne();
+      const land = holdJumps();
+      await jump();
+      await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+
+      // Both ways in: the toolbar button and the shortcut from the chapter frame.
+      fireEvent.click(screen.getByTestId('toggle-bookmark-button'));
+      await act(async () => undefined);
+      expect(store.getState().bookmarks).toEqual([]);
+
+      await land(chapterTwo);
+      await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+      const [saved] = store.getState().bookmarks;
+      expect(saved?.anchor).toEqual({
+        format: 'epub',
+        cfiRange: FAR_CFI,
+        chapterHref: 'OEBPS/chapter2.xhtml',
+      });
+      expect(saved?.label).toBe('Two · Page 1');
+      expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('adds at the destination instead of removing the bookmark being left', async () => {
+      const { store } = await openAtChapterOne();
+      pressShortcut();
+      await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+      expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'true');
+
+      const land = holdJumps();
+      act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml'));
+      await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+      // The origin is bookmarked, so toggling against it would remove that bookmark.
+      pressShortcut();
+      await land(chapterTwo);
+
+      await waitFor(() => expect(store.getState().bookmarks).toHaveLength(2));
+      expect(store.getState().bookmarks.map((bookmark) => bookmark.anchor)).toEqual([
+        { format: 'epub', cfiRange: CFI, chapterHref: 'OEBPS/chapter1.xhtml' },
+        { format: 'epub', cfiRange: FAR_CFI, chapterHref: 'OEBPS/chapter2.xhtml' },
+      ]);
+      expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('treats two toggles during one jump as two toggles at the destination', async () => {
+      const { store } = await openAtChapterOne();
+      const land = holdJumps();
+      act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml'));
+      await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+      pressShortcut();
+      pressShortcut();
+      await land(chapterTwo);
+      await act(async () => undefined);
+
+      expect(store.getState().bookmarks).toEqual([]);
+      expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('waits for the last of overlapping jumps', async () => {
+      const { store } = await openAtChapterOne();
+      // epub.js settles a display as soon as a newer one replaces it.
+      const settleFirst = holdJumps();
+      act(() => engine.emitInternalLink('OEBPS/chapter1.xhtml#s1'));
+      const land = holdJumps();
+      act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml'));
+      await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml'));
+      await settleFirst(chapterOne);
+      pressShortcut();
+      await act(async () => undefined);
+      expect(store.getState().bookmarks).toEqual([]);
+
+      await land(chapterTwo);
+      await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+      expect(store.getState().bookmarks[0]?.anchor).toMatchObject({ cfiRange: FAR_CFI });
+    });
+
+    it.each<[string, () => void]>([
+      ['shortcut', () => pressShortcut()],
+      [
+        'toolbar pointer click',
+        () => {
+          const button = screen.getByTestId('toggle-bookmark-button');
+          const target = button.querySelector('svg') ?? button;
+          fireEvent.pointerDown(target);
+          fireEvent.pointerUp(target);
+          fireEvent.click(button);
+        },
+      ],
+    ])(
+      'defers bookmarking across a delayed peekLink lookup via %s until the automatic jump lands',
+      async (_trigger, toggle) => {
+        let resolvePeek: (text: string | null) => void = () => undefined;
+        engine.peek = () =>
+          new Promise<string | null>((resolve) => {
+            resolvePeek = resolve;
+          });
+
+        const { store } = await setup().then(async (opened_) => {
+          render(<Harness store={opened_.store} documentId={opened_.documentId} />);
+          await opened();
+          act(() => engine.emitLocation({ ...chapterOne, page: 3 }));
+          return opened_;
+        });
+        const displayedBefore = engine.displayed.length;
+
+        act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml#section'));
+        // Toggling while peekLink is still resolving the link intent must not save the origin
+        // or cancel the pending link jump via window pointerdown capture.
+        toggle();
+        await act(async () => undefined);
+        expect(engine.displayed.length).toBe(displayedBefore);
+        expect(store.getState().bookmarks).toEqual([]);
+
+        const land = holdJumps();
+        await act(async () => {
+          resolvePeek(null);
+          await Promise.resolve();
+        });
+        await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml#section'));
+        expect(store.getState().bookmarks).toEqual([]);
+
+        await land(chapterTwo);
+        await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+        const [saved] = store.getState().bookmarks;
+        expect(saved?.anchor).toEqual({
+          format: 'epub',
+          cfiRange: FAR_CFI,
+          chapterHref: 'OEBPS/chapter2.xhtml',
+        });
+        expect(saved?.label).toBe('Two · Page 1');
+        expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+      },
+    );
+
+    it('still cancels a pending peekLink lookup on non-bookmark pointer input', async () => {
+      let resolvePeek: (text: string | null) => void = () => undefined;
+      engine.peek = () =>
+        new Promise<string | null>((resolve) => {
+          resolvePeek = resolve;
+        });
+
+      await openAtChapterOne();
+      const displayedBefore = engine.displayed.length;
+
+      act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml#section'));
+      fireEvent.pointerDown(screen.getByTestId('sidebar-toggle'));
+      await act(async () => {
+        resolvePeek(null);
+        await Promise.resolve();
+      });
+      expect(engine.displayed.length).toBe(displayedBefore);
+    });
+
+    it('applies a deferred bookmark to the origin page when peekLink opens a preview instead of jumping', async () => {
+      let resolvePeek: (text: string | null) => void = () => undefined;
+      engine.peek = () =>
+        new Promise<string | null>((resolve) => {
+          resolvePeek = resolve;
+        });
+
+      const { store } = await openAtChapterOne();
+      const displayedBefore = engine.displayed.length;
+
+      act(() =>
+        engine.emitInternalLink('OEBPS/chapter2.xhtml#fn1', {
+          noteref: true,
+          rect: { top: 100, left: 100, bottom: 116, right: 108 },
+        }),
+      );
+      pressShortcut();
+      await act(async () => undefined);
+      expect(store.getState().bookmarks).toEqual([]);
+
+      await act(async () => {
+        resolvePeek('A short footnote.');
+        await Promise.resolve();
+      });
+      expect(await screen.findByTestId('link-peek')).toBeInTheDocument();
+      expect(engine.displayed.length).toBe(displayedBefore);
+
+      await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+      const [saved] = store.getState().bookmarks;
+      expect(saved?.anchor).toEqual({
+        format: 'epub',
+        cfiRange: CFI,
+        chapterHref: 'OEBPS/chapter1.xhtml',
+      });
+      expect(saved?.label).toBe('One · Page 1');
+      expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('saves nothing before the book reports a location, never a placeholder', async () => {
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      expect(screen.getByTestId('toggle-bookmark-button')).toBeDisabled();
+      expect(commandState('bookmarks.toggle').enabled).toBe(false);
+      pressShortcut();
+      await act(async () => undefined);
+      expect(store.getState().bookmarks).toEqual([]);
+
+      act(() => engine.emitLocation(chapterTwo));
+      expect(screen.getByTestId('toggle-bookmark-button')).toBeEnabled();
+      expect(commandState('bookmarks.toggle').enabled).toBe(true);
+      pressShortcut();
+      await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+      expect(store.getState().bookmarks[0]?.anchor).toEqual({
+        format: 'epub',
+        cfiRange: FAR_CFI,
+        chapterHref: 'OEBPS/chapter2.xhtml',
+      });
+    });
   });
 
   it('creates, lists, jumps to, edits, deletes, and undoes independent highlights and notes without creating MindMap cards', async () => {

@@ -631,14 +631,6 @@ export async function epubFlow(page) {
     })()`,
     'EPUB search matches marked on the scrubber',
   );
-  // The bookmark flow below starts from Chapter Two, so put the reader back there.
-  await page.showSidebarTab('Table of Contents');
-  await page.clickTreeItem('Two');
-  await page.waitFor(chapterIs('Chapter Two'), 'returning to Chapter Two after the folding checks');
-  // The frame renders a moment before the reader reports the new location, and the
-  // bookmark button reads that location. Waiting only for the frame let a bookmark
-  // taken in that window point at Chapter One.
-  await page.waitFor(chapterNamed('Two'), 'the reader to report Chapter Two');
   await page.leaveSearch();
   // Clearing the query puts the view back and leaves the sidebar open.
   await page.waitFor(
@@ -647,11 +639,33 @@ export async function epubFlow(page) {
   );
 
   // Independent bookmarks in EPUB: bookmark Chapter Two, jump to Chapter One, jump back via bookmark, and remove.
-  await page.clickButton('Bookmark current location');
+  // The bookmark is taken in the same task as the jump to Chapter Two, on a slowed
+  // CPU, before epub.js reports the new location: it must still land on Two (#100).
+  await page.showSidebarTab('Table of Contents');
+  await page.clickTreeItem('One');
+  await page.waitFor(chapterNamed('One'), 'the reader to report Chapter One before the jump');
+  await page.cdp.send('Emulation.setCPUThrottlingRate', { rate: 8 });
+  try {
+    await page.evaluate(`(() => {
+      const two = [...document.querySelectorAll('[role="treeitem"]')].find(
+        (e) => e.getAttribute('aria-label') === 'Two' && e.checkVisibility({ visibilityProperty: true }));
+      two.click();
+      document.querySelector('[data-testid="unified-toolbar"] [data-testid="toggle-bookmark-button"]').click();
+    })()`);
+    await page.waitFor(
+      `document.querySelector('[data-testid="unified-toolbar"] [data-testid="toggle-bookmark-button"]')?.getAttribute('aria-pressed') === 'true'`,
+      'EPUB bookmark toggle pressed',
+    );
+  } finally {
+    await page.cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  }
+  await page.waitFor(chapterNamed('Two'), 'the reader to report Chapter Two');
+  await page.showSidebarTab('Bookmarks');
   await page.waitFor(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="toggle-bookmark-button"]')?.getAttribute('aria-pressed') === 'true'`,
-    'EPUB bookmark toggle pressed',
+    `${visibleViewer}?.querySelector('[data-testid="bookmark-label"]')?.textContent.startsWith('Two')`,
+    'the bookmark taken during the jump to name Chapter Two',
   );
+  await page.showSidebarTab('Table of Contents');
   await page.clickTreeItem('One');
   await page.waitFor(chapterIs('Chapter One'), 'EPUB jump to Chapter One before bookmark jump');
   await page.showSidebarTab('Bookmarks');
