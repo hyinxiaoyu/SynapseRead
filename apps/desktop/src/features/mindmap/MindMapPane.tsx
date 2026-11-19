@@ -12,10 +12,19 @@ import {
   useReactFlow,
   useStore,
 } from '@xyflow/react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link2, Pencil, Trash2 } from 'lucide-react';
+import {
+  type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 
+import { commandDefinition, formatShortcut } from '@/features/commands/commands';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
-import { isEditableShortcutTarget } from '@/features/commands/registry';
+import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/commands/registry';
 import { CardNode, type CardFlowNode } from '@/features/mindmap/CardNode';
 import {
   MIN_REVEAL_ZOOM,
@@ -30,19 +39,39 @@ type Measured = NonNullable<CardFlowNode['measured']>;
 /** A card's size until React Flow has measured it: `w-60`, about three lines tall. */
 const UNMEASURED_CARD = { width: 240, height: 96 };
 
+interface CardMenuState {
+  nodeId: string;
+  x: number;
+  y: number;
+}
+
 /**
  * The store owns graph state; React Flow is a controlled view of it. Measured
- * sizes and edge selection are purely presentational, so they stay local.
+ * sizes, edge selection, and the card context menu are purely presentational,
+ * so they stay local.
  *
  * `open` is whether the pane is showing: a collapsed pane stays mounted, and a
  * card it is asked to reveal waits until it opens.
  */
-export function MindMapPane({ open }: { open: boolean }) {
+export function MindMapPane({
+  open,
+  inspectorOpen = false,
+}: {
+  open: boolean;
+  inspectorOpen?: boolean;
+}) {
   const nodes = useStudySyncStore((state) => state.nodes);
+  const cards = useStudySyncStore((state) => state.cards);
   const edges = useStudySyncStore((state) => state.edges);
   const selectedNodeId = useStudySyncStore((state) => state.selectedNodeId);
+  const deletedCardCount = useStudySyncStore((state) => state.deletedCardHistory.length);
+  const lastDeletionKind = useStudySyncStore((state) => state.deletionOrder.at(-1) ?? null);
   const initialViewport = useStudySyncStore((state) => state.notebook?.viewport);
   const selectNode = useStudySyncStore((state) => state.selectNode);
+  const inspectNode = useStudySyncStore((state) => state.inspectNode);
+  const jumpToNode = useStudySyncStore((state) => state.jumpToNode);
+  const removeCard = useStudySyncStore((state) => state.removeCard);
+  const undoRemoveCard = useStudySyncStore((state) => state.undoRemoveCard);
   const dragNode = useStudySyncStore((state) => state.dragNode);
   const commitNodeLayout = useStudySyncStore((state) => state.commitNodeLayout);
   const connectNodes = useStudySyncStore((state) => state.connectNodes);
@@ -52,6 +81,9 @@ export function MindMapPane({ open }: { open: boolean }) {
   const sectionRef = useRef<HTMLElement>(null);
   const [measured, setMeasured] = useState<Record<string, Measured>>({});
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<ReadonlySet<string>>(new Set());
+  const [contextMenu, setContextMenu] = useState<CardMenuState | null>(null);
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
   const flowNodes = useMemo<CardFlowNode[]>(
     () =>
@@ -63,6 +95,8 @@ export function MindMapPane({ open }: { open: boolean }) {
           position: { x: node.posX, y: node.posY },
           data: { cardId: node.cardId },
           selected: node.id === selectedNodeId,
+          // Card deletion routes through the command registry (`edit.deleteCard`) so
+          // keyboard, context menu, Inspector, and native menu all share one path.
           deletable: false,
           ...(size ? { measured: size } : {}),
         };
@@ -125,6 +159,65 @@ export function MindMapPane({ open }: { open: boolean }) {
     [connectNodes],
   );
 
+  const selectedNode = useMemo(
+    () => (selectedNodeId ? nodes.find((candidate) => candidate.id === selectedNodeId) : undefined),
+    [nodes, selectedNodeId],
+  );
+  const canUndoCard = deletedCardCount > 0 && lastDeletionKind === 'card';
+
+  useCommands({
+    'edit.editCard': {
+      run: () => {
+        if (selectedNode) inspectNode(selectedNode.id);
+      },
+      enabled: open && selectedNode !== undefined,
+    },
+    'edit.deleteCard': {
+      run: () => {
+        if (selectedNode) {
+          closeContextMenu();
+          void removeCard(selectedNode.cardId);
+        }
+      },
+      enabled: (open || inspectorOpen) && selectedNode !== undefined,
+    },
+  });
+  // Register Undo Delete Card as its own active-gated layer so deleting a card
+  // always lands above an already-open reader tab's handler, and unregisters as
+  // soon as a newer highlight deletion takes precedence (#116).
+  useCommands(
+    {
+      'edit.undoDelete': {
+        run: () => {
+          void undoRemoveCard();
+        },
+        enabled: true,
+        title: 'Undo Delete Card',
+      },
+    },
+    canUndoCard,
+  );
+
+  const activeMenu = useMemo(() => {
+    if (!open || !contextMenu) return null;
+    const node = nodes.find((candidate) => candidate.id === contextMenu.nodeId);
+    if (!node) return null;
+    const card = cards.find((candidate) => candidate.id === node.cardId);
+    if (!card) return null;
+    return { ...contextMenu, card };
+  }, [open, contextMenu, nodes, cards]);
+
+  // Esc closes the card context menu before it clears selection on the canvas.
+  useEscapeLayer(
+    ESCAPE_LAYER.mindMapMenu,
+    activeMenu
+      ? () => {
+          closeContextMenu();
+          return true;
+        }
+      : null,
+  );
+
   // Esc on the canvas puts the selection away, and with it the nesting target.
   useEscapeLayer(
     ESCAPE_LAYER.mindMap,
@@ -141,8 +234,10 @@ export function MindMapPane({ open }: { open: boolean }) {
       : null,
   );
 
+  const isEmpty = nodes.length === 0;
+
   return (
-    <section ref={sectionRef} aria-label="MindMap canvas" className="h-full">
+    <section ref={sectionRef} aria-label="MindMap canvas" className="relative h-full">
       <ReactFlow<CardFlowNode>
         nodes={flowNodes}
         edges={flowEdges}
@@ -152,21 +247,185 @@ export function MindMapPane({ open }: { open: boolean }) {
         onConnect={onConnect}
         // React Flow reports no change for a click on a card that is already
         // selected, as one an excerpt selected is; the click still chooses it.
-        onNodeClick={(_event, node) => selectNode(node.id)}
-        onPaneClick={() => selectNode(null)}
+        onNodeClick={(_event, node) => {
+          closeContextMenu();
+          selectNode(node.id);
+        }}
+        onNodeDoubleClick={(_event, node) => {
+          closeContextMenu();
+          selectNode(node.id);
+          inspectNode(node.id);
+        }}
+        onNodeContextMenu={(event, node) => {
+          event.preventDefault();
+          selectNode(node.id);
+          setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
+        }}
+        onPaneClick={() => {
+          closeContextMenu();
+          selectNode(null);
+        }}
         onNodeDragStop={(_event, node) => void commitNodeLayout(node.id)}
         onMoveEnd={(_event, viewport) => void saveViewport(viewport)}
         {...(initialViewport ? { defaultViewport: initialViewport } : {})}
         minZoom={MIN_REVEAL_ZOOM}
         maxZoom={2.5}
         multiSelectionKeyCode={null}
+        // Only let React Flow claim Backspace/Delete while an edge is selected;
+        // card deletion routes through the command registry (`edit.deleteCard`).
+        deleteKeyCode={selectedEdgeIds.size > 0 ? ['Backspace', 'Delete'] : null}
       >
         <Background />
         <Controls />
-        <MiniMap pannable zoomable />
+        {!isEmpty && <MiniMap pannable zoomable />}
         <RevealOnRequest open={open} />
       </ReactFlow>
+      {isEmpty && <EmptyCanvasHint />}
+      {activeMenu && (
+        <CardContextMenu
+          x={activeMenu.x}
+          y={activeMenu.y}
+          hasSource={activeMenu.card.annotationIds.length > 0}
+          onEdit={() => {
+            closeContextMenu();
+            runCommand('edit.editCard', 'toolbar');
+          }}
+          onJump={() => {
+            closeContextMenu();
+            jumpToNode(activeMenu.nodeId);
+          }}
+          onDelete={() => {
+            closeContextMenu();
+            runCommand('edit.deleteCard', 'toolbar');
+          }}
+          onClose={closeContextMenu}
+        />
+      )}
     </section>
+  );
+}
+
+/** Non-interactive onboarding hint shown while a notebook has no cards (#120). */
+function EmptyCanvasHint() {
+  const excerpt = commandDefinition('edit.excerpt');
+  const shortcut = excerpt.shortcut ? formatShortcut(excerpt.shortcut) : null;
+  return (
+    <div
+      data-testid="mindmap-empty-hint"
+      className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6 select-none"
+    >
+      <p className="max-w-xs rounded-md bg-background/85 px-4 py-3 text-center text-sm text-muted-foreground">
+        Select text in the reader and choose{' '}
+        <span className="font-medium text-foreground">{excerpt.title}</span>
+        {shortcut && (
+          <>
+            {' '}
+            (<kbd className="font-sans text-foreground">{shortcut}</kbd>)
+          </>
+        )}{' '}
+        to add a card.
+      </p>
+    </div>
+  );
+}
+
+function CardContextMenu({
+  x,
+  y,
+  hasSource,
+  onEdit,
+  onJump,
+  onDelete,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  hasSource: boolean;
+  onEdit: () => void;
+  onJump: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const editDef = commandDefinition('edit.editCard');
+  const deleteDef = commandDefinition('edit.deleteCard');
+  const editShortcut = editDef.shortcut ? formatShortcut(editDef.shortcut) : null;
+  const deleteShortcut = deleteDef.shortcut ? formatShortcut(deleteDef.shortcut) : null;
+
+  useEffect(() => {
+    const first = menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]');
+    first?.focus();
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && menuRef.current?.contains(event.target)) return;
+      onClose();
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    return () => window.removeEventListener('pointerdown', onPointerDown, true);
+  }, [onClose]);
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const items = Array.from(
+      menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [],
+    );
+    if (items.length === 0) return;
+    event.preventDefault();
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    const next = (current + delta + items.length) % items.length;
+    items[next]?.focus();
+  };
+
+  // Clamp coordinates so the menu stays on screen even near viewport edges.
+  const left =
+    typeof window === 'undefined' ? x : Math.max(8, Math.min(x, window.innerWidth - 208));
+  const top =
+    typeof window === 'undefined' ? y : Math.max(8, Math.min(y, window.innerHeight - 140));
+
+  return (
+    <div
+      ref={menuRef}
+      role="menu"
+      aria-label="Card actions"
+      data-testid="card-context-menu"
+      style={{ left, top }}
+      className="fixed z-50 min-w-48 rounded-md border bg-background p-1 text-foreground shadow-md"
+      onKeyDown={handleKeyDown}
+    >
+      <button
+        type="button"
+        role="menuitem"
+        className="flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground focus:outline-none"
+        onClick={onEdit}
+      >
+        <Pencil className="size-3.5 shrink-0" />
+        <span className="flex-1">{editDef.title}</span>
+        {editShortcut && <kbd className="font-sans text-muted-foreground">{editShortcut}</kbd>}
+      </button>
+      {hasSource && (
+        <button
+          type="button"
+          role="menuitem"
+          className="flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground focus:bg-accent focus:text-accent-foreground focus:outline-none"
+          onClick={onJump}
+        >
+          <Link2 className="size-3.5 shrink-0" />
+          <span className="flex-1">Jump to Source</span>
+        </button>
+      )}
+      <div role="separator" className="my-1 h-px bg-border" />
+      <button
+        type="button"
+        role="menuitem"
+        className="flex w-full items-center gap-2 rounded-sm px-2.5 py-1.5 text-left text-xs text-destructive hover:bg-accent focus:bg-accent focus:outline-none"
+        onClick={onDelete}
+      >
+        <Trash2 className="size-3.5 shrink-0" />
+        <span className="flex-1">{deleteDef.title}</span>
+        {deleteShortcut && <kbd className="font-sans text-muted-foreground">{deleteShortcut}</kbd>}
+      </button>
+    </div>
   );
 }
 

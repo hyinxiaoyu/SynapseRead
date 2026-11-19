@@ -8,6 +8,7 @@ import type {
   CreateBookmarkInput,
   CreatedExcerpt,
   CreateExcerptInput,
+  DeletedCard,
   DocumentContentReader,
   DocumentSourceStatus,
   IpcError,
@@ -19,6 +20,7 @@ import type {
   ReadingPreferences,
   RelinkDocumentResult,
   RestoredAnnotation,
+  RestoredCard,
   StudyDocument,
   StudyNotebook,
   Viewport,
@@ -102,6 +104,13 @@ export interface StudyBackend extends DocumentContentReader {
   /** Undoes `deleteAnnotation` in this session; `not_found` once it is final. */
   restoreAnnotation(annotationId: string): Promise<RestoredAnnotation>;
   updateCard(cardId: string, patch: CardPatch): Promise<NoteCard>;
+  /**
+   * Deletes a card, its MindMap node(s), and its connected edges atomically,
+   * re-rooting child nodes and keeping source highlights in the reader.
+   */
+  deleteCard(cardId: string): Promise<DeletedCard>;
+  /** Undoes `deleteCard` in this session; `not_found` once snapshots are purged. */
+  restoreCard(cardId: string): Promise<RestoredCard>;
   updateNodeLayout(nodeId: string, patch: NodeLayoutPatch): Promise<void>;
   createEdge(
     notebookId: string,
@@ -137,4 +146,6 @@ export interface StudyBackend extends DocumentContentReader {
   setFullscreen(fullscreen: boolean): Promise<void>;
   /** Also fires when the user leaves full screen through the window controls. */
   onFullscreenChange(listener: (fullscreen: boolean) => void): () => void;
+  /** Runs an async flush hook when the native window or app is about to close (#117). */
+  onBeforeClose(listener: () => Promise<void>): () => void;
 }

@@ -155,9 +155,11 @@ export function isEditableShortcutTarget(target: EventTarget | null): boolean {
  */
 const ARROW_KEY_WIDGETS =
   '[role="slider"], [role="separator"], [role="tablist"], [role="radiogroup"], [role="menu"], [role="tree"], [data-arrow-keys], .react-flow';
-/** Space presses a focused control, so it turns the page only from the page itself. */
+/** Interactive controls that own bare Space and Enter: pressing activates them. */
 const SPACE_KEY_WIDGETS =
   'button, a[href], summary, [role="button"], [role="checkbox"], [role="switch"], [role="radio"], [role="tab"], [role="menuitem"], [role="menuitemcheckbox"], [role="option"], [role="treeitem"]';
+/** Widgets that own bare Enter/Backspace/Delete (sidebar lists, trees, menus, modal dialogs). */
+const CARD_ACTION_BLOCKERS = '[role="menu"], [role="tree"], [data-arrow-keys], [role="dialog"]';
 
 function isSearchField(target: EventTarget | null): boolean {
   const element = target as { dataset?: DOMStringMap } | null;
@@ -173,8 +175,19 @@ function blocksShortcut(event: KeyboardEvent, definition: CommandDefinition): bo
   if (!unmodified) return false;
   const element = target as { closest?: (selector: string) => Element | null } | null;
   if (typeof element?.closest !== 'function') return false;
+  // Enter and Backspace/Delete act on selected MindMap cards (inside `.react-flow`),
+  // so `.react-flow` must not block them; interactive buttons, links, menus, trees,
+  // sidebar lists, and modal dialogs still keep their own Enter/Delete keys.
+  if (event.key === 'Enter') {
+    return element.closest(`${CARD_ACTION_BLOCKERS}, ${SPACE_KEY_WIDGETS}`) !== null;
+  }
+  if (event.key === 'Backspace' || event.key === 'Delete') {
+    return element.closest(CARD_ACTION_BLOCKERS) !== null;
+  }
   const widgets =
-    event.key === ' ' ? `${ARROW_KEY_WIDGETS}, ${SPACE_KEY_WIDGETS}` : ARROW_KEY_WIDGETS;
+    event.key === ' '
+      ? `${ARROW_KEY_WIDGETS}, ${SPACE_KEY_WIDGETS}, [role="dialog"]`
+      : `${ARROW_KEY_WIDGETS}, [role="dialog"]`;
   return element.closest(widgets) !== null;
 }
 

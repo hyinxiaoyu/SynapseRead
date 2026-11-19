@@ -11,6 +11,7 @@ import { launchPage, serveDist, warmUp } from './harness.mjs';
 import { keyboardFlow } from './keyboard.mjs';
 import { linkPeekFlow } from './linkPeek.mjs';
 import { markdownFlow } from './markdown.mjs';
+import { mindmapFlow } from './mindmap.mjs';
 import { pagingFlow } from './paging.mjs';
 import { pagingModesFlow } from './pagingModes.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
@@ -38,6 +39,7 @@ const FLOWS = {
   'go-to': goToFlow,
   'link-peek': linkPeekFlow,
   markdown: markdownFlow,
+  mindmap: mindmapFlow,
   paging: pagingFlow,
   'paging-modes': pagingModesFlow,
   'scroll-paging': scrollPagingFlow,

@@ -273,8 +273,43 @@ pub struct RelinkDocumentResult {
     pub previous_file_hash: String,
 }
 
+/// Persisted MindMap and Inspector pane state across application restarts (#119).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkspacePaneLayout {
+    #[serde(default)]
+    pub mind_map_open: bool,
+    #[serde(default)]
+    pub inspector_open: bool,
+    /// Last non-zero MindMap width percentage (`35..=80`), if customized.
+    #[serde(default)]
+    pub mind_map_size: Option<f64>,
+    /// Last non-zero Inspector width percentage (`20..=80`), if customized.
+    #[serde(default)]
+    pub inspector_size: Option<f64>,
+}
+
+impl WorkspacePaneLayout {
+    pub const MIN_MIND_MAP_SIZE: f64 = 35.0;
+    pub const MIN_INSPECTOR_SIZE: f64 = 20.0;
+    pub const MAX_PANE_SIZE: f64 = 80.0;
+
+    /// Drops non-finite or out-of-range widths so corrupt values cannot collapse the reader.
+    pub fn sanitized(&self) -> Self {
+        let clamp_size = |value: Option<f64>, min: f64| {
+            value.filter(|v| v.is_finite() && (min..=Self::MAX_PANE_SIZE).contains(v))
+        };
+        Self {
+            mind_map_open: self.mind_map_open,
+            inspector_open: self.inspector_open,
+            mind_map_size: clamp_size(self.mind_map_size, Self::MIN_MIND_MAP_SIZE),
+            inspector_size: clamp_size(self.inspector_size, Self::MIN_INSPECTOR_SIZE),
+        }
+    }
+}
+
 /// Persisted reader tab session across application restarts.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkspaceSession {
     pub open_document_ids: Vec<String>,
@@ -283,6 +318,10 @@ pub struct WorkspaceSession {
     /// the wire so a frontend that predates it still round-trips.
     #[serde(default)]
     pub immersive: bool,
+    /// Persisted MindMap / Inspector visibility and widths. Optional on the wire so
+    /// older payloads still round-trip.
+    #[serde(default)]
+    pub pane_layout: WorkspacePaneLayout,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -452,6 +491,28 @@ pub struct CreatedExcerpt {
 pub struct RestoredAnnotation {
     pub annotation: Annotation,
     pub cards: Vec<NoteCard>,
+}
+
+/// Summary of a deleted card: its id, removed node(s), removed edges, and child
+/// nodes whose `parent_node_id` was cleared to re-root them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedCard {
+    pub card_id: String,
+    pub node_ids: Vec<String>,
+    pub edge_ids: Vec<String>,
+    pub rerooted_child_node_ids: Vec<String>,
+}
+
+/// A card brought back by Undo Delete, with its node(s), connected edges, and
+/// child nodes whose `parent_node_id` was re-attached to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoredCard {
+    pub card: NoteCard,
+    pub nodes: Vec<MindMapNode>,
+    pub edges: Vec<MindMapEdge>,
+    pub reparented_children: Vec<MindMapNode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

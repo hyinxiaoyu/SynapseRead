@@ -15,10 +15,14 @@ export const ESCAPE_LAYER = {
   noteField: 40,
   /** A footnote card: above the selection popover, which a link click never opens. */
   linkPeek: 35,
+  /** The MindMap card context menu. */
+  mindMapMenu: 32,
   selectionPopover: 30,
   find: 20,
   /** The sidebar's lists: Esc hands the keyboard back to the page, sidebar open. */
   sidebar: 15,
+  /** The Inspector: Esc returns focus to the selected MindMap card. */
+  inspector: 14,
   /** The MindMap's selection, while focus is on the canvas. */
   mindMap: 12,
   focusMode: 10,

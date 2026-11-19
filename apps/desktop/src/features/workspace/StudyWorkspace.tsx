@@ -1,13 +1,18 @@
 import { Maximize, Minimize, Network, PanelRight, Glasses, X } from 'lucide-react';
 import { type DragEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { usePanelRef } from 'react-resizable-panels';
+import { type Layout, usePanelRef } from 'react-resizable-panels';
 
 import { Button } from '@/components/ui/button';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
 import { KeyboardShortcutsDialog } from '@/features/commands/KeyboardShortcutsDialog';
 import { useDefaultContextMenuGuard } from '@/features/commands/contextMenu';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
-import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/commands/registry';
+import {
+  type CommandHandlers,
+  isEditableShortcutTarget,
+  runCommand,
+  useCommands,
+} from '@/features/commands/registry';
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
@@ -24,15 +29,47 @@ import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChro
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import { UnifiedToolbar } from '@/features/workspace/UnifiedToolbar';
 import { SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
+import { flushBeforeClose } from '@/lib/flushBeforeClose';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
+import type { WorkspacePaneLayout } from '@/types/domain';
 
 const EMPTY_SLOTS: ToolbarSlots = { leading: null, center: null, trailing: null };
+const DEFAULT_MIND_MAP_SIZE = 35;
+const DEFAULT_INSPECTOR_SIZE = 20;
+const MIN_READER_SIZE = 20;
+
+const roundPercent = (value: number) => Math.round(value * 10) / 10;
+
+function computeInitialPanelLayout(
+  paneLayout: WorkspacePaneLayout,
+  immersive: boolean,
+): { reader: number; mindmap: number; inspector: number } {
+  if (immersive) {
+    return { reader: 100, mindmap: 0, inspector: 0 };
+  }
+  let mindmap = paneLayout.mindMapOpen ? (paneLayout.mindMapSize ?? DEFAULT_MIND_MAP_SIZE) : 0;
+  let inspector = paneLayout.inspectorOpen
+    ? (paneLayout.inspectorSize ?? DEFAULT_INSPECTOR_SIZE)
+    : 0;
+  const maxCombined = 100 - MIN_READER_SIZE;
+  if (mindmap + inspector > maxCombined) {
+    const excess = mindmap + inspector - maxCombined;
+    const trimMindMap = Math.min(excess, Math.max(0, mindmap - DEFAULT_MIND_MAP_SIZE));
+    mindmap -= trimMindMap;
+    const remaining = excess - trimMindMap;
+    if (remaining > 0) {
+      inspector = Math.max(DEFAULT_INSPECTOR_SIZE, inspector - remaining);
+    }
+  }
+  const reader = Math.max(MIN_READER_SIZE, 100 - mindmap - inspector);
+  return { reader, mindmap, inspector };
+}
 
 const isFileDrag = (event: DragEvent): boolean =>
   Array.from(event.dataTransfer?.types ?? []).includes('Files') ||
   (event.dataTransfer?.files?.length ?? 0) > 0;
 
-/** Reader | MindMap | Inspector. MindMap and Inspector start collapsed for full-screen reading. */
+/** Reader | MindMap | Inspector. Pane state and widths persist across launches (#119). */
 export function StudyWorkspace() {
   const status = useStudySyncStore((state) => state.status);
   const error = useStudySyncStore((state) => state.error);
@@ -44,6 +81,8 @@ export function StudyWorkspace() {
   const dropFiles = useStudySyncStore((state) => state.dropFiles);
   const immersive = useStudySyncStore((state) => state.immersive);
   const setImmersive = useStudySyncStore((state) => state.setImmersive);
+  const paneLayout = useStudySyncStore((state) => state.paneLayout);
+  const setPaneLayout = useStudySyncStore((state) => state.setPaneLayout);
   const fullscreen = useStudySyncStore((state) => state.fullscreen);
   const setFullscreen = useStudySyncStore((state) => state.setFullscreen);
   const chromeStyle = useStudySyncStore((state) => state.chromeStyle);
@@ -54,29 +93,60 @@ export function StudyWorkspace() {
   );
   const readerChrome = useReaderChromeTheme();
   const revealRequest = useStudySyncStore((state) => state.revealRequest);
+  const inspectRequest = useStudySyncStore((state) => state.inspectRequest);
   const excerptNonce = useStudySyncStore((state) => state.excerptNonce);
   const revealNode = useStudySyncStore((state) => state.revealNode);
   const completeReveal = useStudySyncStore((state) => state.completeReveal);
+  const deletedAnnotationCount = useStudySyncStore(
+    (state) => state.deletedAnnotationHistory.length,
+  );
+  const undoRemoveAnnotation = useStudySyncStore((state) => state.undoRemoveAnnotation);
   const onMenuCommand = useStudySyncStore((state) => state.onMenuCommand);
   const setMenuItemStates = useStudySyncStore((state) => state.setMenuItemStates);
+  const onBeforeClose = useStudySyncStore((state) => state.onBeforeClose);
 
   const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
   const excerptStatusRef = useRef<HTMLParagraphElement>(null);
   const dragDepthRef = useRef(0);
+  const suppressLayoutPersistRef = useRef(false);
+  const [initialLayout, setInitialLayout] = useState<{
+    reader: number;
+    mindmap: number;
+    inspector: number;
+  } | null>(null);
   const [mindMapOpen, setMindMapOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [htmlDragging, setHtmlDragging] = useState(false);
   const [slots, setSlots] = useState<ToolbarSlots>(EMPTY_SLOTS);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   /** The panes focus mode collapsed, to reopen when it ends. */
-  const panesBeforeImmersive = useRef<{ mindMap: boolean; inspector: boolean } | null>(null);
+  const [panesBeforeImmersive, setPanesBeforeImmersive] = useState<{
+    mindMap: boolean;
+    inspector: boolean;
+  } | null>(null);
 
   useEffect(() => {
     void initialize();
   }, [initialize]);
 
+  // Flush unsaved Inspector edits before the native window closes or quits (#117).
+  useEffect(() => onBeforeClose(flushBeforeClose), [onBeforeClose]);
+
   const ready = status === 'ready';
+
+  if (ready && initialLayout === null) {
+    const restored = computeInitialPanelLayout(paneLayout, immersive);
+    setInitialLayout(restored);
+    setMindMapOpen(restored.mindmap > 0);
+    setInspectorOpen(restored.inspector > 0);
+    if (immersive && (paneLayout.mindMapOpen || paneLayout.inspectorOpen)) {
+      setPanesBeforeImmersive({
+        mindMap: paneLayout.mindMapOpen,
+        inspector: paneLayout.inspectorOpen,
+      });
+    }
+  }
 
   useEffect(() => {
     const statusNode = excerptStatusRef.current;
@@ -101,43 +171,144 @@ export function StudyWorkspace() {
 
   useNativeMenu(onMenuCommand, setMenuItemStates);
 
-  const toggleMindMap = () => {
+  const openMindMap = useCallback(
+    (persist = true) => {
+      const panel = mindMapRef.current;
+      if (!panel) return;
+      if (panel.isCollapsed()) {
+        const savedSize = useStudySyncStore.getState().paneLayout.mindMapSize;
+        if (savedSize !== null) {
+          panel.resize(`${savedSize}%`);
+          if (panel.isCollapsed()) panel.expand();
+        } else {
+          panel.expand();
+        }
+      }
+      setMindMapOpen(true);
+      if (persist && !useStudySyncStore.getState().immersive) {
+        setPaneLayout({ mindMapOpen: true });
+      }
+    },
+    [mindMapRef, setPaneLayout],
+  );
+
+  const closeMindMap = useCallback(
+    (persist = true) => {
+      const panel = mindMapRef.current;
+      if (!panel) return;
+      if (!panel.isCollapsed()) panel.collapse();
+      setMindMapOpen(false);
+      if (persist && !useStudySyncStore.getState().immersive) {
+        setPaneLayout({ mindMapOpen: false });
+      }
+    },
+    [mindMapRef, setPaneLayout],
+  );
+
+  const toggleMindMap = useCallback(() => {
     const panel = mindMapRef.current;
     if (!panel) return;
-    if (panel.isCollapsed()) {
-      panel.expand();
-      setMindMapOpen(true);
-    } else {
-      panel.collapse();
-      setMindMapOpen(false);
-    }
-  };
+    if (panel.isCollapsed()) openMindMap();
+    else closeMindMap();
+  }, [mindMapRef, openMindMap, closeMindMap]);
 
-  const toggleInspector = () => {
+  const openInspector = useCallback(
+    (persist = true) => {
+      const panel = inspectorRef.current;
+      if (!panel) return;
+      if (panel.isCollapsed()) {
+        const savedSize = useStudySyncStore.getState().paneLayout.inspectorSize;
+        if (savedSize !== null) {
+          panel.resize(`${savedSize}%`);
+          if (panel.isCollapsed()) panel.expand();
+        } else {
+          panel.expand();
+        }
+      }
+      setInspectorOpen(true);
+      if (persist && !useStudySyncStore.getState().immersive) {
+        setPaneLayout({ inspectorOpen: true });
+      }
+    },
+    [inspectorRef, setPaneLayout],
+  );
+
+  const closeInspector = useCallback(
+    (persist = true) => {
+      const panel = inspectorRef.current;
+      if (!panel) return;
+      if (!panel.isCollapsed()) panel.collapse();
+      setInspectorOpen(false);
+      if (persist && !useStudySyncStore.getState().immersive) {
+        setPaneLayout({ inspectorOpen: false });
+      }
+    },
+    [inspectorRef, setPaneLayout],
+  );
+
+  const toggleInspector = useCallback(() => {
     const panel = inspectorRef.current;
     if (!panel) return;
-    if (panel.isCollapsed()) {
-      panel.expand();
-      setInspectorOpen(true);
-    } else {
-      panel.collapse();
-      setInspectorOpen(false);
-    }
-  };
+    if (panel.isCollapsed()) openInspector();
+    else closeInspector();
+  }, [inspectorRef, openInspector, closeInspector]);
 
-  // Focus mode collapses the MindMap and inspector and restores them afterwards.
+  // Double-clicking a card or invoking Edit Card opens the Inspector if collapsed (#119).
+  useEffect(() => {
+    if (!ready || !inspectRequest) return;
+    if (inspectorRef.current?.isCollapsed() || !inspectorOpen) {
+      openInspector();
+    }
+  }, [ready, inspectRequest, inspectorRef, inspectorOpen, openInspector]);
+
+  const handleLayoutChanged = useCallback(
+    (layout: Layout) => {
+      const mindmap = layout.mindmap;
+      const inspector = layout.inspector;
+      if (
+        mindmap === undefined ||
+        inspector === undefined ||
+        Number.isNaN(mindmap) ||
+        Number.isNaN(inspector)
+      ) {
+        return;
+      }
+      const nextMindMapOpen = mindmap > 0;
+      const nextInspectorOpen = inspector > 0;
+      setMindMapOpen(nextMindMapOpen);
+      setInspectorOpen(nextInspectorOpen);
+      if (suppressLayoutPersistRef.current || useStudySyncStore.getState().immersive) return;
+      setPaneLayout({
+        mindMapOpen: nextMindMapOpen,
+        inspectorOpen: nextInspectorOpen,
+        ...(mindmap >= DEFAULT_MIND_MAP_SIZE ? { mindMapSize: roundPercent(mindmap) } : {}),
+        ...(inspector >= DEFAULT_INSPECTOR_SIZE ? { inspectorSize: roundPercent(inspector) } : {}),
+      });
+    },
+    [setPaneLayout],
+  );
+
+  // Focus mode collapses the MindMap and inspector and restores them afterwards,
+  // leaving the persisted pane layout untouched.
   const changeImmersive = (next: boolean) => {
     if (next === immersive) return;
-    if (next) {
-      panesBeforeImmersive.current = { mindMap: mindMapOpen, inspector: inspectorOpen };
-      if (mindMapOpen) toggleMindMap();
-      if (inspectorOpen) toggleInspector();
-    } else if (panesBeforeImmersive.current) {
-      if (panesBeforeImmersive.current.mindMap && !mindMapOpen) toggleMindMap();
-      if (panesBeforeImmersive.current.inspector && !inspectorOpen) toggleInspector();
-      panesBeforeImmersive.current = null;
+    suppressLayoutPersistRef.current = true;
+    try {
+      if (next) {
+        setPanesBeforeImmersive({ mindMap: mindMapOpen, inspector: inspectorOpen });
+        if (mindMapOpen) closeMindMap(false);
+        if (inspectorOpen) closeInspector(false);
+      } else if (panesBeforeImmersive) {
+        if (panesBeforeImmersive.mindMap && !mindMapOpen) openMindMap(false);
+        if (panesBeforeImmersive.inspector && !inspectorOpen) openInspector(false);
+        setPanesBeforeImmersive(null);
+      }
+      setImmersive(next);
+    } finally {
+      queueMicrotask(() => {
+        suppressLayoutPersistRef.current = false;
+      });
     }
-    setImmersive(next);
   };
   const changeImmersiveRef = useRef(changeImmersive);
   useEffect(() => {
@@ -160,7 +331,7 @@ export function StudyWorkspace() {
 
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
 
-  useCommands({
+  const workspaceCommands: CommandHandlers = {
     'window.mindMap': {
       run: toggleMindMap,
       enabled: ready,
@@ -181,7 +352,14 @@ export function StudyWorkspace() {
       title: fullscreen ? 'Exit Full Screen' : 'Enter Full Screen',
     },
     'help.shortcuts': { run: () => setShortcutsOpen((open) => !open) },
-  });
+  };
+  if (deletedAnnotationCount > 0) {
+    workspaceCommands['edit.undoDelete'] = {
+      run: () => void undoRemoveAnnotation(),
+      enabled: ready,
+    };
+  }
+  useCommands(workspaceCommands);
 
   const handleDragEnter = (event: DragEvent<HTMLElement>) => {
     if (!isFileDrag(event)) return;
@@ -240,6 +418,8 @@ export function StudyWorkspace() {
       Added to MindMap
     </ReaderNotice>
   ) : null;
+
+  const panelDefaultLayout = initialLayout ?? { reader: 100, mindmap: 0, inspector: 0 };
 
   return (
     <ToolbarSlotsContext.Provider value={slots}>
@@ -342,36 +522,41 @@ export function StudyWorkspace() {
           {status === 'ready' ? (
             <ResizablePanelGroup
               orientation="horizontal"
-              defaultLayout={{ reader: 100, mindmap: 0, inspector: 0 }}
+              defaultLayout={panelDefaultLayout}
+              onLayoutChanged={handleLayoutChanged}
             >
-              <ResizablePanel id="reader" defaultSize="100%" minSize="20%">
+              <ResizablePanel
+                id="reader"
+                defaultSize={`${panelDefaultLayout.reader}%`}
+                minSize={`${MIN_READER_SIZE}%`}
+              >
                 <ReaderPane notice={excerptNotice} />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
                 id="mindmap"
                 panelRef={mindMapRef}
-                defaultSize="0%"
-                minSize="35%"
+                defaultSize={`${panelDefaultLayout.mindmap}%`}
+                minSize={`${DEFAULT_MIND_MAP_SIZE}%`}
                 collapsible
                 onResize={(size) => {
                   if (!Number.isNaN(size.asPercentage)) setMindMapOpen(size.asPercentage > 0);
                 }}
               >
-                <MindMapPane open={mindMapOpen} />
+                <MindMapPane open={mindMapOpen} inspectorOpen={inspectorOpen} />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
                 id="inspector"
                 panelRef={inspectorRef}
-                defaultSize="0%"
-                minSize="20%"
+                defaultSize={`${panelDefaultLayout.inspector}%`}
+                minSize={`${DEFAULT_INSPECTOR_SIZE}%`}
                 collapsible
                 onResize={(size) => {
                   if (!Number.isNaN(size.asPercentage)) setInspectorOpen(size.asPercentage > 0);
                 }}
               >
-                <InspectorPane />
+                <InspectorPane open={inspectorOpen} />
               </ResizablePanel>
             </ResizablePanelGroup>
           ) : (

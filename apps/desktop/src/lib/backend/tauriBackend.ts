@@ -8,6 +8,7 @@ import type {
   Annotation,
   Bookmark,
   CreatedExcerpt,
+  DeletedCard,
   DocumentSourceStatus,
   MindMapEdge,
   NoteCard,
@@ -16,6 +17,7 @@ import type {
   ReadingPreferences,
   RelinkDocumentResult,
   RestoredAnnotation,
+  RestoredCard,
   StudyDocument,
   StudyNotebook,
   TextChunk,
@@ -23,6 +25,7 @@ import type {
 } from '@/types/domain';
 
 const DOCUMENTS_DROPPED_EVENT = 'synapse://documents-dropped';
+const BEFORE_CLOSE_EVENT = 'synapse://before-close';
 const MENU_COMMAND_EVENT = 'menu-command';
 
 /**
@@ -109,6 +112,8 @@ export function createTauriBackend(): StudyBackend {
     restoreAnnotation: (annotationId) =>
       invoke<RestoredAnnotation>('restore_annotation', { annotationId }),
     updateCard: (cardId, patch) => invoke<NoteCard>('update_card', { cardId, patch }),
+    deleteCard: (cardId) => invoke<DeletedCard>('delete_card', { cardId }),
+    restoreCard: (cardId) => invoke<RestoredCard>('restore_card', { cardId }),
     updateNodeLayout: (nodeId, patch) => invoke('update_node_layout', { nodeId, patch }),
     createEdge: (notebookId, sourceNodeId, targetNodeId, label) =>
       invoke<MindMapEdge>('create_edge', { notebookId, sourceNodeId, targetNodeId, label }),
@@ -154,6 +159,19 @@ export function createTauriBackend(): StudyBackend {
         }),
       );
     },
+    onBeforeClose: (listener) =>
+      subscribe((isLive) =>
+        listen<{ token: number }>(BEFORE_CLOSE_EVENT, (event) => {
+          if (!isLive()) return;
+          void listener()
+            .catch(() => undefined)
+            .finally(() => {
+              void invoke('confirm_flush_before_close', { token: event.payload.token }).catch(
+                () => undefined,
+              );
+            });
+        }),
+      ),
 
     // The asset protocol enforces its scope in Rust, whatever this URL names.
     loadDocumentSource: async (document) => ({

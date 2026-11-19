@@ -13,6 +13,7 @@ use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, WebviewWindow, WebviewWindowBuilder};
 
 use crate::access::{grant_all, register_and_grant, register_dropped_paths, relink_and_grant};
+use crate::close_flush::{CloseDecision, CloseFlushCoordinator};
 use crate::state::AppState;
 
 /// Where bundled app content is served from on the mock runtime.
@@ -38,6 +39,7 @@ impl Harness {
         let state = AppState::open(&dir.path().join("test.sqlite3")).unwrap();
         let app = crate::with_commands(mock_builder())
             .manage(state)
+            .manage(CloseFlushCoordinator::default())
             .build(mock_context(noop_assets()))
             .unwrap();
         let window = WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1109,6 +1111,12 @@ fn workspace_session_and_touch_document_opened_persist_across_relaunch() {
             "openDocumentIds": [first["id"], second["id"]],
             "activeDocumentId": second["id"],
             "immersive": true,
+            "paneLayout": {
+                "mindMapOpen": false,
+                "inspectorOpen": false,
+                "mindMapSize": null,
+                "inspectorSize": null,
+            },
         })
     );
 
@@ -1124,6 +1132,12 @@ fn workspace_session_and_touch_document_opened_persist_across_relaunch() {
             "openDocumentIds": [first_id, second_id.clone()],
             "activeDocumentId": second_id,
             "immersive": true,
+            "paneLayout": {
+                "mindMapOpen": false,
+                "inspectorOpen": false,
+                "mindMapSize": null,
+                "inspectorSize": null,
+            },
         })
     );
 
@@ -1207,4 +1221,128 @@ fn verify_and_relink_document_source_grants_asset_scope_and_preserves_annotation
     assert_eq!(relinked["contentChanged"], false);
     assert_eq!(relinked["document"]["title"], "relocated");
     assert!(h.asset_allowed(&moved_path));
+}
+
+#[test]
+fn delete_card_and_restore_card_round_trip_over_ipc() {
+    let h = Harness::new();
+    let doc = h.register("notes.txt", "parent child");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+
+    let parent = h.excerpt(&doc, &notebook, None);
+    let child = h.excerpt(&doc, &notebook, Some(&parent["node"]));
+
+    h.ok(
+        "update_card",
+        json!({
+            "cardId": parent["card"]["id"],
+            "patch": { "title": "Parent", "markdownNotes": "Saved note", "tags": ["t1", "t2"] },
+        }),
+    );
+
+    let deleted = h.ok("delete_card", json!({ "cardId": parent["card"]["id"] }));
+    assert_eq!(deleted["cardId"], parent["card"]["id"]);
+    assert_eq!(deleted["nodeIds"], json!([parent["node"]["id"]]));
+    assert_eq!(
+        deleted["rerootedChildNodeIds"],
+        json!([child["node"]["id"]])
+    );
+    assert_eq!(deleted["edgeIds"].as_array().unwrap().len(), 1);
+
+    let graph = h.ok(
+        "load_notebook_graph",
+        json!({ "notebookId": notebook["id"] }),
+    );
+    // Highlight stays in reader; child is re-rooted, not deleted.
+    assert_eq!(graph["annotations"].as_array().unwrap().len(), 2);
+    assert_eq!(graph["cards"].as_array().unwrap().len(), 1);
+    assert_eq!(graph["nodes"][0]["id"], child["node"]["id"]);
+    assert_eq!(graph["nodes"][0]["parentNodeId"], Value::Null);
+    assert!(graph["edges"].as_array().unwrap().is_empty());
+
+    let missing = h
+        .call("delete_card", json!({ "cardId": parent["card"]["id"] }))
+        .unwrap_err();
+    assert_eq!(missing["code"], "not_found");
+
+    let restored = h.ok("restore_card", json!({ "cardId": parent["card"]["id"] }));
+    assert_eq!(restored["card"]["title"], "Parent");
+    assert_eq!(restored["card"]["markdownNotes"], "Saved note");
+    assert_eq!(restored["card"]["tags"], json!(["t1", "t2"]));
+    assert_eq!(restored["nodes"][0]["id"], parent["node"]["id"]);
+    assert_eq!(restored["edges"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        restored["reparentedChildren"][0]["parentNodeId"],
+        parent["node"]["id"]
+    );
+
+    // "Source removed" cards can also be deleted cleanly.
+    h.ok(
+        "delete_annotation",
+        json!({ "annotationId": child["annotation"]["id"] }),
+    );
+    let deleted_orphan = h.ok("delete_card", json!({ "cardId": child["card"]["id"] }));
+    assert_eq!(deleted_orphan["cardId"], child["card"]["id"]);
+}
+
+#[test]
+fn workspace_session_round_trips_pane_layout_and_defaults_without_it() {
+    let h = Harness::new();
+    let initial = h.ok("get_workspace_session", json!({}));
+    assert_eq!(
+        initial["paneLayout"],
+        json!({
+            "mindMapOpen": false,
+            "inspectorOpen": false,
+            "mindMapSize": null,
+            "inspectorSize": null,
+        })
+    );
+
+    let saved = h.ok(
+        "save_workspace_session",
+        json!({
+            "session": {
+                "openDocumentIds": [],
+                "activeDocumentId": null,
+                "immersive": false,
+                "paneLayout": {
+                    "mindMapOpen": true,
+                    "inspectorOpen": true,
+                    "mindMapSize": 40.0,
+                    "inspectorSize": 25.0,
+                }
+            }
+        }),
+    );
+    assert_eq!(saved["paneLayout"]["mindMapOpen"], true);
+    assert_eq!(saved["paneLayout"]["inspectorOpen"], true);
+    assert_eq!(saved["paneLayout"]["mindMapSize"], 40.0);
+    assert_eq!(saved["paneLayout"]["inspectorSize"], 25.0);
+
+    // Older payload omitting `paneLayout` still deserializes via `#[serde(default)]`.
+    let legacy = h.ok(
+        "save_workspace_session",
+        json!({
+            "session": {
+                "openDocumentIds": [],
+                "activeDocumentId": null,
+                "immersive": true,
+            }
+        }),
+    );
+    assert_eq!(legacy["immersive"], true);
+    assert_eq!(legacy["paneLayout"]["mindMapOpen"], false);
+}
+
+#[test]
+fn confirm_flush_before_close_acknowledges_pending_token() {
+    let h = Harness::new();
+    let coordinator = h.app.state::<CloseFlushCoordinator>();
+    let token = match coordinator.begin_close() {
+        CloseDecision::StartFlush(token) => token,
+        other => panic!("expected StartFlush, got {other:?}"),
+    };
+    h.ok("confirm_flush_before_close", json!({ "token": token }));
+    assert!(coordinator.wait_for_flush(token, std::time::Duration::from_millis(50)));
 }

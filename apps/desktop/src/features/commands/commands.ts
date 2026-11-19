@@ -125,6 +125,9 @@ const KEY_SYMBOLS: Record<string, string> = {
   PageDown: '⇟',
   Home: '↖',
   End: '↘',
+  Enter: '↩',
+  Backspace: '⌫',
+  Delete: '⌦',
   Plus: '+',
   '=': '+',
 };
@@ -136,6 +139,9 @@ const OTHER_KEY_NAMES: Record<string, string> = {
   ArrowDown: 'Down',
   PageUp: 'PgUp',
   PageDown: 'PgDn',
+  Enter: 'Enter',
+  Backspace: 'Backspace',
+  Delete: 'Del',
   Plus: '+',
   '=': '+',
 };
@@ -174,6 +180,9 @@ const SPELLED_KEYS: Record<string, string> = {
   PageDown: 'Page Down',
   Home: 'Home',
   End: 'End',
+  Enter: 'Enter',
+  Backspace: 'Backspace',
+  Delete: 'Delete',
   ContextMenu: 'Menu Key',
 };
 
@@ -213,7 +222,11 @@ function keyCode(key: string): string | null {
     case 'Plus':
       return 'NumpadAdd';
     default:
-      return /^(Arrow\w+|F\d+|Page(Up|Down)|Home|End|Space|ContextMenu)$/.test(key) ? key : null;
+      return /^(Arrow\w+|F\d+|Page(Up|Down)|Home|End|Space|ContextMenu|Enter|Backspace|Delete)$/.test(
+        key,
+      )
+        ? key
+        : null;
   }
 }
 
