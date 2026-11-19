@@ -244,6 +244,63 @@ describe('InspectorPane', () => {
       expect(useStudySyncStore.getState().cards[0]?.markdownNotes).toBe('v1 + v2');
       expect(screen.getByTestId('inspector-save-status')).toHaveTextContent('Saved');
     });
+
+    it('does not re-queue an older failed write after a newer debounced revision is already queued', async () => {
+      vi.useFakeTimers();
+      const { updateCard } = seedCard();
+      let resolveFirst: (ok: boolean) => void = () => {};
+      updateCard.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      );
+      render(<InspectorPane open />);
+
+      const notes = screen.getByLabelText('Notes');
+
+      // 1. Type "old" and let its debounce fire (first write stays pending).
+      fireEvent.change(notes, { target: { value: 'old' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CARD_SAVE_DEBOUNCE_MS);
+      });
+      expect(updateCard).toHaveBeenCalledTimes(1);
+      expect(updateCard).toHaveBeenLastCalledWith('card-1', {
+        title: 'Initial Title',
+        markdownNotes: 'old',
+        tags: [],
+      });
+
+      // 2. Type "new" and let its debounce fire too while first write is still pending,
+      //    so both revisions are queued and `pendingRef` is cleared.
+      fireEvent.change(notes, { target: { value: 'new' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CARD_SAVE_DEBOUNCE_MS);
+      });
+      expect(updateCard).toHaveBeenCalledTimes(1);
+
+      // 3. Fail the first write; the queued second write runs and persists "new".
+      await act(async () => {
+        resolveFirst(false);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(updateCard).toHaveBeenCalledTimes(2);
+      expect(updateCard).toHaveBeenLastCalledWith('card-1', {
+        title: 'Initial Title',
+        markdownNotes: 'new',
+        tags: [],
+      });
+      expect(useStudySyncStore.getState().cards[0]?.markdownNotes).toBe('new');
+      expect(screen.getByTestId('inspector-save-status')).toHaveTextContent('Saved');
+
+      // 4. Subsequent close flush must NOT overwrite "new" with the stale "old" draft.
+      await act(async () => {
+        await flushBeforeClose();
+      });
+      expect(updateCard).toHaveBeenCalledTimes(2);
+      expect(useStudySyncStore.getState().cards[0]?.markdownNotes).toBe('new');
+    });
   });
 
   describe('focus management (#119) and card deletion (#116)', () => {

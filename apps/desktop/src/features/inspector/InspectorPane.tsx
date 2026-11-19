@@ -153,8 +153,10 @@ function CardEditor({
 
   // Mirrors the draft for debounced saves, blur, unmount, pagehide, and native
   // close flushes. Re-renders after a save keep `draft` intact so typing and caret
-  // position are never interrupted (#117).
-  const pendingRef = useRef<CardPatch | null>(null);
+  // position are never interrupted (#117). Each edit increments `draftRevisionRef`
+  // so an older failed write can never re-queue itself over a newer queued revision.
+  const draftRevisionRef = useRef(0);
+  const pendingRef = useRef<{ patch: CardPatch; revision: number } | null>(null);
   const timerRef = useRef<number | null>(null);
   const inFlightRef = useRef<Promise<void> | null>(null);
   const mountedRef = useRef(true);
@@ -168,10 +170,11 @@ function CardEditor({
 
   const commit = (): Promise<void> => {
     clearTimer();
-    const patch = pendingRef.current;
-    if (!patch) {
+    const pending = pendingRef.current;
+    if (!pending) {
       return inFlightRef.current ?? Promise.resolve();
     }
+    const { patch, revision } = pending;
     pendingRef.current = null;
     // Skip persisting if the card was deleted before this flush ran (#116).
     if (!useStudySyncStore.getState().cards.some((candidate) => candidate.id === card.id)) {
@@ -194,18 +197,24 @@ function CardEditor({
       })
       .then((outcome) => {
         if (outcome === 'failed') {
-          // Retain the failed draft for the next flush unless newer edits already superseded it (#117).
+          // Only retain a failed draft if it is still the latest edit revision (#117).
           if (
+            revision === draftRevisionRef.current &&
             pendingRef.current === null &&
             useStudySyncStore.getState().cards.some((candidate) => candidate.id === card.id)
           ) {
-            pendingRef.current = patch;
+            pendingRef.current = { patch, revision };
             if (mountedRef.current) onSaveStatus(card.id, 'error');
           }
           return;
         }
-        if (outcome === 'saved' && inFlightRef.current === next) {
-          if (mountedRef.current && pendingRef.current === null) {
+        if (
+          outcome === 'saved' &&
+          revision === draftRevisionRef.current &&
+          inFlightRef.current === next &&
+          pendingRef.current === null
+        ) {
+          if (mountedRef.current) {
             onSaveStatus(card.id, 'saved');
           }
         }
@@ -266,10 +275,14 @@ function CardEditor({
 
   const edit = (next: typeof draft) => {
     setDraft(next);
+    draftRevisionRef.current += 1;
     pendingRef.current = {
-      title: next.title.trim() || card.title,
-      markdownNotes: next.notes,
-      tags: parseTags(next.tags),
+      revision: draftRevisionRef.current,
+      patch: {
+        title: next.title.trim() || card.title,
+        markdownNotes: next.notes,
+        tags: parseTags(next.tags),
+      },
     };
     onSaveStatus(card.id, 'saving');
     clearTimer();
