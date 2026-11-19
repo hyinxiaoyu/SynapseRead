@@ -16,6 +16,7 @@ import {
 import {
   commandState,
   dispatchCommandKeydown,
+  forgetRecentCommandRuns,
   isBrowserOnlyShortcut,
   onCommandRun,
   registerCommands,
@@ -554,5 +555,84 @@ describe('MindMap card action keys (#116, #119)', () => {
       input.remove();
       sidebar.remove();
     }
+  });
+});
+
+describe('keyboard scope (#123)', () => {
+  it('runs a scoped shortcut only for keys pressed inside its scope, and leaves other keys to the page', () => {
+    const deleteCard = vi.fn();
+    const editCard = vi.fn();
+    const canvas = document.createElement('section');
+    const card = document.createElement('div');
+    card.tabIndex = 0;
+    canvas.append(card);
+    const page = document.createElement('div');
+    page.setAttribute('role', 'document');
+    page.tabIndex = 0;
+    const toolbarButton = document.createElement('button');
+    document.body.append(canvas, page, toolbarButton);
+    register(() => ({
+      'edit.deleteCard': { run: deleteCard, keyboardScope: () => canvas },
+      'edit.editCard': { run: editCard, keyboardScope: () => canvas },
+    }));
+
+    // Outside the scope (a reader page, the toolbar, the window): nothing runs, and
+    // the key is not swallowed, so the page keeps its own Backspace and Return.
+    for (const target of [page, toolbarButton, document.body]) {
+      for (const init of [
+        { key: 'Backspace', code: 'Backspace' },
+        { key: 'Delete', code: 'Delete' },
+        { key: 'Enter', code: 'Enter' },
+      ]) {
+        const event = key({ ...init, bubbles: true });
+        target.dispatchEvent(event);
+        expect(event.defaultPrevented, `${init.key} on ${target.tagName}`).toBe(false);
+      }
+    }
+    expect(deleteCard).not.toHaveBeenCalled();
+    expect(editCard).not.toHaveBeenCalled();
+
+    // Inside the scope, the shortcut runs.
+    card.dispatchEvent(key({ key: 'Backspace', code: 'Backspace', bubbles: true }));
+    card.dispatchEvent(key({ key: 'Enter', code: 'Enter', bubbles: true }));
+    expect(deleteCard).toHaveBeenCalledTimes(1);
+    expect(editCard).toHaveBeenCalledTimes(1);
+
+    // The Edit menu, context menu, and Inspector are not keyboard routes. (Forget
+    // the key presses, or the menu run would be taken for the same keypress.)
+    forgetRecentCommandRuns();
+    expect(runCommand('edit.deleteCard', 'menu')).toBe(true);
+    expect(runCommand('edit.editCard', 'toolbar')).toBe(true);
+    expect(deleteCard).toHaveBeenCalledTimes(2);
+    expect(editCard).toHaveBeenCalledTimes(2);
+  });
+
+  it('never runs a scoped shortcut for a key forwarded from another document, such as an EPUB frame', () => {
+    const deleteCard = vi.fn();
+    const canvas = document.createElement('section');
+    document.body.append(canvas);
+    const frame = document.createElement('iframe');
+    document.body.append(frame);
+    const frameDocument = frame.contentDocument as Document;
+    const paragraph = frameDocument.createElement('p');
+    frameDocument.body.append(paragraph);
+    register(() => ({ 'edit.deleteCard': { run: deleteCard, keyboardScope: () => canvas } }));
+
+    for (const keyName of ['Backspace', 'Delete']) {
+      const event = key({ key: keyName, code: keyName, bubbles: true });
+      paragraph.dispatchEvent(event);
+      // The frame forwards its keydowns to the registry.
+      expect(dispatchCommandKeydown(event)).toBe(false);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(deleteCard).not.toHaveBeenCalled();
+  });
+
+  it('disables a scoped shortcut everywhere when its scope is null', () => {
+    const deleteCard = vi.fn();
+    register(() => ({ 'edit.deleteCard': { run: deleteCard, keyboardScope: () => null } }));
+    document.body.dispatchEvent(key({ key: 'Backspace', code: 'Backspace', bubbles: true }));
+    expect(deleteCard).not.toHaveBeenCalled();
+    expect(commandState('edit.deleteCard').enabled).toBe(true);
   });
 });

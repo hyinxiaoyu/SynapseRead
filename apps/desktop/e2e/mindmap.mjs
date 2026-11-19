@@ -1,3 +1,4 @@
+import { assertCardKeysStayInReader } from './cardKeys.mjs';
 import { assert } from './harness.mjs';
 
 // Issues #116–#120: empty canvas onboarding hint, opening Inspector from a card,
@@ -52,6 +53,27 @@ export async function mindmapFlow(page) {
     ),
     'excerpting should not auto-open the Inspector',
   );
+
+  // 2b. The excerpt selected its card, but Backspace, Delete, and Return pressed on
+  // the reading page stay the reader's: the card survives and the Inspector stays
+  // closed (#123).
+  const plainText = await page.textRect(SEGMENT, 'lazy dog');
+  await assertCardKeysStayInReader(page, plainText.end, 'the TXT page');
+  const readerFocus = await page.evaluate(
+    `document.activeElement?.closest('[data-testid="txt-scroll"]') !== null`,
+  );
+  assert(readerFocus, 'clicking plain text should leave focus on the TXT page');
+
+  // The same with the highlight's popover open, where a reader might press Delete to
+  // remove the highlight: the card must survive (#123).
+  const highlight = await page.textRect(SEGMENT, 'brown');
+  assert(highlight, 'the excerpted text is still rendered');
+  await assertCardKeysStayInReader(page, highlight.start, 'the TXT highlight popover');
+  assert(
+    await page.evaluate(`Boolean(document.querySelector('[data-reader-popover]'))`),
+    "the highlight's popover should be open while the keys are pressed",
+  );
+  await page.press('Escape');
 
   // 3. Double-clicking the card opens the Inspector and focuses Notes (#119).
   const center = await cardCenter(page);
@@ -126,6 +148,11 @@ export async function mindmapFlow(page) {
   await page.waitFor(
     `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 0`,
     'card to be deleted from context menu',
+  );
+  // A deletion is never silent: a polite notice offers Undo (#123).
+  await page.waitFor(
+    `document.querySelector('[data-testid="card-deleted-notice"] [role="status"]')?.textContent === 'Card deleted'`,
+    'a Card deleted notice after deleting from the context menu',
   );
   await page.waitFor(
     `Boolean(document.querySelector('[data-testid="mindmap-empty-hint"]'))`,

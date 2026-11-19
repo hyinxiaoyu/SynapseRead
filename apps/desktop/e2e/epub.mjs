@@ -1,3 +1,4 @@
+import { assertCardKeysStayInReader } from './cardKeys.mjs';
 import { assert } from './harness.mjs';
 import { notesInPlaceFlow } from './notes.mjs';
 
@@ -165,6 +166,11 @@ export async function epubFlow(page) {
   );
   assert(Math.abs(mark.left - points.start.x) < 4, 'the highlight starts at the text');
   assert(Math.abs(mark.y - points.start.y) < 6, 'the highlight is on the text line');
+
+  // Keys pressed inside the chapter frame are forwarded to the app, but Backspace,
+  // Delete, and Return there must not act on the card the excerpt selected (#123).
+  const plainText = await textPoints(page, 'lazy dog');
+  await assertCardKeysStayInReader(page, plainText.end, 'the EPUB chapter frame');
 
   // Multibyte text in another paragraph.
   await excerpt(page, '汉字');

@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { commandDefinition, formatShortcut } from '@/features/commands/commands';
 import { ESCAPE_LAYER, registerEscapeLayer } from '@/features/commands/escape';
-import { forgetRecentCommandRuns, onCommandRun } from '@/features/commands/registry';
+import {
+  dispatchCommandKeydown,
+  forgetRecentCommandRuns,
+  onCommandRun,
+  runCommand,
+} from '@/features/commands/registry';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { MindMapNode, NoteCard, StudyNotebook } from '@/types/domain';
 
@@ -329,6 +334,126 @@ describe('MindMapPane', () => {
       const menu = screen.getByRole('menu', { name: 'Card actions' });
       fireEvent.click(within(menu).getByRole('menuitem', { name: /Delete Card/i }));
       expect(removeCard).toHaveBeenLastCalledWith('card-a');
+    });
+  });
+  describe('card keys outside the canvas (#123)', () => {
+    const CARD_KEYS = [
+      { key: 'Backspace', code: 'Backspace' },
+      { key: 'Delete', code: 'Delete' },
+      { key: 'Enter', code: 'Enter' },
+    ];
+
+    /** Stand-ins for the reading surfaces and chrome around the canvas. */
+    function ReadingSurfaces() {
+      return (
+        <>
+          <div role="document" tabIndex={0} data-testid="txt-page">
+            The quick brown fox
+          </div>
+          <div tabIndex={0} data-testid="pdf-scroller">
+            <div data-testid="pdf-text-layer">jumps over</div>
+          </div>
+          <div role="dialog" aria-label="Highlight" data-testid="highlight-popover">
+            <span>green highlight</span>
+          </div>
+          <aside data-testid="reader-sidebar">
+            <button type="button">Contents entry</button>
+          </aside>
+          <div role="toolbar" aria-label="Reader toolbar">
+            <button type="button">Show MindMap</button>
+          </div>
+          <iframe title="EPUB chapter" data-testid="epub-frame" />
+        </>
+      );
+    }
+
+    function renderBeside(pane: { open: boolean; inspectorOpen?: boolean }) {
+      seed([node('a', 40, 40)], { selectedNodeId: 'a' });
+      const removeCard = vi.fn(async () => {});
+      const inspectNode = vi.fn();
+      useStudySyncStore.setState({ removeCard, inspectNode });
+      render(
+        <>
+          <MindMapPane open={pane.open} inspectorOpen={pane.inspectorOpen ?? false} />
+          <ReadingSurfaces />
+        </>,
+      );
+      return { removeCard, inspectNode };
+    }
+
+    function readerTargets(): HTMLElement[] {
+      const frameDocument = (screen.getByTestId('epub-frame') as HTMLIFrameElement)
+        .contentDocument as Document;
+      const chapterParagraph = frameDocument.createElement('p');
+      frameDocument.body.append(chapterParagraph);
+      return [
+        screen.getByTestId('txt-page'),
+        screen.getByTestId('pdf-text-layer'),
+        screen.getByText('green highlight'),
+        screen.getByRole('button', { name: 'Contents entry' }),
+        screen.getByRole('button', { name: 'Show MindMap' }),
+        document.body,
+        chapterParagraph,
+      ];
+    }
+
+    function pressEverywhere(targets: HTMLElement[]) {
+      for (const target of targets) {
+        for (const init of CARD_KEYS) {
+          const event = new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true });
+          if (target.ownerDocument === document) {
+            target.focus();
+            target.dispatchEvent(event);
+          } else {
+            // An EPUB chapter forwards its keydowns to the registry.
+            target.dispatchEvent(event);
+            dispatchCommandKeydown(event);
+          }
+        }
+      }
+    }
+
+    it('leaves the selected card alone for Backspace, Delete, and Return pressed while reading', () => {
+      const { removeCard, inspectNode } = renderBeside({ open: true, inspectorOpen: true });
+      pressEverywhere(readerTargets());
+      expect(removeCard).not.toHaveBeenCalled();
+      expect(inspectNode).not.toHaveBeenCalled();
+      expect(useStudySyncStore.getState().selectedNodeId).toBe('a');
+    });
+
+    it('leaves the selected card alone when only the Inspector shows it', () => {
+      const { removeCard, inspectNode } = renderBeside({ open: false, inspectorOpen: true });
+      pressEverywhere(readerTargets());
+      expect(removeCard).not.toHaveBeenCalled();
+      expect(inspectNode).not.toHaveBeenCalled();
+    });
+
+    it('still deletes and edits from the canvas pane, the Edit menu, and the context menu', () => {
+      const { removeCard, inspectNode } = renderBeside({ open: true, inspectorOpen: true });
+
+      const canvasPane = document.querySelector('.react-flow__pane') as HTMLElement;
+      fireEvent.keyDown(canvasPane, { key: 'Enter', code: 'Enter' });
+      expect(inspectNode).toHaveBeenCalledWith('a');
+      fireEvent.keyDown(canvasPane, { key: 'Delete', code: 'Delete' });
+      expect(removeCard).toHaveBeenCalledWith('card-a');
+
+      forgetRecentCommandRuns();
+      screen.getByTestId('txt-page').focus();
+      expect(runCommand('edit.deleteCard', 'menu')).toBe(true);
+      expect(runCommand('edit.editCard', 'menu')).toBe(true);
+      expect(removeCard).toHaveBeenCalledTimes(2);
+      expect(inspectNode).toHaveBeenCalledTimes(2);
+
+      fireEvent.contextMenu(cardElement('a'));
+      const menu = screen.getByRole('menu', { name: 'Card actions' });
+      fireEvent.click(within(menu).getByRole('menuitem', { name: /Delete Card/i }));
+      expect(removeCard).toHaveBeenCalledTimes(3);
+    });
+
+    it('keeps the Inspector Delete Card route when the map is hidden', () => {
+      const { removeCard } = renderBeside({ open: false, inspectorOpen: true });
+      expect(runCommand('edit.deleteCard', 'toolbar')).toBe(true);
+      expect(removeCard).toHaveBeenCalledWith('card-a');
     });
   });
 });

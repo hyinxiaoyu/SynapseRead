@@ -16,6 +16,7 @@ import {
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
+import { useCardDeletedNotice } from '@/features/mindmap/useCardDeletedNotice';
 import { ReaderNotice } from '@/features/reader/ReaderNotice';
 import { ReaderPane } from '@/features/reader/ReaderPane';
 import {
@@ -418,6 +419,14 @@ export function StudyWorkspace() {
       Added to MindMap
     </ReaderNotice>
   ) : null;
+  const cardDeletedNotice = useCardDeletedNotice();
+  const readerNotices =
+    excerptNotice || cardDeletedNotice ? (
+      <>
+        {excerptNotice}
+        {cardDeletedNotice}
+      </>
+    ) : null;
 
   const panelDefaultLayout = initialLayout ?? { reader: 100, mindmap: 0, inspector: 0 };
 
@@ -530,7 +539,7 @@ export function StudyWorkspace() {
                 defaultSize={`${panelDefaultLayout.reader}%`}
                 minSize={`${MIN_READER_SIZE}%`}
               >
-                <ReaderPane notice={excerptNotice} />
+                <ReaderPane notice={readerNotices} />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel

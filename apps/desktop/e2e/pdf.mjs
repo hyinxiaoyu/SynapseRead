@@ -1,3 +1,4 @@
+import { assertCardKeysStayInReader } from './cardKeys.mjs';
 import { assert } from './harness.mjs';
 import { notesInPlaceFlow } from './notes.mjs';
 
@@ -115,6 +116,12 @@ export async function pdfFlow(page) {
   assert(Math.abs(painted.left - expected.start.x) < 3, 'the highlight starts at the text');
   assert(Math.abs(painted.right - expected.end.x) < 3, 'the highlight ends at the text');
   assert(Math.abs(painted.y - expected.start.y) < 4, 'the highlight is on the text line');
+
+  // With the Inspector open and the new card selected, Backspace, Delete, and Return
+  // on the PDF page must neither delete the card nor move focus into its Notes (#123).
+  const plainText = await page.textRect(TEXT, 'lazy dog');
+  assert(plainText, 'the PDF text layer shows "lazy dog"');
+  await assertCardKeysStayInReader(page, plainText.end, 'the PDF page');
 
   // A non-embedded CJK font only produces this text if the CMap files load. Whether its
   // glyphs then draw depends on the machine's fonts, so that is not asserted here.

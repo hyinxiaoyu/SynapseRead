@@ -26,6 +26,14 @@ export interface CommandHandler {
    * browser, for a view that scrolls natively, such as PDF continuous scroll.
    */
   nativeAliases?: boolean;
+  /**
+   * Confines the command's keyboard shortcut to keys pressed inside this element,
+   * for a bare key such as Backspace that means something else elsewhere: a MindMap
+   * card action must not fire while the reader has focus (#123). Menus, toolbars,
+   * and other explicit routes still run the command. Return `null` to disable the
+   * shortcut everywhere.
+   */
+  keyboardScope?: () => Element | null;
 }
 
 export type CommandHandlers = Partial<Record<CommandId, CommandHandler>>;
@@ -192,6 +200,16 @@ function blocksShortcut(event: KeyboardEvent, definition: CommandDefinition): bo
 }
 
 /**
+ * Whether a keydown's target lies inside `scope`. A target in another document,
+ * such as an EPUB chapter's iframe, is never inside it.
+ */
+function isWithinScope(scope: Element | null, target: EventTarget | null): boolean {
+  if (!scope || !target) return false;
+  if (typeof (target as Partial<Node>).nodeType !== 'number') return false;
+  return scope.contains(target as Node);
+}
+
+/**
  * Keys the webview answers as a browser rather than as the app: reload, Find,
  * print, view source, and caret browsing. None of them is an app command, and
  * none is a text-editing key, so they are swallowed wherever the focus is.
@@ -297,7 +315,14 @@ function dispatchToCommand(event: KeyboardEvent): KeydownResult {
       if (isBrowserAction(event, platform)) event.preventDefault();
       return 'passed';
     }
-    if (binding !== definition.shortcut && resolve(id)?.nativeAliases) return 'passed';
+    const handler = resolve(id);
+    if (handler?.keyboardScope && !isWithinScope(handler.keyboardScope(), event.target)) {
+      // Out of scope, the key is the page's own: Backspace and Return in the
+      // reader must reach the reader, not the selected MindMap card.
+      if (isModified(event)) event.preventDefault();
+      return 'passed';
+    }
+    if (binding !== definition.shortcut && handler?.nativeAliases) return 'passed';
     if (runCommand(id, 'keyboard')) {
       event.preventDefault();
       return 'ran';
