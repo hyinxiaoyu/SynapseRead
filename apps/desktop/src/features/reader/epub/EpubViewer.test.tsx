@@ -1644,46 +1644,84 @@ describe('EpubViewer', () => {
       expect(store.getState().bookmarks[0]?.anchor).toMatchObject({ cfiRange: FAR_CFI });
     });
 
-    it('defers bookmarking across a delayed peekLink lookup until the automatic jump lands', async () => {
+    it.each<[string, () => void]>([
+      ['shortcut', () => pressShortcut()],
+      [
+        'toolbar pointer click',
+        () => {
+          const button = screen.getByTestId('toggle-bookmark-button');
+          const target = button.querySelector('svg') ?? button;
+          fireEvent.pointerDown(target);
+          fireEvent.pointerUp(target);
+          fireEvent.click(button);
+        },
+      ],
+    ])(
+      'defers bookmarking across a delayed peekLink lookup via %s until the automatic jump lands',
+      async (_trigger, toggle) => {
+        let resolvePeek: (text: string | null) => void = () => undefined;
+        engine.peek = () =>
+          new Promise<string | null>((resolve) => {
+            resolvePeek = resolve;
+          });
+
+        const { store } = await setup().then(async (opened_) => {
+          render(<Harness store={opened_.store} documentId={opened_.documentId} />);
+          await opened();
+          act(() => engine.emitLocation({ ...chapterOne, page: 3 }));
+          return opened_;
+        });
+        const displayedBefore = engine.displayed.length;
+
+        act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml#section'));
+        // Toggling while peekLink is still resolving the link intent must not save the origin
+        // or cancel the pending link jump via window pointerdown capture.
+        toggle();
+        await act(async () => undefined);
+        expect(engine.displayed.length).toBe(displayedBefore);
+        expect(store.getState().bookmarks).toEqual([]);
+
+        const land = holdJumps();
+        await act(async () => {
+          resolvePeek(null);
+          await Promise.resolve();
+        });
+        await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml#section'));
+        expect(store.getState().bookmarks).toEqual([]);
+
+        await land(chapterTwo);
+        await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
+        const [saved] = store.getState().bookmarks;
+        expect(saved?.anchor).toEqual({
+          format: 'epub',
+          cfiRange: FAR_CFI,
+          chapterHref: 'OEBPS/chapter2.xhtml',
+        });
+        expect(saved?.label).toBe('Two · Page 1');
+        expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+      },
+    );
+
+    it('still cancels a pending peekLink lookup on non-bookmark pointer input', async () => {
       let resolvePeek: (text: string | null) => void = () => undefined;
       engine.peek = () =>
         new Promise<string | null>((resolve) => {
           resolvePeek = resolve;
         });
 
-      const { store } = await setup().then(async (opened_) => {
-        render(<Harness store={opened_.store} documentId={opened_.documentId} />);
-        await opened();
-        act(() => engine.emitLocation({ ...chapterOne, page: 3 }));
-        return opened_;
-      });
+      await openAtChapterOne();
       const displayedBefore = engine.displayed.length;
 
       act(() => engine.emitInternalLink('OEBPS/chapter2.xhtml#section'));
-      // Toggling while peekLink is still resolving the link intent must not save the origin.
-      pressShortcut();
-      await act(async () => undefined);
-      expect(engine.displayed.length).toBe(displayedBefore);
-      expect(store.getState().bookmarks).toEqual([]);
-
-      const land = holdJumps();
+      fireEvent.pointerDown(screen.getByTestId('sidebar-toggle'));
       await act(async () => {
         resolvePeek(null);
         await Promise.resolve();
       });
-      await waitFor(() => expect(engine.displayed.at(-1)).toBe('OEBPS/chapter2.xhtml#section'));
-      expect(store.getState().bookmarks).toEqual([]);
-
-      await land(chapterTwo);
-      await waitFor(() => expect(store.getState().bookmarks).toHaveLength(1));
-      const [saved] = store.getState().bookmarks;
-      expect(saved?.anchor).toEqual({
-        format: 'epub',
-        cfiRange: FAR_CFI,
-        chapterHref: 'OEBPS/chapter2.xhtml',
-      });
-      expect(saved?.label).toBe('Two · Page 1');
-      expect(screen.getByTestId('toggle-bookmark-button')).toHaveAttribute('aria-pressed', 'true');
+      expect(engine.displayed.length).toBe(displayedBefore);
     });
 
     it('applies a deferred bookmark to the origin page when peekLink opens a preview instead of jumping', async () => {

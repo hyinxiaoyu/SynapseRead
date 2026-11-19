@@ -941,6 +941,19 @@ export function EpubViewer({
     dismiss: dismissLinkPeek,
   } = useLinkPeek<LinkPeekTarget & { href: string }>(
     `${isActive}|${currentCfi}|${readingMode}|${layout.columns}|${preferencesKey}`,
+    {
+      // Bookmarking during a pending link lookup defers until the link settles
+      // rather than cancelling the automatic jump (#100).
+      shouldIgnorePointerDown: (event) => {
+        const element =
+          event.target instanceof Element
+            ? event.target
+            : event.target instanceof Node
+              ? event.target.parentElement
+              : null;
+        return Boolean(element?.closest('[data-command="bookmarks.toggle"]'));
+      },
+    },
   );
   useEffect(() => {
     if (!handle) return;

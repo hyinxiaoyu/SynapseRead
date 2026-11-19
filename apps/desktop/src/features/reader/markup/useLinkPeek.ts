@@ -11,6 +11,11 @@ export interface LinkPeekRequest<T> {
   finish(peek: T | null): boolean;
 }
 
+export interface UseLinkPeekOptions {
+  /** Return true to keep a pending lookup alive across a `pointerdown` (e.g. bookmarking). */
+  shouldIgnorePointerDown?: (event: PointerEvent) => boolean;
+}
+
 /**
  * The card a reader shows beside a link (#49), and the rules for when it goes away.
  *
@@ -20,10 +25,17 @@ export interface LinkPeekRequest<T> {
  * the reader moved on. Readers build `context` from whatever moves the link without
  * a scroll event, which the card already closes on.
  */
-export function useLinkPeek<T extends LinkPeekTarget>(context: string) {
+export function useLinkPeek<T extends LinkPeekTarget>(
+  context: string,
+  options?: UseLinkPeekOptions,
+) {
   const [peek, setPeek] = useState<T | null>(null);
   const [pending, setPending] = useState(false);
   const request = useRef(0);
+  const ignorePointerDownRef = useRef(options?.shouldIgnorePointerDown);
+  useEffect(() => {
+    ignorePointerDownRef.current = options?.shouldIgnorePointerDown;
+  });
 
   // Clearing during render, not in an effect, so a stale card never paints.
   const [seenContext, setSeenContext] = useState(context);
@@ -61,10 +73,14 @@ export function useLinkPeek<T extends LinkPeekTarget>(context: string) {
   // scrolls, so the reader's next move is heard here and cancels the peek.
   useEffect(() => {
     if (!pending) return;
-    window.addEventListener('pointerdown', dismiss, true);
+    const onPointerDown = (event: PointerEvent) => {
+      if (ignorePointerDownRef.current?.(event)) return;
+      dismiss();
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('scroll', dismiss, true);
     return () => {
-      window.removeEventListener('pointerdown', dismiss, true);
+      window.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('scroll', dismiss, true);
     };
   }, [pending, dismiss]);
