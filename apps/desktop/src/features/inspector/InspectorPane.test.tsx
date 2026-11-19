@@ -56,6 +56,7 @@ function seedCard(overrides: Partial<NoteCard> = {}) {
           : candidate,
       ),
     }));
+    return true;
   });
   useStudySyncStore.setState({
     annotations: [annotation],
@@ -171,6 +172,77 @@ describe('InspectorPane', () => {
         markdownNotes: 'Before Cmd+Q',
         tags: [],
       });
+    });
+
+    it('keeps a failed debounced write pending instead of showing Saved, and retries on close flush', async () => {
+      vi.useFakeTimers();
+      const { updateCard } = seedCard();
+      updateCard.mockResolvedValueOnce(false);
+      render(<InspectorPane open />);
+
+      fireEvent.change(screen.getByLabelText('Notes'), { target: { value: 'Must not be lost' } });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CARD_SAVE_DEBOUNCE_MS);
+      });
+
+      expect(updateCard).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId('inspector-save-status')).toHaveTextContent('Unsaved');
+      expect(useStudySyncStore.getState().cards[0]?.markdownNotes).toBe('');
+
+      // Subsequent close flush retries the retained draft and persists it.
+      await act(async () => {
+        await flushBeforeClose();
+      });
+
+      expect(updateCard).toHaveBeenCalledTimes(2);
+      expect(updateCard).toHaveBeenLastCalledWith('card-1', {
+        title: 'Initial Title',
+        markdownNotes: 'Must not be lost',
+        tags: [],
+      });
+      expect(useStudySyncStore.getState().cards[0]?.markdownNotes).toBe('Must not be lost');
+      expect(screen.getByTestId('inspector-save-status')).toHaveTextContent('Saved');
+    });
+
+    it('does not let a failed in-flight write overwrite newer keystrokes', async () => {
+      vi.useFakeTimers();
+      const { updateCard } = seedCard();
+      let resolveFirst: (ok: boolean) => void = () => {};
+      updateCard.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      );
+      render(<InspectorPane open />);
+
+      const notes = screen.getByLabelText('Notes');
+      fireEvent.change(notes, { target: { value: 'v1' } });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(CARD_SAVE_DEBOUNCE_MS);
+      });
+      expect(updateCard).toHaveBeenCalledTimes(1);
+
+      // User keeps typing while v1 is still in flight; then v1 fails.
+      fireEvent.change(notes, { target: { value: 'v1 + v2' } });
+      await act(async () => {
+        resolveFirst(false);
+        await Promise.resolve();
+      });
+
+      // Next flush persists the newer draft ("v1 + v2"), never rolling back to "v1".
+      await act(async () => {
+        await flushBeforeClose();
+      });
+      expect(updateCard).toHaveBeenCalledTimes(2);
+      expect(updateCard).toHaveBeenLastCalledWith('card-1', {
+        title: 'Initial Title',
+        markdownNotes: 'v1 + v2',
+        tags: [],
+      });
+      expect(useStudySyncStore.getState().cards[0]?.markdownNotes).toBe('v1 + v2');
+      expect(screen.getByTestId('inspector-save-status')).toHaveTextContent('Saved');
     });
   });
 

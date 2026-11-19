@@ -293,5 +293,42 @@ describe('MindMapPane', () => {
         stop();
       }
     });
+
+    it('deletes and edits the keyboard-focused card rather than a stale selected card (#116)', () => {
+      seed([node('a', 40, 40), node('b', 400, 40)], { selectedNodeId: 'a' });
+      const removeCard = vi.fn(async () => {});
+      const inspectNode = vi.fn();
+      useStudySyncStore.setState({ removeCard, inspectNode });
+      render(
+        <>
+          <MindMapPane open inspectorOpen />
+          <button type="button">Outside canvas</button>
+        </>,
+      );
+
+      // Select A, then move keyboard focus to B without selecting B.
+      const cardB = cardElement('b');
+      cardB.focus();
+      expect(document.activeElement).toBe(cardB);
+      expect(useStudySyncStore.getState().selectedNodeId).toBe('a');
+
+      // Pressing Enter targets focused card B, not selected card A.
+      fireEvent.keyDown(cardB, { key: 'Enter', code: 'Enter' });
+      expect(inspectNode).toHaveBeenCalledWith('b');
+
+      // Pressing Backspace deletes focused card B, leaving A untouched.
+      fireEvent.keyDown(cardB, { key: 'Backspace', code: 'Backspace' });
+      expect(removeCard).toHaveBeenCalledWith('card-b');
+      expect(removeCard).not.toHaveBeenCalledWith('card-a');
+
+      // Once focus leaves the canvas (e.g., clicking Inspector Delete Card), explicit
+      // actions still target the selected card A.
+      const outside = screen.getByRole('button', { name: 'Outside canvas' });
+      outside.focus();
+      fireEvent.contextMenu(cardElement('a'));
+      const menu = screen.getByRole('menu', { name: 'Card actions' });
+      fireEvent.click(within(menu).getByRole('menuitem', { name: /Delete Card/i }));
+      expect(removeCard).toHaveBeenLastCalledWith('card-a');
+    });
   });
 });

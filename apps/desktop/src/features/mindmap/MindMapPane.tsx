@@ -14,6 +14,7 @@ import {
 } from '@xyflow/react';
 import { Link2, Pencil, Trash2 } from 'lucide-react';
 import {
+  type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
@@ -43,6 +44,13 @@ interface CardMenuState {
   nodeId: string;
   x: number;
   y: number;
+}
+
+function focusedCanvasNodeId(container: HTMLElement | null): string | null {
+  if (!container) return null;
+  const active = document.activeElement;
+  if (!(active instanceof Element) || !container.contains(active)) return null;
+  return active.closest<HTMLElement>('.react-flow__node[data-id]')?.dataset.id ?? null;
 }
 
 /**
@@ -81,9 +89,25 @@ export function MindMapPane({
   const sectionRef = useRef<HTMLElement>(null);
   const [measured, setMeasured] = useState<Record<string, Measured>>({});
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<ReadonlySet<string>>(new Set());
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<CardMenuState | null>(null);
 
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  const handleSectionFocus = useCallback((event: ReactFocusEvent<HTMLElement>) => {
+    const nodeElement = event.target.closest<HTMLElement>('.react-flow__node[data-id]');
+    setFocusedNodeId(nodeElement?.dataset.id ?? null);
+  }, []);
+
+  const handleSectionBlur = useCallback((event: ReactFocusEvent<HTMLElement>) => {
+    const next = event.relatedTarget;
+    if (next instanceof Element && sectionRef.current?.contains(next)) {
+      const nodeElement = next.closest<HTMLElement>('.react-flow__node[data-id]');
+      setFocusedNodeId(nodeElement?.dataset.id ?? null);
+    } else {
+      setFocusedNodeId(null);
+    }
+  }, []);
 
   const flowNodes = useMemo<CardFlowNode[]>(
     () =>
@@ -163,23 +187,49 @@ export function MindMapPane({
     () => (selectedNodeId ? nodes.find((candidate) => candidate.id === selectedNodeId) : undefined),
     [nodes, selectedNodeId],
   );
+  const activeFocusedNode = useMemo(
+    () =>
+      open && focusedNodeId ? nodes.find((candidate) => candidate.id === focusedNodeId) : undefined,
+    [open, focusedNodeId, nodes],
+  );
   const canUndoCard = deletedCardCount > 0 && lastDeletionKind === 'card';
+
+  // When keyboard focus rests on a canvas card, keyboard actions target that card
+  // rather than a stale selection elsewhere; explicit Inspector and context-menu
+  // actions move focus off the card and target `selectedNode` (#116).
+  const resolveTargetNode = () => {
+    const state = useStudySyncStore.getState();
+    if (open) {
+      const focusedId = focusedCanvasNodeId(sectionRef.current);
+      if (focusedId) {
+        const focused = state.nodes.find((candidate) => candidate.id === focusedId);
+        if (focused) return focused;
+      }
+    }
+    return state.selectedNodeId
+      ? state.nodes.find((candidate) => candidate.id === state.selectedNodeId)
+      : undefined;
+  };
 
   useCommands({
     'edit.editCard': {
       run: () => {
-        if (selectedNode) inspectNode(selectedNode.id);
+        const target = resolveTargetNode();
+        if (target) inspectNode(target.id);
       },
-      enabled: open && selectedNode !== undefined,
+      enabled: open && (activeFocusedNode !== undefined || selectedNode !== undefined),
     },
     'edit.deleteCard': {
       run: () => {
-        if (selectedNode) {
+        const target = resolveTargetNode();
+        if (target) {
           closeContextMenu();
-          void removeCard(selectedNode.cardId);
+          void removeCard(target.cardId);
         }
       },
-      enabled: (open || inspectorOpen) && selectedNode !== undefined,
+      enabled:
+        (open && activeFocusedNode !== undefined) ||
+        ((open || inspectorOpen) && selectedNode !== undefined),
     },
   });
   // Register Undo Delete Card as its own active-gated layer so deleting a card
@@ -237,7 +287,13 @@ export function MindMapPane({
   const isEmpty = nodes.length === 0;
 
   return (
-    <section ref={sectionRef} aria-label="MindMap canvas" className="relative h-full">
+    <section
+      ref={sectionRef}
+      aria-label="MindMap canvas"
+      className="relative h-full"
+      onFocus={handleSectionFocus}
+      onBlur={handleSectionBlur}
+    >
       <ReactFlow<CardFlowNode>
         nodes={flowNodes}
         edges={flowEdges}

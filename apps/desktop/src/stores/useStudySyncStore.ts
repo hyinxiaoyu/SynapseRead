@@ -186,7 +186,8 @@ export interface StudySyncState {
   commitNodeLayout(nodeId: string): Promise<void>;
   connectNodes(sourceNodeId: string, targetNodeId: string): Promise<void>;
   removeEdge(edgeId: string): Promise<void>;
-  updateCard(cardId: string, patch: CardPatch): Promise<void>;
+  /** Persists a card edit; resolves to `false` when the backend write fails. */
+  updateCard(cardId: string, patch: CardPatch): Promise<boolean>;
   removeCard(cardId: string): Promise<void>;
   undoRemoveCard(): Promise<RestoredCard | null>;
   saveViewport(viewport: Viewport): Promise<void>;
@@ -212,7 +213,19 @@ export interface InspectRequest {
   nodeId: string;
 }
 
-/** Children stack to the right of their parent; roots cascade from the origin. */
+const SLOT_EPSILON = 24;
+
+function isSlotOccupied(nodes: readonly MindMapNode[], x: number, y: number): boolean {
+  return nodes.some(
+    (node) => Math.abs(node.posX - x) < SLOT_EPSILON && Math.abs(node.posY - y) < SLOT_EPSILON,
+  );
+}
+
+/**
+ * Children stack to the right of their parent; roots cascade from the origin.
+ * Picks the first unoccupied slot so deleting a card never causes the next
+ * excerpt to land on top of a surviving card (#116).
+ */
 export function nextNodePosition(
   nodes: readonly MindMapNode[],
   parentNodeId: string | null,
@@ -220,10 +233,18 @@ export function nextNodePosition(
   const parent = parentNodeId ? nodes.find((node) => node.id === parentNodeId) : undefined;
   if (parent) {
     const siblings = nodes.filter((node) => node.parentNodeId === parent.id).length;
-    return { x: parent.posX + CHILD_OFFSET_X, y: parent.posY + siblings * SIBLING_OFFSET_Y };
+    const x = parent.posX + CHILD_OFFSET_X;
+    for (let slot = siblings; ; slot += 1) {
+      const y = parent.posY + slot * SIBLING_OFFSET_Y;
+      if (!isSlotOccupied(nodes, x, y)) return { x, y };
+    }
   }
   const roots = nodes.filter((node) => node.parentNodeId === null).length;
-  return { x: ROOT_ORIGIN.x + roots * ROOT_CASCADE, y: ROOT_ORIGIN.y + roots * ROOT_CASCADE };
+  for (let slot = roots; ; slot += 1) {
+    const x = ROOT_ORIGIN.x + slot * ROOT_CASCADE;
+    const y = ROOT_ORIGIN.y + slot * ROOT_CASCADE;
+    if (!isSlotOccupied(nodes, x, y)) return { x, y };
+  }
 }
 
 export function selectHighlights(
@@ -996,8 +1017,10 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async updateCard(cardId, patch) {
+        let saved = false;
         await guarded(async () => {
           const card = await backend.updateCard(cardId, patch);
+          saved = true;
           // CardPatch never edits annotationIds; keeping the store's links avoids
           // clobbering concurrent delete/restore updates with an older snapshot (#97).
           set((state) => ({
@@ -1008,6 +1031,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             ),
           }));
         });
+        return saved;
       },
 
       async removeCard(cardId) {

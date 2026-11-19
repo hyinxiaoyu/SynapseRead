@@ -14,7 +14,7 @@ import type { Annotation, CardPatch, NoteCard } from '@/types/domain';
 /** Idle delay before typing in the Inspector persists without a blur (#117). */
 export const CARD_SAVE_DEBOUNCE_MS = 600;
 
-type SaveStatus = 'idle' | 'saving' | 'saved';
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 function findCardNodeElement(nodeId: string): HTMLElement | null {
   for (const element of document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]')) {
@@ -66,9 +66,17 @@ export function InspectorPane({ open = true }: { open?: boolean }) {
           <span
             data-testid="inspector-save-status"
             aria-live="polite"
-            className="text-xs font-normal text-muted-foreground"
+            className={
+              visibleSaveStatus === 'error'
+                ? 'text-xs font-normal text-destructive'
+                : 'text-xs font-normal text-muted-foreground'
+            }
           >
-            {visibleSaveStatus === 'saving' ? 'Saving…' : 'Saved'}
+            {visibleSaveStatus === 'saving'
+              ? 'Saving…'
+              : visibleSaveStatus === 'error'
+                ? 'Unsaved'
+                : 'Saved'}
           </span>
         )}
       </header>
@@ -173,18 +181,38 @@ function CardEditor({
     const previous = inFlightRef.current ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => {
+      .then(async (): Promise<'saved' | 'skipped' | 'failed'> => {
         if (!useStudySyncStore.getState().cards.some((candidate) => candidate.id === card.id)) {
+          return 'skipped';
+        }
+        try {
+          const ok = await updateCard(card.id, patch);
+          return ok ? 'saved' : 'failed';
+        } catch {
+          return 'failed';
+        }
+      })
+      .then((outcome) => {
+        if (outcome === 'failed') {
+          // Retain the failed draft for the next flush unless newer edits already superseded it (#117).
+          if (
+            pendingRef.current === null &&
+            useStudySyncStore.getState().cards.some((candidate) => candidate.id === card.id)
+          ) {
+            pendingRef.current = patch;
+            if (mountedRef.current) onSaveStatus(card.id, 'error');
+          }
           return;
         }
-        return updateCard(card.id, patch);
+        if (outcome === 'saved' && inFlightRef.current === next) {
+          if (mountedRef.current && pendingRef.current === null) {
+            onSaveStatus(card.id, 'saved');
+          }
+        }
       })
       .finally(() => {
         if (inFlightRef.current === next) {
           inFlightRef.current = null;
-          if (mountedRef.current && pendingRef.current === null) {
-            onSaveStatus(card.id, 'saved');
-          }
         }
       });
     inFlightRef.current = next;
@@ -207,7 +235,13 @@ function CardEditor({
     document.addEventListener('visibilitychange', onVisibilityChange);
     const unregisterFlush = registerBeforeCloseFlush({
       isDirty: () => pendingRef.current !== null || inFlightRef.current !== null,
-      flush: () => commitRef.current(),
+      flush: async () => {
+        await commitRef.current();
+        // If an in-flight write failed and restored `pendingRef`, retry once before closing.
+        if (pendingRef.current !== null) {
+          await commitRef.current();
+        }
+      },
     });
     return () => {
       mountedRef.current = false;

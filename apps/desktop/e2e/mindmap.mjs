@@ -153,4 +153,57 @@ export async function mindmapFlow(page) {
     `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 0`,
     'Backspace to delete the selected card',
   );
+
+  // 10. With two cards (A selected, keyboard focus moved to B without selecting),
+  // Backspace deletes focused card B and keeps A; and deleting a middle root among
+  // three roots does not cause the next root excerpt to overlap the surviving third (#116).
+  const excerptPhrase = async (phrase, expectedCount) => {
+    await page.selectText(SEGMENT, phrase);
+    await page.waitFor(
+      `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`,
+      `Excerpt to MindMap to enable for ${phrase}`,
+    );
+    await page.clickButton('Excerpt to MindMap');
+    await page.waitFor(
+      `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === ${expectedCount}`,
+      `card count to reach ${expectedCount}`,
+    );
+  };
+
+  await excerptPhrase('quick brown fox', 1);
+  await excerptPhrase('jumps over', 2);
+  await excerptPhrase('lazy dog', 3);
+
+  // Select first card, then move keyboard focus to the middle card without selecting it.
+  await page.evaluate(`(() => {
+    const nodes = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})];
+    nodes[0].click();
+    nodes[1].focus();
+  })()`);
+  await page.press('Backspace');
+  await page.waitFor(
+    `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 2`,
+    'Backspace to delete the focused middle card',
+  );
+  const survivingTitles = await page.evaluate(
+    `[...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].map((el) => el.textContent ?? '')`,
+  );
+  assert(
+    survivingTitles.some((text) => text.includes('quick brown fox')) &&
+      survivingTitles.some((text) => text.includes('lazy dog')) &&
+      !survivingTitles.some((text) => text.includes('jumps over')),
+    `expected focused middle card to be deleted while keeping first and third, got: ${JSON.stringify(survivingTitles)}`,
+  );
+
+  // Excerpt another root: all three cards must occupy distinct canvas positions.
+  await page.evaluate(`document.querySelector('.react-flow__pane')?.click()`);
+  await excerptPhrase('jumps over', 3);
+  const distinctPositions = await page.evaluate(`(() => {
+    const transforms = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].map((el) => el.style.transform);
+    return new Set(transforms).size;
+  })()`);
+  assert(
+    distinctPositions === 3,
+    `expected 3 distinct card positions after deleting middle root and excerpting again, got ${distinctPositions}`,
+  );
 }
