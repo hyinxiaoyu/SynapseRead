@@ -6,7 +6,12 @@ import { dispatchEscape } from '@/features/commands/escape';
 import { forgetRecentCommandRuns } from '@/features/commands/registry';
 import type { MenuItemState } from '@/lib/backend/types';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
-import type { AnchorLocation, DocumentFormat, DocumentViewerProps } from '@/types/domain';
+import {
+  type AnchorLocation,
+  DEFAULT_WORKSPACE_PANE_LAYOUT,
+  type DocumentFormat,
+  type DocumentViewerProps,
+} from '@/types/domain';
 
 import { StudyWorkspace } from './StudyWorkspace';
 
@@ -83,6 +88,8 @@ describe('StudyWorkspace', () => {
     for (const id of [...useStudySyncStore.getState().openDocumentIds]) {
       useStudySyncStore.getState().closeDocument(id);
     }
+    useStudySyncStore.getState().setImmersive(false);
+    useStudySyncStore.getState().setPaneLayout(DEFAULT_WORKSPACE_PANE_LAYOUT);
     useStudySyncStore.setState(initialState, true);
     forgetRecentCommandRuns();
   });
@@ -816,5 +823,104 @@ describe('StudyWorkspace', () => {
     expect(await screen.findByRole('button', { name: 'Exit full screen' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Exit full screen' }));
     expect(setFullscreen).toHaveBeenLastCalledWith(false);
+  });
+
+  describe('opening Inspector from a card and persisting pane layout (#119)', () => {
+    it('does not open Inspector on excerpt, opens it on double-click or Edit Card, and focuses Notes', async () => {
+      await renderReady();
+      fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+
+      await waitFor(() => expect(useStudySyncStore.getState().nodes.length).toBeGreaterThan(0));
+      const newestNode = useStudySyncStore.getState().nodes.at(-1);
+      expect(newestNode).toBeDefined();
+
+      // Excerpting never auto-opens the Inspector.
+      expect(screen.getByRole('button', { name: 'Show inspector' })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      );
+
+      // Double-clicking the card opens Inspector and focuses Notes.
+      const cardEl = document.querySelector(
+        `.react-flow__node[data-id="${newestNode?.id}"]`,
+      ) as HTMLElement;
+      fireEvent.doubleClick(cardEl);
+
+      expect(screen.getByRole('button', { name: 'Hide inspector' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('Notes')));
+
+      // Collapse Inspector again and verify Enter (`edit.editCard`) reopens and focuses Notes.
+      fireEvent.click(screen.getByRole('button', { name: 'Hide inspector' }));
+      expect(screen.getByRole('button', { name: 'Show inspector' })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      );
+      cardEl.focus();
+      fireEvent.keyDown(cardEl, { key: 'Enter', code: 'Enter' });
+
+      expect(screen.getByRole('button', { name: 'Hide inspector' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('Notes')));
+    });
+
+    it('persists MindMap and Inspector open state across relaunch while keeping focus mode restore', async () => {
+      const first = render(<StudyWorkspace />);
+      await screen.findByRole('region', { name: 'Document reader' });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Show inspector' }));
+      expect(useStudySyncStore.getState().paneLayout).toMatchObject({
+        mindMapOpen: true,
+        inspectorOpen: true,
+      });
+
+      // Focus mode collapses both visually without overwriting persisted pane layout, and restores them.
+      fireEvent.click(screen.getByRole('button', { name: 'Enter focus mode' }));
+      expect(screen.getByRole('button', { name: 'Show MindMap' })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      );
+      expect(screen.getByRole('button', { name: 'Show inspector' })).toHaveAttribute(
+        'aria-pressed',
+        'false',
+      );
+      expect(useStudySyncStore.getState().paneLayout).toMatchObject({
+        mindMapOpen: true,
+        inspectorOpen: true,
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Exit focus mode' }));
+      expect(screen.getByRole('button', { name: 'Hide MindMap' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      expect(screen.getByRole('button', { name: 'Hide inspector' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+
+      // Simulate relaunch: unmount, reset in-memory store state to idle, remount against same backend.
+      first.unmount();
+      useStudySyncStore.setState(initialState, true);
+
+      render(<StudyWorkspace />);
+      await screen.findByRole('region', { name: 'Document reader' });
+      expect(screen.getByRole('button', { name: 'Hide MindMap' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      expect(screen.getByRole('button', { name: 'Hide inspector' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+    });
   });
 });

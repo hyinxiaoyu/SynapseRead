@@ -2,6 +2,7 @@ import { create } from 'zustand';
 
 import { createDefaultBackend, type StudyBackend } from '@/lib/backend';
 import type { MenuItemState, WindowChromeStyle } from '@/lib/backend/types';
+import { flushBeforeClose, hasPendingBeforeCloseFlush } from '@/lib/flushBeforeClose';
 import { describeError } from '@/lib/utils';
 import {
   type AnchorLocation,
@@ -13,6 +14,7 @@ import {
   type CardPatch,
   type CreateAnnotationOptions,
   DEFAULT_READING_PREFERENCES,
+  DEFAULT_WORKSPACE_PANE_LAYOUT,
   type DocumentContentReader,
   type DocumentSourceStatus,
   type JumpRequest,
@@ -25,9 +27,11 @@ import {
   type PdfLayout,
   type ReadingPreferences,
   type RelinkDocumentResult,
+  type RestoredCard,
   type StudyDocument,
   type StudyNotebook,
   type Viewport,
+  type WorkspacePaneLayout,
 } from '@/types/domain';
 
 export const DEFAULT_NOTEBOOK_TITLE = 'My Notebook';
@@ -36,6 +40,15 @@ export const DEFAULT_EXCERPT_COLOR = '#fde047';
 export interface DeletedAnnotationSnapshot {
   annotation: Annotation;
 }
+
+export interface DeletedCardSnapshot {
+  card: NoteCard;
+  nodes: MindMapNode[];
+  edges: MindMapEdge[];
+  childParentLinks: Array<[string, string]>;
+}
+
+export type DeletionKind = 'annotation' | 'card';
 
 /** Reopen Closed Tab keeps a bounded history: nobody reopens the 21st-last tab. */
 const MAX_CLOSED_TABS = 20;
@@ -68,6 +81,8 @@ export interface StudySyncState {
   isDraggingFile: boolean;
   /** Immersive reading: chrome collapsed. Part of the session, so it survives a restart. */
   immersive: boolean;
+  /** Persisted MindMap and Inspector pane visibility and widths across relaunch (#119). */
+  paneLayout: WorkspacePaneLayout;
   /** Whether the window is full screen, however it got there. */
   fullscreen: boolean;
   /**
@@ -87,6 +102,9 @@ export interface StudySyncState {
   notebook: StudyNotebook | null;
   annotations: Annotation[];
   deletedAnnotationHistory: DeletedAnnotationSnapshot[];
+  deletedCardHistory: DeletedCardSnapshot[];
+  /** Order of undoable deletions across highlights and cards, newest last. */
+  deletionOrder: DeletionKind[];
   cards: NoteCard[];
   nodes: MindMapNode[];
   edges: MindMapEdge[];
@@ -104,6 +122,8 @@ export interface StudySyncState {
   nestingTargetNodeId: string | null;
   /** Store -> MindMap: a card to bring into view once the canvas is showing. */
   revealRequest: RevealRequest | null;
+  /** Store -> Workspace/Inspector: open Inspector and focus Notes for this card (#119). */
+  inspectRequest: InspectRequest | null;
   /** Monotonic count of successful excerpts, so announcements fire even back-to-back. */
   excerptNonce: number;
   /** MindMap -> Reader: the jump the reader for that document should perform. */
@@ -131,10 +151,13 @@ export interface StudySyncState {
     progress?: number,
   ): void;
   setImmersive(immersive: boolean): void;
+  setPaneLayout(patch: Partial<WorkspacePaneLayout>): void;
   setFullscreen(fullscreen: boolean): Promise<void>;
   /** Native menu choices, as command ids. Thin pass-throughs to the backend. */
   onMenuCommand(listener: (commandId: string) => void): () => void;
   setMenuItemStates(states: readonly MenuItemState[]): Promise<void>;
+  /** Runs an async flush hook before the native window closes or quits (#117). */
+  onBeforeClose(listener: () => Promise<void>): () => void;
 
   /** A loadable URL for an annotation's capture, or `null` if it has no image. */
   captureUrl(annotationId: string): Promise<string | null>;
@@ -154,13 +177,19 @@ export interface StudySyncState {
   /** Selects a card without making it the nesting target, and asks the canvas to show it. */
   revealNode(nodeId: string): void;
   completeReveal(nonce: number): void;
+  /** Selects a card (without changing nesting target) and asks Inspector to open and focus Notes. */
+  inspectNode(nodeId: string): void;
+  completeInspect(nonce: number): void;
   /** Updates position in memory only: called for every frame of a drag. */
   dragNode(nodeId: string, posX: number, posY: number): void;
   /** Persists the node's current layout: called when a drag ends. */
   commitNodeLayout(nodeId: string): Promise<void>;
   connectNodes(sourceNodeId: string, targetNodeId: string): Promise<void>;
   removeEdge(edgeId: string): Promise<void>;
-  updateCard(cardId: string, patch: CardPatch): Promise<void>;
+  /** Persists a card edit; resolves to `false` when the backend write fails. */
+  updateCard(cardId: string, patch: CardPatch): Promise<boolean>;
+  removeCard(cardId: string): Promise<void>;
+  undoRemoveCard(): Promise<RestoredCard | null>;
   saveViewport(viewport: Viewport): Promise<void>;
   updateReadingPreferences(patch: Partial<ReadingPreferences>): Promise<void>;
   /** Loads a PDF's layout into `pdfLayouts`, falling back to the default on failure. */
@@ -179,7 +208,24 @@ export interface RevealRequest {
   nodeId: string;
 }
 
-/** Children stack to the right of their parent; roots cascade from the origin. */
+export interface InspectRequest {
+  nonce: number;
+  nodeId: string;
+}
+
+const SLOT_EPSILON = 24;
+
+function isSlotOccupied(nodes: readonly MindMapNode[], x: number, y: number): boolean {
+  return nodes.some(
+    (node) => Math.abs(node.posX - x) < SLOT_EPSILON && Math.abs(node.posY - y) < SLOT_EPSILON,
+  );
+}
+
+/**
+ * Children stack to the right of their parent; roots cascade from the origin.
+ * Picks the first unoccupied slot so deleting a card never causes the next
+ * excerpt to land on top of a surviving card (#116).
+ */
 export function nextNodePosition(
   nodes: readonly MindMapNode[],
   parentNodeId: string | null,
@@ -187,10 +233,18 @@ export function nextNodePosition(
   const parent = parentNodeId ? nodes.find((node) => node.id === parentNodeId) : undefined;
   if (parent) {
     const siblings = nodes.filter((node) => node.parentNodeId === parent.id).length;
-    return { x: parent.posX + CHILD_OFFSET_X, y: parent.posY + siblings * SIBLING_OFFSET_Y };
+    const x = parent.posX + CHILD_OFFSET_X;
+    for (let slot = siblings; ; slot += 1) {
+      const y = parent.posY + slot * SIBLING_OFFSET_Y;
+      if (!isSlotOccupied(nodes, x, y)) return { x, y };
+    }
   }
   const roots = nodes.filter((node) => node.parentNodeId === null).length;
-  return { x: ROOT_ORIGIN.x + roots * ROOT_CASCADE, y: ROOT_ORIGIN.y + roots * ROOT_CASCADE };
+  for (let slot = roots; ; slot += 1) {
+    const x = ROOT_ORIGIN.x + slot * ROOT_CASCADE;
+    const y = ROOT_ORIGIN.y + slot * ROOT_CASCADE;
+    if (!isSlotOccupied(nodes, x, y)) return { x, y };
+  }
 }
 
 export function selectHighlights(
@@ -254,6 +308,12 @@ export function selectReopenableDocumentId(
   return null;
 }
 
+function withoutLastDeletion(order: readonly DeletionKind[], kind: DeletionKind): DeletionKind[] {
+  const index = order.lastIndexOf(kind);
+  if (index === -1) return [...order];
+  return [...order.slice(0, index), ...order.slice(index + 1)];
+}
+
 /**
  * The bi-directional bus between the Reader and the MindMap. Neither side knows
  * the other exists: readers publish selections and consume jump requests, the
@@ -262,16 +322,17 @@ export function selectReopenableDocumentId(
 export function createStudySyncStore(backend: StudyBackend) {
   let jumpNonce = 0;
   let revealNonce = 0;
+  let inspectNonce = 0;
   let preferencesSaveSeq = 0;
   let preferencesWriteChain: Promise<void> = Promise.resolve();
 
   return create<StudySyncState>((set, get) => {
-    /** Runs a backend write, routing failures to the error banner. */
     /**
-     * Deletes still on their way to the backend, by annotation id. Undo waits for
-     * one, so a quick ⌘Z cannot reach the backend before the delete it undoes.
+     * Deletes still on their way to the backend, by annotation or card id. Undo
+     * waits for one, so a quick ⌘Z cannot reach the backend before the delete it undoes.
      */
     const pendingDeletes = new Map<string, Promise<void>>();
+    const pendingCardDeletes = new Map<string, Promise<void>>();
 
     const guarded = async (write: () => Promise<void>, rollback?: () => void) => {
       try {
@@ -283,9 +344,14 @@ export function createStudySyncStore(backend: StudyBackend) {
     };
 
     const persistSession = () => {
-      const { openDocumentIds, activeDocumentId, immersive } = get();
+      const { openDocumentIds, activeDocumentId, immersive, paneLayout } = get();
       void guarded(async () => {
-        await backend.saveWorkspaceSession({ openDocumentIds, activeDocumentId, immersive });
+        await backend.saveWorkspaceSession({
+          openDocumentIds,
+          activeDocumentId,
+          immersive,
+          paneLayout,
+        });
       });
     };
 
@@ -418,6 +484,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       closedDocumentIds: [],
       isDraggingFile: false,
       immersive: false,
+      paneLayout: { ...DEFAULT_WORKSPACE_PANE_LAYOUT },
       fullscreen: false,
       fullscreenFromFocusMode: false,
       chromeStyle: backend.chromeStyle,
@@ -427,6 +494,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       notebook: null,
       annotations: [],
       deletedAnnotationHistory: [],
+      deletedCardHistory: [],
+      deletionOrder: [],
       cards: [],
       nodes: [],
       edges: [],
@@ -435,6 +504,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       selectedNodeId: null,
       nestingTargetNodeId: null,
       revealRequest: null,
+      inspectRequest: null,
       excerptNonce: 0,
       jumpRequest: null,
 
@@ -474,6 +544,9 @@ export function createStudySyncStore(backend: StudyBackend) {
             openDocumentIds,
             activeDocumentId,
             immersive: session.immersive,
+            paneLayout: session.paneLayout
+              ? { ...session.paneLayout }
+              : { ...DEFAULT_WORKSPACE_PANE_LAYOUT },
             fullscreen,
             readingPreferences,
             bookmarks,
@@ -620,6 +693,23 @@ export function createStudySyncStore(backend: StudyBackend) {
         await backend.setMenuItemStates(states).catch(() => undefined);
       },
 
+      onBeforeClose: (listener) => backend.onBeforeClose(listener),
+
+      setPaneLayout(patch) {
+        const current = get().paneLayout;
+        const next: WorkspacePaneLayout = { ...current, ...patch };
+        if (
+          next.mindMapOpen === current.mindMapOpen &&
+          next.inspectorOpen === current.inspectorOpen &&
+          next.mindMapSize === current.mindMapSize &&
+          next.inspectorSize === current.inspectorSize
+        ) {
+          return;
+        }
+        set({ paneLayout: next });
+        persistSession();
+      },
+
       setImmersive(immersive) {
         if (get().immersive === immersive) return;
         set({ immersive });
@@ -737,6 +827,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         set((state) => ({
           annotations: state.annotations.filter((annotation) => annotation.id !== annotationId),
           deletedAnnotationHistory: [...state.deletedAnnotationHistory, { annotation: removed }],
+          deletionOrder: [...state.deletionOrder, 'annotation'],
           cards: state.cards.map((card) =>
             removedFromCards.has(card.id)
               ? {
@@ -754,6 +845,7 @@ export function createStudySyncStore(backend: StudyBackend) {
               deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
                 (entry) => entry.annotation.id !== removed.id,
               ),
+              deletionOrder: withoutLastDeletion(state.deletionOrder, 'annotation'),
               cards: state.cards.map((card) => {
                 const index = removedFromCards.get(card.id);
                 if (index === undefined || card.annotationIds.includes(annotationId)) return card;
@@ -774,6 +866,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         const annotationId = last.annotation.id;
         set((state) => ({
           deletedAnnotationHistory: state.deletedAnnotationHistory.slice(0, -1),
+          deletionOrder: withoutLastDeletion(state.deletionOrder, 'annotation'),
         }));
         await pendingDeletes.get(annotationId);
         // The delete failed and was rolled back: the highlight is already back.
@@ -798,6 +891,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           () =>
             set((state) => ({
               deletedAnnotationHistory: [...state.deletedAnnotationHistory, last],
+              deletionOrder: [...state.deletionOrder, 'annotation'],
             })),
         );
         return restored;
@@ -881,6 +975,15 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().revealRequest?.nonce === nonce) set({ revealRequest: null });
       },
 
+      inspectNode(nodeId) {
+        inspectNonce += 1;
+        set({ selectedNodeId: nodeId, inspectRequest: { nonce: inspectNonce, nodeId } });
+      },
+
+      completeInspect(nonce) {
+        if (get().inspectRequest?.nonce === nonce) set({ inspectRequest: null });
+      },
+
       dragNode(nodeId, posX, posY) {
         set((state) => ({
           nodes: state.nodes.map((node) => (node.id === nodeId ? { ...node, posX, posY } : node)),
@@ -914,8 +1017,10 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async updateCard(cardId, patch) {
+        let saved = false;
         await guarded(async () => {
           const card = await backend.updateCard(cardId, patch);
+          saved = true;
           // CardPatch never edits annotationIds; keeping the store's links avoids
           // clobbering concurrent delete/restore updates with an older snapshot (#97).
           set((state) => ({
@@ -926,6 +1031,154 @@ export function createStudySyncStore(backend: StudyBackend) {
             ),
           }));
         });
+        return saved;
+      },
+
+      async removeCard(cardId) {
+        // Flush any pending Inspector edits first so Undo preserves them and no stale
+        // `updateCard` races with the deletion (#116, #117).
+        if (hasPendingBeforeCloseFlush()) {
+          await flushBeforeClose();
+        }
+        const current = get();
+        const removedCard = current.cards.find((candidate) => candidate.id === cardId);
+        if (!removedCard) return;
+
+        const removedNodes = current.nodes.filter((node) => node.cardId === cardId);
+        const removedNodeIds = new Set(removedNodes.map((node) => node.id));
+        const removedEdges = current.edges.filter(
+          (edge) => removedNodeIds.has(edge.sourceNodeId) || removedNodeIds.has(edge.targetNodeId),
+        );
+        const removedEdgeIds = new Set(removedEdges.map((edge) => edge.id));
+        const childParentLinks: Array<[string, string]> = [];
+        for (const node of current.nodes) {
+          if (
+            !removedNodeIds.has(node.id) &&
+            node.parentNodeId !== null &&
+            removedNodeIds.has(node.parentNodeId)
+          ) {
+            childParentLinks.push([node.id, node.parentNodeId]);
+          }
+        }
+        const rerootedIds = new Set(childParentLinks.map(([childId]) => childId));
+
+        const snapshot: DeletedCardSnapshot = {
+          card: removedCard,
+          nodes: removedNodes,
+          edges: removedEdges,
+          childParentLinks,
+        };
+
+        set((state) => ({
+          cards: state.cards.filter((candidate) => candidate.id !== cardId),
+          nodes: state.nodes
+            .filter((node) => !removedNodeIds.has(node.id))
+            .map((node) => (rerootedIds.has(node.id) ? { ...node, parentNodeId: null } : node)),
+          edges: state.edges.filter((edge) => !removedEdgeIds.has(edge.id)),
+          selectedNodeId:
+            state.selectedNodeId !== null && removedNodeIds.has(state.selectedNodeId)
+              ? null
+              : state.selectedNodeId,
+          nestingTargetNodeId:
+            state.nestingTargetNodeId !== null && removedNodeIds.has(state.nestingTargetNodeId)
+              ? null
+              : state.nestingTargetNodeId,
+          revealRequest:
+            state.revealRequest && removedNodeIds.has(state.revealRequest.nodeId)
+              ? null
+              : state.revealRequest,
+          inspectRequest:
+            state.inspectRequest && removedNodeIds.has(state.inspectRequest.nodeId)
+              ? null
+              : state.inspectRequest,
+          deletedCardHistory: [...state.deletedCardHistory, snapshot],
+          deletionOrder: [...state.deletionOrder, 'card'],
+        }));
+
+        const deleting = guarded(
+          async () => {
+            await backend.deleteCard(cardId);
+          },
+          () => {
+            const parentByChild = new Map(childParentLinks);
+            set((state) => ({
+              cards: state.cards.some((c) => c.id === removedCard.id)
+                ? state.cards
+                : [...state.cards, removedCard],
+              nodes: [
+                ...state.nodes.map((node) => {
+                  const formerParent = parentByChild.get(node.id);
+                  return formerParent !== undefined && node.parentNodeId === null
+                    ? { ...node, parentNodeId: formerParent }
+                    : node;
+                }),
+                ...removedNodes.filter(
+                  (n) => !state.nodes.some((existing) => existing.id === n.id),
+                ),
+              ],
+              edges: [
+                ...state.edges,
+                ...removedEdges.filter(
+                  (e) => !state.edges.some((existing) => existing.id === e.id),
+                ),
+              ],
+              deletedCardHistory: state.deletedCardHistory.filter(
+                (entry) => entry.card.id !== removedCard.id,
+              ),
+              deletionOrder: withoutLastDeletion(state.deletionOrder, 'card'),
+            }));
+          },
+        );
+        pendingCardDeletes.set(cardId, deleting);
+        await deleting;
+        pendingCardDeletes.delete(cardId);
+      },
+
+      async undoRemoveCard() {
+        const last = get().deletedCardHistory.at(-1);
+        if (!last) return null;
+        const cardId = last.card.id;
+        set((state) => ({
+          deletedCardHistory: state.deletedCardHistory.slice(0, -1),
+          deletionOrder: withoutLastDeletion(state.deletionOrder, 'card'),
+        }));
+        await pendingCardDeletes.get(cardId);
+        // The delete failed and was rolled back: the card is already back.
+        if (get().cards.some((card) => card.id === cardId)) return null;
+
+        let restored: RestoredCard | null = null;
+        await guarded(
+          async () => {
+            const result = await backend.restoreCard(cardId);
+            restored = result;
+            const reparented = new Map(result.reparentedChildren.map((child) => [child.id, child]));
+            set((state) => ({
+              cards: [...state.cards.filter((c) => c.id !== result.card.id), result.card],
+              nodes: [
+                ...state.nodes
+                  .filter((n) => !result.nodes.some((restoredNode) => restoredNode.id === n.id))
+                  .map((n) => reparented.get(n.id) ?? n),
+                ...result.nodes,
+              ],
+              edges: [
+                ...state.edges.filter(
+                  (e) => !result.edges.some((restoredEdge) => restoredEdge.id === e.id),
+                ),
+                ...result.edges,
+              ],
+            }));
+            const restoredNode = result.nodes[0];
+            if (restoredNode) {
+              get().revealNode(restoredNode.id);
+            }
+          },
+          () =>
+            set((state) => ({
+              deletedCardHistory: [...state.deletedCardHistory, last],
+              deletionOrder: [...state.deletionOrder, 'card'],
+            })),
+        );
+        return restored;
       },
 
       async saveViewport(viewport) {

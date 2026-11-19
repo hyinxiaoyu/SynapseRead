@@ -14,6 +14,10 @@ use tauri::{AppHandle, Manager, Runtime};
 use crate::error::{IpcError, IpcResult};
 
 pub const MENU_COMMAND_EVENT: &str = "menu-command";
+/// Explicit Quit menu item id so `⌘Q` / File ▸ Quit routes through the draft
+/// flush handshake instead of AppKit's `terminate:`, which bypasses
+/// `RunEvent::ExitRequested` on macOS (#117).
+pub const QUIT_MENU_ID: &str = "app.quit";
 const SEPARATOR: &str = "separator";
 const CONTRACT: &str = include_str!("../../../../fixtures/contract/commands.json");
 
@@ -118,7 +122,13 @@ pub fn build<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<(Menu<R>, 
         app_menu.append(&PredefinedMenuItem::hide_others(manager, None)?)?;
         app_menu.append(&PredefinedMenuItem::show_all(manager, None)?)?;
         app_menu.append(&PredefinedMenuItem::separator(manager)?)?;
-        app_menu.append(&PredefinedMenuItem::quit(manager, None)?)?;
+        app_menu.append(&MenuItem::with_id(
+            manager,
+            QUIT_MENU_ID,
+            "Quit SynapseRead",
+            true,
+            Some("Cmd+Q"),
+        )?)?;
         menu.append(&app_menu)?;
     }
 
@@ -163,7 +173,13 @@ pub fn build<R: Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<(Menu<R>, 
         #[cfg(not(target_os = "macos"))]
         if spec.id == "file" {
             submenu.append(&PredefinedMenuItem::separator(manager)?)?;
-            submenu.append(&PredefinedMenuItem::quit(manager, None)?)?;
+            submenu.append(&MenuItem::with_id(
+                manager,
+                QUIT_MENU_ID,
+                "Quit",
+                true,
+                Some("Ctrl+Q"),
+            )?)?;
         }
         #[cfg(target_os = "macos")]
         match spec.id.as_str() {
@@ -285,9 +301,30 @@ mod tests {
             })
         );
         assert_eq!(menu_command_payload("copy"), None);
+        assert_eq!(menu_command_payload(QUIT_MENU_ID), None);
         assert_eq!(
             serde_json::to_value(menu_command_payload("file.open").unwrap()).unwrap(),
             serde_json::json!({ "commandId": "file.open" })
         );
+    }
+
+    #[test]
+    fn quit_menu_accelerator_parses_and_does_not_collide_with_commands() {
+        let contract = contract().unwrap();
+        let quit_acc = if cfg!(target_os = "macos") {
+            "Cmd+Q"
+        } else {
+            "Ctrl+Q"
+        };
+        let parsed = muda::accelerator::Accelerator::from_str(quit_acc).unwrap();
+        for (id, command) in &contract.commands {
+            if let Some(acc) = command.accelerator() {
+                let other = muda::accelerator::Accelerator::from_str(acc).unwrap();
+                assert_ne!(
+                    parsed, other,
+                    "Quit accelerator {quit_acc} collides with {id} ({acc})"
+                );
+            }
+        }
     }
 }

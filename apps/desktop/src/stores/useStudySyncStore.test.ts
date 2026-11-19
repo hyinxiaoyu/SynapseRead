@@ -1543,3 +1543,220 @@ describe('PDF layouts', () => {
     expect(store.getState().error).toContain('scale');
   });
 });
+
+describe('card deletion, undo, and pane layout persistence (#116, #119)', () => {
+  it('deletes a card atomically, re-roots children, preserves highlights, and restores on undo', async () => {
+    const backend = createMemoryBackend({
+      library: { '/books/test.txt': new TextEncoder().encode('parent child') },
+    });
+    const store = createStudySyncStore(backend);
+    const state = () => store.getState();
+    await state().initialize();
+    await state().openDocument();
+    const docId = state().activeDocumentId as string;
+
+    state().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 6, lineIndex: 0 },
+      text: 'parent',
+      imagePng: null,
+    });
+    await state().excerptSelection();
+    const parentNode = state().nodes[0];
+    expect(parentNode).toBeDefined();
+    state().selectNode(parentNode?.id as string);
+
+    state().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 7, endByteOffset: 12, lineIndex: 0 },
+      text: 'child',
+      imagePng: null,
+    });
+    await state().excerptSelection();
+    const childNode = state().nodes[1];
+    expect(childNode?.parentNodeId).toBe(parentNode?.id);
+
+    await state().updateCard(parentNode?.cardId as string, {
+      title: 'Parent',
+      markdownNotes: 'Key insight',
+      tags: ['core'],
+    });
+    state().selectNode(parentNode?.id as string);
+
+    await state().removeCard(parentNode?.cardId as string);
+    expect(state().cards.map((c) => c.id)).toEqual([childNode?.cardId]);
+    expect(state().nodes).toHaveLength(1);
+    expect(state().nodes[0]?.parentNodeId).toBeNull();
+    expect(state().edges).toEqual([]);
+    expect(state().annotations).toHaveLength(2);
+    expect(state().selectedNodeId).toBeNull();
+    expect(state().deletionOrder.at(-1)).toBe('card');
+
+    const restored = await state().undoRemoveCard();
+    expect(restored?.card).toMatchObject({
+      title: 'Parent',
+      markdownNotes: 'Key insight',
+      tags: ['core'],
+    });
+    expect(state().cards).toHaveLength(2);
+    expect(state().nodes).toHaveLength(2);
+    expect(state().nodes.find((n) => n.id === childNode?.id)?.parentNodeId).toBe(parentNode?.id);
+    expect(state().edges).toHaveLength(1);
+  });
+
+  it('waits for an in-flight card delete before restoring on quick undo, and rolls back on failure', async () => {
+    const backend = createMemoryBackend({
+      library: { '/books/test.txt': new TextEncoder().encode('hello') },
+    });
+    const store = createStudySyncStore(backend);
+    const state = () => store.getState();
+    await state().initialize();
+    await state().openDocument();
+    const docId = state().activeDocumentId as string;
+
+    state().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+      text: 'hello',
+      imagePng: null,
+    });
+    await state().excerptSelection();
+    const cardId = state().cards[0]?.id as string;
+
+    let finishDelete = () => {};
+    const realDelete = backend.deleteCard.bind(backend);
+    vi.spyOn(backend, 'deleteCard').mockImplementationOnce(
+      (id) =>
+        new Promise((resolve, reject) => {
+          finishDelete = () => void realDelete(id).then(resolve, reject);
+        }),
+    );
+    const restoreSpy = vi.spyOn(backend, 'restoreCard');
+
+    const removing = state().removeCard(cardId);
+    const undoing = state().undoRemoveCard();
+    await Promise.resolve();
+    expect(restoreSpy).not.toHaveBeenCalled();
+
+    finishDelete();
+    await Promise.all([removing, undoing]);
+    expect(restoreSpy).toHaveBeenCalledWith(cardId);
+    expect(state().cards.map((c) => c.id)).toEqual([cardId]);
+
+    // Backend failure rolls back cleanly without leaving undo history behind.
+    vi.spyOn(backend, 'deleteCard').mockRejectedValueOnce(new Error('disk full'));
+    await state().removeCard(cardId);
+    expect(state().cards.map((c) => c.id)).toEqual([cardId]);
+    expect(state().deletedCardHistory).toEqual([]);
+    expect(state().error).toContain('disk full');
+  });
+
+  it('persists paneLayout across store re-initialization', async () => {
+    const backend = createMemoryBackend();
+    const first = createStudySyncStore(backend);
+    await first.getState().initialize();
+    first.getState().setPaneLayout({
+      mindMapOpen: true,
+      inspectorOpen: true,
+      mindMapSize: 42,
+      inspectorSize: 25,
+    });
+    // Allow async saveWorkspaceSession to complete.
+    await Promise.resolve();
+
+    const second = createStudySyncStore(backend);
+    await second.getState().initialize();
+    expect(second.getState().paneLayout).toEqual({
+      mindMapOpen: true,
+      inspectorOpen: true,
+      mindMapSize: 42,
+      inspectorSize: 25,
+    });
+  });
+
+  it('picks an unoccupied position after deleting a middle root or sibling card (#116)', async () => {
+    const backend = createMemoryBackend({
+      library: { '/books/test.txt': new TextEncoder().encode('one two three four five six') },
+    });
+    const store = createStudySyncStore(backend);
+    const state = () => store.getState();
+    await state().initialize();
+    await state().openDocument();
+    const docId = state().activeDocumentId as string;
+
+    const addExcerpt = async (text: string) => {
+      state().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 3, lineIndex: 0 },
+        text,
+        imagePng: null,
+      });
+      await state().excerptSelection();
+      return state().nodes.at(-1)!;
+    };
+
+    // Three roots at (40,40), (76,76), (112,112).
+    const r1 = await addExcerpt('r1');
+    const r2 = await addExcerpt('r2');
+    const r3 = await addExcerpt('r3');
+    expect({ x: r3.posX, y: r3.posY }).toEqual({ x: 112, y: 112 });
+
+    // Delete middle root r2, then add r4: must not collide with r1 or r3.
+    await state().removeCard(r2.cardId);
+    const r4 = await addExcerpt('r4');
+    const rootPositions = [r1, r3, r4].map((n) => `${n.posX},${n.posY}`);
+    expect(new Set(rootPositions).size).toBe(3);
+
+    // Same for three siblings under r1: deleting middle child leaves an unoccupied slot
+    // rather than colliding with the surviving third sibling.
+    state().selectNode(r1.id);
+    const c1 = await addExcerpt('c1');
+    state().selectNode(r1.id);
+    const c2 = await addExcerpt('c2');
+    state().selectNode(r1.id);
+    const c3 = await addExcerpt('c3');
+
+    await state().removeCard(c2.cardId);
+    state().selectNode(r1.id);
+    const c4 = await addExcerpt('c4');
+    const siblingPositions = [c1, c3, c4].map((n) => `${n.posX},${n.posY}`);
+    expect(new Set(siblingPositions).size).toBe(3);
+  });
+
+  it('reports false from updateCard when the backend rejects the write (#117)', async () => {
+    const backend = createMemoryBackend({
+      library: { '/books/test.txt': new TextEncoder().encode('hello') },
+    });
+    const store = createStudySyncStore(backend);
+    const state = () => store.getState();
+    await state().initialize();
+    await state().openDocument();
+    const docId = state().activeDocumentId as string;
+    state().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+      text: 'hello',
+      imagePng: null,
+    });
+    await state().excerptSelection();
+    const cardId = state().cards[0]?.id as string;
+
+    vi.spyOn(backend, 'updateCard').mockRejectedValueOnce(new Error('disk full'));
+    const failed = await state().updateCard(cardId, {
+      title: null,
+      markdownNotes: 'unsaved',
+      tags: null,
+    });
+    expect(failed).toBe(false);
+    expect(state().error).toContain('disk full');
+    expect(state().cards[0]?.markdownNotes).toBe('');
+
+    const succeeded = await state().updateCard(cardId, {
+      title: null,
+      markdownNotes: 'saved',
+      tags: null,
+    });
+    expect(succeeded).toBe(true);
+    expect(state().cards[0]?.markdownNotes).toBe('saved');
+  });
+});

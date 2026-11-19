@@ -505,3 +505,54 @@ describe('the webview browser keys', () => {
     expect(unrelated.defaultPrevented).toBe(false);
   });
 });
+
+describe('MindMap card action keys (#116, #119)', () => {
+  it('allows Enter and Backspace/Delete inside .react-flow while keeping them blocked in inputs, buttons, and sidebar lists', () => {
+    const editCard = vi.fn();
+    const deleteCard = vi.fn();
+    register(() => ({
+      'edit.editCard': { run: editCard },
+      'edit.deleteCard': { run: deleteCard },
+    }));
+
+    const flow = document.createElement('div');
+    flow.className = 'react-flow';
+    const card = document.createElement('div');
+    card.className = 'react-flow__node';
+    const jumpButton = document.createElement('button');
+    card.append(jumpButton);
+    flow.append(card);
+
+    const input = document.createElement('input');
+    const sidebar = document.createElement('div');
+    sidebar.setAttribute('data-arrow-keys', '');
+    const row = document.createElement('button');
+    sidebar.append(row);
+
+    document.body.append(flow, input, sidebar);
+    try {
+      // On a card inside .react-flow: Enter edits, Backspace and Delete remove.
+      card.dispatchEvent(key({ key: 'Enter', code: 'Enter', bubbles: true }));
+      card.dispatchEvent(key({ key: 'Backspace', code: 'Backspace', bubbles: true }));
+      card.dispatchEvent(key({ key: 'Delete', code: 'Delete', bubbles: true }));
+      expect(editCard).toHaveBeenCalledTimes(1);
+      expect(deleteCard).toHaveBeenCalledTimes(2);
+
+      // On a button inside a card: Enter activates the button, never hijacked.
+      jumpButton.dispatchEvent(key({ key: 'Enter', code: 'Enter', bubbles: true }));
+      expect(editCard).toHaveBeenCalledTimes(1);
+
+      // Inside an input or sidebar list: neither Enter nor Backspace/Delete runs card commands.
+      input.dispatchEvent(key({ key: 'Enter', code: 'Enter', bubbles: true }));
+      input.dispatchEvent(key({ key: 'Backspace', code: 'Backspace', bubbles: true }));
+      row.dispatchEvent(key({ key: 'Enter', code: 'Enter', bubbles: true }));
+      row.dispatchEvent(key({ key: 'Backspace', code: 'Backspace', bubbles: true }));
+      expect(editCard).toHaveBeenCalledTimes(1);
+      expect(deleteCard).toHaveBeenCalledTimes(2);
+    } finally {
+      flow.remove();
+      input.remove();
+      sidebar.remove();
+    }
+  });
+});

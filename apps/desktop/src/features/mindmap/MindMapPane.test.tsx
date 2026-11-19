@@ -1,7 +1,9 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { commandDefinition, formatShortcut } from '@/features/commands/commands';
 import { ESCAPE_LAYER, registerEscapeLayer } from '@/features/commands/escape';
+import { forgetRecentCommandRuns, onCommandRun } from '@/features/commands/registry';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { MindMapNode, NoteCard, StudyNotebook } from '@/types/domain';
 
@@ -70,6 +72,7 @@ describe('MindMapPane', () => {
   beforeEach(() => {
     useStudySyncStore.setState(initialState, true);
     useStudySyncStore.setState({ saveViewport: vi.fn(async () => {}) });
+    forgetRecentCommandRuns();
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
       this: HTMLElement,
     ) {
@@ -200,6 +203,132 @@ describe('MindMapPane', () => {
       act(() => rerender(<MindMapPane open />));
       expect(viewportTransform()).toBe(CENTERED_FAR);
       expect(useStudySyncStore.getState().revealRequest).toBeNull();
+    });
+  });
+
+  describe('empty canvas onboarding hint (#120)', () => {
+    it('shows the non-interactive hint with registry shortcut and hides MiniMap while empty, then hides hint once a card exists', () => {
+      seed([], {});
+      const { rerender } = render(<MindMapPane open />);
+
+      const hint = screen.getByTestId('mindmap-empty-hint');
+      const excerpt = commandDefinition('edit.excerpt');
+      const shortcut = excerpt.shortcut ? formatShortcut(excerpt.shortcut) : '';
+      expect(hint).toHaveTextContent(excerpt.title);
+      if (shortcut) expect(hint).toHaveTextContent(shortcut);
+      expect(hint.className).toContain('pointer-events-none');
+      expect(document.querySelector('.react-flow__minimap')).toBeNull();
+
+      act(() => seed([node('a', 40, 40)], {}));
+      rerender(<MindMapPane open />);
+      expect(screen.queryByTestId('mindmap-empty-hint')).toBeNull();
+      expect(document.querySelector('.react-flow__minimap')).not.toBeNull();
+    });
+  });
+
+  describe('editing and deleting cards (#116, #119)', () => {
+    it('opens Inspector on double-click and on Enter (`edit.editCard`)', () => {
+      seed([node('a', 40, 40)], { selectedNodeId: 'a' });
+      const inspectNode = vi.fn();
+      useStudySyncStore.setState({ inspectNode });
+      render(<MindMapPane open />);
+
+      fireEvent.doubleClick(cardElement('a'));
+      expect(inspectNode).toHaveBeenCalledWith('a');
+
+      const ran = vi.fn();
+      const stop = onCommandRun(ran);
+      try {
+        fireEvent.keyDown(cardElement('a'), { key: 'Enter', code: 'Enter' });
+        expect(inspectNode).toHaveBeenCalledTimes(2);
+        expect(ran).toHaveBeenCalledWith('edit.editCard', 'keyboard');
+      } finally {
+        stop();
+      }
+    });
+
+    it('deletes a selected card via Backspace, Delete, and right-click context menu, and undoes via Cmd+Z', () => {
+      seed([node('a', 40, 40), node('b', 400, 40)], { selectedNodeId: 'a' });
+      const removeCard = vi.fn(async (cardId: string) => {
+        useStudySyncStore.setState((state) => ({
+          cards: state.cards.filter((c) => c.id !== cardId),
+          nodes: state.nodes.filter((n) => n.cardId !== cardId),
+          selectedNodeId: null,
+          deletedCardHistory: [
+            ...state.deletedCardHistory,
+            {
+              card: state.cards.find((c) => c.id === cardId) as NoteCard,
+              nodes: state.nodes.filter((n) => n.cardId === cardId),
+              edges: [],
+              childParentLinks: [],
+            },
+          ],
+          deletionOrder: [...state.deletionOrder, 'card'],
+        }));
+      });
+      const undoRemoveCard = vi.fn(async () => null);
+      useStudySyncStore.setState({ removeCard, undoRemoveCard });
+      render(<MindMapPane open />);
+
+      // Backspace routes through `edit.deleteCard` and deletes the "Source removed" card.
+      const ran = vi.fn();
+      const stop = onCommandRun(ran);
+      try {
+        fireEvent.keyDown(cardElement('a'), { key: 'Backspace', code: 'Backspace' });
+        expect(removeCard).toHaveBeenCalledWith('card-a');
+        expect(ran).toHaveBeenCalledWith('edit.deleteCard', 'keyboard');
+
+        // Cmd+Z triggers `edit.undoDelete` for the deleted card.
+        fireEvent.keyDown(window, { key: 'z', code: 'KeyZ', metaKey: true });
+        expect(undoRemoveCard).toHaveBeenCalledTimes(1);
+
+        // Right-click opens context menu (`role="menu"`) and Delete Card routes through the command registry.
+        fireEvent.contextMenu(cardElement('b'));
+        const menu = screen.getByRole('menu', { name: 'Card actions' });
+        fireEvent.click(within(menu).getByRole('menuitem', { name: /Delete Card/i }));
+        expect(removeCard).toHaveBeenCalledWith('card-b');
+        expect(ran).toHaveBeenCalledWith('edit.deleteCard', 'toolbar');
+        expect(screen.queryByRole('menu', { name: 'Card actions' })).toBeNull();
+      } finally {
+        stop();
+      }
+    });
+
+    it('deletes and edits the keyboard-focused card rather than a stale selected card (#116)', () => {
+      seed([node('a', 40, 40), node('b', 400, 40)], { selectedNodeId: 'a' });
+      const removeCard = vi.fn(async () => {});
+      const inspectNode = vi.fn();
+      useStudySyncStore.setState({ removeCard, inspectNode });
+      render(
+        <>
+          <MindMapPane open inspectorOpen />
+          <button type="button">Outside canvas</button>
+        </>,
+      );
+
+      // Select A, then move keyboard focus to B without selecting B.
+      const cardB = cardElement('b');
+      cardB.focus();
+      expect(document.activeElement).toBe(cardB);
+      expect(useStudySyncStore.getState().selectedNodeId).toBe('a');
+
+      // Pressing Enter targets focused card B, not selected card A.
+      fireEvent.keyDown(cardB, { key: 'Enter', code: 'Enter' });
+      expect(inspectNode).toHaveBeenCalledWith('b');
+
+      // Pressing Backspace deletes focused card B, leaving A untouched.
+      fireEvent.keyDown(cardB, { key: 'Backspace', code: 'Backspace' });
+      expect(removeCard).toHaveBeenCalledWith('card-b');
+      expect(removeCard).not.toHaveBeenCalledWith('card-a');
+
+      // Once focus leaves the canvas (e.g., clicking Inspector Delete Card), explicit
+      // actions still target the selected card A.
+      const outside = screen.getByRole('button', { name: 'Outside canvas' });
+      outside.focus();
+      fireEvent.contextMenu(cardElement('a'));
+      const menu = screen.getByRole('menu', { name: 'Card actions' });
+      fireEvent.click(within(menu).getByRole('menuitem', { name: /Delete Card/i }));
+      expect(removeCard).toHaveBeenLastCalledWith('card-a');
     });
   });
 });

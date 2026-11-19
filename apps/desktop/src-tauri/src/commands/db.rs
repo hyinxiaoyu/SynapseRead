@@ -5,9 +5,10 @@ use synapse_core::domain::DocumentFormat;
 
 use synapse_core::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
-    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document, DocumentSourceStatus,
-    MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, PdfLayout, ReadingPreferences,
-    RelinkDocumentResult, RestoredAnnotation, StudyNotebook, Viewport, WorkspaceSession,
+    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, DeletedCard, Document,
+    DocumentSourceStatus, MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, PdfLayout,
+    ReadingPreferences, RelinkDocumentResult, RestoredAnnotation, RestoredCard, StudyNotebook,
+    Viewport, WorkspaceSession,
 };
 use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
@@ -143,6 +144,16 @@ pub fn update_card(
     state: State<'_, AppState>,
 ) -> IpcResult<NoteCard> {
     Ok(state.database()?.update_card(&card_id, &patch)?)
+}
+
+#[tauri::command]
+pub fn delete_card(card_id: String, state: State<'_, AppState>) -> IpcResult<DeletedCard> {
+    Ok(state.database()?.delete_card(&card_id)?)
+}
+
+#[tauri::command]
+pub fn restore_card(card_id: String, state: State<'_, AppState>) -> IpcResult<RestoredCard> {
+    Ok(state.database()?.restore_card(&card_id)?)
 }
 
 #[tauri::command]

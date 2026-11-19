@@ -18,7 +18,9 @@ import {
   type Bookmark,
   bookmarkLocationKey,
   DEFAULT_READING_PREFERENCES,
+  DEFAULT_WORKSPACE_PANE_LAYOUT,
   defaultBookmarkLabel,
+  type DeletedCard,
   type DocumentFormat,
   type IpcError,
   MAX_WHEEL_SENSITIVITY,
@@ -31,8 +33,10 @@ import {
   type PdfLayout,
   type PdfZoomMode,
   type ReadingPreferences,
+  type RestoredCard,
   type StudyDocument,
   type StudyNotebook,
+  type WorkspacePaneLayout,
   type WorkspaceSession,
 } from '@/types/domain';
 
@@ -129,14 +133,37 @@ export function createMemoryBackend({
   const captures = new Map<string, string>();
   /** Deleted this session, with the cards that cited them, until restored. */
   const deletedAnnotations = new Map<string, { annotation: Annotation; cardIds: string[] }>();
+  /** Deleted cards this session, with nodes, edges, and re-rooted children, until restored. */
+  const deletedCards = new Map<
+    string,
+    {
+      card: NoteCard;
+      rawAnnotationIds: string[];
+      nodes: MindMapNode[];
+      edges: MindMapEdge[];
+      childParentLinks: Array<[string, string]>;
+    }
+  >();
   const bookmarks = new Map<string, Bookmark>();
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
   /** In save order: a save deletes and re-adds its entry, so the last is the latest. */
   const pdfLayouts = new Map<string, PdfLayout>();
+  const sanitizePaneLayout = (layout?: WorkspacePaneLayout): WorkspacePaneLayout => {
+    const source = layout ?? DEFAULT_WORKSPACE_PANE_LAYOUT;
+    const clamp = (value: number | null, min: number) =>
+      value !== null && Number.isFinite(value) && value >= min && value <= 80 ? value : null;
+    return {
+      mindMapOpen: source.mindMapOpen,
+      inspectorOpen: source.inspectorOpen,
+      mindMapSize: clamp(source.mindMapSize, 35),
+      inspectorSize: clamp(source.inspectorSize, 20),
+    };
+  };
   let workspaceSession: WorkspaceSession = {
     openDocumentIds: [],
     activeDocumentId: null,
     immersive: false,
+    paneLayout: { ...DEFAULT_WORKSPACE_PANE_LAYOUT },
   };
   let picks = 0;
   let clockSeq = 0;
@@ -448,7 +475,12 @@ export function createMemoryBackend({
         openDocumentIds.includes(workspaceSession.activeDocumentId)
           ? workspaceSession.activeDocumentId
           : (openDocumentIds.at(-1) ?? null);
-      return { openDocumentIds, activeDocumentId, immersive: workspaceSession.immersive };
+      return {
+        openDocumentIds,
+        activeDocumentId,
+        immersive: workspaceSession.immersive,
+        paneLayout: { ...sanitizePaneLayout(workspaceSession.paneLayout) },
+      };
     },
 
     async saveWorkspaceSession(session) {
@@ -462,8 +494,14 @@ export function createMemoryBackend({
         session.activeDocumentId && openDocumentIds.includes(session.activeDocumentId)
           ? session.activeDocumentId
           : (openDocumentIds.at(-1) ?? null);
-      workspaceSession = { openDocumentIds, activeDocumentId, immersive: session.immersive };
-      return { ...workspaceSession };
+      const paneLayout = sanitizePaneLayout(session.paneLayout);
+      workspaceSession = {
+        openDocumentIds,
+        activeDocumentId,
+        immersive: session.immersive,
+        paneLayout,
+      };
+      return { ...workspaceSession, paneLayout: { ...paneLayout } };
     },
 
     async createNotebook(title) {
@@ -677,6 +715,134 @@ export function createMemoryBackend({
       return updated;
     },
 
+    async deleteCard(cardId): Promise<DeletedCard> {
+      const card = require(cards, cardId, 'card');
+      // Capture both active and soft-deleted annotation links so Undo works across both.
+      const rawAnnotationIds = new Set(card.annotationIds);
+      for (const [annId, deleted] of deletedAnnotations) {
+        if (deleted.cardIds.includes(cardId)) rawAnnotationIds.add(annId);
+      }
+
+      const cardNodes = [...nodes.values()]
+        .filter((node) => node.cardId === cardId)
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .map((node) => ({ ...node }));
+      const nodeIds = cardNodes.map((node) => node.id);
+      const nodeIdSet = new Set(nodeIds);
+
+      const childParentLinks: Array<[string, string]> = [];
+      const rerootedChildNodeIds: string[] = [];
+      for (const candidate of nodes.values()) {
+        if (candidate.parentNodeId !== null && nodeIdSet.has(candidate.parentNodeId)) {
+          childParentLinks.push([candidate.id, candidate.parentNodeId]);
+          if (!nodeIdSet.has(candidate.id)) {
+            rerootedChildNodeIds.push(candidate.id);
+          }
+        }
+      }
+      rerootedChildNodeIds.sort();
+
+      const connectedEdges = [...edges.values()]
+        .filter((edge) => nodeIdSet.has(edge.sourceNodeId) || nodeIdSet.has(edge.targetNodeId))
+        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+        .map((edge) => ({ ...edge }));
+      const edgeIds = connectedEdges.map((edge) => edge.id);
+
+      deletedCards.set(cardId, {
+        card: { ...card, tags: [...card.tags], annotationIds: [...card.annotationIds] },
+        rawAnnotationIds: [...rawAnnotationIds].sort(),
+        nodes: cardNodes,
+        edges: connectedEdges,
+        childParentLinks,
+      });
+
+      cards.delete(cardId);
+      for (const nodeId of nodeIds) nodes.delete(nodeId);
+      for (const childId of rerootedChildNodeIds) {
+        const child = nodes.get(childId);
+        if (child) nodes.set(childId, { ...child, parentNodeId: null });
+      }
+      for (const edgeId of edgeIds) edges.delete(edgeId);
+
+      return { cardId, nodeIds, edgeIds, rerootedChildNodeIds };
+    },
+
+    async restoreCard(cardId): Promise<RestoredCard> {
+      const snapshot = require(deletedCards, cardId, 'deleted card');
+      require(notebooks, snapshot.card.notebookId, 'notebook');
+      deletedCards.delete(cardId);
+
+      const activeAnnotationIds = snapshot.rawAnnotationIds
+        .flatMap((id) => {
+          const linked = annotations.get(id);
+          return linked ? [linked] : [];
+        })
+        .sort(
+          (a, b) =>
+            a.createdAt.localeCompare(b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+        )
+        .map((linked) => linked.id);
+      const restoredCard: NoteCard = {
+        ...snapshot.card,
+        tags: [...snapshot.card.tags],
+        annotationIds: activeAnnotationIds,
+      };
+      cards.set(cardId, restoredCard);
+
+      // Re-link any still-soft-deleted annotations so undoing them later finds this card.
+      for (const annId of snapshot.rawAnnotationIds) {
+        const deletedAnn = deletedAnnotations.get(annId);
+        if (deletedAnn && !deletedAnn.cardIds.includes(cardId)) {
+          deletedAnn.cardIds = [...deletedAnn.cardIds, cardId].sort();
+        }
+      }
+
+      for (const node of snapshot.nodes) {
+        nodes.set(node.id, { ...node, parentNodeId: null });
+      }
+      const restoredNodes: MindMapNode[] = [];
+      for (const node of snapshot.nodes) {
+        const parentNodeId =
+          node.parentNodeId !== null && nodes.has(node.parentNodeId) ? node.parentNodeId : null;
+        const restored = { ...node, parentNodeId };
+        nodes.set(node.id, restored);
+        restoredNodes.push(restored);
+      }
+
+      const reparentedChildren: MindMapNode[] = [];
+      for (const [childId, parentId] of snapshot.childParentLinks) {
+        const child = nodes.get(childId);
+        if (child && child.parentNodeId === null && nodes.has(parentId)) {
+          const updated = { ...child, parentNodeId: parentId };
+          nodes.set(childId, updated);
+          reparentedChildren.push(updated);
+        }
+      }
+
+      const restoredEdges: MindMapEdge[] = [];
+      for (const edge of snapshot.edges) {
+        if (!nodes.has(edge.sourceNodeId) || !nodes.has(edge.targetNodeId)) continue;
+        const duplicate = [...edges.values()].some(
+          (existing) =>
+            existing.id === edge.id ||
+            (existing.sourceNodeId === edge.sourceNodeId &&
+              existing.targetNodeId === edge.targetNodeId),
+        );
+        if (!duplicate) {
+          const copy = { ...edge };
+          edges.set(copy.id, copy);
+          restoredEdges.push(copy);
+        }
+      }
+
+      return {
+        card: restoredCard,
+        nodes: restoredNodes,
+        edges: restoredEdges,
+        reparentedChildren,
+      };
+    },
+
     async updateNodeLayout(nodeId, patch) {
       Object.assign(require(nodes, nodeId, 'node'), patch);
     },
@@ -883,6 +1049,7 @@ export function createMemoryBackend({
       page.addEventListener('fullscreenchange', onChange);
       return () => page.removeEventListener('fullscreenchange', onChange);
     },
+    onBeforeClose: () => () => undefined,
 
     loadDocumentSource: async (document) => ({
       kind: 'bytes',

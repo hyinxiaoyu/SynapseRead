@@ -1,6 +1,7 @@
 //! Tauri adapter: wires `synapse-core` to IPC commands. Keep logic in the core crate.
 
 mod access;
+mod close_flush;
 mod commands;
 mod error;
 mod menu;
@@ -10,6 +11,9 @@ mod state;
 
 use tauri::{Builder, Manager, Runtime, Url};
 
+use close_flush::{
+    BEFORE_CLOSE_EVENT, BeforeClosePayload, CloseDecision, CloseFlushCoordinator, FLUSH_TIMEOUT,
+};
 use state::AppState;
 
 const DATABASE_FILE: &str = "synapseread.sqlite3";
@@ -32,6 +36,8 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::restore_annotation,
         commands::db::capture_path,
         commands::db::update_card,
+        commands::db::delete_card,
+        commands::db::restore_card,
         commands::db::update_node_layout,
         commands::db::create_edge,
         commands::db::delete_edge,
@@ -50,18 +56,20 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::fs_reader::read_text_stream,
         commands::fs_reader::cancel_text_stream,
         menu::set_menu_item_states,
+        close_flush::confirm_flush_before_close,
     ])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    with_commands(Builder::default().plugin(tauri_plugin_dialog::init()))
+    let app = with_commands(Builder::default().plugin(tauri_plugin_dialog::init()))
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let state = AppState::open(&data_dir.join(DATABASE_FILE))?;
             access::grant_all(app, &state)?;
             app.manage(state);
+            app.manage(CloseFlushCoordinator::default());
             let (menu, menu_items) = menu::build(app)?;
             app.set_menu(menu)?;
             app.manage(menu_items);
@@ -69,11 +77,40 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
+            if event.id().as_ref() == menu::QUIT_MENU_ID {
+                request_app_exit(app);
+                return;
+            }
             if let Some(payload) = menu::menu_command_payload(event.id().as_ref()) {
                 let _ = tauri::Emitter::emit(app, menu::MENU_COMMAND_EVENT, &payload);
             }
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle().clone();
+                let coordinator = app.state::<CloseFlushCoordinator>();
+                match coordinator.begin_close() {
+                    CloseDecision::Proceed => {}
+                    CloseDecision::AlreadyWaiting => {
+                        api.prevent_close();
+                    }
+                    CloseDecision::StartFlush(token) => {
+                        api.prevent_close();
+                        let _ = tauri::Emitter::emit(
+                            window,
+                            BEFORE_CLOSE_EVENT,
+                            &BeforeClosePayload { token },
+                        );
+                        let window = window.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            let coordinator = app.state::<CloseFlushCoordinator>();
+                            coordinator.wait_for_flush(token, FLUSH_TIMEOUT);
+                            coordinator.mark_allow_close();
+                            let _ = window.close();
+                        });
+                    }
+                }
+            }
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let app = window.app_handle().clone();
                 let paths = paths.clone();
@@ -91,8 +128,55 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("failed to run SynapseRead");
+        .build(tauri::generate_context!())
+        .expect("failed to build SynapseRead");
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            // Programmatic exit or no live windows: proceed immediately.
+            if code.is_some() || app_handle.webview_windows().is_empty() {
+                return;
+            }
+            let coordinator = app_handle.state::<CloseFlushCoordinator>();
+            match coordinator.begin_exit() {
+                CloseDecision::Proceed => {}
+                CloseDecision::AlreadyWaiting => {
+                    api.prevent_exit();
+                }
+                CloseDecision::StartFlush(token) => {
+                    api.prevent_exit();
+                    spawn_exit_flush(app_handle, token);
+                }
+            }
+        }
+    });
+}
+
+/// Flushes unsaved webview drafts before exiting the app (used by the explicit
+/// Quit menu item / `⌘Q`, since macOS `PredefinedMenuItem::quit` invokes AppKit
+/// `terminate:` directly and bypasses `RunEvent::ExitRequested`: #117).
+fn request_app_exit<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if app.webview_windows().is_empty() {
+        app.exit(0);
+        return;
+    }
+    let coordinator = app.state::<CloseFlushCoordinator>();
+    match coordinator.begin_exit() {
+        CloseDecision::Proceed => app.exit(0),
+        CloseDecision::AlreadyWaiting => {}
+        CloseDecision::StartFlush(token) => spawn_exit_flush(app, token),
+    }
+}
+
+fn spawn_exit_flush<R: Runtime>(app: &tauri::AppHandle<R>, token: u64) {
+    let _ = tauri::Emitter::emit(app, BEFORE_CLOSE_EVENT, &BeforeClosePayload { token });
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app.state::<CloseFlushCoordinator>();
+        coordinator.wait_for_flush(token, FLUSH_TIMEOUT);
+        coordinator.mark_allow_exit();
+        app.exit(0);
+    });
 }
 
 /// The window is created here rather than from `tauri.conf.json` so that only

@@ -85,11 +85,29 @@ export interface RelinkDocumentResult {
   previousFileHash: string;
 }
 
+export interface WorkspacePaneLayout {
+  mindMapOpen: boolean;
+  inspectorOpen: boolean;
+  /** Last non-zero MindMap width percentage (`35..=80`), or `null` for default. */
+  mindMapSize: number | null;
+  /** Last non-zero Inspector width percentage (`20..=80`), or `null` for default. */
+  inspectorSize: number | null;
+}
+
+export const DEFAULT_WORKSPACE_PANE_LAYOUT: WorkspacePaneLayout = {
+  mindMapOpen: false,
+  inspectorOpen: false,
+  mindMapSize: null,
+  inspectorSize: null,
+};
+
 export interface WorkspaceSession {
   openDocumentIds: string[];
   activeDocumentId: string | null;
   /** Immersive reading: reader chrome collapsed and the toolbar auto-hiding. */
   immersive: boolean;
+  /** MindMap and Inspector open/closed state and widths across relaunch (#119). */
+  paneLayout?: WorkspacePaneLayout;
 }
 
 export interface Viewport {
@@ -214,6 +232,22 @@ export interface CreatedExcerpt {
 export interface RestoredAnnotation {
   annotation: Annotation;
   cards: NoteCard[];
+}
+
+/** Summary of a deleted card: its id, removed nodes and edges, and re-rooted children. */
+export interface DeletedCard {
+  cardId: string;
+  nodeIds: string[];
+  edgeIds: string[];
+  rerootedChildNodeIds: string[];
+}
+
+/** A card brought back by Undo Delete, with its nodes, edges, and re-attached children. */
+export interface RestoredCard {
+  card: NoteCard;
+  nodes: MindMapNode[];
+  edges: MindMapEdge[];
+  reparentedChildren: MindMapNode[];
 }
 
 export interface CardPatch {

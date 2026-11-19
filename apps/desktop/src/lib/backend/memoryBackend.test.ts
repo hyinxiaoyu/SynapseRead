@@ -94,3 +94,68 @@ describe('memory backend Markdown registration', () => {
     expect(await backend.listDocuments()).toEqual([]);
   });
 });
+
+/** Mirrors core's atomic card deletion, child re-rooting, and Undo (#116). */
+describe('memory backend card delete and restore', () => {
+  it('deletes card, node, and edges while re-rooting children and keeping highlights, then restores on undo', async () => {
+    const backend = createMemoryBackend({
+      library: { '/test/a.txt': new TextEncoder().encode('parent child') },
+    });
+    const document = await backend.pickDocument();
+    const notebook = await backend.createNotebook('Study');
+    const parent = await backend.createExcerpt({
+      documentId: document?.id as string,
+      notebookId: notebook.id,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 6, lineIndex: 0 },
+      excerptText: 'parent',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 40,
+      posY: 40,
+    });
+    const child = await backend.createExcerpt({
+      documentId: document?.id as string,
+      notebookId: notebook.id,
+      anchor: { format: 'txt', startByteOffset: 7, endByteOffset: 12, lineIndex: 0 },
+      excerptText: 'child',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: parent.node.id,
+      posX: 360,
+      posY: 40,
+    });
+    await backend.updateCard(parent.card.id, {
+      title: 'Parent card',
+      markdownNotes: 'Notes',
+      tags: ['tag1'],
+    });
+
+    const deleted = await backend.deleteCard(parent.card.id);
+    expect(deleted.cardId).toBe(parent.card.id);
+    expect(deleted.nodeIds).toEqual([parent.node.id]);
+    expect(deleted.rerootedChildNodeIds).toEqual([child.node.id]);
+    expect(deleted.edgeIds).toHaveLength(1);
+
+    const afterDelete = await backend.loadNotebookGraph(notebook.id);
+    expect(afterDelete.annotations).toHaveLength(2);
+    expect(afterDelete.cards.map((c) => c.id)).toEqual([child.card.id]);
+    expect(afterDelete.nodes[0]?.parentNodeId).toBeNull();
+    expect(afterDelete.edges).toEqual([]);
+
+    await expect(backend.deleteCard(parent.card.id)).rejects.toMatchObject({ code: 'not_found' });
+
+    const restored = await backend.restoreCard(parent.card.id);
+    expect(restored.card).toMatchObject({
+      id: parent.card.id,
+      title: 'Parent card',
+      markdownNotes: 'Notes',
+      tags: ['tag1'],
+    });
+    expect(restored.nodes[0]?.id).toBe(parent.node.id);
+    expect(restored.edges).toHaveLength(1);
+    expect(restored.reparentedChildren[0]?.parentNodeId).toBe(parent.node.id);
+
+    await expect(backend.restoreCard(parent.card.id)).rejects.toMatchObject({ code: 'not_found' });
+  });
+});

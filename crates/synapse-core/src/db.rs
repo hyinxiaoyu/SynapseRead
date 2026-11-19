@@ -1,20 +1,22 @@
 //! SQLite persistence: migrations and every query the app runs.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
     AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, CardPatch,
-    CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, Document,
-    DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode,
+    CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, DeletedCard,
+    Document, DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode,
     NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout,
-    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, RestoredAnnotation,
-    ScrollPageTransition, StudyNotebook, Viewport, WorkspaceSession,
+    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, RestoredAnnotation, RestoredCard,
+    ScrollPageTransition, StudyNotebook, Viewport, WorkspacePaneLayout, WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -34,9 +36,24 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0011_page_transition_curl.sql"),
     include_str!("../migrations/0012_annotation_soft_delete.sql"),
     include_str!("../migrations/0013_markdown_as_text.sql"),
+    include_str!("../migrations/0014_workspace_pane_layout.sql"),
+    include_str!("../migrations/0015_card_undo_snapshots.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeletedCardSnapshot {
+    card: NoteCard,
+    /// Raw `card_annotations` links (including soft-deleted annotations) so
+    /// restoring a card and then undoing a highlight deletion still re-links them.
+    raw_annotation_ids: Vec<String>,
+    nodes: Vec<MindMapNode>,
+    edges: Vec<MindMapEdge>,
+    /// `(child_node_id, former_parent_node_id)` pairs re-rooted when this card was deleted.
+    child_parent_links: Vec<(String, String)>,
+}
 
 /// Owns the single SQLite connection.
 pub struct Database {
@@ -106,6 +123,7 @@ impl Database {
         };
         if is_sole_connection {
             database.purge_deleted_annotations()?;
+            database.purge_deleted_card_snapshots()?;
         }
         Ok(database)
     }
@@ -822,6 +840,254 @@ impl Database {
         Ok(card)
     }
 
+    /// Removes a card, its MindMap node(s), its `card_annotations` links, and all
+    /// edges touching those nodes in one transaction. Child nodes are re-rooted
+    /// (`parent_node_id = NULL`), never deleted, and source highlights stay in the
+    /// reader. An ephemeral snapshot is saved for session Undo (`restore_card`).
+    pub fn delete_card(&mut self, card_id: &str) -> CoreResult<DeletedCard> {
+        let tx = self.conn.transaction()?;
+        let card = tx
+            .query_row(&format!("{CARD_SELECT} WHERE id = ?1"), [card_id], map_card)
+            .optional()?
+            .ok_or_else(|| not_found("card", card_id))?;
+
+        let raw_annotation_ids = {
+            let mut stmt = tx.prepare(
+                "SELECT annotation_id FROM card_annotations
+                 WHERE card_id = ?1 ORDER BY annotation_id",
+            )?;
+            stmt.query_map([card_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        let nodes = {
+            let mut stmt = tx.prepare(&format!("{NODE_SELECT} WHERE card_id = ?1 ORDER BY id"))?;
+            stmt.query_map([card_id], map_node)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let node_ids: Vec<String> = nodes.iter().map(|node| node.id.clone()).collect();
+        let node_id_set: HashSet<&str> = node_ids.iter().map(String::as_str).collect();
+
+        let mut child_parent_links = Vec::new();
+        let mut rerooted_child_node_ids = Vec::new();
+        for node_id in &node_ids {
+            let mut stmt =
+                tx.prepare("SELECT id FROM mindmap_nodes WHERE parent_node_id = ?1 ORDER BY id")?;
+            let children = stmt
+                .query_map([node_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for child_id in children {
+                if !node_id_set.contains(child_id.as_str()) {
+                    rerooted_child_node_ids.push(child_id.clone());
+                }
+                child_parent_links.push((child_id, node_id.clone()));
+            }
+        }
+        rerooted_child_node_ids.sort();
+        rerooted_child_node_ids.dedup();
+
+        let mut edges = Vec::new();
+        let mut seen_edges = HashSet::new();
+        for node_id in &node_ids {
+            let mut stmt = tx.prepare(&format!(
+                "{EDGE_SELECT} WHERE source_node_id = ?1 OR target_node_id = ?1 ORDER BY id"
+            ))?;
+            let connected = stmt
+                .query_map([node_id], map_edge)?
+                .collect::<Result<Vec<_>, _>>()?;
+            for edge in connected {
+                if seen_edges.insert(edge.id.clone()) {
+                    edges.push(edge);
+                }
+            }
+        }
+        edges.sort_by(|a, b| a.id.cmp(&b.id));
+        let edge_ids: Vec<String> = edges.iter().map(|edge| edge.id.clone()).collect();
+
+        let snapshot = DeletedCardSnapshot {
+            card,
+            raw_annotation_ids,
+            nodes,
+            edges,
+            child_parent_links,
+        };
+        let snapshot_json = serde_json::to_string(&snapshot)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO deleted_card_snapshots (card_id, snapshot_json)
+             VALUES (?1, ?2)",
+            params![card_id, snapshot_json],
+        )?;
+
+        // Cascades `card_annotations`, `mindmap_nodes`, and `mindmap_edges`, and sets
+        // `parent_node_id = NULL` on child nodes atomically inside this transaction.
+        let changed = tx.execute("DELETE FROM note_cards WHERE id = ?1", [card_id])?;
+        expect_changed(changed, "card", card_id)?;
+        tx.commit()?;
+
+        Ok(DeletedCard {
+            card_id: card_id.to_owned(),
+            node_ids,
+            edge_ids,
+            rerooted_child_node_ids,
+        })
+    }
+
+    /// Undoes `delete_card` within the same session: restores the card, its notes,
+    /// tags, surviving annotation links, node(s) with position and parent, surviving
+    /// edges, and re-attaches re-rooted child nodes.
+    pub fn restore_card(&mut self, card_id: &str) -> CoreResult<RestoredCard> {
+        let tx = self.conn.transaction()?;
+        let snapshot: DeletedCardSnapshot = tx
+            .query_row(
+                "SELECT snapshot_json FROM deleted_card_snapshots WHERE card_id = ?1",
+                [card_id],
+                |row| json_column(row, 0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found("deleted card", card_id))?;
+
+        check_notebook_exists(&tx, &snapshot.card.notebook_id)?;
+
+        let tags_json = serde_json::to_string(&snapshot.card.tags)?;
+        tx.execute(
+            "INSERT INTO note_cards (id, notebook_id, title, markdown_notes, tags_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                snapshot.card.id,
+                snapshot.card.notebook_id,
+                snapshot.card.title,
+                snapshot.card.markdown_notes,
+                tags_json,
+                snapshot.card.created_at,
+            ],
+        )?;
+
+        for annotation_id in &snapshot.raw_annotation_ids {
+            let exists: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM annotations WHERE id = ?1",
+                    [annotation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if exists.is_some() {
+                tx.execute(
+                    "INSERT OR IGNORE INTO card_annotations (card_id, annotation_id)
+                     VALUES (?1, ?2)",
+                    params![snapshot.card.id, annotation_id],
+                )?;
+            }
+        }
+
+        // Insert nodes with NULL parent first so multi-node parent references resolve
+        // regardless of order, then restore parent links that still exist.
+        for node in &snapshot.nodes {
+            let style_json = node.style.as_ref().map(serde_json::to_string).transpose()?;
+            tx.execute(
+                "INSERT INTO mindmap_nodes
+                     (id, notebook_id, card_id, parent_node_id, pos_x, pos_y, is_collapsed, style_json)
+                 VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7)",
+                params![
+                    node.id,
+                    node.notebook_id,
+                    node.card_id,
+                    node.pos_x,
+                    node.pos_y,
+                    node.is_collapsed,
+                    style_json,
+                ],
+            )?;
+        }
+        for node in &snapshot.nodes {
+            if let Some(parent_id) = &node.parent_node_id {
+                let parent_exists: Option<String> = tx
+                    .query_row(
+                        "SELECT id FROM mindmap_nodes WHERE id = ?1",
+                        [parent_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if parent_exists.is_some() {
+                    tx.execute(
+                        "UPDATE mindmap_nodes SET parent_node_id = ?2 WHERE id = ?1",
+                        params![node.id, parent_id],
+                    )?;
+                }
+            }
+        }
+
+        let mut reparented_children = Vec::new();
+        for (child_id, parent_id) in &snapshot.child_parent_links {
+            let changed = tx.execute(
+                "UPDATE mindmap_nodes SET parent_node_id = ?2
+                 WHERE id = ?1 AND parent_node_id IS NULL",
+                params![child_id, parent_id],
+            )?;
+            if changed > 0 {
+                let child = tx.query_row(
+                    &format!("{NODE_SELECT} WHERE id = ?1"),
+                    [child_id],
+                    map_node,
+                )?;
+                reparented_children.push(child);
+            }
+        }
+
+        let mut edges = Vec::new();
+        for edge in &snapshot.edges {
+            let endpoints_exist: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM mindmap_nodes WHERE id IN (?1, ?2)",
+                params![edge.source_node_id, edge.target_node_id],
+                |row| row.get(0),
+            )?;
+            if endpoints_exist == 2 {
+                let inserted = tx.execute(
+                    "INSERT OR IGNORE INTO mindmap_edges
+                         (id, notebook_id, source_node_id, target_node_id, label)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        edge.id,
+                        edge.notebook_id,
+                        edge.source_node_id,
+                        edge.target_node_id,
+                        edge.label,
+                    ],
+                )?;
+                if inserted > 0 {
+                    edges.push(edge.clone());
+                }
+            }
+        }
+
+        tx.execute(
+            "DELETE FROM deleted_card_snapshots WHERE card_id = ?1",
+            [card_id],
+        )?;
+
+        let restored_nodes = {
+            let mut stmt = tx.prepare(&format!("{NODE_SELECT} WHERE card_id = ?1 ORDER BY id"))?;
+            stmt.query_map([card_id], map_node)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let raw_card =
+            tx.query_row(&format!("{CARD_SELECT} WHERE id = ?1"), [card_id], map_card)?;
+        tx.commit()?;
+
+        let card = self.with_annotation_ids(raw_card)?;
+        Ok(RestoredCard {
+            card,
+            nodes: restored_nodes,
+            edges,
+            reparented_children,
+        })
+    }
+
+    fn purge_deleted_card_snapshots(&mut self) -> CoreResult<()> {
+        self.conn
+            .execute("DELETE FROM deleted_card_snapshots", [])?;
+        Ok(())
+    }
+
     // ---- Graph -----------------------------------------------------------
 
     pub fn update_node_layout(&self, node_id: &str, patch: &NodeLayoutPatch) -> CoreResult<()> {
@@ -1036,31 +1302,60 @@ impl Database {
     // ---- Workspace Session -----------------------------------------------
 
     pub fn get_workspace_session(&self) -> CoreResult<WorkspaceSession> {
-        let raw: Option<(Vec<String>, Option<String>, bool)> = self
+        struct RawSession {
+            open_document_ids: Vec<String>,
+            active_document_id: Option<String>,
+            immersive: bool,
+            mind_map_open: bool,
+            inspector_open: bool,
+            mind_map_size: Option<f64>,
+            inspector_size: Option<f64>,
+        }
+        let raw = self
             .conn
             .query_row(
-                "SELECT open_document_ids, active_document_id, immersive
+                "SELECT open_document_ids, active_document_id, immersive,
+                        mind_map_open, inspector_open, mind_map_size, inspector_size
                  FROM workspace_session WHERE id = 1",
                 [],
-                |row| Ok((json_column(row, 0)?, row.get(1)?, row.get(2)?)),
+                |row| {
+                    Ok(RawSession {
+                        open_document_ids: json_column(row, 0)?,
+                        active_document_id: row.get(1)?,
+                        immersive: row.get(2)?,
+                        mind_map_open: row.get(3)?,
+                        inspector_open: row.get(4)?,
+                        mind_map_size: row.get(5)?,
+                        inspector_size: row.get(6)?,
+                    })
+                },
             )
             .optional()?;
-        let Some((stored_ids, stored_active, immersive)) = raw else {
+        let Some(raw) = raw else {
             return Ok(WorkspaceSession::default());
         };
         let mut open_document_ids = Vec::new();
-        for id in stored_ids {
+        for id in raw.open_document_ids {
             if !open_document_ids.contains(&id) && self.document_exists(&id)? {
                 open_document_ids.push(id);
             }
         }
-        let active_document_id = stored_active
+        let active_document_id = raw
+            .active_document_id
             .filter(|id| open_document_ids.contains(id))
             .or_else(|| open_document_ids.last().cloned());
+        let pane_layout = WorkspacePaneLayout {
+            mind_map_open: raw.mind_map_open,
+            inspector_open: raw.inspector_open,
+            mind_map_size: raw.mind_map_size,
+            inspector_size: raw.inspector_size,
+        }
+        .sanitized();
         Ok(WorkspaceSession {
             open_document_ids,
             active_document_id,
-            immersive,
+            immersive: raw.immersive,
+            pane_layout,
         })
     }
 
@@ -1081,16 +1376,30 @@ impl Database {
             .cloned()
             .or_else(|| open_document_ids.last().cloned());
         let open_json = serde_json::to_string(&open_document_ids)?;
+        let pane_layout = session.pane_layout.sanitized();
         self.conn.execute(
             "INSERT INTO workspace_session
-                 (id, open_document_ids, active_document_id, immersive, updated_at)
-             VALUES (1, ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                 (id, open_document_ids, active_document_id, immersive,
+                  mind_map_open, inspector_open, mind_map_size, inspector_size, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
              ON CONFLICT (id) DO UPDATE SET
                  open_document_ids = excluded.open_document_ids,
                  active_document_id = excluded.active_document_id,
                  immersive = excluded.immersive,
+                 mind_map_open = excluded.mind_map_open,
+                 inspector_open = excluded.inspector_open,
+                 mind_map_size = excluded.mind_map_size,
+                 inspector_size = excluded.inspector_size,
                  updated_at = excluded.updated_at",
-            params![open_json, active_document_id, session.immersive],
+            params![
+                open_json,
+                active_document_id,
+                session.immersive,
+                pane_layout.mind_map_open,
+                pane_layout.inspector_open,
+                pane_layout.mind_map_size,
+                pane_layout.inspector_size,
+            ],
         )?;
         self.get_workspace_session()
     }
@@ -1578,6 +1887,10 @@ mod tests {
                     "active_document_id",
                     "updated_at",
                     "immersive",
+                    "mind_map_open",
+                    "inspector_open",
+                    "mind_map_size",
+                    "inspector_size",
                 ],
             ),
             (
@@ -1591,6 +1904,10 @@ mod tests {
                     "cover_page_alone",
                     "updated_at",
                 ],
+            ),
+            (
+                "deleted_card_snapshots",
+                &["card_id", "snapshot_json", "deleted_at"],
             ),
         ];
         for (table, columns) in expected {
@@ -3194,6 +3511,7 @@ mod tests {
                     ],
                     active_document_id: Some("missing-doc".to_owned()),
                     immersive: true,
+                    pane_layout: WorkspacePaneLayout::default(),
                 })
                 .unwrap();
             assert_eq!(
@@ -3202,6 +3520,7 @@ mod tests {
                     open_document_ids: vec![first.id.clone(), second.id.clone()],
                     active_document_id: Some(second.id.clone()),
                     immersive: true,
+                    pane_layout: WorkspacePaneLayout::default(),
                 }
             );
 
@@ -3217,6 +3536,7 @@ mod tests {
                 open_document_ids: vec![first_id, second_id.clone()],
                 active_document_id: Some(second_id),
                 immersive: true,
+                pane_layout: WorkspacePaneLayout::default(),
             }
         );
     }
@@ -3301,5 +3621,227 @@ mod tests {
             db.relink_document(&doc.id, &other_txt),
             Err(CoreError::InvalidGraph(_))
         ));
+    }
+
+    fn excerpt_input(
+        document_id: &str,
+        notebook_id: &str,
+        parent_node_id: Option<&str>,
+    ) -> CreateExcerptInput {
+        CreateExcerptInput {
+            document_id: document_id.to_owned(),
+            notebook_id: notebook_id.to_owned(),
+            anchor: txt_anchor(),
+            excerpt_text: Some("excerpt".to_owned()),
+            excerpt_image_png: None,
+            color: "#fde047".to_owned(),
+            parent_node_id: parent_node_id.map(str::to_owned),
+            pos_x: 10.0,
+            pos_y: 20.0,
+        }
+    }
+
+    #[test]
+    fn delete_card_removes_graph_atomically_reroots_children_and_restores_on_undo() {
+        let mut db = Database::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("book.txt");
+        std::fs::write(&file, "root middle leaf").unwrap();
+        let doc = db.register_document(&file).unwrap();
+        let notebook = db.create_notebook("Study").unwrap();
+
+        let root = db
+            .create_excerpt(&excerpt_input(&doc.id, &notebook.id, None))
+            .unwrap();
+        let middle = db
+            .create_excerpt(&excerpt_input(&doc.id, &notebook.id, Some(&root.node.id)))
+            .unwrap();
+        let leaf = db
+            .create_excerpt(&excerpt_input(&doc.id, &notebook.id, Some(&middle.node.id)))
+            .unwrap();
+
+        // Give `middle` custom notes, tags, layout, and an extra cross-link edge.
+        let updated_middle = db
+            .update_card(
+                &middle.card.id,
+                &CardPatch {
+                    title: Some("Edited middle".to_owned()),
+                    markdown_notes: Some("Important synthesis note".to_owned()),
+                    tags: Some(vec!["key".to_owned(), "synthesis".to_owned()]),
+                },
+            )
+            .unwrap();
+        db.update_node_layout(
+            &middle.node.id,
+            &NodeLayoutPatch {
+                pos_x: 123.5,
+                pos_y: 456.25,
+                is_collapsed: true,
+            },
+        )
+        .unwrap();
+        let cross_edge = db
+            .create_edge(
+                &notebook.id,
+                &leaf.node.id,
+                &middle.node.id,
+                Some("supports"),
+            )
+            .unwrap();
+
+        // Delete middle: removes middle card, middle node, and all 3 edges touching middle;
+        // re-roots leaf (does not delete leaf); keeps middle's highlight in annotations.
+        let deleted = db.delete_card(&middle.card.id).unwrap();
+        assert_eq!(deleted.card_id, middle.card.id);
+        assert_eq!(deleted.node_ids, vec![middle.node.id.clone()]);
+        assert_eq!(deleted.rerooted_child_node_ids, vec![leaf.node.id.clone()]);
+        assert_eq!(deleted.edge_ids.len(), 3);
+
+        let graph = db.load_notebook_graph(&notebook.id).unwrap();
+        assert_eq!(graph.annotations.len(), 3);
+        assert!(
+            graph
+                .annotations
+                .iter()
+                .any(|a| a.id == middle.annotation.id)
+        );
+        assert_eq!(graph.cards.len(), 2);
+        assert!(graph.cards.iter().all(|c| c.id != middle.card.id));
+        assert_eq!(graph.nodes.len(), 2);
+        let leaf_node = graph.nodes.iter().find(|n| n.id == leaf.node.id).unwrap();
+        assert_eq!(leaf_node.parent_node_id, None);
+        assert!(graph.edges.is_empty());
+
+        // Deleting a nonexistent card returns a stable `not_found` error.
+        let err = db.delete_card(&middle.card.id).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+
+        // Undo brings back the card (with notes & tags), node (position, parent, collapsed),
+        // edges (parent, child, cross-link), and re-attaches leaf's parent_node_id.
+        let restored = db.restore_card(&middle.card.id).unwrap();
+        assert_eq!(restored.card, updated_middle);
+        assert_eq!(restored.nodes.len(), 1);
+        assert_eq!(restored.nodes[0].id, middle.node.id);
+        assert_eq!(restored.nodes[0].parent_node_id, Some(root.node.id.clone()));
+        assert_eq!(restored.nodes[0].pos_x, 123.5);
+        assert_eq!(restored.nodes[0].pos_y, 456.25);
+        assert!(restored.nodes[0].is_collapsed);
+        assert_eq!(restored.edges.len(), 3);
+        assert!(
+            restored
+                .edges
+                .iter()
+                .any(|e| e.id == cross_edge.id && e.label.as_deref() == Some("supports"))
+        );
+        assert_eq!(restored.reparented_children.len(), 1);
+        assert_eq!(restored.reparented_children[0].id, leaf.node.id);
+        assert_eq!(
+            restored.reparented_children[0].parent_node_id,
+            Some(middle.node.id.clone())
+        );
+
+        let after_restore = db.load_notebook_graph(&notebook.id).unwrap();
+        assert_eq!(after_restore.cards.len(), 3);
+        assert_eq!(after_restore.nodes.len(), 3);
+        assert_eq!(after_restore.edges.len(), 3);
+
+        // Restoring again returns `not_found`.
+        let err = db.restore_card(&middle.card.id).unwrap_err();
+        assert_eq!(err.code(), "not_found");
+    }
+
+    #[test]
+    fn delete_card_handles_source_removed_cards_and_purges_snapshots_on_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cards.sqlite3");
+        let file = dir.path().join("book.txt");
+        std::fs::write(&file, "orphaned source").unwrap();
+
+        let (notebook_id, card_id) = {
+            let mut db = Database::open(&db_path).unwrap();
+            let doc = db.register_document(&file).unwrap();
+            let notebook = db.create_notebook("Study").unwrap();
+            let created = db
+                .create_excerpt(&excerpt_input(&doc.id, &notebook.id, None))
+                .unwrap();
+
+            // Delete the highlight so the card becomes "Source removed".
+            db.delete_annotation(&created.annotation.id).unwrap();
+            let graph = db.load_notebook_graph(&notebook.id).unwrap();
+            assert!(graph.cards[0].annotation_ids.is_empty());
+
+            // Deleting the "Source removed" card succeeds.
+            db.delete_card(&created.card.id).unwrap();
+            let graph = db.load_notebook_graph(&notebook.id).unwrap();
+            assert!(graph.cards.is_empty());
+            assert!(graph.nodes.is_empty());
+
+            // Undo within the same session restores the card, and then undoing the highlight
+            // re-links it.
+            let restored = db.restore_card(&created.card.id).unwrap();
+            assert!(restored.card.annotation_ids.is_empty());
+            let restored_ann = db.restore_annotation(&created.annotation.id).unwrap();
+            assert_eq!(
+                restored_ann.cards[0].annotation_ids,
+                vec![created.annotation.id.clone()]
+            );
+
+            // Delete the card again and close the database without undoing.
+            db.delete_card(&created.card.id).unwrap();
+            (notebook.id, created.card.id)
+        };
+
+        // Reopening purges ephemeral card undo snapshots.
+        let mut reopened = Database::open(&db_path).unwrap();
+        let graph = reopened.load_notebook_graph(&notebook_id).unwrap();
+        assert!(graph.cards.is_empty());
+        assert_eq!(
+            reopened.restore_card(&card_id).unwrap_err().code(),
+            "not_found"
+        );
+    }
+
+    #[test]
+    fn workspace_session_persists_and_sanitizes_pane_layout() {
+        let db = Database::open_in_memory().unwrap();
+        let default_session = db.get_workspace_session().unwrap();
+        assert_eq!(default_session.pane_layout, WorkspacePaneLayout::default());
+
+        let saved = db
+            .save_workspace_session(&WorkspaceSession {
+                open_document_ids: vec![],
+                active_document_id: None,
+                immersive: false,
+                pane_layout: WorkspacePaneLayout {
+                    mind_map_open: true,
+                    inspector_open: true,
+                    mind_map_size: Some(42.5),
+                    inspector_size: Some(24.0),
+                },
+            })
+            .unwrap();
+        assert!(saved.pane_layout.mind_map_open);
+        assert!(saved.pane_layout.inspector_open);
+        assert_eq!(saved.pane_layout.mind_map_size, Some(42.5));
+        assert_eq!(saved.pane_layout.inspector_size, Some(24.0));
+        assert_eq!(db.get_workspace_session().unwrap(), saved);
+
+        // Out-of-range widths are dropped rather than collapsing the reader.
+        let sanitized = db
+            .save_workspace_session(&WorkspaceSession {
+                open_document_ids: vec![],
+                active_document_id: None,
+                immersive: true,
+                pane_layout: WorkspacePaneLayout {
+                    mind_map_open: true,
+                    inspector_open: false,
+                    mind_map_size: Some(10.0),
+                    inspector_size: Some(95.0),
+                },
+            })
+            .unwrap();
+        assert_eq!(sanitized.pane_layout.mind_map_size, None);
+        assert_eq!(sanitized.pane_layout.inspector_size, None);
+        assert!(sanitized.immersive);
     }
 }

@@ -123,7 +123,9 @@ export function useReaderCommands<TMatch extends DocumentSearchResultItem>({
       },
       enabled: ready && hasSelection,
     },
-    'edit.undoDelete': { run: undoDelete, enabled: ready && canUndoDelete },
+    // Only claim Undo Delete while this reader has a bookmark or annotation to
+    // restore; otherwise a deleted MindMap card beneath it stays reachable (#116).
+    ...(canUndoDelete ? { 'edit.undoDelete': { run: undoDelete, enabled: ready } } : {}),
     // The last color and style used, as in Books.
     'edit.highlight': { run: () => annotations.createHighlight(), enabled: ready && hasSelection },
     'edit.addNote': { run: popover.openNote, enabled: ready && hasSelection },

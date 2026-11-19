@@ -22,7 +22,10 @@
         "edit.captureArea",
         "edit.selectionActions",
         "edit.highlightMode",
-        "edit.excerpt"
+        "edit.excerpt",
+        "separator",
+        "edit.editCard",
+        "edit.deleteCard"
       ]
     },
     {
@@ -129,6 +132,13 @@
       "shortcutOther": "Ctrl+Alt+H"
     },
     "edit.excerpt": { "title": "Excerpt to MindMap", "shortcut": "Shift+CmdOrCtrl+E" },
+    "edit.editCard": { "title": "Edit Card", "shortcut": "Enter", "accelerator": false },
+    "edit.deleteCard": {
+      "title": "Delete Card",
+      "shortcut": "Backspace",
+      "aliases": ["Delete"],
+      "accelerator": false
+    },
     "view.toggleSidebar": { "title": "Toggle Sidebar", "shortcut": "Alt+CmdOrCtrl+S" },
     "view.hideSidebar": { "title": "Hide Sidebar", "shortcut": "Alt+CmdOrCtrl+1" },
     "view.sidebarThumbnails": { "title": "Thumbnails", "shortcut": "Alt+CmdOrCtrl+2" },
