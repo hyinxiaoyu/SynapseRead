@@ -416,8 +416,9 @@ export function EpubViewer({
   const currentLocationRef = useRef<EpubLocation | null>(null);
 
   /**
-   * Jumps still on their way. Until one lands, `currentLocationRef` is the page the
-   * reader is leaving, so a bookmark toggled now waits for it (#100).
+   * Jumps and link-intent lookups still on their way. Until they settle,
+   * `currentLocationRef` may still be the page the reader is leaving, so a
+   * bookmark toggled now waits for them (#100).
    */
   const navigationsInFlight = useRef(0);
   const [navigationsSettled, setNavigationsSettled] = useState(0);
@@ -813,12 +814,15 @@ export function EpubViewer({
       const loc = currentLocationRef.current;
       if (!loc) return null;
       const { cfi: cfiRange, href: chapterHref } = loc;
+      const chapterNum =
+        loc.chapterIndex !== undefined ? loc.chapterIndex + 1 : bookProgress?.chapter;
+      const pageNum = loc.page ?? pageInfo?.page;
       const chapterTitle =
         findOutlineLabel(handle?.toc ?? [], chapterHref) ??
-        (bookProgress ? `Ch. ${bookProgress.chapter}` : chapterHref);
+        (chapterNum !== undefined ? `Ch. ${chapterNum}` : chapterHref);
       const label =
-        readingMode !== 'scroll' && pageInfo
-          ? `${chapterTitle} · Page ${pageInfo.page}`
+        readingMode !== 'scroll' && pageNum !== undefined
+          ? `${chapterTitle} · Page ${pageNum}`
           : chapterTitle;
       return {
         anchor: { format: 'epub', cfiRange, chapterHref },
@@ -1288,18 +1292,20 @@ export function EpubViewer({
         jump();
         return;
       }
-      void handle
-        .peekLink(href, { noteref: link.noteref })
-        .catch(() => null)
-        .then((text) => {
-          if (!request.finish(text ? { text, rect: link.rect, href } : null)) return;
-          if (!text) jump();
-        });
+      void trackNavigation(
+        handle
+          .peekLink(href, { noteref: link.noteref })
+          .catch(() => null)
+          .then((text) => {
+            if (!request.finish(text ? { text, rect: link.rect, href } : null)) return;
+            if (!text) jump();
+          }),
+      );
     });
     return () => {
       handle.onInternalLink(() => undefined);
     };
-  }, [handle, isActive, jumpWithBackChip, beginLinkPeek]);
+  }, [handle, isActive, jumpWithBackChip, beginLinkPeek, trackNavigation]);
 
   /** A two-page spread hinges at its spine; a single page on its leading edge. */
   const spread = readingMode === 'spread' && layout.columns === 2;
@@ -1642,6 +1648,11 @@ export function EpubViewer({
       panel: preferencesPanel,
     },
     extra: {
+      'bookmarks.toggle': {
+        run: toggleBookmark,
+        enabled: ready && currentCfi !== null,
+        title: bookmarksController.isCurrentBookmarked ? 'Remove Bookmark' : 'Add Bookmark',
+      },
       'view.layoutSingle': {
         run: () => updatePreferences({ epubReadingMode: 'paged' }),
         enabled: ready,
