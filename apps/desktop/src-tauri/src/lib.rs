@@ -77,6 +77,10 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
+            if event.id().as_ref() == menu::QUIT_MENU_ID {
+                request_app_exit(app);
+                return;
+            }
             if let Some(payload) = menu::menu_command_payload(event.id().as_ref()) {
                 let _ = tauri::Emitter::emit(app, menu::MENU_COMMAND_EVENT, &payload);
             }
@@ -141,21 +145,37 @@ pub fn run() {
                 }
                 CloseDecision::StartFlush(token) => {
                     api.prevent_exit();
-                    let _ = tauri::Emitter::emit(
-                        app_handle,
-                        BEFORE_CLOSE_EVENT,
-                        &BeforeClosePayload { token },
-                    );
-                    let app = app_handle.clone();
-                    tauri::async_runtime::spawn_blocking(move || {
-                        let coordinator = app.state::<CloseFlushCoordinator>();
-                        coordinator.wait_for_flush(token, FLUSH_TIMEOUT);
-                        coordinator.mark_allow_exit();
-                        app.exit(0);
-                    });
+                    spawn_exit_flush(app_handle, token);
                 }
             }
         }
+    });
+}
+
+/// Flushes unsaved webview drafts before exiting the app (used by the explicit
+/// Quit menu item / `⌘Q`, since macOS `PredefinedMenuItem::quit` invokes AppKit
+/// `terminate:` directly and bypasses `RunEvent::ExitRequested`: #117).
+fn request_app_exit<R: Runtime>(app: &tauri::AppHandle<R>) {
+    if app.webview_windows().is_empty() {
+        app.exit(0);
+        return;
+    }
+    let coordinator = app.state::<CloseFlushCoordinator>();
+    match coordinator.begin_exit() {
+        CloseDecision::Proceed => app.exit(0),
+        CloseDecision::AlreadyWaiting => {}
+        CloseDecision::StartFlush(token) => spawn_exit_flush(app, token),
+    }
+}
+
+fn spawn_exit_flush<R: Runtime>(app: &tauri::AppHandle<R>, token: u64) {
+    let _ = tauri::Emitter::emit(app, BEFORE_CLOSE_EVENT, &BeforeClosePayload { token });
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let coordinator = app.state::<CloseFlushCoordinator>();
+        coordinator.wait_for_flush(token, FLUSH_TIMEOUT);
+        coordinator.mark_allow_exit();
+        app.exit(0);
     });
 }
 
