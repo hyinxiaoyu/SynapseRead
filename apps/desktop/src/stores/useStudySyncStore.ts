@@ -163,8 +163,8 @@ export interface StudySyncState {
   registerMountedViewer(documentId: string): () => void;
   /**
    * Acquires a reference-counted reopen lock for `documentId` and returns an
-   * idempotent release function. While locked, `reopenRecentDocument` and
-   * `reopenClosedDocument` will not reopen `documentId`.
+   * idempotent release function. While locked, open, reopen, activate, and jump
+   * paths will not open or activate `documentId`.
    */
   lockDocument(documentId: string): () => void;
   /** Runs `run` while holding a reopen lock on `documentId`. */
@@ -380,6 +380,9 @@ export function createStudySyncStore(backend: StudyBackend) {
     /** Reference-counted reopen locks, by document id. */
     const documentLockCounts = new Map<string, number>();
 
+    const isDocumentLocked = (documentId: string): boolean =>
+      (documentLockCounts.get(documentId) ?? 0) > 0;
+
     const acquireLock = (documentId: string): (() => void) => {
       const nextCount = (documentLockCounts.get(documentId) ?? 0) + 1;
       documentLockCounts.set(documentId, nextCount);
@@ -450,11 +453,19 @@ export function createStudySyncStore(backend: StudyBackend) {
     };
 
     const applyOpenedDocuments = (opened: readonly StudyDocument[], error?: unknown) => {
+      let openedUnlockedCount = 0;
       set((state) => {
         let documents = state.documents;
         let openDocumentIds = state.openDocumentIds;
         const documentSourceStatuses = { ...state.documentSourceStatuses };
+        const unlockedOpened: StudyDocument[] = [];
         for (const document of opened) {
+          if (isDocumentLocked(document.id)) {
+            if (!documents.some((d) => d.id === document.id)) {
+              documents = [...documents, document];
+            }
+            continue;
+          }
           documents = [...documents.filter((d) => d.id !== document.id), document];
           if (!openDocumentIds.includes(document.id)) {
             openDocumentIds = [...openDocumentIds, document.id];
@@ -465,22 +476,24 @@ export function createStudySyncStore(backend: StudyBackend) {
             currentFileHash: document.fileHash,
             fileSizeBytes: null,
           };
+          unlockedOpened.push(document);
         }
-        const lastOpened = opened.at(-1);
+        openedUnlockedCount = unlockedOpened.length;
+        const lastOpened = unlockedOpened.at(-1);
         return {
           documents,
           documentSourceStatuses,
           openDocumentIds,
           // Opening a file again takes it off the closed-tab stack.
           closedDocumentIds: state.closedDocumentIds.filter(
-            (id) => !opened.some((document) => document.id === id),
+            (id) => !unlockedOpened.some((document) => document.id === id),
           ),
           activeDocumentId: lastOpened ? lastOpened.id : state.activeDocumentId,
-          selection: opened.length > 0 ? null : state.selection,
+          selection: unlockedOpened.length > 0 ? null : state.selection,
           ...(error !== undefined && error !== null ? { error: describeError(error) } : {}),
         };
       });
-      if (opened.length > 0) persistSession();
+      if (openedUnlockedCount > 0) persistSession();
     };
 
     // Leaving full screen by any other route (the window's button, View ▸ Exit Full
@@ -600,7 +613,9 @@ export function createStudySyncStore(backend: StudyBackend) {
           const notebook = notebooks[0] ?? (await backend.createNotebook(DEFAULT_NOTEBOOK_TITLE));
           const graph = await backend.loadNotebookGraph(notebook.id);
           const knownIds = new Set(documents.map((doc) => doc.id));
-          const openDocumentIds = session.openDocumentIds.filter((id) => knownIds.has(id));
+          const openDocumentIds = session.openDocumentIds.filter(
+            (id) => knownIds.has(id) && !isDocumentLocked(id),
+          );
           const activeDocumentId =
             session.activeDocumentId && openDocumentIds.includes(session.activeDocumentId)
               ? session.activeDocumentId
@@ -643,7 +658,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async reopenRecentDocument(documentId) {
-        if ((documentLockCounts.get(documentId) ?? 0) > 0) return;
+        if (isDocumentLocked(documentId)) return;
         if (!get().documents.some((doc) => doc.id === documentId)) return;
         await guarded(async () => {
           const [touched, status] = await Promise.all([
@@ -651,7 +666,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             backend.verifyDocumentSource(documentId),
           ]);
           // A close-and-apply lock may have been acquired while awaiting backend I/O.
-          if ((documentLockCounts.get(documentId) ?? 0) > 0) return;
+          if (isDocumentLocked(documentId)) return;
           set((state) => ({
             documents: state.documents.map((doc) => (doc.id === documentId ? touched : doc)),
             documentSourceStatuses: {
@@ -724,6 +739,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       activateDocument(documentId) {
+        if (isDocumentLocked(documentId)) return;
         if (documentId === get().activeDocumentId) return;
         set({ activeDocumentId: documentId, selection: null });
         persistSession();
@@ -805,8 +821,11 @@ export function createStudySyncStore(backend: StudyBackend) {
         try {
           const isMounted = (mountedViewerCounts.get(documentId) ?? 0) > 0;
           const wasOpen = get().openDocumentIds.includes(documentId);
+          // Wait whenever a viewer is still mounted, even if a concurrent
+          // `closeDocumentAndFlush` already removed `documentId` from
+          // `openDocumentIds` before React committed the unmount.
           let unmountPromise: Promise<void> | null = null;
-          if (wasOpen && isMounted) {
+          if (isMounted) {
             unmountPromise = new Promise<void>((resolve) => {
               let waiters = viewerUnmountWaiters.get(documentId);
               if (!waiters) {
@@ -1121,6 +1140,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           set({ error: 'The source document for this annotation is no longer available.' });
           return;
         }
+        if (isDocumentLocked(annotation.documentId)) return;
 
         jumpNonce += 1;
         set((state) => ({
@@ -1153,6 +1173,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           set({ error: 'The source document for this card is no longer available.' });
           return;
         }
+        if (isDocumentLocked(annotation.documentId)) return;
 
         jumpNonce += 1;
         set((state) => ({
@@ -1508,6 +1529,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           set({ error: 'The source document for this bookmark is no longer available.' });
           return;
         }
+        if (isDocumentLocked(bookmark.documentId)) return;
 
         jumpNonce += 1;
         set((state) => ({

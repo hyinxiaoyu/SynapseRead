@@ -1911,6 +1911,106 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(finished).toBe(true);
   });
 
+  it('concurrent closeDocumentAndFlush calls both block until viewer unmounts and cursor write settles', async () => {
+    const docId = await openDocument();
+    const unregister = state().registerMountedViewer(docId);
+
+    let resolveWrite!: () => void;
+    const delayedWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    const updateSpy = vi.spyOn(backend, 'updateDocumentCursor').mockReturnValueOnce(delayedWrite);
+
+    let firstFinished = false;
+    let secondFinished = false;
+    const first = state()
+      .closeDocumentAndFlush(docId)
+      .then(() => {
+        firstFinished = true;
+      });
+    const second = state()
+      .closeDocumentAndFlush(docId)
+      .then(() => {
+        secondFinished = true;
+      });
+
+    await Promise.resolve();
+    expect(firstFinished).toBe(false);
+    expect(secondFinished).toBe(false);
+    expect(state().lockedDocumentIds).toContain(docId);
+
+    // Viewer unmounts, reports cursor, then UnmountSentinel unregisters.
+    state().reportCursor(docId, txtAnchor, 0.8);
+    unregister();
+
+    await Promise.resolve();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(firstFinished).toBe(false);
+    expect(secondFinished).toBe(false);
+
+    resolveWrite();
+    await Promise.all([first, second]);
+    expect(firstFinished).toBe(true);
+    expect(secondFinished).toBe(true);
+    expect(state().lockedDocumentIds).not.toContain(docId);
+  });
+
+  it('blocks file-picker open, dropped files, activate, and jump paths while a document lock is held', async () => {
+    const docId = await openDocument();
+    const lockedDoc = state().documents.find((d) => d.id === docId)!;
+    const otherDocId = await openDocument();
+    const otherDoc = state().documents.find((d) => d.id === otherDocId)!;
+
+    // Seed an annotation, card/node, and bookmark on the locked document to test jump paths too.
+    state().setSelection({
+      documentId: docId,
+      anchor: pdfAnchor as ReaderSelection['anchor'],
+      text: 'Locked excerpt',
+      imagePng: null,
+    });
+    await state().excerptSelection();
+    const annotationId = state().annotations.find((a) => a.documentId === docId)!.id;
+    const nodeId = state().nodes[0]!.id;
+    const bookmark = await state().addBookmark(docId, pdfAnchor as ReaderSelection['anchor'], 'BM');
+
+    state().closeDocument(docId);
+    expect(state().openDocumentIds).toEqual([otherDocId]);
+    expect(state().activeDocumentId).toBe(otherDocId);
+
+    const pickSpy = vi.spyOn(backend, 'pickDocument').mockResolvedValue(lockedDoc);
+    const dropSpy = vi
+      .spyOn(backend, 'dropFiles')
+      .mockResolvedValue({ documents: [lockedDoc, otherDoc], error: null });
+
+    await state().withDocumentLock(docId, async () => {
+      // File picker returning the locked document must not reopen or activate it.
+      await state().openDocument();
+      expect(state().openDocumentIds).not.toContain(docId);
+      expect(state().activeDocumentId).toBe(otherDocId);
+
+      // Dropped files containing the locked document must not reopen or activate it.
+      await state().dropFiles([new File(['data'], 'locked.pdf')]);
+      expect(state().openDocumentIds).not.toContain(docId);
+      expect(state().activeDocumentId).toBe(otherDocId);
+
+      // Direct activate and jump paths must also be blocked while locked.
+      state().activateDocument(docId);
+      state().jumpToAnnotation(annotationId);
+      state().jumpToNode(nodeId);
+      if (bookmark) state().jumpToBookmark(bookmark.id);
+      expect(state().openDocumentIds).not.toContain(docId);
+      expect(state().activeDocumentId).toBe(otherDocId);
+    });
+
+    // Once the lock is released, file-picker open reopens and activates the document normally.
+    await state().openDocument();
+    expect(state().openDocumentIds).toContain(docId);
+    expect(state().activeDocumentId).toBe(docId);
+
+    pickSpy.mockRestore();
+    dropSpy.mockRestore();
+  });
+
   it('withDocumentLock blocks reopenRecentDocument and reopenClosedDocument across a close-and-apply sequence', async () => {
     const docId = await openDocument();
     state().closeDocument(docId);

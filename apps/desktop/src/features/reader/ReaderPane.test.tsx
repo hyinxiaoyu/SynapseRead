@@ -389,6 +389,62 @@ describe('ReaderPane tab commands', () => {
     updateSpy.mockRestore();
   });
 
+  it('concurrent closeDocumentAndFlush calls both wait for viewer unmount and delayed cursor write', async () => {
+    await openDocuments(['concurrent-flush.txt']);
+    const store = useStudySyncStore.getState;
+    const docId = store().activeDocumentId as string;
+    const finalAnchor: AnchorLocation = {
+      format: 'txt',
+      startByteOffset: 4,
+      endByteOffset: 10,
+      lineIndex: 0,
+    };
+    unmountCursorByDoc.set(docId, finalAnchor);
+
+    render(<ReaderPane />);
+    expect(screen.getByTestId(`fake-viewer-${docId}`)).toBeInTheDocument();
+
+    const backend = backendHolder.current!;
+    let resolveCursorWrite!: () => void;
+    const delayedWrite = new Promise<void>((resolve) => {
+      resolveCursorWrite = resolve;
+    });
+    const updateSpy = vi.spyOn(backend, 'updateDocumentCursor').mockReturnValueOnce(delayedWrite);
+
+    let firstSettled = false;
+    let secondSettled = false;
+    let firstFlush!: Promise<void>;
+    let secondFlush!: Promise<void>;
+    act(() => {
+      firstFlush = store()
+        .closeDocumentAndFlush(docId)
+        .then(() => {
+          firstSettled = true;
+        });
+      // Second call runs while openDocumentIds already dropped docId, before React unmounts <Viewer>.
+      secondFlush = store()
+        .closeDocumentAndFlush(docId)
+        .then(() => {
+          secondSettled = true;
+        });
+    });
+
+    await waitFor(() => expect(updateSpy).toHaveBeenCalledWith(docId, finalAnchor, 0.9));
+    expect(screen.queryByTestId(`fake-viewer-${docId}`)).not.toBeInTheDocument();
+    expect(firstSettled).toBe(false);
+    expect(secondSettled).toBe(false);
+    expect(store().lockedDocumentIds).toContain(docId);
+
+    resolveCursorWrite();
+    await act(async () => {
+      await Promise.all([firstFlush, secondFlush]);
+    });
+    expect(firstSettled).toBe(true);
+    expect(secondSettled).toBe(true);
+    expect(store().lockedDocumentIds).not.toContain(docId);
+    updateSpy.mockRestore();
+  });
+
   it('skips unmount wait when SourceRecoveryDialog is showing and restores Viewer on refreshDocument (T-31, T-32)', async () => {
     await openDocuments(['missing-file.txt']);
     const store = useStudySyncStore.getState;
