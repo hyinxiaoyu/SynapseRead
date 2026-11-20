@@ -2260,6 +2260,66 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     listSpy.mockRestore();
   });
 
+  it('loads the authoritative moved filePath before opening a tab on native onFileDrop', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    await nativeStore.getState().openDocument(); // b.epub
+    const epubId = nativeStore.getState().activeDocumentId as string;
+    const originalEpub = nativeStore.getState().documents.find((d) => d.id === epubId)!;
+    expect(originalEpub.format).toBe('epub');
+    expect(originalEpub.filePath).toBe('/test/b.epub');
+
+    nativeStore.getState().closeDocument(epubId);
+    expect(nativeStore.getState().openDocumentIds).not.toContain(epubId);
+
+    // Simulate the backend registering the moved EPUB at its new path.
+    const movedEpub: StudyDocument = {
+      ...originalEpub,
+      filePath: '/moved/b.epub',
+    };
+    const existingDocs = await nativeBackend.listDocuments();
+    let resolveList!: (docs: StudyDocument[]) => void;
+    const listSpy = vi.spyOn(nativeBackend, 'listDocuments').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument[]>((resolve) => {
+          resolveList = resolve;
+        }),
+    );
+
+    emitDrop?.({ type: 'enter' });
+    emitDrop?.({ type: 'leave' });
+    emitDrop?.({ type: 'drop', documents: [movedEpub], error: null });
+
+    // Must NOT open the tab synchronously while the store still holds the old path.
+    expect(nativeStore.getState().openDocumentIds).not.toContain(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/test/b.epub',
+    );
+
+    // Once the authoritative DB record resolves, the tab opens directly on the new path.
+    resolveList(existingDocs.map((d) => (d.id === epubId ? movedEpub : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().openDocumentIds).toContain(epubId);
+    expect(nativeStore.getState().activeDocumentId).toBe(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/moved/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    listSpy.mockRestore();
+  });
+
   it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {
     const docA = await openDocument();
     const docB = await openDocument();

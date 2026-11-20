@@ -477,11 +477,11 @@ export function createStudySyncStore(backend: StudyBackend) {
       epochsAtStart?: ReadonlyMap<string, number>,
     ) => {
       let openedUnlockedCount = 0;
-      const refreshAfterOpen: string[] = [];
       set((state) => {
         let documents = state.documents;
         let openDocumentIds = state.openDocumentIds;
         const documentSourceStatuses = { ...state.documentSourceStatuses };
+        const relinkedNonceByDocumentId = { ...state.relinkedNonceByDocumentId };
         const unlockedOpened: StudyDocument[] = [];
         for (const document of opened) {
           if (isDocumentLocked(document.id)) {
@@ -500,32 +500,28 @@ export function createStudySyncStore(backend: StudyBackend) {
             continue;
           }
           const existing = documents.find((d) => d.id === document.id);
-          // Native file-drop push events carry no request correlation and can overlap
-          // with subsequent drags or syncs. Never overwrite an existing store record
-          // with an untagged push payload; keep the current record and refresh from
-          // the backend under lock-epoch verification instead.
-          const isUntaggedPush = epochsAtStart === undefined;
-          const resolvedDocument = isUntaggedPush && existing !== undefined ? existing : document;
-          if (isUntaggedPush) {
-            refreshAfterOpen.push(document.id);
+          if (existing !== undefined && existing.filePath !== document.filePath) {
+            relinkedNonceByDocumentId[document.id] =
+              (relinkedNonceByDocumentId[document.id] ?? 0) + 1;
           }
-          documents = [...documents.filter((d) => d.id !== document.id), resolvedDocument];
+          documents = [...documents.filter((d) => d.id !== document.id), document];
           if (!openDocumentIds.includes(document.id)) {
             openDocumentIds = [...openDocumentIds, document.id];
           }
           documentSourceStatuses[document.id] = {
             documentId: document.id,
             state: 'ok',
-            currentFileHash: resolvedDocument.fileHash,
+            currentFileHash: document.fileHash,
             fileSizeBytes: null,
           };
-          unlockedOpened.push(resolvedDocument);
+          unlockedOpened.push(document);
         }
         openedUnlockedCount = unlockedOpened.length;
         const lastOpened = unlockedOpened.at(-1);
         return {
           documents,
           documentSourceStatuses,
+          relinkedNonceByDocumentId,
           openDocumentIds,
           // Opening a file again takes it off the closed-tab stack.
           closedDocumentIds: state.closedDocumentIds.filter(
@@ -537,9 +533,26 @@ export function createStudySyncStore(backend: StudyBackend) {
         };
       });
       if (openedUnlockedCount > 0) persistSession();
-      for (const id of refreshAfterOpen) {
-        void get().refreshDocument(id);
+    };
+
+    const openNativeDroppedDocuments = (dropped: readonly StudyDocument[], error?: unknown) => {
+      const knownIds = new Set(get().documents.map((doc) => doc.id));
+      const hasKnownDocument = dropped.some((doc) => knownIds.has(doc.id));
+      if (!hasKnownDocument) {
+        applyOpenedDocuments(dropped, error);
+        return;
       }
+      // Native drop push events carry no request id and may race with sync or
+      // move a known document to a new path. Read the authoritative DB rows
+      // under a lock-epoch snapshot before opening any tab so viewers always
+      // mount with both the latest filePath and the latest synced progress.
+      const epochsAtStart = new Map(documentLockEpochs);
+      void guarded(async () => {
+        const allDocuments = await backend.listDocuments();
+        const byId = new Map(allDocuments.map((doc) => [doc.id, doc]));
+        const resolved = dropped.map((doc) => byId.get(doc.id) ?? doc);
+        applyOpenedDocuments(resolved, error, epochsAtStart);
+      });
     };
 
     // Leaving full screen by any other route (the window's button, View ▸ Exit Full
@@ -596,7 +609,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         set({ isDraggingFile: false });
       } else {
         set({ isDraggingFile: false });
-        applyOpenedDocuments(event.documents, event.error);
+        openNativeDroppedDocuments(event.documents, event.error);
       }
     });
 
