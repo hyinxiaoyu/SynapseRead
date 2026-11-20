@@ -2201,8 +2201,9 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     nativeStore.getState().closeDocument(docId);
     const staleSnapshot = { ...nativeStore.getState().documents.find((d) => d.id === docId)! };
 
-    // Case 1: drag enters before sync, sync locks & unlocks, drop arrives with stale snapshot.
+    // Case 1: real Tauri enter -> leave -> drop sequence where sync runs between enter/leave and drop.
     emitDrop?.({ type: 'enter' });
+    emitDrop?.({ type: 'leave' });
     await nativeStore.getState().withDocumentLock(docId, async () => {
       await nativeBackend.updateDocumentCursor(docId, syncedAnchor, 0.85);
       await nativeStore.getState().refreshDocument(docId);
@@ -2215,13 +2216,44 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.85);
     expect(nativeStore.getState().openDocumentIds).not.toContain(docId);
 
-    // Case 2: bare drop without preceding enter carrying a stale snapshot still preserves synced progress.
+    // Case 2: bare drop without preceding enter triggers a background refreshDocument that
+    // reads old progress before a subsequent sync writes newer progress and unlocks.
+    const newerAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 14,
+      rects: [{ x: 0, y: 0.7, width: 0.5, height: 0.05 }],
+    };
+    const beforeSecondSync = await nativeBackend.listDocuments();
+    let resolveStaleRefresh!: (docs: StudyDocument[]) => void;
+    const listSpy = vi.spyOn(nativeBackend, 'listDocuments').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument[]>((resolve) => {
+          resolveStaleRefresh = resolve;
+        }),
+    );
+
     emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
     await Promise.resolve();
+
+    // Next sync runs to completion while the drop-triggered refreshDocument is still in flight.
+    await nativeStore.getState().withDocumentLock(docId, async () => {
+      await nativeBackend.updateDocumentCursor(docId, newerAnchor, 0.95);
+      await nativeStore.getState().refreshDocument(docId);
+    });
     expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
-      syncedAnchor,
+      newerAnchor,
     );
-    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.85);
+
+    // Stale background refreshDocument returns with the pre-sync list; it must not regress state.
+    resolveStaleRefresh(beforeSecondSync);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
+      newerAnchor,
+    );
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.95);
+    listSpy.mockRestore();
   });
 
   it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {

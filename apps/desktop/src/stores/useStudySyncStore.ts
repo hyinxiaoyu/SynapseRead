@@ -386,6 +386,9 @@ export function createStudySyncStore(backend: StudyBackend) {
      * refreshed state after the lock is released.
      */
     const documentLockEpochs = new Map<string, number>();
+    /** Monotonic per-document sequence numbers for `refreshDocument` and `refreshBookmarks`. */
+    const documentRefreshSeqs = new Map<string, number>();
+    const bookmarkRefreshSeqs = new Map<string, number>();
 
     const isDocumentLocked = (documentId: string): boolean =>
       (documentLockCounts.get(documentId) ?? 0) > 0;
@@ -595,7 +598,8 @@ export function createStudySyncStore(backend: StudyBackend) {
         nativeDropLockEpochs = new Map(documentLockEpochs);
         set({ isDraggingFile: true });
       } else if (event.type === 'leave') {
-        nativeDropLockEpochs = null;
+        // Keep `nativeDropLockEpochs` across `leave`: Tauri emits `leave` on
+        // `DRAG_DROP` before delivering the asynchronous `drop` payload.
         set({ isDraggingFile: false });
       } else {
         const epochsAtStart = nativeDropLockEpochs;
@@ -905,9 +909,20 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async refreshDocument(documentId) {
+        const lockEpoch = getDocumentLockEpoch(documentId);
+        const startedWhileLocked = isDocumentLocked(documentId);
+        const refreshSeq = (documentRefreshSeqs.get(documentId) ?? 0) + 1;
+        documentRefreshSeqs.set(documentId, refreshSeq);
         let refreshed: StudyDocument | null = null;
         await guarded(async () => {
           const documents = await backend.listDocuments();
+          if (
+            getDocumentLockEpoch(documentId) !== lockEpoch ||
+            documentRefreshSeqs.get(documentId) !== refreshSeq ||
+            (!startedWhileLocked && isDocumentLocked(documentId))
+          ) {
+            return;
+          }
           const target = documents.find((doc) => doc.id === documentId);
           if (!target) return;
           refreshed = target;
@@ -946,8 +961,19 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async refreshBookmarks(documentId) {
+        const lockEpoch = getDocumentLockEpoch(documentId);
+        const startedWhileLocked = isDocumentLocked(documentId);
+        const refreshSeq = (bookmarkRefreshSeqs.get(documentId) ?? 0) + 1;
+        bookmarkRefreshSeqs.set(documentId, refreshSeq);
         await guarded(async () => {
           const allBookmarks = await backend.listBookmarks();
+          if (
+            getDocumentLockEpoch(documentId) !== lockEpoch ||
+            bookmarkRefreshSeqs.get(documentId) !== refreshSeq ||
+            (!startedWhileLocked && isDocumentLocked(documentId))
+          ) {
+            return;
+          }
           const forDocument = allBookmarks.filter((bookmark) => bookmark.documentId === documentId);
           set((state) => ({
             bookmarks: [
