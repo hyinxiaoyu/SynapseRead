@@ -18,6 +18,7 @@ import { isEditableShortcutTarget, useCommands } from '@/features/commands/regis
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { requestActivePageFocus } from '@/features/reader/focusPage';
 import { ReaderPopoverLayer, ReaderPopoverSlotProvider } from '@/features/reader/ReaderNotice';
+import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { documentFormatLabel, SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
 import { cn, describeError } from '@/lib/utils';
@@ -439,7 +440,9 @@ export function ReaderPane({
           (activeViewerLayer && !immersive ? (
             createPortal(shownNotices, activeViewerLayer)
           ) : (
-            <ReaderPopoverLayer>{shownNotices}</ReaderPopoverLayer>
+            <ReaderPopoverLayer topOffset={immersive ? TOOLBAR_HEIGHT_PX : 0}>
+              {shownNotices}
+            </ReaderPopoverLayer>
           ))}
       </div>
     </section>

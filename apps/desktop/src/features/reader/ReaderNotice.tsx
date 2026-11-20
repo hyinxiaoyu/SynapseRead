@@ -30,6 +30,9 @@ export const INFO_NOTICE_MS = 6000;
 /** The fade itself; reduced motion skips the transition but keeps the wait. */
 export const NOTICE_FADE_MS = 300;
 
+/** Space between the top of the reader and the notice stack (`top-2`). */
+const NOTICE_TOP_PX = 8;
+
 /**
  * Notices float over the page as popovers instead of stacking strips above it,
  * so the reading area never jumps. Focus mode keeps the page clear: notices wait,
@@ -37,9 +40,12 @@ export const NOTICE_FADE_MS = 300;
  */
 export function ReaderPopoverLayer({
   hidden = false,
+  topOffset = 0,
   children,
 }: {
   hidden?: boolean;
+  /** Extra top clearance (px), e.g. below the overlay toolbar in focus mode. */
+  topOffset?: number;
   children: ReactNode;
 }) {
   const register = useContext(ReaderPopoverSlotContext);
@@ -48,6 +54,7 @@ export function ReaderPopoverLayer({
     <div
       ref={register ?? undefined}
       className="pointer-events-none absolute inset-x-3 top-2 z-30 flex flex-col items-end gap-2 *:pointer-events-auto *:w-full *:max-w-xl *:animate-in *:overflow-hidden *:rounded-lg *:border *:shadow-lg *:animation-duration-150 *:fade-in-0 *:slide-in-from-top-1 *:motion-reduce:animate-none"
+      style={topOffset > 0 ? { top: NOTICE_TOP_PX + topOffset } : undefined}
     >
       {children}
     </div>

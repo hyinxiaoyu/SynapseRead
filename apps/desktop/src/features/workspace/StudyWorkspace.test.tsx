@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchEscape } from '@/features/commands/escape';
 import { forgetRecentCommandRuns } from '@/features/commands/registry';
 import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
+import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
 import type { MenuItemState } from '@/lib/backend/types';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import {
@@ -397,6 +398,7 @@ describe('StudyWorkspace', () => {
       expect(useStudySyncStore.getState().immersive).toBe(true);
       expect(useStudySyncStore.getState().cards).toHaveLength(cardCount - 1);
       expect(notice).toBeVisible();
+      expect(notice.parentElement).toHaveStyle({ top: `${8 + TOOLBAR_HEIGHT_PX}px` });
       expect(screen.getByRole('region', { name: 'Document reader' })).toContainElement(notice);
       expect(screen.getByTestId('card-deleted-status')).toHaveTextContent('Card deleted');
       // Focus mode still defers the excerpt notice; only the deletion shows.

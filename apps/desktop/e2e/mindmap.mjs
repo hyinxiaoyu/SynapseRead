@@ -246,4 +246,69 @@ export async function mindmapFlow(page) {
     distinctPositions === 3,
     `expected 3 distinct card positions after deleting middle root and excerpting again, got ${distinctPositions}`,
   );
+
+  // 11. In Focus Mode with the overlay toolbar still expanded, deleting a card
+  // shows the Undo notice below the toolbar so a real click hits Undo, not the toolbar.
+  await page.clickButton('Enter focus mode');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"]')?.dataset.immersive === 'true'`,
+    'focus mode to activate',
+  );
+  await page.clickButton('Show MindMap');
+  await page.waitFor(
+    `Boolean(document.querySelector('button[aria-label="Hide MindMap"]')) && Boolean(document.querySelector(${JSON.stringify(CARD_NODE)}))`,
+    'MindMap to reopen in focus mode',
+  );
+  const focusCard = await cardCenter(page);
+  assert(focusCard, 'card should be visible in reopened MindMap');
+  await page.click(focusCard);
+  await page.press('Backspace');
+  await page.waitFor(
+    `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 2`,
+    'Backspace to delete the focused card in focus mode',
+  );
+  const hitCheck = await page.waitFor(
+    `(() => {
+      const toolbar = document.querySelector('[data-testid="unified-toolbar"]');
+      const notice = document.querySelector('[data-testid="card-deleted-notice"]');
+      if (!toolbar || !notice) return null;
+      const undo = [...notice.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Undo');
+      if (!undo) return null;
+      const toolbarRect = toolbar.getBoundingClientRect();
+      const noticeRect = notice.getBoundingClientRect();
+      const undoRect = undo.getBoundingClientRect();
+      if (undoRect.width === 0 || undoRect.height === 0) return null;
+      const center = { x: undoRect.left + undoRect.width / 2, y: undoRect.top + undoRect.height / 2 };
+      const topEl = document.elementFromPoint(center.x, center.y);
+      return {
+        toolbarHidden: toolbar.dataset.hidden === 'true',
+        clearsToolbar: noticeRect.top >= toolbarRect.bottom,
+        undoHit: undo.contains(topEl),
+        hitTag: topEl?.tagName ?? null,
+        hitLabel: topEl?.getAttribute('aria-label') ?? topEl?.textContent?.trim() ?? null,
+        noticeTop: noticeRect.top,
+        toolbarBottom: toolbarRect.bottom,
+      };
+    })()`,
+    'card-deleted notice and Undo button in focus mode',
+  );
+  assert(
+    !hitCheck.toolbarHidden,
+    'expected the focus mode toolbar to still be expanded when Undo appeared',
+  );
+  assert(
+    hitCheck.clearsToolbar && hitCheck.undoHit,
+    `Undo in focus mode must sit below the expanded toolbar and receive pointer hits: ${JSON.stringify(hitCheck)}`,
+  );
+  await page.clickButton('Undo');
+  await page.waitFor(
+    `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 3`,
+    'Undo click in focus mode to restore the deleted card',
+  );
+  await page.waitFor(
+    `!document.querySelector('[data-testid="card-deleted-notice"]')`,
+    'card-deleted notice to clear after Undo',
+  );
+  assert(await page.inFocusMode(), 'Undo should keep Focus Mode active');
+  await page.clickButton('Exit focus mode');
 }
