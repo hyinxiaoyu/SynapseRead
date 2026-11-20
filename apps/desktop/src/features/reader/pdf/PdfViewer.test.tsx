@@ -3103,4 +3103,29 @@ describe('PdfViewer', () => {
       expect(readout).toHaveTextContent('Page 3 of 5');
     });
   });
+
+  describe('hostile anchor recovery (T-38)', () => {
+    it.each([
+      { label: 'past pageCount', pageIndex: 99 },
+      { label: 'negative pageIndex', pageIndex: -1 },
+    ])('falls back safely to page 1 when lastCursorAnchor has $label', async ({ pageIndex }) => {
+      const { store, documentId } = await setup();
+      const hostileAnchor: PdfAnchor = {
+        format: 'pdf',
+        pageIndex,
+        rects: [{ x: 0, y: 0.5, width: 0.5, height: 0.02 }],
+      };
+      store.setState((state) => ({
+        documents: state.documents.map((doc) =>
+          doc.id === documentId ? { ...doc, lastCursorAnchor: hostileAnchor } : doc,
+        ),
+      }));
+
+      render(<Harness store={store} documentId={documentId} />);
+      expect(await pageElement(0)).toBeInTheDocument();
+      const readout = screen.getByTestId('reader-footer-readout');
+      fireEvent.click(readout);
+      expect(readout).toHaveTextContent('Page 1 of 5');
+    });
+  });
 });

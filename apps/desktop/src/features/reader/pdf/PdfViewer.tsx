@@ -1123,7 +1123,12 @@ function PdfPages({
   const [initialCursor] = useState(() => asPdfAnchor(document.lastCursorAnchor));
   const [initialJump] = useState(jumpRequest);
   const [currentPageIndex, setRawPageIndex] = useState(() =>
-    initialCursor && initialCursor.pageIndex < engine.pageCount ? initialCursor.pageIndex : 0,
+    initialCursor &&
+    Number.isInteger(initialCursor.pageIndex) &&
+    initialCursor.pageIndex >= 0 &&
+    initialCursor.pageIndex < engine.pageCount
+      ? initialCursor.pageIndex
+      : 0,
   );
   const committedPageRef = useRef(currentPageIndex);
   const latestPageRef = useRef(currentPageIndex);
@@ -1786,13 +1791,15 @@ function PdfPages({
   useLayoutEffect(() => {
     if (restored.current || !initialCursor || width === 0) return;
     const pageIndex = initialCursor.pageIndex;
-    if (pageIndex >= engine.pageCount) {
+    if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= engine.pageCount) {
       restored.current = true;
       return;
     }
     if (sizes.length <= pageIndex) return;
     setCurrentPageIndex(pageIndex);
-    const nextTop = offsetWithin(pageIndex, initialCursor.rects[0]?.y ?? 0);
+    const rawY = initialCursor.rects[0]?.y ?? 0;
+    const safeY = Number.isFinite(rawY) ? Math.min(Math.max(rawY, 0), 1) : 0;
+    const nextTop = offsetWithin(pageIndex, safeY);
     scrollToOffset(nextTop);
     lastScrollTop.current = scrollRef.current?.scrollTop ?? nextTop;
     restored.current = true;

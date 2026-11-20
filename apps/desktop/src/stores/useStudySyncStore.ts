@@ -78,6 +78,11 @@ export interface StudySyncState {
    * session's other tab state.
    */
   closedDocumentIds: string[];
+  /**
+   * Documents currently locked by a close-and-flush / close-and-apply sequence.
+   * Reopening a locked document is ignored until its lock is released.
+   */
+  lockedDocumentIds: string[];
   isDraggingFile: boolean;
   /** Immersive reading: chrome collapsed. Part of the session, so it survives a restart. */
   immersive: boolean;
@@ -144,6 +149,37 @@ export interface StudySyncState {
   dropFiles(files: readonly File[]): Promise<void>;
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
+  /**
+   * Closes an open document, waits for its mounted viewer to unmount and enqueue
+   * any final cursor write, then waits for all in-flight cursor writes to settle.
+   */
+  closeDocumentAndFlush(documentId: string): Promise<void>;
+  /** Waits until all in-flight `updateDocumentCursor` writes for `documentId` settle. */
+  flushCursorWrites(documentId: string): Promise<void>;
+  /**
+   * Registers a mounted viewer instance for `documentId` and returns an unregister
+   * callback to invoke on unmount after the viewer's own cleanup has run.
+   */
+  registerMountedViewer(documentId: string): () => void;
+  /**
+   * Acquires a reference-counted reopen lock for `documentId` and returns an
+   * idempotent release function. While locked, `reopenRecentDocument` and
+   * `reopenClosedDocument` will not reopen `documentId`.
+   */
+  lockDocument(documentId: string): () => void;
+  /** Runs `run` while holding a reopen lock on `documentId`. */
+  withDocumentLock<T>(documentId: string, run: () => Promise<T>): Promise<T>;
+  /**
+   * Reloads `documentId` via `backend.listDocuments()`, upserting it in `documents`.
+   * If it was previously `missing` and its `filePath` changed, resets its source
+   * status to `ok` and increments `relinkedNonceByDocumentId[documentId]`.
+   */
+  refreshDocument(documentId: string): Promise<StudyDocument | null>;
+  /**
+   * Reloads bookmarks via `backend.listBookmarks()` and replaces only bookmarks
+   * belonging to `documentId`.
+   */
+  refreshBookmarks(documentId: string): Promise<void>;
   /** `progress` is how far through the document the anchor is, `0..1`, if known. */
   reportCursor(
     documentId: string,
@@ -296,12 +332,14 @@ export function selectReopenableDocumentId(
   closedDocumentIds: readonly string[],
   openDocumentIds: readonly string[],
   documents: readonly StudyDocument[],
+  lockedDocumentIds: readonly string[] = [],
 ): string | null {
   for (let index = closedDocumentIds.length - 1; index >= 0; index -= 1) {
     const id = closedDocumentIds[index];
     if (id === undefined) continue;
     // A tab opened again by Open or Recent is no longer a closed tab.
     if (openDocumentIds.includes(id)) continue;
+    if (lockedDocumentIds.includes(id)) continue;
     if (!documents.some((document) => document.id === id)) continue;
     return id;
   }
@@ -333,6 +371,42 @@ export function createStudySyncStore(backend: StudyBackend) {
      */
     const pendingDeletes = new Map<string, Promise<void>>();
     const pendingCardDeletes = new Map<string, Promise<void>>();
+    /** In-flight `updateDocumentCursor` writes, by document id. */
+    const pendingCursorWrites = new Map<string, Set<Promise<void>>>();
+    /** Active mounted `<Viewer>` counts, registered by sibling `<UnmountSentinel>`. */
+    const mountedViewerCounts = new Map<string, number>();
+    /** Waiters resolved when the last mounted viewer for a document unmounts. */
+    const viewerUnmountWaiters = new Map<string, Set<() => void>>();
+    /** Reference-counted reopen locks, by document id. */
+    const documentLockCounts = new Map<string, number>();
+
+    const acquireLock = (documentId: string): (() => void) => {
+      const nextCount = (documentLockCounts.get(documentId) ?? 0) + 1;
+      documentLockCounts.set(documentId, nextCount);
+      if (nextCount === 1) {
+        set((state) =>
+          state.lockedDocumentIds.includes(documentId)
+            ? state
+            : { lockedDocumentIds: [...state.lockedDocumentIds, documentId] },
+        );
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const current = documentLockCounts.get(documentId) ?? 0;
+        if (current <= 1) {
+          documentLockCounts.delete(documentId);
+          set((state) =>
+            state.lockedDocumentIds.includes(documentId)
+              ? { lockedDocumentIds: state.lockedDocumentIds.filter((id) => id !== documentId) }
+              : state,
+          );
+        } else {
+          documentLockCounts.set(documentId, current - 1);
+        }
+      };
+    };
 
     const guarded = async (write: () => Promise<void>, rollback?: () => void) => {
       try {
@@ -482,6 +556,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       openDocumentIds: [],
       activeDocumentId: null,
       closedDocumentIds: [],
+      lockedDocumentIds: [],
       isDraggingFile: false,
       immersive: false,
       paneLayout: { ...DEFAULT_WORKSPACE_PANE_LAYOUT },
@@ -568,12 +643,15 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async reopenRecentDocument(documentId) {
+        if ((documentLockCounts.get(documentId) ?? 0) > 0) return;
         if (!get().documents.some((doc) => doc.id === documentId)) return;
         await guarded(async () => {
           const [touched, status] = await Promise.all([
             backend.touchDocumentOpened(documentId),
             backend.verifyDocumentSource(documentId),
           ]);
+          // A close-and-apply lock may have been acquired while awaiting backend I/O.
+          if ((documentLockCounts.get(documentId) ?? 0) > 0) return;
           set((state) => ({
             documents: state.documents.map((doc) => (doc.id === documentId ? touched : doc)),
             documentSourceStatuses: {
@@ -592,11 +670,12 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async reopenClosedDocument() {
-        const { closedDocumentIds, openDocumentIds, documents } = get();
+        const { closedDocumentIds, openDocumentIds, documents, lockedDocumentIds } = get();
         const documentId = selectReopenableDocumentId(
           closedDocumentIds,
           openDocumentIds,
           documents,
+          lockedDocumentIds,
         );
         if (documentId === null) return;
         await get().reopenRecentDocument(documentId);
@@ -679,6 +758,130 @@ export function createStudySyncStore(backend: StudyBackend) {
         persistSession();
       },
 
+      async flushCursorWrites(documentId) {
+        // Loop in case another cursor write starts while awaiting the current batch.
+        for (;;) {
+          const writes = pendingCursorWrites.get(documentId);
+          if (!writes || writes.size === 0) return;
+          await Promise.allSettled([...writes]);
+        }
+      },
+
+      registerMountedViewer(documentId) {
+        mountedViewerCounts.set(documentId, (mountedViewerCounts.get(documentId) ?? 0) + 1);
+        let unregistered = false;
+        return () => {
+          if (unregistered) return;
+          unregistered = true;
+          const current = mountedViewerCounts.get(documentId) ?? 0;
+          if (current <= 1) {
+            mountedViewerCounts.delete(documentId);
+            const waiters = viewerUnmountWaiters.get(documentId);
+            if (waiters) {
+              viewerUnmountWaiters.delete(documentId);
+              for (const resolve of waiters) resolve();
+            }
+          } else {
+            mountedViewerCounts.set(documentId, current - 1);
+          }
+        };
+      },
+
+      lockDocument(documentId) {
+        return acquireLock(documentId);
+      },
+
+      async withDocumentLock(documentId, run) {
+        const release = acquireLock(documentId);
+        try {
+          return await run();
+        } finally {
+          release();
+        }
+      },
+
+      async closeDocumentAndFlush(documentId) {
+        const release = acquireLock(documentId);
+        try {
+          const isMounted = (mountedViewerCounts.get(documentId) ?? 0) > 0;
+          const wasOpen = get().openDocumentIds.includes(documentId);
+          let unmountPromise: Promise<void> | null = null;
+          if (wasOpen && isMounted) {
+            unmountPromise = new Promise<void>((resolve) => {
+              let waiters = viewerUnmountWaiters.get(documentId);
+              if (!waiters) {
+                waiters = new Set();
+                viewerUnmountWaiters.set(documentId, waiters);
+              }
+              waiters.add(resolve);
+            });
+          }
+          if (wasOpen) {
+            get().closeDocument(documentId);
+          }
+          if (unmountPromise) {
+            await unmountPromise;
+          }
+          await get().flushCursorWrites(documentId);
+        } finally {
+          release();
+        }
+      },
+
+      async refreshDocument(documentId) {
+        let refreshed: StudyDocument | null = null;
+        await guarded(async () => {
+          const documents = await backend.listDocuments();
+          const target = documents.find((doc) => doc.id === documentId);
+          if (!target) return;
+          refreshed = target;
+          set((state) => {
+            const previous = state.documents.find((doc) => doc.id === documentId);
+            const nextDocuments = previous
+              ? state.documents.map((doc) => (doc.id === documentId ? target : doc))
+              : [...state.documents, target];
+
+            const wasMissing = state.documentSourceStatuses[documentId]?.state === 'missing';
+            const filePathChanged = previous !== undefined && previous.filePath !== target.filePath;
+            if (wasMissing && filePathChanged) {
+              return {
+                documents: nextDocuments,
+                documentSourceStatuses: {
+                  ...state.documentSourceStatuses,
+                  [documentId]: {
+                    documentId,
+                    state: 'ok',
+                    currentFileHash: target.fileHash,
+                    fileSizeBytes: null,
+                  },
+                },
+                relinkedNonceByDocumentId: {
+                  ...state.relinkedNonceByDocumentId,
+                  [documentId]: (state.relinkedNonceByDocumentId[documentId] ?? 0) + 1,
+                },
+                selection: state.selection?.documentId === documentId ? null : state.selection,
+              };
+            }
+
+            return { documents: nextDocuments };
+          });
+        });
+        return refreshed;
+      },
+
+      async refreshBookmarks(documentId) {
+        await guarded(async () => {
+          const allBookmarks = await backend.listBookmarks();
+          const forDocument = allBookmarks.filter((bookmark) => bookmark.documentId === documentId);
+          set((state) => ({
+            bookmarks: [
+              ...state.bookmarks.filter((bookmark) => bookmark.documentId !== documentId),
+              ...forDocument,
+            ],
+          }));
+        });
+      },
+
       async setFullscreen(fullscreen) {
         await guarded(async () => {
           await backend.setFullscreen(fullscreen);
@@ -732,7 +935,19 @@ export function createStudySyncStore(backend: StudyBackend) {
               : document,
           ),
         }));
-        void guarded(() => backend.updateDocumentCursor(documentId, anchor, progress));
+        let writes = pendingCursorWrites.get(documentId);
+        if (!writes) {
+          writes = new Set();
+          pendingCursorWrites.set(documentId, writes);
+        }
+        const bucket = writes;
+        const tracked = guarded(() =>
+          backend.updateDocumentCursor(documentId, anchor, progress),
+        ).finally(() => {
+          bucket.delete(tracked);
+          if (bucket.size === 0) pendingCursorWrites.delete(documentId);
+        });
+        bucket.add(tracked);
       },
 
       captureUrl: (annotationId) => backend.captureUrl(annotationId),

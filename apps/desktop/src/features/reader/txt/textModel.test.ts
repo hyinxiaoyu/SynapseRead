@@ -249,6 +249,42 @@ describe('TxtTextModel', () => {
     ).toBe('cafe\u0301');
     expect(nfdModel.search('café', { matchDiacritics: true })).toHaveLength(1);
   });
+
+  it('returns null without throwing for hostile or out-of-range byte offsets (T-38)', () => {
+    const model = modelOf(new TextEncoder().encode('hello\nworld\n'), 6);
+    expect(
+      model.rangeFor({
+        format: 'txt',
+        startByteOffset: 99999,
+        endByteOffset: 100010,
+        lineIndex: 500,
+      }),
+    ).toBeNull();
+    expect(
+      model.rangeFor({
+        format: 'txt',
+        startByteOffset: -10,
+        endByteOffset: 5,
+        lineIndex: 0,
+      }),
+    ).toBeNull();
+    expect(
+      model.rangeFor({
+        format: 'txt',
+        startByteOffset: 10,
+        endByteOffset: 2,
+        lineIndex: 0,
+      }),
+    ).toBeNull();
+    expect(
+      model.rangeFor({
+        format: 'txt',
+        startByteOffset: Number.NaN,
+        endByteOffset: Number.POSITIVE_INFINITY,
+        lineIndex: 0,
+      }),
+    ).toBeNull();
+  });
 });
 
 function collect(source: string, chunkBytes: number): TextChunk[] {

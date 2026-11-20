@@ -1760,3 +1760,263 @@ describe('card deletion, undo, and pane layout persistence (#116, #119)', () => 
     expect(state().cards[0]?.markdownNotes).toBe('saved');
   });
 });
+
+describe('cursor write tracking, close-and-flush, and store refresh (#137)', () => {
+  let backend: StudyBackend;
+  let store: ReturnType<typeof createStudySyncStore>;
+
+  const state = () => store.getState();
+
+  const openDocument = async () => {
+    await state().openDocument();
+    return state().activeDocumentId as string;
+  };
+
+  beforeEach(async () => {
+    backend = createMemoryBackend({
+      library: Object.fromEntries(
+        ['a.pdf', 'b.epub', 'c.txt', 'd.md'].map((name) => [
+          `/test/${name}`,
+          new TextEncoder().encode(`content:${name}`),
+        ]),
+      ),
+    });
+    store = createStudySyncStore(backend);
+    await state().initialize();
+  });
+
+  it('flushCursorWrites waits until all in-flight updateDocumentCursor promises for that document settle', async () => {
+    const docA = await openDocument();
+    const docB = await openDocument();
+
+    let resolveA1!: () => void;
+    let resolveA2!: () => void;
+    let resolveB!: () => void;
+    const a1 = new Promise<void>((resolve) => {
+      resolveA1 = resolve;
+    });
+    const a2 = new Promise<void>((resolve) => {
+      resolveA2 = resolve;
+    });
+    const b1 = new Promise<void>((resolve) => {
+      resolveB = resolve;
+    });
+
+    const calls: string[] = [];
+    vi.spyOn(backend, 'updateDocumentCursor').mockImplementation((id) => {
+      calls.push(id);
+      if (id === docA && calls.filter((c) => c === docA).length === 1) return a1;
+      if (id === docA) return a2;
+      return b1;
+    });
+
+    state().reportCursor(docA, txtAnchor, 0.2);
+    state().reportCursor(docA, { ...txtAnchor, startByteOffset: 1, endByteOffset: 4 }, 0.4);
+    state().reportCursor(docB, txtAnchor, 0.5);
+
+    let flushedA = false;
+    const flushPromise = state()
+      .flushCursorWrites(docA)
+      .then(() => {
+        flushedA = true;
+      });
+
+    await Promise.resolve();
+    expect(flushedA).toBe(false);
+
+    resolveA1();
+    await Promise.resolve();
+    expect(flushedA).toBe(false);
+
+    resolveA2();
+    await flushPromise;
+    expect(flushedA).toBe(true);
+
+    // Unrelated docB write is still pending and did not block docA.
+    resolveB();
+    await state().flushCursorWrites(docB);
+  });
+
+  it('closeDocumentAndFlush skips unmount wait when headless and awaits delayed cursor writes (T-31)', async () => {
+    const docId = await openDocument();
+
+    let resolveWrite!: () => void;
+    const delayedWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    vi.spyOn(backend, 'updateDocumentCursor').mockReturnValueOnce(delayedWrite);
+
+    state().reportCursor(docId, txtAnchor, 0.3);
+
+    let finished = false;
+    const closing = state()
+      .closeDocumentAndFlush(docId)
+      .then(() => {
+        finished = true;
+      });
+
+    // Document is closed synchronously and locked while flushing.
+    expect(state().openDocumentIds).not.toContain(docId);
+    expect(state().lockedDocumentIds).toContain(docId);
+
+    // Reopen attempts are ignored while locked.
+    await state().reopenRecentDocument(docId);
+    await state().reopenClosedDocument();
+    expect(state().openDocumentIds).not.toContain(docId);
+
+    await Promise.resolve();
+    expect(finished).toBe(false);
+
+    resolveWrite();
+    await closing;
+    expect(finished).toBe(true);
+    expect(state().lockedDocumentIds).not.toContain(docId);
+
+    // Reopen works again once the lock is released.
+    await state().reopenClosedDocument();
+    expect(state().openDocumentIds).toContain(docId);
+  });
+
+  it('closeDocumentAndFlush waits for mounted viewer unmount before flushing its cursor write (T-31, R3-06)', async () => {
+    const docId = await openDocument();
+    const unregister = state().registerMountedViewer(docId);
+
+    let resolveWrite!: () => void;
+    const delayedWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    const updateSpy = vi.spyOn(backend, 'updateDocumentCursor').mockReturnValueOnce(delayedWrite);
+
+    let finished = false;
+    const closing = state()
+      .closeDocumentAndFlush(docId)
+      .then(() => {
+        finished = true;
+      });
+
+    expect(state().openDocumentIds).not.toContain(docId);
+    await Promise.resolve();
+    expect(finished).toBe(false);
+
+    // Simulate React sibling order: <Viewer> cleanup reports cursor, then <UnmountSentinel> unregisters.
+    state().reportCursor(docId, txtAnchor, 0.75);
+    unregister();
+
+    await Promise.resolve();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(finished).toBe(false);
+
+    resolveWrite();
+    await closing;
+    expect(finished).toBe(true);
+  });
+
+  it('withDocumentLock blocks reopenRecentDocument and reopenClosedDocument across a close-and-apply sequence', async () => {
+    const docId = await openDocument();
+    state().closeDocument(docId);
+
+    await state().withDocumentLock(docId, async () => {
+      expect(state().lockedDocumentIds).toContain(docId);
+      await state().reopenRecentDocument(docId);
+      await state().reopenClosedDocument();
+      expect(state().openDocumentIds).not.toContain(docId);
+    });
+
+    expect(state().lockedDocumentIds).not.toContain(docId);
+    await state().reopenClosedDocument();
+    expect(state().openDocumentIds).toContain(docId);
+  });
+
+  it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {
+    const docA = await openDocument();
+    const docB = await openDocument();
+    const originalA = state().documents.find((d) => d.id === docA)!;
+    const originalB = state().documents.find((d) => d.id === docB)!;
+
+    // Update cursor directly in backend (simulating a synced write).
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 4,
+      rects: [{ x: 0, y: 0.25, width: 0.5, height: 0.05 }],
+    };
+    await backend.updateDocumentCursor(docA, syncedAnchor, 0.8);
+
+    const updated = await state().refreshDocument(docA);
+    expect(updated?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(state().documents.find((d) => d.id === docA)?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(state().documents.find((d) => d.id === docB)).toEqual(originalB);
+
+    // Insert a newly imported document not yet in store state.
+    const imported = {
+      ...originalA,
+      id: 'doc-newly-imported',
+      title: 'Synced Book',
+      filePath: '/synced/book.pdf',
+    };
+    vi.spyOn(backend, 'listDocuments').mockResolvedValueOnce([
+      ...(await backend.listDocuments()),
+      imported,
+    ]);
+    await state().refreshDocument(imported.id);
+    expect(state().documents.find((d) => d.id === imported.id)).toEqual(imported);
+
+    // Missing document with unchanged filePath stays missing.
+    store.setState((s) => ({
+      documentSourceStatuses: {
+        ...s.documentSourceStatuses,
+        [docA]: {
+          documentId: docA,
+          state: 'missing',
+          currentFileHash: null,
+          fileSizeBytes: null,
+        },
+      },
+    }));
+    await state().refreshDocument(docA);
+    expect(state().documentSourceStatuses[docA]?.state).toBe('missing');
+    expect(state().relinkedNonceByDocumentId[docA] ?? 0).toBe(0);
+
+    // Missing document whose filePath changed transitions to ok and bumps relinkedNonce.
+    const restoredA = { ...originalA, filePath: '/restored/a.pdf', lastCursorAnchor: syncedAnchor };
+    vi.spyOn(backend, 'listDocuments').mockResolvedValueOnce([restoredA, originalB]);
+    await state().refreshDocument(docA);
+    expect(state().documentSourceStatuses[docA]).toEqual({
+      documentId: docA,
+      state: 'ok',
+      currentFileHash: restoredA.fileHash,
+      fileSizeBytes: null,
+    });
+    expect(state().relinkedNonceByDocumentId[docA]).toBe(1);
+    expect(state().documents.find((d) => d.id === docA)?.filePath).toBe('/restored/a.pdf');
+  });
+
+  it('refreshBookmarks replaces only the target document bookmarks without affecting others (T-32)', async () => {
+    const docA = await openDocument();
+    const docB = await openDocument();
+
+    await state().addBookmark(docA, pdfAnchor as ReaderSelection['anchor'], 'Old A');
+    await state().addBookmark(
+      docB,
+      { format: 'epub', cfiRange: 'epubcfi(/6/2!/4/2)', chapterHref: 'ch1.xhtml' },
+      'Keep B',
+    );
+    const oldAId = state().bookmarks.find((b) => b.documentId === docA)!.id;
+    const keepBId = state().bookmarks.find((b) => b.documentId === docB)!.id;
+
+    // Mutate backend directly for docA without going through store actions.
+    await backend.deleteBookmark(oldAId);
+    const syncedA = await backend.createBookmark({
+      documentId: docA,
+      anchor: { format: 'pdf', pageIndex: 3, rects: [{ x: 0, y: 0, width: 1, height: 0.1 }] },
+      label: 'Synced A',
+    });
+
+    await state().refreshBookmarks(docA);
+
+    const aBookmarks = state().bookmarks.filter((b) => b.documentId === docA);
+    const bBookmarks = state().bookmarks.filter((b) => b.documentId === docB);
+    expect(aBookmarks.map((b) => b.id)).toEqual([syncedA.id]);
+    expect(aBookmarks[0]?.label).toBe('Synced A');
+    expect(bBookmarks.map((b) => b.id)).toEqual([keepBId]);
+  });
+});

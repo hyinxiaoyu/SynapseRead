@@ -2935,4 +2935,32 @@ describe('EpubViewer', () => {
       expect(fireMouseDown(area, { detail: 2, clientX: 1050 }).defaultPrevented).toBe(false);
     });
   });
+
+  describe('hostile anchor recovery (T-38)', () => {
+    it('falls back cleanly to the start of the book on a malformed or unresolvable CFI', async () => {
+      const malformedCfi = 'epubcfi(/6/999!/invalid/path)';
+      engine.failCfi = malformedCfi;
+
+      const { store, documentId } = await setup();
+      store.setState((state) => ({
+        documents: state.documents.map((doc) =>
+          doc.id === documentId
+            ? {
+                ...doc,
+                lastCursorAnchor: {
+                  format: 'epub',
+                  cfiRange: malformedCfi,
+                  chapterHref: 'OEBPS/missing.xhtml',
+                },
+              }
+            : doc,
+        ),
+      }));
+
+      render(<Harness store={store} documentId={documentId} />);
+      // Failed CFI rejects before recording in `engine.displayed`, so fallback `engine.display()` records `undefined`.
+      await waitFor(() => expect(engine.displayed).toEqual([undefined]));
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+  });
 });

@@ -1,21 +1,49 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { commandState, forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
 import { useFocusPageOnActivate } from '@/features/reader/focusPage';
 import { ReaderNotice, ReaderPopoverLayer } from '@/features/reader/ReaderNotice';
+import type * as BackendModule from '@/lib/backend';
+import type { StudyBackend } from '@/lib/backend';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
-import type { DocumentViewerProps } from '@/types/domain';
+import type { AnchorLocation, DocumentViewerProps } from '@/types/domain';
 
 import { describeResumeLocation, ReaderPane } from './ReaderPane';
+
+const backendHolder = vi.hoisted(() => ({ current: null as StudyBackend | null }));
+const unmountCursorByDoc = new Map<string, AnchorLocation>();
+
+vi.mock('@/lib/backend', async (importOriginal) => {
+  const actual = await importOriginal<typeof BackendModule>();
+  return {
+    ...actual,
+    createDefaultBackend: () => {
+      const backend = actual.createDefaultBackend();
+      backendHolder.current = backend;
+      return backend;
+    },
+  };
+});
 
 /**
  * These tests are about the tab commands, so a small stand-in fulfils the viewer
  * contract; each real engine has its own tests.
  */
-function FakeViewer({ document, isActive, chromeHidden }: DocumentViewerProps) {
+function FakeViewer({ document, isActive, chromeHidden, onCursorChange }: DocumentViewerProps) {
   const pageRef = useRef<HTMLDivElement>(null);
+  const onCursorChangeRef = useRef(onCursorChange);
+  useEffect(() => {
+    onCursorChangeRef.current = onCursorChange;
+  }, [onCursorChange]);
+  useEffect(
+    () => () => {
+      const anchor = unmountCursorByDoc.get(document.id);
+      if (anchor) onCursorChangeRef.current(anchor, 0.9);
+    },
+    [document.id],
+  );
   useFocusPageOnActivate(pageRef, isActive);
   return (
     <div ref={pageRef} data-testid={`fake-viewer-${document.id}`} tabIndex={-1}>
@@ -58,6 +86,7 @@ const openDocuments = (names: readonly string[]) => {
 
 describe('ReaderPane tab commands', () => {
   beforeEach(() => {
+    unmountCursorByDoc.clear();
     const store = useStudySyncStore.getState();
     for (const id of [...store.openDocumentIds]) store.closeDocument(id);
     useStudySyncStore.setState(initialState, true);
@@ -312,6 +341,112 @@ describe('ReaderPane tab commands', () => {
     expect(screen.getByTestId('excerpt-added-notice').parentElement).toBe(
       firstWarning.parentElement,
     );
+  });
+
+  it('closeDocumentAndFlush waits for mounted viewer unmount cursor write via sibling UnmountSentinel (T-31, R3-06)', async () => {
+    await openDocuments(['flush-target.txt']);
+    const store = useStudySyncStore.getState;
+    const docId = store().activeDocumentId as string;
+    const finalAnchor: AnchorLocation = {
+      format: 'txt',
+      startByteOffset: 2,
+      endByteOffset: 6,
+      lineIndex: 0,
+    };
+    unmountCursorByDoc.set(docId, finalAnchor);
+
+    render(<ReaderPane />);
+    expect(screen.getByTestId(`fake-viewer-${docId}`)).toBeInTheDocument();
+
+    const backend = backendHolder.current!;
+    let resolveCursorWrite!: () => void;
+    const delayedWrite = new Promise<void>((resolve) => {
+      resolveCursorWrite = resolve;
+    });
+    const updateSpy = vi.spyOn(backend, 'updateDocumentCursor').mockReturnValueOnce(delayedWrite);
+
+    let settled = false;
+    let flushPromise!: Promise<void>;
+    act(() => {
+      flushPromise = store()
+        .closeDocumentAndFlush(docId)
+        .then(() => {
+          settled = true;
+        });
+    });
+
+    // React has committed the unmount: <Viewer> cleanup fired onCursorChange before <UnmountSentinel>.
+    await waitFor(() => expect(updateSpy).toHaveBeenCalledWith(docId, finalAnchor, 0.9));
+    expect(screen.queryByTestId(`fake-viewer-${docId}`)).not.toBeInTheDocument();
+    expect(settled).toBe(false);
+
+    // Resolving the delayed IPC write unblocks closeDocumentAndFlush.
+    resolveCursorWrite();
+    await act(async () => {
+      await flushPromise;
+    });
+    expect(settled).toBe(true);
+    updateSpy.mockRestore();
+  });
+
+  it('skips unmount wait when SourceRecoveryDialog is showing and restores Viewer on refreshDocument (T-31, T-32)', async () => {
+    await openDocuments(['missing-file.txt']);
+    const store = useStudySyncStore.getState;
+    const docId = store().activeDocumentId as string;
+    const originalDoc = store().documents.find((d) => d.id === docId)!;
+
+    act(() => {
+      useStudySyncStore.setState((state) => ({
+        documentSourceStatuses: {
+          ...state.documentSourceStatuses,
+          [docId]: {
+            documentId: docId,
+            state: 'missing',
+            currentFileHash: null,
+            fileSizeBytes: null,
+          },
+        },
+      }));
+    });
+
+    render(<ReaderPane />);
+    expect(screen.getByTestId('source-recovery-dialog')).toBeInTheDocument();
+    expect(screen.queryByTestId(`fake-viewer-${docId}`)).not.toBeInTheDocument();
+
+    // Refreshing with a restored filePath transitions cleanly from SourceRecoveryDialog back to <Viewer>.
+    const backend = backendHolder.current!;
+    const listSpy = vi
+      .spyOn(backend, 'listDocuments')
+      .mockResolvedValueOnce([{ ...originalDoc, filePath: '/restored/missing-file.txt' }]);
+    await act(async () => {
+      await store().refreshDocument(docId);
+    });
+    listSpy.mockRestore();
+
+    expect(screen.queryByTestId('source-recovery-dialog')).not.toBeInTheDocument();
+    expect(screen.getByTestId(`fake-viewer-${docId}`)).toBeInTheDocument();
+    expect(store().relinkedNonceByDocumentId[docId]).toBe(1);
+
+    // Put back into missing state and verify closeDocumentAndFlush resolves without hanging.
+    act(() => {
+      useStudySyncStore.setState((state) => ({
+        documentSourceStatuses: {
+          ...state.documentSourceStatuses,
+          [docId]: {
+            documentId: docId,
+            state: 'missing',
+            currentFileHash: null,
+            fileSizeBytes: null,
+          },
+        },
+      }));
+    });
+    expect(screen.getByTestId('source-recovery-dialog')).toBeInTheDocument();
+
+    await act(async () => {
+      await store().closeDocumentAndFlush(docId);
+    });
+    expect(store().openDocumentIds).not.toContain(docId);
   });
 });
 

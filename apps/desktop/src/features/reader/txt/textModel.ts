@@ -236,7 +236,7 @@ export class TxtTextModel {
    * A byte inside a span rounds outward, as the span is atomic (invariant 3).
    */
   unitAtSourceOffset(byte: number, rounding: Rounding): number | null {
-    if (byte > this.endByte) return null;
+    if (!Number.isFinite(byte) || byte < 0 || byte > this.endByte) return null;
     if (byte === this.endByte) return this.units;
     const chunk = this.chunks[lastAtOrBefore(this.chunks, byte, (item) => item.startByte)];
     if (!chunk) return null;
@@ -307,7 +307,8 @@ export class TxtTextModel {
   rangeFor(anchor: TxtAnchor): { startUnit: number; endUnit: number } | null {
     const startUnit = this.unitAtSourceOffset(anchor.startByteOffset, 'down');
     const endUnit = this.unitAtSourceOffset(anchor.endByteOffset, 'up');
-    return startUnit === null || endUnit === null ? null : { startUnit, endUnit };
+    if (startUnit === null || endUnit === null || startUnit > endUnit) return null;
+    return { startUnit, endUnit };
   }
 
   /**

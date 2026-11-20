@@ -121,6 +121,7 @@ export function ReaderPane({
   const reopenRecentDocument = useStudySyncStore((state) => state.reopenRecentDocument);
   const reopenClosedDocument = useStudySyncStore((state) => state.reopenClosedDocument);
   const closedDocumentIds = useStudySyncStore((state) => state.closedDocumentIds);
+  const lockedDocumentIds = useStudySyncStore((state) => state.lockedDocumentIds);
   const activateDocument = useStudySyncStore((state) => state.activateDocument);
   const closeDocument = useStudySyncStore((state) => state.closeDocument);
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
@@ -162,7 +163,8 @@ export function ReaderPane({
       </>
     ) : null;
   const canReopenClosedTab =
-    selectReopenableDocumentId(closedDocumentIds, openDocumentIds, documents) !== null;
+    selectReopenableDocumentId(closedDocumentIds, openDocumentIds, documents, lockedDocumentIds) !==
+    null;
 
   /** Next or previous tab, wrapping around at the ends, as Safari's do. */
   const stepTab = (direction: 1 | -1) => {
@@ -590,6 +592,18 @@ function SourceRecoveryDialog({
   );
 }
 
+/**
+ * Mounted as a sibling *after* `<Viewer>` inside `DocumentTab`. React runs
+ * sibling passive cleanups in tree order, so this cleanup is guaranteed to fire
+ * after `<Viewer>`'s unmount effect has synchronously called `onCursorChange`,
+ * keeping all viewers callback-only without touching the store directly.
+ */
+function UnmountSentinel({ documentId }: { documentId: string }) {
+  const registerMountedViewer = useStudySyncStore((state) => state.registerMountedViewer);
+  useEffect(() => registerMountedViewer(documentId), [registerMountedViewer, documentId]);
+  return null;
+}
+
 function DocumentTab({
   document,
   isActive,
@@ -767,6 +781,7 @@ function DocumentTab({
         onExcerptSelection={onExcerptSelection}
         canExcerpt={!isExcerpting}
       />
+      <UnmountSentinel key={`sentinel:${document.id}:${relinkedNonce}`} documentId={document.id} />
     </ReaderPopoverSlotProvider>
   );
 }
