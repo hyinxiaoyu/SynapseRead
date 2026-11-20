@@ -1,7 +1,10 @@
 //! Persistence commands. Each one is a thin adapter over `synapse_core::db`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use synapse_core::CoreResult;
+use synapse_core::db::verify_document_file_with_hasher;
 use synapse_core::domain::DocumentFormat;
+use synapse_core::fs_reader::hash_file;
 
 use synapse_core::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
@@ -252,16 +255,32 @@ pub fn save_workspace_session(
     Ok(state.database()?.save_workspace_session(&session)?)
 }
 
+/// Reads the document record under a brief lock, then verifies `fs::metadata`
+/// and `hash_file` outside the database lock so large files do not stall other
+/// commands.
+pub(crate) fn verify_document_source_with_hasher<R, F>(
+    app: &impl Manager<R>,
+    document_id: &str,
+    hasher: F,
+) -> IpcResult<DocumentSourceStatus>
+where
+    R: Runtime,
+    F: FnOnce(&Path) -> CoreResult<String>,
+{
+    let document = app
+        .state::<AppState>()
+        .database()?
+        .get_document(document_id)?;
+    Ok(verify_document_file_with_hasher(&document, hasher)?)
+}
+
 #[tauri::command]
 pub async fn verify_document_source(
     document_id: String,
     app: AppHandle<impl Runtime>,
 ) -> IpcResult<DocumentSourceStatus> {
     tauri::async_runtime::spawn_blocking(move || {
-        Ok(app
-            .state::<AppState>()
-            .database()?
-            .verify_document_source(&document_id)?)
+        verify_document_source_with_hasher(&app, &document_id, hash_file)
     })
     .await
     .map_err(|error| IpcError::internal(error.to_string()))?

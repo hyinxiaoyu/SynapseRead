@@ -12,8 +12,12 @@ use tauri::test::{
 use tauri::webview::InvokeRequest;
 use tauri::{App, Manager, WebviewWindow, WebviewWindowBuilder};
 
-use crate::access::{grant_all, register_and_grant, register_dropped_paths, relink_and_grant};
+use crate::access::{
+    grant_all, register_and_grant, register_and_grant_with_hasher, register_dropped_paths,
+    relink_and_grant, relink_and_grant_with_hasher,
+};
 use crate::close_flush::{CloseDecision, CloseFlushCoordinator};
+use crate::commands::db::verify_document_source_with_hasher;
 use crate::state::AppState;
 
 /// Where bundled app content is served from on the mock runtime.
@@ -1345,4 +1349,175 @@ fn confirm_flush_before_close_acknowledges_pending_token() {
     };
     h.ok("confirm_flush_before_close", json!({ "token": token }));
     assert!(coordinator.wait_for_flush(token, std::time::Duration::from_millis(50)));
+}
+
+/// T-27: Hashing a large/slow file during `register_and_grant`, `relink_and_grant`,
+/// or `verify_document_source` must never hold `Mutex<Database>`, so concurrent
+/// database commands (such as debounced cursor saves) complete immediately.
+#[test]
+fn database_commands_complete_while_file_hashing_is_in_progress() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use synapse_core::db::{hash_document_for_registration, hash_document_for_relink};
+    use synapse_core::domain::DocumentSourceState;
+    use synapse_core::fs_reader::hash_file;
+
+    let h = Harness::new();
+    let existing = h.register("existing.txt", "initial content");
+    let existing_id = existing["id"].as_str().unwrap().to_owned();
+    let timeout = Duration::from_secs(5);
+
+    // 1. `register_and_grant` releases DB lock (never holds it) during hashing.
+    let slow_register_path = h.dir.path().join("slow-register.txt");
+    std::fs::write(&slow_register_path, "large book bytes").unwrap();
+    {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let app = h.app.handle().clone();
+        let path = slow_register_path.clone();
+
+        let worker = std::thread::spawn(move || {
+            register_and_grant_with_hasher(&app, &path, |p| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(timeout)
+                    .expect("main thread should complete DB command and release hasher");
+                hash_document_for_registration(p)
+            })
+        });
+
+        entered_rx
+            .recv_timeout(timeout)
+            .expect("register hasher should start");
+        // If the DB lock were held during hashing, this IPC write would deadlock.
+        h.ok(
+            "update_document_cursor",
+            json!({
+                "documentId": existing_id,
+                "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 7, "lineIndex": 0 },
+                "progress": 0.25,
+            }),
+        );
+        release_tx.send(()).unwrap();
+
+        let registered = worker
+            .join()
+            .expect("register worker should not panic")
+            .expect("register_and_grant should succeed");
+        assert_eq!(registered.title, "slow-register");
+        assert!(h.asset_allowed(&slow_register_path));
+    }
+
+    // 2. `verify_document_source` drops DB lock before `fs::metadata` and `hash_file`.
+    {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let app = h.app.handle().clone();
+        let doc_id = existing_id.clone();
+
+        let worker = std::thread::spawn(move || {
+            verify_document_source_with_hasher(&app, &doc_id, |p| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(timeout)
+                    .expect("main thread should complete DB command and release hasher");
+                hash_file(p)
+            })
+        });
+
+        entered_rx
+            .recv_timeout(timeout)
+            .expect("verify hasher should start");
+        h.ok(
+            "update_document_cursor",
+            json!({
+                "documentId": existing_id,
+                "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 7, "lineIndex": 0 },
+                "progress": 0.5,
+            }),
+        );
+        release_tx.send(()).unwrap();
+
+        let status = worker
+            .join()
+            .expect("verify worker should not panic")
+            .expect("verify_document_source should succeed");
+        assert_eq!(status.state, DocumentSourceState::Ok);
+    }
+
+    // 3. `relink_and_grant` drops DB lock before hashing, then rechecks invariants on commit.
+    let slow_relink_path = h.dir.path().join("slow-relink.txt");
+    std::fs::write(&slow_relink_path, "revised book bytes").unwrap();
+    {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let app = h.app.handle().clone();
+        let doc_id = existing_id.clone();
+        let path = slow_relink_path.clone();
+
+        let worker = std::thread::spawn(move || {
+            relink_and_grant_with_hasher(&app, &doc_id, &path, |format, p| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(timeout)
+                    .expect("main thread should complete DB command and release hasher");
+                hash_document_for_relink(format, p)
+            })
+        });
+
+        entered_rx
+            .recv_timeout(timeout)
+            .expect("relink hasher should start");
+        h.ok(
+            "update_document_cursor",
+            json!({
+                "documentId": existing_id,
+                "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 7, "lineIndex": 0 },
+                "progress": 0.75,
+            }),
+        );
+        release_tx.send(()).unwrap();
+
+        let relinked = worker
+            .join()
+            .expect("relink worker should not panic")
+            .expect("relink_and_grant should succeed");
+        assert!(relinked.content_changed);
+        assert_eq!(relinked.document.title, "slow-relink");
+        assert!(h.asset_allowed(&slow_relink_path));
+    }
+
+    // 4. Concurrent registration of the same file while `relink_and_grant` is hashing
+    // is caught by the commit transaction's `file_hash` uniqueness recheck.
+    let colliding_path = h.dir.path().join("colliding.txt");
+    std::fs::write(&colliding_path, "colliding content").unwrap();
+    {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let app = h.app.handle().clone();
+        let doc_id = existing_id.clone();
+        let path = colliding_path.clone();
+
+        let worker = std::thread::spawn(move || {
+            relink_and_grant_with_hasher(&app, &doc_id, &path, |format, p| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(timeout)
+                    .expect("main thread should register colliding doc and release hasher");
+                hash_document_for_relink(format, p)
+            })
+        });
+
+        entered_rx
+            .recv_timeout(timeout)
+            .expect("relink collision hasher should start");
+        register_and_grant(h.app.handle(), &colliding_path).unwrap();
+        release_tx.send(()).unwrap();
+
+        let err = worker
+            .join()
+            .expect("relink collision worker should not panic")
+            .expect_err("commit should reject hash collision introduced during hashing");
+        assert_eq!(serde_json::to_value(err).unwrap()["code"], "invalid_graph");
+    }
 }
