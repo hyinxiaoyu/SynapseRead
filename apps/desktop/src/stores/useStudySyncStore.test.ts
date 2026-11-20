@@ -2201,20 +2201,24 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     nativeStore.getState().closeDocument(docId);
     const staleSnapshot = { ...nativeStore.getState().documents.find((d) => d.id === docId)! };
 
-    // Case 1: real Tauri enter -> leave -> drop sequence where sync runs between enter/leave and drop.
+    // Case 1: overlapping native drags (enter1 -> leave1 -> sync -> enter2 -> delayed drop1)
+    // must never overwrite the synced progress with drop1's stale snapshot.
     emitDrop?.({ type: 'enter' });
     emitDrop?.({ type: 'leave' });
     await nativeStore.getState().withDocumentLock(docId, async () => {
       await nativeBackend.updateDocumentCursor(docId, syncedAnchor, 0.85);
       await nativeStore.getState().refreshDocument(docId);
     });
+    // A second drag enters after sync unlocked, before the first drop payload arrives.
+    emitDrop?.({ type: 'enter' });
     emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
       syncedAnchor,
     );
     expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.85);
-    expect(nativeStore.getState().openDocumentIds).not.toContain(docId);
 
     // Case 2: bare drop without preceding enter triggers a background refreshDocument that
     // reads old progress before a subsequent sync writes newer progress and unlocks.

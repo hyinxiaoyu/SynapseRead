@@ -471,9 +471,6 @@ export function createStudySyncStore(backend: StudyBackend) {
       return status;
     };
 
-    /** Lock-epoch snapshot captured when a native file drag enters the window. */
-    let nativeDropLockEpochs: ReadonlyMap<string, number> | null = null;
-
     const applyOpenedDocuments = (
       opened: readonly StudyDocument[],
       error?: unknown,
@@ -503,14 +500,13 @@ export function createStudySyncStore(backend: StudyBackend) {
             continue;
           }
           const existing = documents.find((d) => d.id === document.id);
-          // For push-based native drop events without a preceding `enter` snapshot,
-          // keep the store's post-sync record instead of overwriting it with a
-          // potentially stale payload, and refresh from the backend.
-          const resolvedDocument =
-            epochsAtStart === undefined && existing !== undefined && currentEpoch > 0
-              ? existing
-              : document;
-          if (resolvedDocument === existing) {
+          // Native file-drop push events carry no request correlation and can overlap
+          // with subsequent drags or syncs. Never overwrite an existing store record
+          // with an untagged push payload; keep the current record and refresh from
+          // the backend under lock-epoch verification instead.
+          const isUntaggedPush = epochsAtStart === undefined;
+          const resolvedDocument = isUntaggedPush && existing !== undefined ? existing : document;
+          if (isUntaggedPush) {
             refreshAfterOpen.push(document.id);
           }
           documents = [...documents.filter((d) => d.id !== document.id), resolvedDocument];
@@ -595,17 +591,12 @@ export function createStudySyncStore(backend: StudyBackend) {
 
     backend.onFileDrop((event) => {
       if (event.type === 'enter') {
-        nativeDropLockEpochs = new Map(documentLockEpochs);
         set({ isDraggingFile: true });
       } else if (event.type === 'leave') {
-        // Keep `nativeDropLockEpochs` across `leave`: Tauri emits `leave` on
-        // `DRAG_DROP` before delivering the asynchronous `drop` payload.
         set({ isDraggingFile: false });
       } else {
-        const epochsAtStart = nativeDropLockEpochs;
-        nativeDropLockEpochs = null;
         set({ isDraggingFile: false });
-        applyOpenedDocuments(event.documents, event.error, epochsAtStart ?? undefined);
+        applyOpenedDocuments(event.documents, event.error);
       }
     });
 
