@@ -255,23 +255,43 @@ pub fn save_workspace_session(
     Ok(state.database()?.save_workspace_session(&session)?)
 }
 
-/// Reads the document record under a brief lock, then verifies `fs::metadata`
-/// and `hash_file` outside the database lock so large files do not stall other
-/// commands.
+/// Reads the document record under a brief lock, verifies `fs::metadata` and
+/// `hash_file` outside the database lock so large files do not stall other
+/// commands, then rechecks the database row under a brief lock before returning.
+/// If a concurrent relink changed `file_path` or `file_hash` while hashing was
+/// in flight, verification retries against the updated record instead of
+/// returning a stale status.
 pub(crate) fn verify_document_source_with_hasher<R, F>(
     app: &impl Manager<R>,
     document_id: &str,
-    hasher: F,
+    mut hasher: F,
 ) -> IpcResult<DocumentSourceStatus>
 where
     R: Runtime,
-    F: FnOnce(&Path) -> CoreResult<String>,
+    F: FnMut(&Path) -> CoreResult<String>,
 {
-    let document = app
+    const MAX_VERIFY_ATTEMPTS: usize = 8;
+
+    let mut snapshot = app
         .state::<AppState>()
         .database()?
         .get_document(document_id)?;
-    Ok(verify_document_file_with_hasher(&document, hasher)?)
+
+    for _ in 0..MAX_VERIFY_ATTEMPTS {
+        let result = verify_document_file_with_hasher(&snapshot, &mut hasher);
+        let current = app
+            .state::<AppState>()
+            .database()?
+            .get_document(document_id)?;
+        if current.file_path == snapshot.file_path && current.file_hash == snapshot.file_hash {
+            return Ok(result?);
+        }
+        snapshot = current;
+    }
+
+    Err(IpcError::internal(format!(
+        "document {document_id} changed repeatedly during verification"
+    )))
 }
 
 #[tauri::command]

@@ -1521,3 +1521,61 @@ fn database_commands_complete_while_file_hashing_is_in_progress() {
         assert_eq!(serde_json::to_value(err).unwrap()["code"], "invalid_graph");
     }
 }
+
+/// If a document is relinked while `verify_document_source` is hashing the old
+/// file outside `Mutex<Database>`, verification must detect the changed record
+/// and retry against the relinked file instead of returning a stale `Changed`.
+#[test]
+fn verify_document_source_rechecks_after_concurrent_relink() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use synapse_core::domain::DocumentSourceState;
+    use synapse_core::fs_reader::hash_file;
+
+    let h = Harness::new();
+    let doc = h.register("original.txt", "original content");
+    let doc_id = doc["id"].as_str().unwrap().to_owned();
+    let original_path = h.dir.path().join("original.txt");
+    std::fs::write(&original_path, "modified original content").unwrap();
+
+    let relinked_path = h.dir.path().join("relinked.txt");
+    std::fs::write(&relinked_path, "relinked valid content").unwrap();
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let timeout = Duration::from_secs(5);
+    let app = h.app.handle().clone();
+    let worker_doc_id = doc_id.clone();
+
+    let worker = std::thread::spawn(move || {
+        let mut attempts = 0usize;
+        let status = verify_document_source_with_hasher(&app, &worker_doc_id, |p| {
+            attempts += 1;
+            if attempts == 1 {
+                entered_tx.send(p.to_path_buf()).unwrap();
+                release_rx
+                    .recv_timeout(timeout)
+                    .expect("main thread should relink document and release hasher");
+            }
+            hash_file(p)
+        })?;
+        Ok::<_, crate::error::IpcError>((status, attempts))
+    });
+
+    let first_hashed_path = entered_rx
+        .recv_timeout(timeout)
+        .expect("verify hasher should start on original file");
+    assert_eq!(first_hashed_path, original_path);
+
+    let relinked = relink_and_grant(h.app.handle(), &doc_id, &relinked_path)
+        .expect("relink_and_grant should succeed while verify is paused");
+    release_tx.send(()).unwrap();
+
+    let (status, attempts) = worker
+        .join()
+        .expect("verify worker should not panic")
+        .expect("verify_document_source should succeed after retry");
+    assert_eq!(attempts, 2);
+    assert_eq!(status.state, DocumentSourceState::Ok);
+    assert_eq!(status.current_file_hash, Some(relinked.document.file_hash));
+}
