@@ -396,6 +396,15 @@ export function createStudySyncStore(backend: StudyBackend) {
     const getDocumentLockEpoch = (documentId: string): number =>
       documentLockEpochs.get(documentId) ?? 0;
 
+    const getDocumentRefreshSeq = (documentId: string): number =>
+      documentRefreshSeqs.get(documentId) ?? 0;
+
+    const nextDocumentRefreshSeq = (documentId: string): number => {
+      const next = getDocumentRefreshSeq(documentId) + 1;
+      documentRefreshSeqs.set(documentId, next);
+      return next;
+    };
+
     const acquireLock = (documentId: string): (() => void) => {
       documentLockEpochs.set(documentId, getDocumentLockEpoch(documentId) + 1);
       const nextCount = (documentLockCounts.get(documentId) ?? 0) + 1;
@@ -544,13 +553,20 @@ export function createStudySyncStore(backend: StudyBackend) {
       }
       // Native drop push events carry no request id and may race with sync or
       // move a known document to a new path. Read the authoritative DB rows
-      // under a lock-epoch snapshot before opening any tab so viewers always
-      // mount with both the latest filePath and the latest synced progress.
+      // under both a lock-epoch snapshot and per-document sequence numbers so
+      // out-of-order responses can never overwrite a newer path or synced state.
       const epochsAtStart = new Map(documentLockEpochs);
+      const seqsAtStart = new Map<string, number>();
+      for (const doc of dropped) {
+        seqsAtStart.set(doc.id, nextDocumentRefreshSeq(doc.id));
+      }
       void guarded(async () => {
         const allDocuments = await backend.listDocuments();
         const byId = new Map(allDocuments.map((doc) => [doc.id, doc]));
-        const resolved = dropped.map((doc) => byId.get(doc.id) ?? doc);
+        const resolved = dropped
+          .filter((doc) => getDocumentRefreshSeq(doc.id) === seqsAtStart.get(doc.id))
+          .map((doc) => byId.get(doc.id) ?? doc);
+        if (resolved.length === 0 && (error === undefined || error === null)) return;
         applyOpenedDocuments(resolved, error, epochsAtStart);
       });
     };
@@ -915,14 +931,13 @@ export function createStudySyncStore(backend: StudyBackend) {
       async refreshDocument(documentId) {
         const lockEpoch = getDocumentLockEpoch(documentId);
         const startedWhileLocked = isDocumentLocked(documentId);
-        const refreshSeq = (documentRefreshSeqs.get(documentId) ?? 0) + 1;
-        documentRefreshSeqs.set(documentId, refreshSeq);
+        const refreshSeq = nextDocumentRefreshSeq(documentId);
         let refreshed: StudyDocument | null = null;
         await guarded(async () => {
           const documents = await backend.listDocuments();
           if (
             getDocumentLockEpoch(documentId) !== lockEpoch ||
-            documentRefreshSeqs.get(documentId) !== refreshSeq ||
+            getDocumentRefreshSeq(documentId) !== refreshSeq ||
             (!startedWhileLocked && isDocumentLocked(documentId))
           ) {
             return;

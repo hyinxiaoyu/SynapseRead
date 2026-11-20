@@ -2320,6 +2320,72 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     listSpy.mockRestore();
   });
 
+  it('ignores an out-of-order earlier native drop listDocuments response so filePath does not regress', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    await nativeStore.getState().openDocument(); // b.epub
+    const epubId = nativeStore.getState().activeDocumentId as string;
+    const originalEpub = nativeStore.getState().documents.find((d) => d.id === epubId)!;
+    nativeStore.getState().closeDocument(epubId);
+
+    const existingDocs = await nativeBackend.listDocuments();
+    const firstMoved: StudyDocument = { ...originalEpub, filePath: '/moved-first/b.epub' };
+    const secondMoved: StudyDocument = { ...originalEpub, filePath: '/moved-second/b.epub' };
+
+    let resolveFirst!: (docs: StudyDocument[]) => void;
+    let resolveSecond!: (docs: StudyDocument[]) => void;
+    const listSpy = vi
+      .spyOn(nativeBackend, 'listDocuments')
+      .mockImplementationOnce(
+        () =>
+          new Promise<StudyDocument[]>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<StudyDocument[]>((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+
+    // Drop 1 starts, then Drop 2 starts before Drop 1's listDocuments() returns.
+    emitDrop?.({ type: 'drop', documents: [firstMoved], error: null });
+    emitDrop?.({ type: 'drop', documents: [secondMoved], error: null });
+
+    // Second response arrives first -> opens directly on the latest path.
+    resolveSecond(existingDocs.map((d) => (d.id === epubId ? secondMoved : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().openDocumentIds).toContain(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/moved-second/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    // Earlier response arrives late -> must be discarded without regressing filePath.
+    resolveFirst(existingDocs.map((d) => (d.id === epubId ? firstMoved : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/moved-second/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    listSpy.mockRestore();
+  });
+
   it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {
     const docA = await openDocument();
     const docB = await openDocument();
