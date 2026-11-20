@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { dispatchEscape } from '@/features/commands/escape';
 import { forgetRecentCommandRuns } from '@/features/commands/registry';
+import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
 import type { MenuItemState } from '@/lib/backend/types';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import {
@@ -301,6 +302,112 @@ describe('StudyWorkspace', () => {
       const notice = await screen.findByTestId('excerpt-added-notice');
       expect(notice).toBeVisible();
       expect(within(notice).queryByRole('status')).toBeNull();
+    });
+  });
+
+  describe('card deleted notice (#123)', () => {
+    const excerpt = async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Excerpt to MindMap' }));
+      await waitFor(() => expect(useStudySyncStore.getState().selectedNodeId).not.toBeNull());
+    };
+
+    it('gets its own node and timer when it replaces a fading excerpt notice, and Undo restores the card', async () => {
+      // Advancing with the clock keeps the memory backend's promises moving.
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        await renderReady();
+        const status = screen.getByTestId('card-deleted-status');
+        expect(status).toHaveTextContent('');
+        // MindMap hidden, Inspector open.
+        fireEvent.click(screen.getByRole('button', { name: 'Show inspector' }));
+        await excerpt();
+        const cardId = useStudySyncStore.getState().cards.at(-1)?.id;
+        const cardCount = useStudySyncStore.getState().cards.length;
+
+        const excerptNotice = await screen.findByTestId('excerpt-added-notice');
+        act(() => void vi.advanceTimersByTime(INFO_NOTICE_MS));
+        expect(excerptNotice).toHaveAttribute('data-fading', 'true');
+
+        fireEvent.click(screen.getByRole('button', { name: /Delete Card/ }));
+        const deletedNotice = await screen.findByTestId('card-deleted-notice');
+        expect(useStudySyncStore.getState().cards).toHaveLength(cardCount - 1);
+        expect(deletedNotice).not.toBe(excerptNotice);
+        expect(deletedNotice).not.toHaveAttribute('data-fading');
+        expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+        expect(screen.getByTestId('card-deleted-status')).toBe(status);
+        await waitFor(() => expect(status).toHaveTextContent('Card deleted'));
+
+        // Well past the excerpt notice's fade, Undo is still there.
+        act(() => void vi.advanceTimersByTime(NOTICE_FADE_MS * 2));
+        expect(screen.getByTestId('card-deleted-notice')).toBe(deletedNotice);
+        expect(deletedNotice).not.toHaveAttribute('data-fading');
+
+        fireEvent.click(within(deletedNotice).getByRole('button', { name: 'Undo' }));
+        await waitFor(() =>
+          expect(useStudySyncStore.getState().cards.map((card) => card.id)).toContain(cardId),
+        );
+        expect(useStudySyncStore.getState().cards).toHaveLength(cardCount);
+
+        // Its own timer: a full info interval, not what was left of the excerpt's.
+        fireEvent.click(screen.getByRole('button', { name: /Delete Card/ }));
+        const again = await screen.findByTestId('card-deleted-notice');
+        act(() => void vi.advanceTimersByTime(INFO_NOTICE_MS - 100));
+        expect(again).not.toHaveAttribute('data-fading');
+        act(() => void vi.advanceTimersByTime(200));
+        expect(again).toHaveAttribute('data-fading', 'true');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('shows Undo at once in focus mode, after a canvas Backspace on a map reopened from the toolbar', async () => {
+      // The canvas has a size, so React Flow lays out and the card can be focused.
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement,
+      ) {
+        const size = this.classList.contains('react-flow')
+          ? { width: 800, height: 600 }
+          : { width: 0, height: 0 };
+        return DOMRect.fromRect({ x: 0, y: 0, ...size });
+      });
+      await renderReady();
+      await excerpt();
+      const cardId = useStudySyncStore.getState().cards.at(-1)?.id;
+      const nodeId = useStudySyncStore.getState().selectedNodeId;
+      const cardCount = useStudySyncStore.getState().cards.length;
+
+      fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+      expect(useStudySyncStore.getState().immersive).toBe(true);
+      fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+      await screen.findByRole('button', { name: 'Hide MindMap' });
+
+      const card = await waitFor(() => {
+        const element = document.querySelector<HTMLElement>(
+          `.react-flow__node[data-id="${nodeId}"]`,
+        );
+        expect(element).not.toBeNull();
+        return element as HTMLElement;
+      });
+      card.focus();
+      fireEvent.keyDown(card, { key: 'Backspace', code: 'Backspace' });
+
+      const notice = await screen.findByTestId('card-deleted-notice');
+      expect(useStudySyncStore.getState().immersive).toBe(true);
+      expect(useStudySyncStore.getState().cards).toHaveLength(cardCount - 1);
+      expect(notice).toBeVisible();
+      expect(screen.getByRole('region', { name: 'Document reader' })).toContainElement(notice);
+      expect(screen.getByTestId('card-deleted-status')).toHaveTextContent('Card deleted');
+      // Focus mode still defers the excerpt notice; only the deletion shows.
+      expect(screen.queryByTestId('excerpt-added-notice')).not.toBeInTheDocument();
+
+      fireEvent.click(within(notice).getByRole('button', { name: 'Undo' }));
+      await waitFor(() =>
+        expect(useStudySyncStore.getState().cards.map((entry) => entry.id)).toContain(cardId),
+      );
+      expect(useStudySyncStore.getState().immersive).toBe(true);
+      expect(screen.queryByTestId('card-deleted-notice')).not.toBeInTheDocument();
     });
   });
 

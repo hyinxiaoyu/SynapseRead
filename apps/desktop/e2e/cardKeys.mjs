@@ -9,8 +9,14 @@ const INSPECTOR_TOGGLE = `document.querySelector('button[aria-label="Show inspec
  * real click, so focus lands where a reader's would), presses each key, and checks
  * that no card was deleted, the Inspector did not open, and focus never moved into
  * its Notes.
+ *
+ * `focus` names the element that must own focus before the keys are sent, so the
+ * check exercises that reader's key path and cannot pass with focus on `body` or
+ * a stray control. `selector` must match `document.activeElement` itself; with
+ * `within`, the active element only has to be inside it.
  */
-export async function assertCardKeysStayInReader(page, focusPoint, where) {
+export async function assertCardKeysStayInReader(page, focusPoint, where, focus) {
+  assert(focus?.selector, `an expected focus target is required for ${where}`);
   await page.waitFor(
     `Boolean(document.querySelector(${JSON.stringify(`${CARD_NODE}.selected`)}))`,
     `a selected card before pressing card keys in ${where}`,
@@ -21,15 +27,21 @@ export async function assertCardKeysStayInReader(page, focusPoint, where) {
   })`);
 
   await page.click(focusPoint);
-  const focus = await page.evaluate(`(() => {
+  const actual = await page.evaluate(`(() => {
     const active = document.activeElement;
+    const selector = ${JSON.stringify(focus.selector)};
     return {
+      expected: Boolean(${focus.within ? 'active?.closest(selector)' : 'active?.matches(selector)'}),
       onCanvas: Boolean(active?.closest('.react-flow')),
       tag: active?.tagName ?? null,
       testId: active?.closest('[data-testid]')?.getAttribute('data-testid') ?? null,
     };
   })()`);
-  assert(!focus.onCanvas, `focus must be in ${where}, not on the canvas: ${JSON.stringify(focus)}`);
+  assert(
+    actual.expected && !actual.onCanvas,
+    `focus must be on ${focus.within ? 'something inside ' : ''}${focus.selector} in ${where} ` +
+      `before the card keys: ${JSON.stringify(actual)}`,
+  );
 
   for (const key of ['Backspace', 'Delete', 'Enter']) {
     await page.press(key);

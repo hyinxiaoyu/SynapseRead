@@ -99,7 +99,18 @@ class TabErrorBoundary extends Component<TabErrorBoundaryProps, TabErrorBoundary
   }
 }
 
-export function ReaderPane({ notice }: { notice?: ReactNode }) {
+/**
+ * `notice` waits while focus mode keeps the page clear. `immediateNotice` is for
+ * one whose action only helps right now (a deletion's Undo), so it shows in
+ * focus mode too.
+ */
+export function ReaderPane({
+  notice,
+  immediateNotice,
+}: {
+  notice?: ReactNode;
+  immediateNotice?: ReactNode;
+}) {
   const documents = useStudySyncStore((state) => state.documents);
   const openDocumentIds = useStudySyncStore((state) => state.openDocumentIds);
   const activeDocumentId = useStudySyncStore((state) => state.activeDocumentId);
@@ -141,6 +152,14 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
   const activeDocument = openDocuments.find((document) => document.id === activeDocumentId);
   const activeViewerLayer =
     activeDocumentId !== null ? (viewerLayers[activeDocumentId] ?? null) : null;
+  const deferredNotice = immersive ? null : notice;
+  const shownNotices =
+    deferredNotice || immediateNotice ? (
+      <>
+        {deferredNotice}
+        {immediateNotice}
+      </>
+    ) : null;
   const canReopenClosedTab =
     selectReopenableDocumentId(closedDocumentIds, openDocumentIds, documents) !== null;
 
@@ -416,12 +435,11 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
             )}
           </div>
         )}
-        {notice &&
-          !immersive &&
-          (activeViewerLayer ? (
-            createPortal(notice, activeViewerLayer)
+        {shownNotices &&
+          (activeViewerLayer && !immersive ? (
+            createPortal(shownNotices, activeViewerLayer)
           ) : (
-            <ReaderPopoverLayer hidden={immersive}>{notice}</ReaderPopoverLayer>
+            <ReaderPopoverLayer>{shownNotices}</ReaderPopoverLayer>
           ))}
       </div>
     </section>

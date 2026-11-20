@@ -121,7 +121,10 @@ export async function pdfFlow(page) {
   // on the PDF page must neither delete the card nor move focus into its Notes (#123).
   const plainText = await page.textRect(TEXT, 'lazy dog');
   assert(plainText, 'the PDF text layer shows "lazy dog"');
-  await assertCardKeysStayInReader(page, plainText.end, 'the PDF page');
+  // The PDF scroll container, not its text layer, takes focus on a click.
+  await assertCardKeysStayInReader(page, plainText.end, 'the PDF page', {
+    selector: '[data-testid="pdf-scroll"]',
+  });
 
   // A non-embedded CJK font only produces this text if the CMap files load. Whether its
   // glyphs then draw depends on the machine's fonts, so that is not asserted here.

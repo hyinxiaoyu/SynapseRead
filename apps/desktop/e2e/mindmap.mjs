@@ -58,7 +58,9 @@ export async function mindmapFlow(page) {
   // the reading page stay the reader's: the card survives and the Inspector stays
   // closed (#123).
   const plainText = await page.textRect(SEGMENT, 'lazy dog');
-  await assertCardKeysStayInReader(page, plainText.end, 'the TXT page');
+  await assertCardKeysStayInReader(page, plainText.end, 'the TXT page', {
+    selector: '[data-testid="txt-scroll"]',
+  });
   const readerFocus = await page.evaluate(
     `document.activeElement?.closest('[data-testid="txt-scroll"]') !== null`,
   );
@@ -68,7 +70,10 @@ export async function mindmapFlow(page) {
   // remove the highlight: the card must survive (#123).
   const highlight = await page.textRect(SEGMENT, 'brown');
   assert(highlight, 'the excerpted text is still rendered');
-  await assertCardKeysStayInReader(page, highlight.start, 'the TXT highlight popover');
+  // The popover opens without taking focus; the page keeps it.
+  await assertCardKeysStayInReader(page, highlight.start, 'the TXT highlight popover', {
+    selector: '[data-testid="txt-scroll"]',
+  });
   assert(
     await page.evaluate(`Boolean(document.querySelector('[data-reader-popover]'))`),
     "the highlight's popover should be open while the keys are pressed",
@@ -149,9 +154,17 @@ export async function mindmapFlow(page) {
     `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 0`,
     'card to be deleted from context menu',
   );
-  // A deletion is never silent: a polite notice offers Undo (#123).
+  // A deletion is never silent: a notice offers Undo, and the polite live region
+  // that was mounted empty at startup announces it (#123).
   await page.waitFor(
-    `document.querySelector('[data-testid="card-deleted-notice"] [role="status"]')?.textContent === 'Card deleted'`,
+    `(() => {
+      const notice = document.querySelector('[data-testid="card-deleted-notice"]');
+      const status = document.querySelector('[data-testid="card-deleted-status"]');
+      return notice?.textContent?.includes('Card deleted') &&
+        !notice.querySelector('[role="status"]') &&
+        status?.getAttribute('role') === 'status' &&
+        status.textContent === 'Card deleted';
+    })()`,
     'a Card deleted notice after deleting from the context menu',
   );
   await page.waitFor(

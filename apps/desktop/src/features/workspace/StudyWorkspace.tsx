@@ -31,6 +31,7 @@ import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolve
 import { UnifiedToolbar } from '@/features/workspace/UnifiedToolbar';
 import { SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
 import { flushBeforeClose } from '@/lib/flushBeforeClose';
+import { announceInLiveRegion } from '@/lib/liveRegion';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { WorkspacePaneLayout } from '@/types/domain';
 
@@ -152,17 +153,7 @@ export function StudyWorkspace() {
   useEffect(() => {
     const statusNode = excerptStatusRef.current;
     if (!statusNode || !ready || excerptNonce === 0) return;
-    // Keep one live region mounted from startup and clear before re-populating so
-    // consecutive excerpts with identical text still trigger an announcement.
-    if (statusNode.textContent === '') {
-      statusNode.textContent = 'Added to MindMap';
-      return;
-    }
-    statusNode.textContent = '';
-    const timer = window.setTimeout(() => {
-      if (excerptStatusRef.current) excerptStatusRef.current.textContent = 'Added to MindMap';
-    }, 30);
-    return () => window.clearTimeout(timer);
+    return announceInLiveRegion(statusNode, 'Added to MindMap');
   }, [ready, excerptNonce]);
 
   // The webview's own context menu is a browser's, not the app's: it acts on the
@@ -401,9 +392,11 @@ export function StudyWorkspace() {
   // A card the collapsed MindMap could not show: say it was added, and offer to
   // open the map at it. An open map reveals it itself.
   const pendingReveal = ready && !mindMapOpen ? revealRequest : null;
+  // Both notices share one stack, so their keys are namespaced: a shared key
+  // would hand the deletion notice the excerpt notice's node and its fade timer.
   const excerptNotice = pendingReveal ? (
     <ReaderNotice
-      key={pendingReveal.nonce}
+      key={`excerpt-${pendingReveal.nonce}`}
       tone="info"
       testId="excerpt-added-notice"
       announce={false}
@@ -419,14 +412,7 @@ export function StudyWorkspace() {
       Added to MindMap
     </ReaderNotice>
   ) : null;
-  const cardDeletedNotice = useCardDeletedNotice();
-  const readerNotices =
-    excerptNotice || cardDeletedNotice ? (
-      <>
-        {excerptNotice}
-        {cardDeletedNotice}
-      </>
-    ) : null;
+  const cardDeleted = useCardDeletedNotice();
 
   const panelDefaultLayout = initialLayout ?? { reader: 100, mindmap: 0, inspector: 0 };
 
@@ -539,7 +525,11 @@ export function StudyWorkspace() {
                 defaultSize={`${panelDefaultLayout.reader}%`}
                 minSize={`${MIN_READER_SIZE}%`}
               >
-                <ReaderPane notice={readerNotices} />
+                <ReaderPane
+                  notice={excerptNotice}
+                  // Undo is only useful now, so it does not wait for focus mode to end.
+                  immediateNotice={cardDeleted.notice}
+                />
               </ResizablePanel>
               <ResizableHandle />
               <ResizablePanel
@@ -582,6 +572,7 @@ export function StudyWorkspace() {
           aria-atomic="true"
           className="sr-only"
         />
+        {cardDeleted.liveRegion}
       </main>
     </ToolbarSlotsContext.Provider>
   );

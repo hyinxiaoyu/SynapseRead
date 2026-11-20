@@ -170,7 +170,10 @@ export async function epubFlow(page) {
   // Keys pressed inside the chapter frame are forwarded to the app, but Backspace,
   // Delete, and Return there must not act on the card the excerpt selected (#123).
   const plainText = await textPoints(page, 'lazy dog');
-  await assertCardKeysStayInReader(page, plainText.end, 'the EPUB chapter frame');
+  // The chapter iframe itself owns focus, so the keys take the forwarded route.
+  await assertCardKeysStayInReader(page, plainText.end, 'the EPUB chapter frame', {
+    selector: '[data-testid="epub-host"] iframe',
+  });
 
   // Multibyte text in another paragraph.
   await excerpt(page, '汉字');
