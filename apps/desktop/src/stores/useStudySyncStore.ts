@@ -379,11 +379,22 @@ export function createStudySyncStore(backend: StudyBackend) {
     const viewerUnmountWaiters = new Map<string, Set<() => void>>();
     /** Reference-counted reopen locks, by document id. */
     const documentLockCounts = new Map<string, number>();
+    /**
+     * Monotonic counter incremented whenever a lock is acquired for a document.
+     * In-flight async requests capture the epoch before awaiting backend I/O so
+     * a response that started before a close-and-apply cycle cannot overwrite
+     * refreshed state after the lock is released.
+     */
+    const documentLockEpochs = new Map<string, number>();
 
     const isDocumentLocked = (documentId: string): boolean =>
       (documentLockCounts.get(documentId) ?? 0) > 0;
 
+    const getDocumentLockEpoch = (documentId: string): number =>
+      documentLockEpochs.get(documentId) ?? 0;
+
     const acquireLock = (documentId: string): (() => void) => {
+      documentLockEpochs.set(documentId, getDocumentLockEpoch(documentId) + 1);
       const nextCount = (documentLockCounts.get(documentId) ?? 0) + 1;
       documentLockCounts.set(documentId, nextCount);
       if (nextCount === 1) {
@@ -436,9 +447,14 @@ export function createStudySyncStore(backend: StudyBackend) {
       documentId: string,
     ): Promise<DocumentSourceStatus | null> => {
       if (!get().documents.some((doc) => doc.id === documentId)) return null;
+      const lockEpoch = getDocumentLockEpoch(documentId);
       let status: DocumentSourceStatus | null = null;
       await guarded(async () => {
         status = await backend.verifyDocumentSource(documentId);
+        if (isDocumentLocked(documentId) || getDocumentLockEpoch(documentId) !== lockEpoch) {
+          status = null;
+          return;
+        }
         if (status) {
           const resolved = status;
           set((state) => ({
@@ -660,13 +676,17 @@ export function createStudySyncStore(backend: StudyBackend) {
       async reopenRecentDocument(documentId) {
         if (isDocumentLocked(documentId)) return;
         if (!get().documents.some((doc) => doc.id === documentId)) return;
+        const lockEpoch = getDocumentLockEpoch(documentId);
         await guarded(async () => {
           const [touched, status] = await Promise.all([
             backend.touchDocumentOpened(documentId),
             backend.verifyDocumentSource(documentId),
           ]);
-          // A close-and-apply lock may have been acquired while awaiting backend I/O.
-          if (isDocumentLocked(documentId)) return;
+          // A close-and-apply lock may have been acquired (and even released)
+          // while awaiting backend I/O, invalidating the pre-lock snapshot.
+          if (isDocumentLocked(documentId) || getDocumentLockEpoch(documentId) !== lockEpoch) {
+            return;
+          }
           set((state) => ({
             documents: state.documents.map((doc) => (doc.id === documentId ? touched : doc)),
             documentSourceStatuses: {

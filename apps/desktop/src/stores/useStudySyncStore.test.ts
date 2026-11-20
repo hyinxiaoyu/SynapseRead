@@ -7,6 +7,7 @@ import {
   DEFAULT_PDF_LAYOUT,
   type PdfLayout,
   type ReaderSelection,
+  type StudyDocument,
   type TxtAnchor,
 } from '@/types/domain';
 
@@ -2025,6 +2026,66 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(state().lockedDocumentIds).not.toContain(docId);
     await state().reopenClosedDocument();
     expect(state().openDocumentIds).toContain(docId);
+  });
+
+  it('invalidates an in-flight reopenRecentDocument when a lock is acquired and released before its stale response returns', async () => {
+    const docId = await openDocument();
+    const oldAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 1,
+      rects: [{ x: 0, y: 0.1, width: 0.5, height: 0.05 }],
+    };
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 9,
+      rects: [{ x: 0, y: 0.4, width: 0.5, height: 0.05 }],
+    };
+
+    await backend.updateDocumentCursor(docId, oldAnchor, 0.1);
+    await state().refreshDocument(docId);
+    state().closeDocument(docId);
+
+    // Capture the pre-sync snapshot and delay touchDocumentOpened so sync can
+    // acquire the lock, apply new progress, refresh the store, and unlock first.
+    const staleSnapshot = {
+      ...state().documents.find((d) => d.id === docId)!,
+      lastOpenedAt: '2026-11-20T12:00:00Z',
+    };
+    let resolveStaleTouch!: (doc: StudyDocument) => void;
+    const touchSpy = vi.spyOn(backend, 'touchDocumentOpened').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument>((resolve) => {
+          resolveStaleTouch = resolve;
+        }),
+    );
+
+    const staleReopen = state().reopenRecentDocument(docId);
+    await Promise.resolve();
+
+    // Sync runs end-to-end (lock -> update DB -> refresh store -> unlock) while
+    // the old reopenRecentDocument request is still in flight.
+    await state().withDocumentLock(docId, async () => {
+      await backend.updateDocumentCursor(docId, syncedAnchor, 0.9);
+      await state().refreshDocument(docId);
+    });
+    expect(state().lockedDocumentIds).not.toContain(docId);
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
+
+    // Now the stale response returns after the lock has already been released.
+    resolveStaleTouch(staleSnapshot);
+    await staleReopen;
+
+    // The stale snapshot must not overwrite the synced progress or reopen the tab.
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(state().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.9);
+    expect(state().openDocumentIds).not.toContain(docId);
+
+    touchSpy.mockRestore();
+
+    // A fresh reopen after sync succeeds with the synced progress intact.
+    await state().reopenRecentDocument(docId);
+    expect(state().openDocumentIds).toContain(docId);
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
   });
 
   it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {
