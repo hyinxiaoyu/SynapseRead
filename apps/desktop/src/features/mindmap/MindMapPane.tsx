@@ -211,6 +211,12 @@ export function MindMapPane({
       : undefined;
   };
 
+  // Bare Return and Backspace act on a card only when pressed on the canvas; in
+  // the reader, sidebar, or toolbar they belong there, whatever card an excerpt
+  // just selected (#123). The context menu, Inspector, and Edit menu still reach
+  // the selected card.
+  const canvasKeyboardScope = () => (open ? sectionRef.current : null);
+
   useCommands({
     'edit.editCard': {
       run: () => {
@@ -218,6 +224,7 @@ export function MindMapPane({
         if (target) inspectNode(target.id);
       },
       enabled: open && (activeFocusedNode !== undefined || selectedNode !== undefined),
+      keyboardScope: canvasKeyboardScope,
     },
     'edit.deleteCard': {
       run: () => {
@@ -230,6 +237,7 @@ export function MindMapPane({
       enabled:
         (open && activeFocusedNode !== undefined) ||
         ((open || inspectorOpen) && selectedNode !== undefined),
+      keyboardScope: canvasKeyboardScope,
     },
   });
   // Register Undo Delete Card as its own active-gated layer so deleting a card

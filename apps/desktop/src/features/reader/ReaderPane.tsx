@@ -18,6 +18,7 @@ import { isEditableShortcutTarget, useCommands } from '@/features/commands/regis
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { requestActivePageFocus } from '@/features/reader/focusPage';
 import { ReaderPopoverLayer, ReaderPopoverSlotProvider } from '@/features/reader/ReaderNotice';
+import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { documentFormatLabel, SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
 import { cn, describeError } from '@/lib/utils';
@@ -99,7 +100,18 @@ class TabErrorBoundary extends Component<TabErrorBoundaryProps, TabErrorBoundary
   }
 }
 
-export function ReaderPane({ notice }: { notice?: ReactNode }) {
+/**
+ * `notice` waits while focus mode keeps the page clear. `immediateNotice` is for
+ * one whose action only helps right now (a deletion's Undo), so it shows in
+ * focus mode too.
+ */
+export function ReaderPane({
+  notice,
+  immediateNotice,
+}: {
+  notice?: ReactNode;
+  immediateNotice?: ReactNode;
+}) {
   const documents = useStudySyncStore((state) => state.documents);
   const openDocumentIds = useStudySyncStore((state) => state.openDocumentIds);
   const activeDocumentId = useStudySyncStore((state) => state.activeDocumentId);
@@ -141,6 +153,14 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
   const activeDocument = openDocuments.find((document) => document.id === activeDocumentId);
   const activeViewerLayer =
     activeDocumentId !== null ? (viewerLayers[activeDocumentId] ?? null) : null;
+  const deferredNotice = immersive ? null : notice;
+  const shownNotices =
+    deferredNotice || immediateNotice ? (
+      <>
+        {deferredNotice}
+        {immediateNotice}
+      </>
+    ) : null;
   const canReopenClosedTab =
     selectReopenableDocumentId(closedDocumentIds, openDocumentIds, documents) !== null;
 
@@ -416,12 +436,13 @@ export function ReaderPane({ notice }: { notice?: ReactNode }) {
             )}
           </div>
         )}
-        {notice &&
-          !immersive &&
-          (activeViewerLayer ? (
-            createPortal(notice, activeViewerLayer)
+        {shownNotices &&
+          (activeViewerLayer && !immersive ? (
+            createPortal(shownNotices, activeViewerLayer)
           ) : (
-            <ReaderPopoverLayer hidden={immersive}>{notice}</ReaderPopoverLayer>
+            <ReaderPopoverLayer topOffset={immersive ? TOOLBAR_HEIGHT_PX : 0}>
+              {shownNotices}
+            </ReaderPopoverLayer>
           ))}
       </div>
     </section>

@@ -115,4 +115,15 @@ describe('ReaderNotice', () => {
     act(() => vi.advanceTimersByTime(NOTICE_FADE_MS));
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
+
+  it('clears a top overlay when given topOffset', () => {
+    render(
+      <ReaderPopoverLayer topOffset={48}>
+        <ReaderNotice tone="info" testId="offset-notice" onDismiss={vi.fn()}>
+          Card deleted
+        </ReaderNotice>
+      </ReaderPopoverLayer>,
+    );
+    expect(screen.getByTestId('offset-notice').parentElement).toHaveStyle({ top: '56px' });
+  });
 });

@@ -1,3 +1,4 @@
+import { assertCardKeysStayInReader } from './cardKeys.mjs';
 import { assert } from './harness.mjs';
 
 // Issues #116–#120: empty canvas onboarding hint, opening Inspector from a card,
@@ -52,6 +53,32 @@ export async function mindmapFlow(page) {
     ),
     'excerpting should not auto-open the Inspector',
   );
+
+  // 2b. The excerpt selected its card, but Backspace, Delete, and Return pressed on
+  // the reading page stay the reader's: the card survives and the Inspector stays
+  // closed (#123).
+  const plainText = await page.textRect(SEGMENT, 'lazy dog');
+  await assertCardKeysStayInReader(page, plainText.end, 'the TXT page', {
+    selector: '[data-testid="txt-scroll"]',
+  });
+  const readerFocus = await page.evaluate(
+    `document.activeElement?.closest('[data-testid="txt-scroll"]') !== null`,
+  );
+  assert(readerFocus, 'clicking plain text should leave focus on the TXT page');
+
+  // The same with the highlight's popover open, where a reader might press Delete to
+  // remove the highlight: the card must survive (#123).
+  const highlight = await page.textRect(SEGMENT, 'brown');
+  assert(highlight, 'the excerpted text is still rendered');
+  // The popover opens without taking focus; the page keeps it.
+  await assertCardKeysStayInReader(page, highlight.start, 'the TXT highlight popover', {
+    selector: '[data-testid="txt-scroll"]',
+  });
+  assert(
+    await page.evaluate(`Boolean(document.querySelector('[data-reader-popover]'))`),
+    "the highlight's popover should be open while the keys are pressed",
+  );
+  await page.press('Escape');
 
   // 3. Double-clicking the card opens the Inspector and focuses Notes (#119).
   const center = await cardCenter(page);
@@ -126,6 +153,19 @@ export async function mindmapFlow(page) {
   await page.waitFor(
     `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 0`,
     'card to be deleted from context menu',
+  );
+  // A deletion is never silent: a notice offers Undo, and the polite live region
+  // that was mounted empty at startup announces it (#123).
+  await page.waitFor(
+    `(() => {
+      const notice = document.querySelector('[data-testid="card-deleted-notice"]');
+      const status = document.querySelector('[data-testid="card-deleted-status"]');
+      return notice?.textContent?.includes('Card deleted') &&
+        !notice.querySelector('[role="status"]') &&
+        status?.getAttribute('role') === 'status' &&
+        status.textContent === 'Card deleted';
+    })()`,
+    'a Card deleted notice after deleting from the context menu',
   );
   await page.waitFor(
     `Boolean(document.querySelector('[data-testid="mindmap-empty-hint"]'))`,
@@ -206,4 +246,69 @@ export async function mindmapFlow(page) {
     distinctPositions === 3,
     `expected 3 distinct card positions after deleting middle root and excerpting again, got ${distinctPositions}`,
   );
+
+  // 11. In Focus Mode with the overlay toolbar still expanded, deleting a card
+  // shows the Undo notice below the toolbar so a real click hits Undo, not the toolbar.
+  await page.clickButton('Enter focus mode');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"]')?.dataset.immersive === 'true'`,
+    'focus mode to activate',
+  );
+  await page.clickButton('Show MindMap');
+  await page.waitFor(
+    `Boolean(document.querySelector('button[aria-label="Hide MindMap"]')) && Boolean(document.querySelector(${JSON.stringify(CARD_NODE)}))`,
+    'MindMap to reopen in focus mode',
+  );
+  const focusCard = await cardCenter(page);
+  assert(focusCard, 'card should be visible in reopened MindMap');
+  await page.click(focusCard);
+  await page.press('Backspace');
+  await page.waitFor(
+    `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 2`,
+    'Backspace to delete the focused card in focus mode',
+  );
+  const hitCheck = await page.waitFor(
+    `(() => {
+      const toolbar = document.querySelector('[data-testid="unified-toolbar"]');
+      const notice = document.querySelector('[data-testid="card-deleted-notice"]');
+      if (!toolbar || !notice) return null;
+      const undo = [...notice.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Undo');
+      if (!undo) return null;
+      const toolbarRect = toolbar.getBoundingClientRect();
+      const noticeRect = notice.getBoundingClientRect();
+      const undoRect = undo.getBoundingClientRect();
+      if (undoRect.width === 0 || undoRect.height === 0) return null;
+      const center = { x: undoRect.left + undoRect.width / 2, y: undoRect.top + undoRect.height / 2 };
+      const topEl = document.elementFromPoint(center.x, center.y);
+      return {
+        toolbarHidden: toolbar.dataset.hidden === 'true',
+        clearsToolbar: noticeRect.top >= toolbarRect.bottom,
+        undoHit: undo.contains(topEl),
+        hitTag: topEl?.tagName ?? null,
+        hitLabel: topEl?.getAttribute('aria-label') ?? topEl?.textContent?.trim() ?? null,
+        noticeTop: noticeRect.top,
+        toolbarBottom: toolbarRect.bottom,
+      };
+    })()`,
+    'card-deleted notice and Undo button in focus mode',
+  );
+  assert(
+    !hitCheck.toolbarHidden,
+    'expected the focus mode toolbar to still be expanded when Undo appeared',
+  );
+  assert(
+    hitCheck.clearsToolbar && hitCheck.undoHit,
+    `Undo in focus mode must sit below the expanded toolbar and receive pointer hits: ${JSON.stringify(hitCheck)}`,
+  );
+  await page.clickButton('Undo');
+  await page.waitFor(
+    `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 3`,
+    'Undo click in focus mode to restore the deleted card',
+  );
+  await page.waitFor(
+    `!document.querySelector('[data-testid="card-deleted-notice"]')`,
+    'card-deleted notice to clear after Undo',
+  );
+  assert(await page.inFocusMode(), 'Undo should keep Focus Mode active');
+  await page.clickButton('Exit focus mode');
 }
