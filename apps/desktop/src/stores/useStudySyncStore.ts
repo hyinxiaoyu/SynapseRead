@@ -468,8 +468,16 @@ export function createStudySyncStore(backend: StudyBackend) {
       return status;
     };
 
-    const applyOpenedDocuments = (opened: readonly StudyDocument[], error?: unknown) => {
+    /** Lock-epoch snapshot captured when a native file drag enters the window. */
+    let nativeDropLockEpochs: ReadonlyMap<string, number> | null = null;
+
+    const applyOpenedDocuments = (
+      opened: readonly StudyDocument[],
+      error?: unknown,
+      epochsAtStart?: ReadonlyMap<string, number>,
+    ) => {
       let openedUnlockedCount = 0;
+      const refreshAfterOpen: string[] = [];
       set((state) => {
         let documents = state.documents;
         let openDocumentIds = state.openDocumentIds;
@@ -482,17 +490,37 @@ export function createStudySyncStore(backend: StudyBackend) {
             }
             continue;
           }
-          documents = [...documents.filter((d) => d.id !== document.id), document];
+          const currentEpoch = getDocumentLockEpoch(document.id);
+          if (
+            epochsAtStart !== undefined &&
+            currentEpoch !== (epochsAtStart.get(document.id) ?? 0)
+          ) {
+            // A close-and-apply lock was acquired (and possibly released) while this
+            // open/drop request was in flight, invalidating the pre-lock snapshot.
+            continue;
+          }
+          const existing = documents.find((d) => d.id === document.id);
+          // For push-based native drop events without a preceding `enter` snapshot,
+          // keep the store's post-sync record instead of overwriting it with a
+          // potentially stale payload, and refresh from the backend.
+          const resolvedDocument =
+            epochsAtStart === undefined && existing !== undefined && currentEpoch > 0
+              ? existing
+              : document;
+          if (resolvedDocument === existing) {
+            refreshAfterOpen.push(document.id);
+          }
+          documents = [...documents.filter((d) => d.id !== document.id), resolvedDocument];
           if (!openDocumentIds.includes(document.id)) {
             openDocumentIds = [...openDocumentIds, document.id];
           }
           documentSourceStatuses[document.id] = {
             documentId: document.id,
             state: 'ok',
-            currentFileHash: document.fileHash,
+            currentFileHash: resolvedDocument.fileHash,
             fileSizeBytes: null,
           };
-          unlockedOpened.push(document);
+          unlockedOpened.push(resolvedDocument);
         }
         openedUnlockedCount = unlockedOpened.length;
         const lastOpened = unlockedOpened.at(-1);
@@ -510,6 +538,9 @@ export function createStudySyncStore(backend: StudyBackend) {
         };
       });
       if (openedUnlockedCount > 0) persistSession();
+      for (const id of refreshAfterOpen) {
+        void get().refreshDocument(id);
+      }
     };
 
     // Leaving full screen by any other route (the window's button, View ▸ Exit Full
@@ -561,12 +592,16 @@ export function createStudySyncStore(backend: StudyBackend) {
 
     backend.onFileDrop((event) => {
       if (event.type === 'enter') {
+        nativeDropLockEpochs = new Map(documentLockEpochs);
         set({ isDraggingFile: true });
       } else if (event.type === 'leave') {
+        nativeDropLockEpochs = null;
         set({ isDraggingFile: false });
       } else {
+        const epochsAtStart = nativeDropLockEpochs;
+        nativeDropLockEpochs = null;
         set({ isDraggingFile: false });
-        applyOpenedDocuments(event.documents, event.error);
+        applyOpenedDocuments(event.documents, event.error, epochsAtStart ?? undefined);
       }
     });
 
@@ -666,10 +701,11 @@ export function createStudySyncStore(backend: StudyBackend) {
       dismissError: () => set({ error: null }),
 
       async openDocument() {
+        const epochsAtStart = new Map(documentLockEpochs);
         await guarded(async () => {
           const document = await backend.pickDocument();
           if (document === null) return;
-          applyOpenedDocuments([document]);
+          applyOpenedDocuments([document], undefined, epochsAtStart);
         });
       },
 
@@ -752,9 +788,10 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async dropFiles(files) {
         if (files.length === 0) return;
+        const epochsAtStart = new Map(documentLockEpochs);
         await guarded(async () => {
           const { documents, error } = await backend.dropFiles(files);
-          applyOpenedDocuments(documents, error);
+          applyOpenedDocuments(documents, error, epochsAtStart);
         });
       },
 

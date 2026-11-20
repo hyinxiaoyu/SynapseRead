@@ -2088,6 +2088,142 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
   });
 
+  it('invalidates stale file-picker and browser drop snapshots when a lock is acquired and released in flight', async () => {
+    const docId = await openDocument();
+    const oldAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 1,
+      rects: [{ x: 0, y: 0.1, width: 0.5, height: 0.05 }],
+    };
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 7,
+      rects: [{ x: 0, y: 0.3, width: 0.5, height: 0.05 }],
+    };
+
+    await backend.updateDocumentCursor(docId, oldAnchor, 0.15);
+    await state().refreshDocument(docId);
+    state().closeDocument(docId);
+    const staleSnapshot = { ...state().documents.find((d) => d.id === docId)! };
+
+    // 1) File picker starts before sync, returns stale snapshot after sync unlocks.
+    let resolvePick!: (doc: StudyDocument | null) => void;
+    const pickSpy = vi.spyOn(backend, 'pickDocument').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument | null>((resolve) => {
+          resolvePick = resolve;
+        }),
+    );
+
+    const stalePick = state().openDocument();
+    await Promise.resolve();
+
+    await state().withDocumentLock(docId, async () => {
+      await backend.updateDocumentCursor(docId, syncedAnchor, 0.75);
+      await state().refreshDocument(docId);
+    });
+    expect(state().lockedDocumentIds).not.toContain(docId);
+
+    resolvePick(staleSnapshot);
+    await stalePick;
+
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(state().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.75);
+    expect(state().openDocumentIds).not.toContain(docId);
+
+    // 2) Browser drop starts before a second sync, returns stale snapshot after sync unlocks.
+    const newerAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 12,
+      rects: [{ x: 0, y: 0.6, width: 0.5, height: 0.05 }],
+    };
+    let resolveDrop!: (result: Awaited<ReturnType<StudyBackend['dropFiles']>>) => void;
+    const dropSpy = vi.spyOn(backend, 'dropFiles').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveDrop = resolve;
+        }),
+    );
+
+    const staleDrop = state().dropFiles([new File(['data'], 'a.pdf')]);
+    await Promise.resolve();
+
+    await state().withDocumentLock(docId, async () => {
+      await backend.updateDocumentCursor(docId, newerAnchor, 0.92);
+      await state().refreshDocument(docId);
+    });
+
+    resolveDrop({ documents: [staleSnapshot], error: null });
+    await staleDrop;
+
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(newerAnchor);
+    expect(state().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.92);
+    expect(state().openDocumentIds).not.toContain(docId);
+
+    // A fresh file-picker open after sync succeeds with the synced document.
+    const freshSyncedDoc = { ...state().documents.find((d) => d.id === docId)! };
+    pickSpy.mockResolvedValueOnce(freshSyncedDoc);
+    await state().openDocument();
+    expect(state().openDocumentIds).toContain(docId);
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(newerAnchor);
+
+    pickSpy.mockRestore();
+    dropSpy.mockRestore();
+  });
+
+  it('prevents stale native onFileDrop snapshots from regressing synced progress', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument();
+    const docId = nativeStore.getState().activeDocumentId as string;
+
+    const oldAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 2,
+      rects: [{ x: 0, y: 0.2, width: 0.5, height: 0.05 }],
+    };
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 10,
+      rects: [{ x: 0, y: 0.5, width: 0.5, height: 0.05 }],
+    };
+
+    await nativeBackend.updateDocumentCursor(docId, oldAnchor, 0.2);
+    await nativeStore.getState().refreshDocument(docId);
+    nativeStore.getState().closeDocument(docId);
+    const staleSnapshot = { ...nativeStore.getState().documents.find((d) => d.id === docId)! };
+
+    // Case 1: drag enters before sync, sync locks & unlocks, drop arrives with stale snapshot.
+    emitDrop?.({ type: 'enter' });
+    await nativeStore.getState().withDocumentLock(docId, async () => {
+      await nativeBackend.updateDocumentCursor(docId, syncedAnchor, 0.85);
+      await nativeStore.getState().refreshDocument(docId);
+    });
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
+      syncedAnchor,
+    );
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.85);
+    expect(nativeStore.getState().openDocumentIds).not.toContain(docId);
+
+    // Case 2: bare drop without preceding enter carrying a stale snapshot still preserves synced progress.
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    await Promise.resolve();
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
+      syncedAnchor,
+    );
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.85);
+  });
+
   it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {
     const docA = await openDocument();
     const docB = await openDocument();
