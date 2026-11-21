@@ -350,7 +350,16 @@ impl StagedFile {
     /// Verifies exact length, SHA-256 hash, and format magic bytes, fsyncs the
     /// `.part` file, and atomically publishes it into
     /// `<app-data>/library/<sha256>.<ext>` (reusing an existing verified target).
-    pub fn finish(mut self) -> CoreResult<PathBuf> {
+    pub fn finish(self) -> CoreResult<PathBuf> {
+        self.finish_reporting_created().map(|(path, _)| path)
+    }
+
+    /// Like [`Self::finish`], but also returns `created = true` when this call
+    /// actually published a new managed file into `<app-data>/library/` (and
+    /// `created = false` when an existing verified file at the target path was
+    /// reused). Callers use this to clean up only copies they created when a
+    /// concurrent registration wins the DB commit (`T-26`).
+    pub fn finish_reporting_created(mut self) -> CoreResult<(PathBuf, bool)> {
         if self.written_len != self.expected_len {
             self.cleanup_part();
             return Err(CoreError::LanSizeMismatch(format!(
@@ -415,7 +424,7 @@ impl StagedFile {
                     && validate_magic_bytes(&target, self.format).is_ok()
                 {
                     self.cleanup_part();
-                    return Ok(target);
+                    return Ok((target, false));
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -449,7 +458,7 @@ impl StagedFile {
         }
 
         self.finished = true;
-        Ok(target)
+        Ok((target, true))
     }
 
     fn verify_part_identity(&self, require_declared_size: bool) -> CoreResult<()> {

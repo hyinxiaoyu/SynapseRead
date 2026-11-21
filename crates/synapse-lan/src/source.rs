@@ -49,6 +49,8 @@ pub struct SqliteSourceApiHandler {
     file_bytes_sent: Arc<AtomicU64>,
     limits: ImportLimits,
     chunk_size: usize,
+    #[cfg(test)]
+    on_after_chunk_read: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 }
 
 impl std::fmt::Debug for SqliteSourceApiHandler {
@@ -78,6 +80,8 @@ impl SqliteSourceApiHandler {
             file_bytes_sent,
             limits: ImportLimits::default(),
             chunk_size: DEFAULT_STREAM_CHUNK_BYTES,
+            #[cfg(test)]
+            on_after_chunk_read: None,
         }
     }
 
@@ -101,6 +105,15 @@ impl SqliteSourceApiHandler {
     #[cfg(test)]
     pub(crate) fn with_chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size.max(1);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_after_chunk_read_hook(
+        mut self,
+        hook: Arc<dyn Fn(u64) + Send + Sync>,
+    ) -> Self {
+        self.on_after_chunk_read = Some(hook);
         self
     }
 }
@@ -297,6 +310,8 @@ impl SourceApiHandler for SqliteSourceApiHandler {
         let db = Arc::clone(&self.db);
         let file_bytes_sent = Arc::clone(&self.file_bytes_sent);
         let chunk_size = self.chunk_size;
+        #[cfg(test)]
+        let on_after_chunk_read = self.on_after_chunk_read.clone();
 
         Box::pin(async move {
             let Some(snapshot) = session.find_snapshot_book(&sha256).cloned() else {
@@ -342,11 +357,24 @@ impl SourceApiHandler for SqliteSourceApiHandler {
                     };
 
                     // Single-fd TOCTOU-free verification (`F-15`, `R3-03`, `T-17`):
-                    // open once outside DB lock, hash from that fd, fstat that fd,
-                    // seek(0), and later stream from that exact fd.
+                    // open once outside DB lock, capture pre-hash fstat, hash from
+                    // that fd, verify post-hash fstat matches, seek(0), and later
+                    // stream from that exact fd.
                     let mut file = File::open(&file_path).map_err(|_| {
                         LanError::SourceChanged("source file is missing or unreadable".into())
                     })?;
+
+                    let pre_meta = file.metadata().map_err(|_| {
+                        LanError::SourceChanged("failed to inspect source file metadata".into())
+                    })?;
+                    if !pre_meta.is_file() {
+                        return Err(LanError::SourceChanged(
+                            "source file is not a regular file".into(),
+                        )
+                        .into());
+                    }
+                    let pre_len = pre_meta.len();
+                    let pre_mtime = pre_meta.modified().ok();
 
                     let mut hasher = Sha256::new();
                     let mut buf = vec![0u8; chunk_size];
@@ -375,17 +403,21 @@ impl SourceApiHandler for SqliteSourceApiHandler {
                         .into());
                     }
 
-                    let meta = file.metadata().map_err(|_| {
+                    let post_meta = file.metadata().map_err(|_| {
                         LanError::SourceChanged("failed to inspect source file metadata".into())
                     })?;
-                    if !meta.is_file() || meta.len() != hashed_bytes {
+                    if !post_meta.is_file()
+                        || post_meta.len() != hashed_bytes
+                        || post_meta.len() != pre_len
+                        || post_meta.modified().ok() != pre_mtime
+                    {
                         return Err(LanError::SourceChanged(
-                            "source file size changed during verification".into(),
+                            "source file changed during verification".into(),
                         )
                         .into());
                     }
-                    let expected_len = meta.len();
-                    let expected_mtime = meta.modified().ok();
+                    let expected_len = post_meta.len();
+                    let expected_mtime = post_meta.modified().ok();
 
                     file.seek(SeekFrom::Start(0)).map_err(|_| {
                         LanError::SourceChanged("failed to rewind verified source file".into())
@@ -421,7 +453,15 @@ impl SourceApiHandler for SqliteSourceApiHandler {
 
             let stream_guard = Arc::clone(&transfer_guard);
             tokio::task::spawn_blocking(move || {
-                stream_verified_file(prepared, chunk_size, stream_guard, file_bytes_sent, tx);
+                stream_verified_file(
+                    prepared,
+                    chunk_size,
+                    stream_guard,
+                    file_bytes_sent,
+                    tx,
+                    #[cfg(test)]
+                    on_after_chunk_read,
+                );
             });
 
             let body = ChannelBody {
@@ -583,6 +623,7 @@ fn stream_verified_file(
     transfer_guard: Arc<TransferGuard>,
     file_bytes_sent: Arc<AtomicU64>,
     tx: mpsc::Sender<Result<Frame<Bytes>, io::Error>>,
+    #[cfg(test)] on_after_chunk_read: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 ) {
     let mut total_sent: u64 = 0;
 
@@ -614,7 +655,31 @@ fn stream_verified_file(
             }
             Ok(n) => {
                 chunk.truncate(n);
-                total_sent = total_sent.saturating_add(n as u64);
+                let next_total = total_sent.saturating_add(n as u64);
+
+                #[cfg(test)]
+                if let Some(hook) = &on_after_chunk_read {
+                    hook(next_total);
+                }
+
+                // Re-check revocation and same-fd metadata AFTER reading the
+                // chunk and BEFORE delivering it to hyper — critically before
+                // the final chunk completes the fixed Content-Length response.
+                if transfer_guard.is_aborted() {
+                    let _ = tx.blocking_send(Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "LAN sharing session revoked mid-transfer",
+                    )));
+                    return;
+                }
+                if !fstat_matches(&prepared.file, prepared.len, prepared.mtime) {
+                    let _ = tx.blocking_send(Err(io::Error::other(
+                        "source file changed during transfer",
+                    )));
+                    return;
+                }
+
+                total_sent = next_total;
                 transfer_guard.record_activity();
                 file_bytes_sent.fetch_add(n as u64, Ordering::Release);
                 if tx
@@ -630,11 +695,6 @@ fn stream_verified_file(
                 return;
             }
         }
-    }
-
-    // Final fstat check after the last chunk to catch concurrent modification.
-    if !fstat_matches(&prepared.file, prepared.len, prepared.mtime) {
-        let _ = tx.blocking_send(Err(io::Error::other("source file changed during transfer")));
     }
 }
 
@@ -1356,5 +1416,84 @@ mod tests {
             .await
             .expect_err("revoked stream must abort with error");
         assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
+    }
+
+    #[tokio::test]
+    async fn in_place_modification_during_final_chunk_read_aborts_before_delivery() {
+        let dir = TempDir::new("final-chunk-modify");
+        let db = setup_db(dir.path());
+        let payload = vec![b'A'; 1024];
+        let file_path = write_file(dir.path(), "in-place.txt", &payload);
+        let doc = register_doc(&db, &file_path);
+
+        let snapshot = vec![SnapshotBook {
+            document_id: doc.id.clone(),
+            snapshot_file_hash: doc.file_hash.clone(),
+        }];
+        let perms = SharePermissions {
+            positions: true,
+            bookmarks: true,
+        };
+        let bound = SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 10), 49319);
+        let peer = Ipv4Addr::new(192, 168, 1, 20);
+        let clock = Arc::new(TokioMonotonicClock);
+        let (session, code) =
+            SessionManager::new(SessionConfig::default(), clock, perms, snapshot).expect("session");
+        let session = Arc::new(session);
+        let pair = session.pair(peer, code.expose()).expect("pair");
+        let token = pair.token.expose().to_owned();
+
+        // Trigger an in-place file modification (extending length so fstat
+        // deterministically detects the change regardless of coarse FS mtime
+        // granularity) right after reading the final chunk, BEFORE that chunk
+        // is delivered to the HTTP layer.
+        let path_for_hook = file_path.clone();
+        let total_len = payload.len() as u64;
+        let hook: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |bytes_read| {
+            if bytes_read == total_len {
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path_for_hook)
+                    .expect("open for in-place append");
+                io::Write::write_all(&mut f, b"MUTATED").expect("append mutation");
+                f.sync_all().expect("sync mutation");
+            }
+        });
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let api = Arc::new(
+            SqliteSourceApiHandler::with_file_bytes_counter(Arc::clone(&db), Arc::clone(&counter))
+                .with_chunk_size(512)
+                .with_after_chunk_read_hook(hook),
+        );
+        let handler = LanHttpHandler::new(
+            bound,
+            Arc::clone(&session),
+            api,
+            HttpServerConfig::default(),
+        );
+        let stop = AtomicBool::new(false);
+
+        let resp = handler
+            .route_request(
+                authed_get(bound, &token, &format!("/v1/books/{}/file", doc.file_hash)),
+                peer,
+                &stop,
+            )
+            .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The final chunk must NEVER be delivered to the HTTP layer; collecting
+        // the response body must fail rather than completing cleanly.
+        let err = resp
+            .into_body()
+            .collect()
+            .await
+            .expect_err("in-place mutation before final chunk delivery must abort stream");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(
+            counter.load(Ordering::Acquire) < total_len,
+            "final mutated chunk must not be counted or handed to HTTP layer"
+        );
     }
 }

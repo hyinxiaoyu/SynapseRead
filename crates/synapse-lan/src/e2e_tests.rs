@@ -36,8 +36,9 @@ use crate::http::{
 use crate::listener::{LanListener, LanListenerHandle, ListenerConfig, TokioMonotonicClock};
 use crate::orchestrator::{
     BookCommitEvent, BookImportDecision, BookSyncState, BookmarkPlanSkipReason, ComponentOutcome,
-    ImportProgress, MAX_PLANNER_CONCURRENCY, OrchestratorConfig, PlannedBookmarkStatus,
-    StageFactory, classify_catalog, execute_import, execute_import_with_stage_factory, plan_import,
+    DefaultStageFactory, ExecuteTestHooks, ImportProgress, MAX_PLANNER_CONCURRENCY,
+    OrchestratorConfig, PlannedBookmarkStatus, StageFactory, classify_catalog, execute_import,
+    execute_import_with_stage_factory, execute_import_with_test_hooks, plan_import,
 };
 use crate::session::{
     AuthorizedContext, SessionConfig, SessionManager, SharePermissions, SnapshotBook,
@@ -651,6 +652,7 @@ async fn e2e_missing_file_restore_preserves_md_extension_and_study_data() {
         import_file: true,
         import_position: false,
         import_bookmarks: true,
+        selected_bookmark_indices: None,
         override_position_conflict: false,
     }];
 
@@ -875,6 +877,7 @@ async fn e2e_local_file_changed_is_ineligible_at_stat_plan_and_execute() {
             import_file: true,
             import_position: true,
             import_bookmarks: true,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
         BookImportDecision {
@@ -882,6 +885,7 @@ async fn e2e_local_file_changed_is_ineligible_at_stat_plan_and_execute() {
             import_file: false,
             import_position: false,
             import_bookmarks: true,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
     ];
@@ -1010,6 +1014,7 @@ async fn e2e_bookmark_and_position_only_idempotent_and_preserves_receiver_bookma
         import_file: false,
         import_position: false,
         import_bookmarks: true,
+        selected_bookmark_indices: None,
         override_position_conflict: false,
     }];
     let report1 = execute_import(
@@ -1077,6 +1082,7 @@ async fn e2e_bookmark_and_position_only_idempotent_and_preserves_receiver_bookma
         import_file: false,
         import_position: true,
         import_bookmarks: false,
+        selected_bookmark_indices: None,
         override_position_conflict: false,
     }];
     let report3 = execute_import(
@@ -1184,6 +1190,7 @@ async fn e2e_position_conflict_and_explicit_override_reconfirmation() {
         import_file: false,
         import_position: true,
         import_bookmarks: false,
+        selected_bookmark_indices: None,
         override_position_conflict: false,
     }];
     let report1 = execute_import(
@@ -1226,6 +1233,7 @@ async fn e2e_position_conflict_and_explicit_override_reconfirmation() {
         import_file: false,
         import_position: true,
         import_bookmarks: false,
+        selected_bookmark_indices: None,
         override_position_conflict: true,
     }];
     let report2 = execute_import(
@@ -1304,6 +1312,7 @@ async fn e2e_mid_transfer_cancel_keeps_committed_book_and_cleans_part() {
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
         BookImportDecision {
@@ -1311,6 +1320,7 @@ async fn e2e_mid_transfer_cancel_keeps_committed_book_and_cleans_part() {
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
     ];
@@ -1473,6 +1483,7 @@ async fn e2e_corrupted_hash_length_and_magic_rejected_and_block_dependents() {
             import_file: true,
             import_position: true,
             import_bookmarks: true,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         }];
         let report = execute_import(
@@ -1730,6 +1741,7 @@ async fn e2e_injected_enospc_maps_to_lan_disk_full_and_cleans_part() {
         import_file: true,
         import_position: true,
         import_bookmarks: true,
+        selected_bookmark_indices: None,
         override_position_conflict: false,
     }];
 
@@ -1829,6 +1841,7 @@ async fn e2e_source_changed_or_relinked_mid_session_returns_lan_source_changed()
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
         BookImportDecision {
@@ -1836,6 +1849,7 @@ async fn e2e_source_changed_or_relinked_mid_session_returns_lan_source_changed()
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
         BookImportDecision {
@@ -1843,6 +1857,7 @@ async fn e2e_source_changed_or_relinked_mid_session_returns_lan_source_changed()
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
     ];
@@ -1920,6 +1935,7 @@ async fn e2e_revoked_session_mid_run_aborts_remaining_books_cleanly() {
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
         BookImportDecision {
@@ -1927,6 +1943,7 @@ async fn e2e_revoked_session_mid_run_aborts_remaining_books_cleanly() {
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
         BookImportDecision {
@@ -1934,6 +1951,7 @@ async fn e2e_revoked_session_mid_run_aborts_remaining_books_cleanly() {
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
     ];
@@ -2451,6 +2469,7 @@ async fn e2e_commit_callback_fires_before_book_completed_progress_event() {
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
         BookImportDecision {
@@ -2458,6 +2477,7 @@ async fn e2e_commit_callback_fires_before_book_completed_progress_event() {
             import_file: true,
             import_position: false,
             import_bookmarks: false,
+            selected_bookmark_indices: None,
             override_position_conflict: false,
         },
     ];
@@ -2505,4 +2525,762 @@ async fn e2e_commit_callback_fires_before_book_completed_progress_event() {
         ],
         "R2-07: on_commit must fire strictly before BookCompleted for every book"
     );
+}
+
+fn count_library_entries(library: &ManagedLibrary) -> usize {
+    let dir = library.library_dir();
+    if !dir.exists() {
+        return 0;
+    }
+    std::fs::read_dir(&dir)
+        .expect("read library dir")
+        .filter_map(Result::ok)
+        .count()
+}
+
+// ---------------------------------------------------------------------------
+// 17. #160 P1 regression: relinking the same document_id to a different file
+//     after preview OR between file verification and DB metadata writes must
+//     return LocalFileChanged and block both position and bookmark writes.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_relink_after_preview_and_mid_execute_blocks_position_and_bookmarks() {
+    let source = PeerNode::new("relink-guard-src");
+    let receiver = PeerNode::new("relink-guard-dst");
+
+    let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "v1.txt");
+    let dst_txt_v1 = copy_fixture_to(&receiver.files_dir, "sample.txt", "v1-local.txt");
+    let dst_txt_v2 = receiver.files_dir.join("v2-relinked.txt");
+    std::fs::write(
+        &dst_txt_v2,
+        "Completely different second edition book text for relink identity guard.\n",
+    )
+    .expect("write v2");
+
+    let src_doc = source.register(&src_txt);
+    let dst_doc = receiver.register(&dst_txt_v1);
+
+    let remote_cursor = txt_anchor(30, 50, 1);
+    let local_initial = txt_anchor(5, 10, 0);
+    {
+        let mut db = source.db.lock().expect("lock");
+        db.update_document_cursor(&src_doc.id, &remote_cursor, Some(0.85))
+            .expect("set remote cursor");
+        db.create_bookmark(&CreateBookmarkInput {
+            document_id: src_doc.id.clone(),
+            anchor: txt_anchor(40, 55, 2),
+            label: Some("Source V1 Bookmark".into()),
+        })
+        .expect("set remote bookmark");
+    }
+    {
+        let db = receiver.db.lock().expect("lock");
+        db.update_document_cursor(&dst_doc.id, &local_initial, Some(0.1))
+            .expect("set local cursor");
+    }
+
+    let server = RunningSource::start(
+        Arc::clone(&source.db),
+        SharePermissions {
+            positions: true,
+            bookmarks: true,
+        },
+        vec![SnapshotBook {
+            document_id: src_doc.id.clone(),
+            snapshot_file_hash: src_doc.file_hash.clone(),
+        }],
+        None,
+    );
+    let paired = server.pair_receiver().await;
+    let cancel = CancelToken::never();
+    let catalog = paired.catalog(&cancel).await.expect("catalog");
+
+    // --- Path A: relink AFTER plan_import and BEFORE execute_import ---
+    let mut plan_a = plan_import(
+        &paired,
+        &receiver.db,
+        &catalog.books,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("plan A");
+
+    {
+        let db = receiver.db.lock().expect("lock");
+        let relinked = db
+            .relink_document(&dst_doc.id, &dst_txt_v2)
+            .expect("relink to v2");
+        assert_ne!(relinked.document.file_hash, src_doc.file_hash);
+    }
+
+    let decision = vec![BookImportDecision {
+        book_id: src_doc.file_hash.clone(),
+        import_file: false,
+        import_position: true,
+        import_bookmarks: true,
+        selected_bookmark_indices: None,
+        override_position_conflict: false,
+    }];
+
+    let report_a = execute_import(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan_a,
+        &decision,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+        |_| {},
+    )
+    .await;
+
+    let res_a = &report_a.books[0];
+    assert_eq!(res_a.state, BookSyncState::LocalFileChanged);
+    assert!(matches!(
+        &res_a.file,
+        ComponentOutcome::Failed { error } if error.code == "lan_local_file_changed"
+    ));
+    assert!(matches!(res_a.position, ComponentOutcome::Blocked { .. }));
+    assert!(matches!(res_a.bookmarks, ComponentOutcome::Blocked { .. }));
+
+    {
+        let db = receiver.db.lock().expect("lock");
+        let current = db.get_document(&dst_doc.id).expect("get doc");
+        assert_eq!(
+            current.last_progress, None,
+            "relink cleared v1 cursor and execute_import must not write remote v1 cursor onto v2"
+        );
+        assert!(db.list_bookmarks().expect("list bms").is_empty());
+    }
+
+    // --- Path B: relink in the race window BETWEEN verify_document_file and DB writes ---
+    {
+        // Restore v1 so preview and file verification both succeed cleanly.
+        let db = receiver.db.lock().expect("lock");
+        db.relink_document(&dst_doc.id, &dst_txt_v1)
+            .expect("relink back to v1");
+    }
+
+    let mut plan_b = plan_import(
+        &paired,
+        &receiver.db,
+        &catalog.books,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("plan B");
+
+    let db_for_hook = Arc::clone(&receiver.db);
+    let v2_for_hook = dst_txt_v2.clone();
+    let hooks = ExecuteTestHooks {
+        before_metadata_writes: Some(Arc::new(move |_book_id, doc_id| {
+            let db = db_for_hook.lock().expect("lock");
+            db.relink_document(doc_id, &v2_for_hook)
+                .expect("mid-execute relink to v2");
+        })),
+        ..ExecuteTestHooks::default()
+    };
+
+    let report_b = execute_import_with_test_hooks(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan_b,
+        &decision,
+        &OrchestratorConfig::default(),
+        &cancel,
+        &DefaultStageFactory,
+        &hooks,
+        |_| {},
+        |_| {},
+    )
+    .await;
+
+    let res_b = &report_b.books[0];
+    assert_eq!(res_b.state, BookSyncState::LocalFileChanged);
+    assert!(matches!(
+        &res_b.position,
+        ComponentOutcome::Failed { error } if error.code == "lan_local_file_changed"
+    ));
+    assert!(matches!(res_b.bookmarks, ComponentOutcome::Blocked { .. }));
+
+    {
+        let db = receiver.db.lock().expect("lock");
+        let current = db.get_document(&dst_doc.id).expect("get doc");
+        assert_eq!(
+            current.last_progress, None,
+            "relinked v2 document must not receive remote v1 cursor"
+        );
+        assert!(
+            db.list_bookmarks().expect("list bms").is_empty(),
+            "relinked v2 document must receive zero v1 bookmarks"
+        );
+    }
+
+    assert_eq!(server.file_bytes_sent(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 18. #160 P1 regression: first execution with override_position_conflict=true
+//     must NOT skip conflict confirmation; subsequent page turns after conflict
+//     must trigger a fresh conflict instead of blindly overwriting.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_first_run_override_flag_does_not_skip_conflict_and_recheck_catches_subsequent_turn() {
+    let source = PeerNode::new("conflict-strict-src");
+    let receiver = PeerNode::new("conflict-strict-dst");
+
+    let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "conflict.txt");
+    let dst_txt = copy_fixture_to(&receiver.files_dir, "sample.txt", "conflict.txt");
+    let src_doc = source.register(&src_txt);
+    let dst_doc = receiver.register(&dst_txt);
+
+    let remote_anchor = txt_anchor(80, 100, 3);
+    {
+        let db = source.db.lock().expect("lock");
+        db.update_document_cursor(&src_doc.id, &remote_anchor, Some(0.9))
+            .expect("remote cursor");
+    }
+    {
+        let db = receiver.db.lock().expect("lock");
+        db.update_document_cursor(&dst_doc.id, &txt_anchor(5, 10, 0), Some(0.1))
+            .expect("initial local cursor");
+    }
+
+    let server = RunningSource::start(
+        Arc::clone(&source.db),
+        SharePermissions {
+            positions: true,
+            bookmarks: false,
+        },
+        vec![SnapshotBook {
+            document_id: src_doc.id.clone(),
+            snapshot_file_hash: src_doc.file_hash.clone(),
+        }],
+        None,
+    );
+    let paired = server.pair_receiver().await;
+    let cancel = CancelToken::never();
+    let catalog = paired.catalog(&cancel).await.expect("catalog");
+
+    let mut plan = plan_import(
+        &paired,
+        &receiver.db,
+        &catalog.books,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("plan");
+
+    // Advance local cursor after preview: 0.1 -> 0.45.
+    {
+        let db = receiver.db.lock().expect("lock");
+        db.update_document_cursor(&dst_doc.id, &txt_anchor(25, 35, 1), Some(0.45))
+            .expect("advance to 0.45");
+    }
+
+    let override_decision = vec![BookImportDecision {
+        book_id: src_doc.file_hash.clone(),
+        import_file: false,
+        import_position: true,
+        import_bookmarks: false,
+        selected_bookmark_indices: None,
+        override_position_conflict: true,
+    }];
+
+    // Path 1: First execution passing override_position_conflict=true MUST
+    // still compare against the preview snapshot (0.1) and return Conflict(0.45).
+    let run1 = execute_import(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan,
+        &override_decision,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert!(matches!(
+        &run1.books[0].position,
+        ComponentOutcome::Conflict {
+            code,
+            has_current_position: true,
+            current_progress: Some(p),
+        } if code == "lan_position_conflict" && (*p - 0.45).abs() < 1e-6
+    ));
+    assert!(plan.has_pending_position_conflict(&src_doc.file_hash));
+    assert_eq!(
+        receiver
+            .db
+            .lock()
+            .expect("lock")
+            .get_document(&dst_doc.id)
+            .expect("doc")
+            .last_progress,
+        Some(0.45)
+    );
+
+    // Path 2: User flips another page after seeing the conflict (0.45 -> 0.70);
+    // retrying with override_position_conflict=true must detect the fresh change
+    // and return a NEW Conflict(0.70) instead of overwriting.
+    {
+        let db = receiver.db.lock().expect("lock");
+        db.update_document_cursor(&dst_doc.id, &txt_anchor(50, 60, 2), Some(0.70))
+            .expect("advance to 0.70");
+    }
+
+    let run2 = execute_import(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan,
+        &override_decision,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert!(matches!(
+        &run2.books[0].position,
+        ComponentOutcome::Conflict {
+            code,
+            has_current_position: true,
+            current_progress: Some(p),
+        } if code == "lan_position_conflict" && (*p - 0.70).abs() < 1e-6
+    ));
+    assert_eq!(
+        receiver
+            .db
+            .lock()
+            .expect("lock")
+            .get_document(&dst_doc.id)
+            .expect("doc")
+            .last_progress,
+        Some(0.70)
+    );
+
+    // Path 3: User confirms without further edits -> succeeds against recorded 0.70 snapshot.
+    let run3 = execute_import(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan,
+        &override_decision,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert_eq!(run3.books[0].position, ComponentOutcome::Applied);
+    assert!(!plan.has_pending_position_conflict(&src_doc.file_hash));
+    assert_eq!(
+        receiver
+            .db
+            .lock()
+            .expect("lock")
+            .get_document(&dst_doc.id)
+            .expect("doc")
+            .last_progress,
+        Some(0.9)
+    );
+
+    assert_eq!(server.file_bytes_sent(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 19. #160 P2 regression: per-bookmark deselection by preview index, repeat
+//     idempotency, delete + re-preview re-selection, invalid index rejection,
+//     and 0 file bytes transferred throughout (#146).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_per_bookmark_deselection_repeat_and_repreview_with_zero_file_bytes() {
+    let source = PeerNode::new("per-bm-src");
+    let receiver = PeerNode::new("per-bm-dst");
+
+    let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "bms.txt");
+    let dst_txt = copy_fixture_to(&receiver.files_dir, "sample.txt", "bms.txt");
+    let src_doc = source.register(&src_txt);
+    let _dst_doc = receiver.register(&dst_txt);
+
+    {
+        let mut db = source.db.lock().expect("lock");
+        db.create_bookmark(&CreateBookmarkInput {
+            document_id: src_doc.id.clone(),
+            anchor: txt_anchor(10, 20, 0),
+            label: Some("First Bookmark".into()),
+        })
+        .expect("bm 0");
+        db.create_bookmark(&CreateBookmarkInput {
+            document_id: src_doc.id.clone(),
+            anchor: txt_anchor(40, 55, 2),
+            label: Some("Second Bookmark".into()),
+        })
+        .expect("bm 1");
+    }
+
+    let server = RunningSource::start(
+        Arc::clone(&source.db),
+        SharePermissions {
+            positions: false,
+            bookmarks: true,
+        },
+        vec![SnapshotBook {
+            document_id: src_doc.id.clone(),
+            snapshot_file_hash: src_doc.file_hash.clone(),
+        }],
+        None,
+    );
+    let paired = server.pair_receiver().await;
+    let cancel = CancelToken::never();
+    let catalog = paired.catalog(&cancel).await.expect("catalog");
+
+    let mut plan = plan_import(
+        &paired,
+        &receiver.db,
+        &catalog.books,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("plan");
+
+    let bm_summary = &plan.summary().books[0].bookmarks;
+    assert_eq!(bm_summary.new_count, 2);
+    assert_eq!(bm_summary.entries.len(), 2);
+    let idx0 = bm_summary.entries[0].index;
+    let idx1 = bm_summary.entries[1].index;
+    let label0 = bm_summary.entries[0].label.clone().expect("label0");
+
+    // Deselect idx1: only idx0 should be imported.
+    let select_only_first = vec![BookImportDecision {
+        book_id: src_doc.file_hash.clone(),
+        import_file: false,
+        import_position: false,
+        import_bookmarks: true,
+        selected_bookmark_indices: Some(vec![idx0]),
+        override_position_conflict: false,
+    }];
+
+    let run1 = execute_import(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan,
+        &select_only_first,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert_eq!(run1.books[0].bookmarks, ComponentOutcome::Applied);
+    assert_eq!(run1.books[0].bookmark_counts.inserted, 1);
+    assert_eq!(run1.books[0].bookmark_counts.existing, 0);
+
+    let bms_after_run1 = receiver
+        .db
+        .lock()
+        .expect("lock")
+        .list_bookmarks()
+        .expect("bms");
+    assert_eq!(bms_after_run1.len(), 1);
+    assert_eq!(bms_after_run1[0].label, label0);
+
+    // Repeating the same selection must not insert additional rows.
+    let run2 = execute_import(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan,
+        &select_only_first,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert_eq!(run2.books[0].bookmarks, ComponentOutcome::Applied);
+    assert_eq!(run2.books[0].bookmark_counts.inserted, 0);
+    assert_eq!(run2.books[0].bookmark_counts.existing, 1);
+    assert_eq!(
+        receiver
+            .db
+            .lock()
+            .expect("lock")
+            .list_bookmarks()
+            .expect("bms")
+            .len(),
+        1
+    );
+
+    // Invalid out-of-plan index must be rejected cleanly without inserting.
+    let invalid_selection = vec![BookImportDecision {
+        book_id: src_doc.file_hash.clone(),
+        import_file: false,
+        import_position: false,
+        import_bookmarks: true,
+        selected_bookmark_indices: Some(vec![999]),
+        override_position_conflict: false,
+    }];
+    let run_invalid = execute_import(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan,
+        &invalid_selection,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert!(matches!(
+        &run_invalid.books[0].bookmarks,
+        ComponentOutcome::Failed { error } if error.code == "invalid_bookmark_selection"
+    ));
+
+    // Delete the imported bookmark locally and re-preview -> both indices are
+    // selectable as New again.
+    {
+        let db = receiver.db.lock().expect("lock");
+        db.delete_bookmark(&bms_after_run1[0].id)
+            .expect("delete local bm");
+    }
+    let mut plan2 = plan_import(
+        &paired,
+        &receiver.db,
+        &catalog.books,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("re-plan");
+    assert_eq!(plan2.summary().books[0].bookmarks.new_count, 2);
+
+    let select_both = vec![BookImportDecision {
+        book_id: src_doc.file_hash.clone(),
+        import_file: false,
+        import_position: false,
+        import_bookmarks: true,
+        selected_bookmark_indices: Some(vec![idx0, idx1]),
+        override_position_conflict: false,
+    }];
+    let run3 = execute_import(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan2,
+        &select_both,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+        |_| {},
+    )
+    .await;
+    assert_eq!(run3.books[0].bookmarks, ComponentOutcome::Applied);
+    assert_eq!(run3.books[0].bookmark_counts.inserted, 2);
+    assert_eq!(
+        receiver
+            .db
+            .lock()
+            .expect("lock")
+            .list_bookmarks()
+            .expect("bms")
+            .len(),
+        2
+    );
+
+    assert_eq!(
+        server.file_bytes_sent(),
+        0,
+        "per-bookmark sync on AlreadyPresent book must transfer 0 file bytes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 20. #160 P2 regression (T-26): concurrent local registration before transfer
+//     AND around publish preserves 1 DB row, original path, and leaves zero
+//     orphan copies in managed library or staging directories.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_t26_concurrent_local_registration_before_transfer_and_around_publish_leaves_no_orphans()
+ {
+    let source = PeerNode::new("t26-src");
+    let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "t26-book.txt");
+    let src_doc = source.register(&src_txt);
+
+    let server = RunningSource::start(
+        Arc::clone(&source.db),
+        SharePermissions {
+            positions: false,
+            bookmarks: false,
+        },
+        vec![SnapshotBook {
+            document_id: src_doc.id.clone(),
+            snapshot_file_hash: src_doc.file_hash.clone(),
+        }],
+        None,
+    );
+    let paired = server.pair_receiver().await;
+    let cancel = CancelToken::never();
+    let catalog = paired.catalog(&cancel).await.expect("catalog");
+
+    // --- Case A: local registration happens AFTER preview and BEFORE download ---
+    {
+        let receiver = PeerNode::new("t26-before-dl");
+        let external_copy =
+            copy_fixture_to(&receiver.files_dir, "sample.txt", "external-before.txt");
+        let mut plan = plan_import(
+            &paired,
+            &receiver.db,
+            &catalog.books,
+            &OrchestratorConfig::default(),
+            &cancel,
+            |_| {},
+        )
+        .await
+        .expect("plan A");
+        assert_eq!(plan.summary().books[0].state, BookSyncState::New);
+
+        let db_hook = Arc::clone(&receiver.db);
+        let ext_for_hook = external_copy.clone();
+        let hooks = ExecuteTestHooks {
+            before_file_download: Some(Arc::new(move |_book_id| {
+                db_hook
+                    .lock()
+                    .expect("lock")
+                    .register_document(&ext_for_hook)
+                    .expect("concurrent local register before download");
+            })),
+            ..ExecuteTestHooks::default()
+        };
+
+        let decisions = plan.default_decisions();
+        let report = execute_import_with_test_hooks(
+            &paired,
+            &receiver.db,
+            &receiver.library,
+            &mut plan,
+            &decisions,
+            &OrchestratorConfig::default(),
+            &cancel,
+            &DefaultStageFactory,
+            &hooks,
+            |_| {},
+            |_| {},
+        )
+        .await;
+
+        assert!(matches!(
+            report.books[0].file,
+            ComponentOutcome::Skipped { .. }
+        ));
+        assert_eq!(
+            server.file_bytes_sent(),
+            0,
+            "pre-transfer dedup must skip downloading when healthy local copy already exists"
+        );
+        let docs = receiver
+            .db
+            .lock()
+            .expect("lock")
+            .list_documents()
+            .expect("docs");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(
+            std::fs::canonicalize(&docs[0].file_path).expect("canon doc"),
+            std::fs::canonicalize(&external_copy).expect("canon ext")
+        );
+        assert_eq!(count_library_entries(&receiver.library), 0);
+        assert_eq!(count_staging_entries(&receiver.library), 0);
+    }
+
+    // --- Case B: local registration races AFTER StagedFile::finish and BEFORE import_document ---
+    {
+        let receiver = PeerNode::new("t26-after-publish");
+        let external_copy = copy_fixture_to(&receiver.files_dir, "sample.txt", "external-race.txt");
+        let mut plan = plan_import(
+            &paired,
+            &receiver.db,
+            &catalog.books,
+            &OrchestratorConfig::default(),
+            &cancel,
+            |_| {},
+        )
+        .await
+        .expect("plan B");
+        assert_eq!(plan.summary().books[0].state, BookSyncState::New);
+
+        let db_hook = Arc::clone(&receiver.db);
+        let ext_for_hook = external_copy.clone();
+        let hooks = ExecuteTestHooks {
+            before_import_document: Some(Arc::new(move |_book_id, published_path| {
+                // Confirm the staged file was published into library/ right before
+                // the racing local registration wins.
+                assert!(published_path.is_file());
+                db_hook
+                    .lock()
+                    .expect("lock")
+                    .register_document(&ext_for_hook)
+                    .expect("concurrent local register after publish");
+            })),
+            ..ExecuteTestHooks::default()
+        };
+
+        let decisions = plan.default_decisions();
+        let report = execute_import_with_test_hooks(
+            &paired,
+            &receiver.db,
+            &receiver.library,
+            &mut plan,
+            &decisions,
+            &OrchestratorConfig::default(),
+            &cancel,
+            &DefaultStageFactory,
+            &hooks,
+            |_| {},
+            |_| {},
+        )
+        .await;
+
+        assert!(
+            matches!(report.books[0].file, ComponentOutcome::Skipped { .. }),
+            "T-26: AlreadyPresent race outcome must report Skipped, not Applied"
+        );
+        let docs = receiver
+            .db
+            .lock()
+            .expect("lock")
+            .list_documents()
+            .expect("docs");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(
+            std::fs::canonicalize(&docs[0].file_path).expect("canon doc"),
+            std::fs::canonicalize(&external_copy).expect("canon ext"),
+            "original external path must be preserved"
+        );
+        assert_eq!(
+            count_library_entries(&receiver.library),
+            0,
+            "newly created redundant managed copy must be cleaned up"
+        );
+        assert_eq!(count_staging_entries(&receiver.library), 0);
+    }
 }

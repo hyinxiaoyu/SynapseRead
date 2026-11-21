@@ -960,10 +960,28 @@ impl PairedClient {
     pub async fn download_book_into_staged<F>(
         &self,
         sha256: &str,
+        staged: StagedFile,
+        cancel: &CancelToken,
+        on_progress: F,
+    ) -> LanResult<PathBuf>
+    where
+        F: FnMut(u64, u64),
+    {
+        self.download_book_into_staged_reporting_created(sha256, staged, cancel, on_progress)
+            .await
+            .map(|(path, _)| path)
+    }
+
+    /// Like [`Self::download_book_into_staged`], additionally returning
+    /// `created = true` when this transfer published a new file in
+    /// `<app-data>/library/` (versus reusing an existing verified target).
+    pub async fn download_book_into_staged_reporting_created<F>(
+        &self,
+        sha256: &str,
         mut staged: StagedFile,
         cancel: &CancelToken,
         mut on_progress: F,
-    ) -> LanResult<PathBuf>
+    ) -> LanResult<(PathBuf, bool)>
     where
         F: FnMut(u64, u64),
     {
@@ -1119,7 +1137,7 @@ impl PairedClient {
         self.pool.checkin(sender, &parts.headers);
 
         staged
-            .finish()
+            .finish_reporting_created()
             .map_err(|err| map_core_error(err, expected_bytes, downloaded))
     }
 
@@ -1302,69 +1320,69 @@ fn map_http_error(
     paired: bool,
     is_pair_endpoint: bool,
 ) -> LanError {
+    // Never propagate peer-supplied `ErrorResponseBody.message` into `LanError`
+    // so a buggy or hostile peer cannot echo credentials or arbitrary untrusted
+    // text into logs or IPC error strings (`T-03`).
     if let Ok(parsed) = serde_json::from_slice::<ErrorResponseBody>(body) {
-        let message = if parsed.message.is_empty() {
-            format!("HTTP {}", status.as_u16())
-        } else {
-            parsed.message
-        };
         return match parsed.code.as_str() {
-            "lan_protocol_incompatible" => LanError::ProtocolIncompatible(message),
+            "lan_protocol_incompatible" => {
+                LanError::ProtocolIncompatible(format!("HTTP {}", status.as_u16()))
+            }
             "lan_auth_invalid" => LanError::AuthInvalid,
             "lan_auth_expired" => LanError::AuthExpired,
             "lan_attempts_exceeded" => LanError::AttemptsExceeded,
             "lan_session_busy" => LanError::SessionBusy,
-            "lan_scope_denied" => LanError::ScopeDenied(message),
+            "lan_scope_denied" => {
+                LanError::ScopeDenied("peer denied access to requested sharing scope".into())
+            }
             "lan_transfer_busy" => LanError::TransferBusy,
-            "lan_source_changed" => LanError::SourceChanged(message),
-            "lan_payload_too_large" => LanError::PayloadTooLarge(message),
+            "lan_source_changed" => {
+                LanError::SourceChanged("source book changed during sharing session".into())
+            }
+            "lan_payload_too_large" => LanError::PayloadTooLarge(format!(
+                "peer rejected payload (HTTP {})",
+                status.as_u16()
+            )),
             "lan_size_mismatch" => LanError::SizeMismatch {
                 expected: 0,
                 actual: 0,
             },
             "lan_hash_mismatch" => LanError::HashMismatch,
-            "lan_disk_full" => LanError::DiskFull(message),
+            "lan_disk_full" => LanError::DiskFull("peer reported insufficient disk space".into()),
             "lan_cancelled" => LanError::Cancelled,
-            "lan_source_stopped" => LanError::SourceStopped(message),
-            "lan_position_conflict" => LanError::PositionConflict(message),
+            "lan_source_stopped" => LanError::SourceStopped("peer stopped sharing session".into()),
+            "lan_position_conflict" => {
+                LanError::PositionConflict("reading position changed concurrently".into())
+            }
             "lan_not_found" | "not_found" => LanError::Core(CoreError::NotFound {
                 entity: "resource",
-                id: message,
+                id: format!("HTTP {}", status.as_u16()),
             }),
-            _ => map_status_fallback(status, message, paired, is_pair_endpoint),
+            _ => map_status_fallback(status, paired, is_pair_endpoint),
         };
     }
 
-    map_status_fallback(
-        status,
-        format!("unexpected HTTP status {}", status.as_u16()),
-        paired,
-        is_pair_endpoint,
-    )
+    map_status_fallback(status, paired, is_pair_endpoint)
 }
 
-fn map_status_fallback(
-    status: StatusCode,
-    message: String,
-    paired: bool,
-    is_pair_endpoint: bool,
-) -> LanError {
+fn map_status_fallback(status: StatusCode, paired: bool, is_pair_endpoint: bool) -> LanError {
+    let status_msg = format!("HTTP {}", status.as_u16());
     match status {
         StatusCode::UNAUTHORIZED => LanError::AuthInvalid,
-        StatusCode::FORBIDDEN => LanError::ScopeDenied(message),
+        StatusCode::FORBIDDEN => LanError::ScopeDenied(status_msg),
         StatusCode::NOT_FOUND => LanError::Core(CoreError::NotFound {
             entity: "resource",
-            id: message,
+            id: status_msg,
         }),
         StatusCode::CONFLICT => {
             if is_pair_endpoint {
                 LanError::SessionBusy
             } else {
-                LanError::SourceChanged(message)
+                LanError::SourceChanged(status_msg)
             }
         }
         StatusCode::GONE => LanError::AuthExpired,
-        StatusCode::PAYLOAD_TOO_LARGE => LanError::PayloadTooLarge(message),
+        StatusCode::PAYLOAD_TOO_LARGE => LanError::PayloadTooLarge(status_msg),
         StatusCode::TOO_MANY_REQUESTS => {
             if is_pair_endpoint {
                 LanError::AttemptsExceeded
@@ -1374,9 +1392,9 @@ fn map_status_fallback(
         }
         StatusCode::BAD_REQUEST
         | StatusCode::METHOD_NOT_ALLOWED
-        | StatusCode::UNSUPPORTED_MEDIA_TYPE => LanError::ProtocolIncompatible(message),
+        | StatusCode::UNSUPPORTED_MEDIA_TYPE => LanError::ProtocolIncompatible(status_msg),
         StatusCode::REQUEST_TIMEOUT => LanError::Cancelled,
-        _ => transport_error(paired, message),
+        _ => transport_error(paired, format!("unexpected {status_msg}")),
     }
 }
 
@@ -2683,6 +2701,93 @@ mod tests {
             map_http_error(StatusCode::TOO_MANY_REQUESTS, b"", true, false).code(),
             "lan_transfer_busy"
         );
+    }
+
+    // T-03 (#159 acceptance): peer-supplied error messages must never be copied
+    // into LanError, Display, Debug, or IPC-exported error messages so a peer
+    // echoing credentials cannot leak them.
+    #[test]
+    fn t03_peer_error_messages_never_leak_echoed_credentials() {
+        let fake_credential = "SECRET_CREDENTIAL_987654_TOKEN";
+        let cases: &[(StatusCode, &str, bool, bool)] = &[
+            (
+                StatusCode::BAD_REQUEST,
+                "lan_protocol_incompatible",
+                false,
+                false,
+            ),
+            (StatusCode::UNAUTHORIZED, "lan_auth_invalid", true, false),
+            (StatusCode::GONE, "lan_auth_expired", true, false),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "lan_attempts_exceeded",
+                false,
+                true,
+            ),
+            (StatusCode::CONFLICT, "lan_session_busy", false, true),
+            (StatusCode::FORBIDDEN, "lan_scope_denied", true, false),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                "lan_transfer_busy",
+                true,
+                false,
+            ),
+            (StatusCode::CONFLICT, "lan_source_changed", true, false),
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "lan_payload_too_large",
+                true,
+                false,
+            ),
+            (
+                StatusCode::INSUFFICIENT_STORAGE,
+                "lan_disk_full",
+                true,
+                false,
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "lan_source_stopped",
+                true,
+                false,
+            ),
+            (StatusCode::CONFLICT, "lan_position_conflict", true, false),
+            (StatusCode::NOT_FOUND, "lan_not_found", true, false),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unknown_peer_code",
+                true,
+                false,
+            ),
+            (StatusCode::BAD_GATEWAY, "unknown_peer_code", false, false),
+        ];
+
+        for &(status, code, paired, is_pair) in cases {
+            let body = serde_json::to_vec(&ErrorResponseBody {
+                code: code.into(),
+                message: format!("rejected token {fake_credential} on peer"),
+            })
+            .expect("serialize error body");
+
+            let err = map_http_error(status, &body, paired, is_pair);
+            let display = err.to_string();
+            let debug = format!("{err:?}");
+            let exported = crate::orchestrator::ImportErrorInfo::from_lan_error(&err);
+
+            assert!(
+                !display.contains(fake_credential),
+                "Display leaked peer credential for code={code}: {display}"
+            );
+            assert!(
+                !debug.contains(fake_credential),
+                "Debug leaked peer credential for code={code}: {debug}"
+            );
+            assert!(
+                !exported.message.contains(fake_credential),
+                "exported IPC message leaked peer credential for code={code}: {}",
+                exported.message
+            );
+        }
     }
 
     // Minimal hyper::body::Body wrapper over mpsc::Receiver so tests need no extra dev-deps.
