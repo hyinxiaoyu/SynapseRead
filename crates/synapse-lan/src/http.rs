@@ -1485,10 +1485,21 @@ mod tests {
         // Every stalled POST must time out with 408 and close the connection.
         for mut stream in stalled_streams {
             let mut resp = Vec::new();
-            tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut resp))
-                .await
-                .expect("slow body must time out and close")
-                .expect("read");
+            let read_res =
+                tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut resp))
+                    .await
+                    .expect("slow body must time out and close");
+            if let Err(err) = read_res {
+                assert!(
+                    matches!(
+                        err.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::UnexpectedEof
+                    ),
+                    "unexpected read error after 408: {err}"
+                );
+            }
             let resp_str = String::from_utf8_lossy(&resp);
             assert!(
                 resp_str.starts_with("HTTP/1.1 408"),
@@ -1666,10 +1677,23 @@ mod tests {
         let over_8k = build_exact_len_request(MAX_HEADER_BYTES + 1);
         stream.write_all(&over_8k).await.expect("write 8 KiB + 1");
         let mut resp_over = Vec::new();
-        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut resp_over))
-            .await
-            .expect("431 response and close")
-            .expect("read");
+        let read_res =
+            tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut resp_over))
+                .await
+                .expect("431 response and close");
+        // On macOS, closing a socket while unread request bytes remain in the
+        // kernel buffer sends TCP RST after delivering the 431 response.
+        if let Err(err) = read_res {
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                ),
+                "unexpected read error after 431: {err}"
+            );
+        }
         let resp_over_str = String::from_utf8_lossy(&resp_over);
         assert!(
             resp_over_str.starts_with("HTTP/1.1 431"),
