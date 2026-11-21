@@ -1,0 +1,13 @@
+{
+  "request": {
+    "code": "482910"
+  },
+  "response": {
+    "token": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "idleTimeoutSeconds": 600,
+    "permissions": {
+      "positions": true,
+      "bookmarks": true
+    }
+  }
+}

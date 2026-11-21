@@ -1,0 +1,34 @@
+{
+  "books": [
+    {
+      "id": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "title": "Design Patterns",
+      "format": "epub",
+      "extension": "epub",
+      "sizeBytes": 1048576,
+      "fileAvailable": true,
+      "hasPosition": true,
+      "bookmarkCount": 3
+    },
+    {
+      "id": "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+      "title": "Architecture Notes",
+      "format": "txt",
+      "extension": "md",
+      "sizeBytes": 8192,
+      "fileAvailable": true,
+      "hasPosition": false,
+      "bookmarkCount": 1
+    },
+    {
+      "id": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "title": "Missing Reference PDF",
+      "format": "pdf",
+      "extension": "pdf",
+      "sizeBytes": 0,
+      "fileAvailable": false,
+      "hasPosition": false,
+      "bookmarkCount": 0
+    }
+  ]
+}

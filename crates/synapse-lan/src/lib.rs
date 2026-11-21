@@ -12,6 +12,8 @@ pub mod error;
 pub mod http;
 pub mod listener;
 pub mod session;
+pub mod source;
+pub mod wire;
 
 pub use address::{
     AddressPolicy, InterfaceProvider, Ipv4Subnet, LanInterface, PeerPolicy, PeerRejectReason,
@@ -37,4 +39,9 @@ pub use session::{
     AuthorizedContext, BearerToken, DEFAULT_MAX_FAILED_ATTEMPTS, DEFAULT_PER_IP_MAX_ATTEMPTS,
     DEFAULT_PER_IP_WINDOW, PairOutcome, PairingCode, SessionConfig, SessionManager, SessionStatus,
     SharePermissions, SnapshotBook, TransferGuard,
+};
+pub use source::SqliteSourceApiHandler;
+pub use wire::{
+    BookmarksResponse, CatalogBook, CatalogResponse, HelloResponse, PairRequest, PairResponse,
+    PositionResponse, WireBookmark,
 };
