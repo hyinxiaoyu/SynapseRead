@@ -2440,6 +2440,61 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     listSpy.mockRestore();
   });
 
+  it('prevents an in-flight native drop response from overwriting a newer file-picker open path', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    await nativeStore.getState().openDocument(); // b.epub
+    const epubId = nativeStore.getState().activeDocumentId as string;
+    const originalEpub = nativeStore.getState().documents.find((d) => d.id === epubId)!;
+    nativeStore.getState().closeDocument(epubId);
+
+    const existingDocs = await nativeBackend.listDocuments();
+    const dropOldPath: StudyDocument = { ...originalEpub, filePath: '/drop-old/b.epub' };
+    const pickerNewPath: StudyDocument = { ...originalEpub, filePath: '/picker-new/b.epub' };
+
+    let resolveDropList!: (docs: StudyDocument[]) => void;
+    const listSpy = vi.spyOn(nativeBackend, 'listDocuments').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument[]>((resolve) => {
+          resolveDropList = resolve;
+        }),
+    );
+    const pickSpy = vi.spyOn(nativeBackend, 'pickDocument').mockResolvedValueOnce(pickerNewPath);
+
+    // 1) Native drop starts and awaits listDocuments().
+    emitDrop?.({ type: 'drop', documents: [dropOldPath], error: null });
+
+    // 2) File picker opens the same book from its new path and finishes first.
+    await nativeStore.getState().openDocument();
+    expect(nativeStore.getState().openDocumentIds).toContain(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/picker-new/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    // 3) Earlier native drop listDocuments() returns late with the old path -> must be discarded.
+    resolveDropList(existingDocs.map((d) => (d.id === epubId ? dropOldPath : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/picker-new/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    listSpy.mockRestore();
+    pickSpy.mockRestore();
+  });
+
   it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {
     const docA = await openDocument();
     const docB = await openDocument();

@@ -484,8 +484,9 @@ export function createStudySyncStore(backend: StudyBackend) {
       opened: readonly StudyDocument[],
       error?: unknown,
       epochsAtStart?: ReadonlyMap<string, number>,
+      seqsAtStart?: ReadonlyMap<string, number>,
     ) => {
-      let openedUnlockedCount = 0;
+      const committedIds = new Set<string>();
       set((state) => {
         let documents = state.documents;
         let openDocumentIds = state.openDocumentIds;
@@ -508,6 +509,13 @@ export function createStudySyncStore(backend: StudyBackend) {
             // open/drop request was in flight, invalidating the pre-lock snapshot.
             continue;
           }
+          if (
+            seqsAtStart !== undefined &&
+            getDocumentRefreshSeq(document.id) !== (seqsAtStart.get(document.id) ?? 0)
+          ) {
+            // A newer open, drop, relink, or refresh superseded this response.
+            continue;
+          }
           const existing = documents.find((d) => d.id === document.id);
           if (existing !== undefined && existing.filePath !== document.filePath) {
             relinkedNonceByDocumentId[document.id] =
@@ -524,8 +532,8 @@ export function createStudySyncStore(backend: StudyBackend) {
             fileSizeBytes: null,
           };
           unlockedOpened.push(document);
+          committedIds.add(document.id);
         }
-        openedUnlockedCount = unlockedOpened.length;
         const lastOpened = unlockedOpened.at(-1);
         return {
           documents,
@@ -541,7 +549,10 @@ export function createStudySyncStore(backend: StudyBackend) {
           ...(error !== undefined && error !== null ? { error: describeError(error) } : {}),
         };
       });
-      if (openedUnlockedCount > 0) persistSession();
+      for (const id of committedIds) {
+        nextDocumentRefreshSeq(id);
+      }
+      if (committedIds.size > 0) persistSession();
     };
 
     const openNativeDroppedDocuments = (dropped: readonly StudyDocument[], error?: unknown) => {
@@ -581,7 +592,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           )
           .map((doc) => byId.get(doc.id) ?? doc);
         if (resolved.length === 0 && (error === undefined || error === null)) return;
-        applyOpenedDocuments(resolved, error, epochsAtStart);
+        applyOpenedDocuments(resolved, error, epochsAtStart, seqsAtStart);
       });
     };
 
@@ -740,10 +751,11 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async openDocument() {
         const epochsAtStart = new Map(documentLockEpochs);
+        const seqsAtStart = new Map(documentRefreshSeqs);
         await guarded(async () => {
           const document = await backend.pickDocument();
           if (document === null) return;
-          applyOpenedDocuments([document], undefined, epochsAtStart);
+          applyOpenedDocuments([document], undefined, epochsAtStart, seqsAtStart);
         });
       },
 
@@ -751,14 +763,19 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (isDocumentLocked(documentId)) return;
         if (!get().documents.some((doc) => doc.id === documentId)) return;
         const lockEpoch = getDocumentLockEpoch(documentId);
+        const refreshSeq = nextDocumentRefreshSeq(documentId);
         await guarded(async () => {
           const [touched, status] = await Promise.all([
             backend.touchDocumentOpened(documentId),
             backend.verifyDocumentSource(documentId),
           ]);
-          // A close-and-apply lock may have been acquired (and even released)
-          // while awaiting backend I/O, invalidating the pre-lock snapshot.
-          if (isDocumentLocked(documentId) || getDocumentLockEpoch(documentId) !== lockEpoch) {
+          // A close-and-apply lock or newer open/drop/refresh may have occurred
+          // while awaiting backend I/O, invalidating this snapshot.
+          if (
+            isDocumentLocked(documentId) ||
+            getDocumentLockEpoch(documentId) !== lockEpoch ||
+            getDocumentRefreshSeq(documentId) !== refreshSeq
+          ) {
             return;
           }
           set((state) => ({
@@ -801,6 +818,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           const result = await backend.relinkDocument(documentId, confirmInPlace);
           if (!result) return;
           relinked = result;
+          nextDocumentRefreshSeq(documentId);
           set((state) => ({
             documents: state.documents.map((doc) =>
               doc.id === documentId ? result.document : doc,
@@ -827,9 +845,10 @@ export function createStudySyncStore(backend: StudyBackend) {
       async dropFiles(files) {
         if (files.length === 0) return;
         const epochsAtStart = new Map(documentLockEpochs);
+        const seqsAtStart = new Map(documentRefreshSeqs);
         await guarded(async () => {
           const { documents, error } = await backend.dropFiles(files);
-          applyOpenedDocuments(documents, error, epochsAtStart);
+          applyOpenedDocuments(documents, error, epochsAtStart, seqsAtStart);
         });
       },
 
