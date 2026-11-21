@@ -14,7 +14,7 @@
 //!   invokes the per-book commit callback **before** emitting that book's
 //!   completion progress event (`R2-07`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -273,7 +273,8 @@ struct PlannedBook {
     expected_cursor: CursorSnapshot,
     conflict_cursor: Option<CursorSnapshot>,
     remote_cursor: Option<CursorSnapshot>,
-    remote_bookmarks: Vec<ImportBookmarkEntry>,
+    /// Preview `index` -> valid importable bookmark entry mapping (`#146`).
+    remote_bookmarks: BTreeMap<usize, ImportBookmarkEntry>,
     wire_skipped_bookmarks: usize,
 }
 
@@ -327,6 +328,7 @@ impl ImportPlan {
                 import_file: b.summary.needs_file_download,
                 import_position: b.summary.position.default_adopt,
                 import_bookmarks: b.summary.bookmarks.default_import,
+                selected_bookmark_indices: None,
                 override_position_conflict: false,
             })
             .collect()
@@ -353,8 +355,19 @@ pub struct BookImportDecision {
     pub import_file: bool,
     pub import_position: bool,
     pub import_bookmarks: bool,
+    /// Optional per-bookmark selection by preview `index` from
+    /// [`BookmarkPlanSummary::entries`] (`#146`).
+    ///
+    /// - `None`: import all eligible bookmarks in the plan when
+    ///   `import_bookmarks` is `true`.
+    /// - `Some(indices)`: validate that every index belongs to this book's
+    ///   plan and is selectable, then import only those entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_bookmark_indices: Option<Vec<usize>>,
     /// Explicit per-book user re-confirmation after a `lan_position_conflict`
-    /// (`T-35`, `T-36`).
+    /// (`T-35`, `T-36`). Only applies when this [`ImportPlan`] already holds a
+    /// recorded conflict snapshot for this book; never bypasses the first CAS
+    /// check against the preview snapshot.
     #[serde(default)]
     pub override_position_conflict: bool,
 }
@@ -876,7 +889,7 @@ async fn plan_single_book(
             expected_cursor,
             conflict_cursor: None,
             remote_cursor: None,
-            remote_bookmarks: Vec::new(),
+            remote_bookmarks: BTreeMap::new(),
             wire_skipped_bookmarks: 0,
         });
     }
@@ -1113,9 +1126,13 @@ fn build_bookmarks_plan(
     book_format: Option<DocumentFormat>,
     state: BookSyncState,
     limits: &ImportLimits,
-) -> (BookmarkPlanSummary, Vec<ImportBookmarkEntry>, usize) {
+) -> (
+    BookmarkPlanSummary,
+    BTreeMap<usize, ImportBookmarkEntry>,
+    usize,
+) {
     let Some(parsed_list) = fetched else {
-        return (BookmarkPlanSummary::default(), Vec::new(), 0);
+        return (BookmarkPlanSummary::default(), BTreeMap::new(), 0);
     };
 
     let existing_keys: HashSet<String> = existing_local
@@ -1130,7 +1147,7 @@ fn build_bookmarks_plan(
     let mut planned_skipped = 0usize;
     let mut wire_skipped = 0usize;
     let mut previews = Vec::with_capacity(parsed_list.len());
-    let mut valid_entries = Vec::new();
+    let mut valid_entries = BTreeMap::new();
 
     for (index, item) in parsed_list.into_iter().enumerate() {
         match item {
@@ -1196,14 +1213,17 @@ fn build_bookmarks_plan(
                         created_at: wire.created_at.clone(),
                         status: PlannedBookmarkStatus::Existing,
                     });
-                    // Keep valid entries in the vector passed to import_bookmarks so
-                    // Database::import_bookmarks reports accurate `existing` counts
-                    // and stays idempotent.
-                    valid_entries.push(ImportBookmarkEntry {
-                        anchor: wire.anchor,
-                        label: wire.label,
-                        created_at: wire.created_at,
-                    });
+                    // Keep valid entries keyed by preview index so
+                    // Database::import_bookmarks reports accurate `existing`
+                    // counts and stays idempotent.
+                    valid_entries.insert(
+                        index,
+                        ImportBookmarkEntry {
+                            anchor: wire.anchor,
+                            label: wire.label,
+                            created_at: wire.created_at,
+                        },
+                    );
                 } else if existing_count.saturating_add(planned_new)
                     >= limits.max_bookmarks_per_book
                 {
@@ -1216,11 +1236,14 @@ fn build_bookmarks_plan(
                             reason: BookmarkPlanSkipReason::BookmarkCapExceeded,
                         },
                     });
-                    valid_entries.push(ImportBookmarkEntry {
-                        anchor: wire.anchor,
-                        label: wire.label,
-                        created_at: wire.created_at,
-                    });
+                    valid_entries.insert(
+                        index,
+                        ImportBookmarkEntry {
+                            anchor: wire.anchor,
+                            label: wire.label,
+                            created_at: wire.created_at,
+                        },
+                    );
                 } else {
                     seen_new_keys.insert(key);
                     planned_new += 1;
@@ -1230,11 +1253,14 @@ fn build_bookmarks_plan(
                         created_at: wire.created_at.clone(),
                         status: PlannedBookmarkStatus::New,
                     });
-                    valid_entries.push(ImportBookmarkEntry {
-                        anchor: wire.anchor,
-                        label: wire.label,
-                        created_at: wire.created_at,
-                    });
+                    valid_entries.insert(
+                        index,
+                        ImportBookmarkEntry {
+                            anchor: wire.anchor,
+                            label: wire.label,
+                            created_at: wire.created_at,
+                        },
+                    );
                 }
             }
         }
@@ -1293,6 +1319,23 @@ where
     .await
 }
 
+#[cfg(test)]
+pub(crate) type BeforeFileDownloadHook = Arc<dyn Fn(&str) + Send + Sync>;
+#[cfg(test)]
+pub(crate) type BeforeImportDocumentHook = Arc<dyn Fn(&str, &Path) + Send + Sync>;
+#[cfg(test)]
+pub(crate) type BeforeMetadataWritesHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// Test-only deterministic synchronization hooks for exercising race windows
+/// between pre-checks, staging, DB commits, and metadata writes.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ExecuteTestHooks {
+    pub before_file_download: Option<BeforeFileDownloadHook>,
+    pub before_import_document: Option<BeforeImportDocumentHook>,
+    pub before_metadata_writes: Option<BeforeMetadataWritesHook>,
+}
+
 /// Same as [`execute_import`] with an injectable [`StageFactory`] for
 /// deterministic `ENOSPC` / `EDQUOT` testing (`T-22`).
 #[allow(clippy::too_many_arguments)]
@@ -1305,6 +1348,76 @@ pub async fn execute_import_with_stage_factory<FC, FP>(
     config: &OrchestratorConfig,
     cancel: &CancelToken,
     stage_factory: &dyn StageFactory,
+    on_commit: FC,
+    on_progress: FP,
+) -> ImportExecutionReport
+where
+    FC: FnMut(BookCommitEvent),
+    FP: FnMut(ImportProgress),
+{
+    execute_import_inner(
+        client,
+        db,
+        library,
+        plan,
+        decisions,
+        config,
+        cancel,
+        stage_factory,
+        #[cfg(test)]
+        &ExecuteTestHooks::default(),
+        on_commit,
+        on_progress,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_import_with_test_hooks<FC, FP>(
+    client: &PairedClient,
+    db: &Arc<Mutex<Database>>,
+    library: &ManagedLibrary,
+    plan: &mut ImportPlan,
+    decisions: &[BookImportDecision],
+    config: &OrchestratorConfig,
+    cancel: &CancelToken,
+    stage_factory: &dyn StageFactory,
+    hooks: &ExecuteTestHooks,
+    on_commit: FC,
+    on_progress: FP,
+) -> ImportExecutionReport
+where
+    FC: FnMut(BookCommitEvent),
+    FP: FnMut(ImportProgress),
+{
+    execute_import_inner(
+        client,
+        db,
+        library,
+        plan,
+        decisions,
+        config,
+        cancel,
+        stage_factory,
+        hooks,
+        on_commit,
+        on_progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_import_inner<FC, FP>(
+    client: &PairedClient,
+    db: &Arc<Mutex<Database>>,
+    library: &ManagedLibrary,
+    plan: &mut ImportPlan,
+    decisions: &[BookImportDecision],
+    config: &OrchestratorConfig,
+    cancel: &CancelToken,
+    stage_factory: &dyn StageFactory,
+    #[cfg(test)] hooks: &ExecuteTestHooks,
     mut on_commit: FC,
     mut on_progress: FP,
 ) -> ImportExecutionReport
@@ -1367,6 +1480,8 @@ where
             &config.limits,
             cancel,
             stage_factory,
+            #[cfg(test)]
+            hooks,
             &mut on_commit,
             &mut on_progress,
             book_index,
@@ -1403,6 +1518,7 @@ async fn execute_single_book<FC, FP>(
     limits: &ImportLimits,
     cancel: &CancelToken,
     stage_factory: &dyn StageFactory,
+    #[cfg(test)] hooks: &ExecuteTestHooks,
     on_commit: &mut FC,
     on_progress: &mut FP,
     book_index: usize,
@@ -1503,155 +1619,260 @@ where
             return (result, false, None);
         }
 
-        // Pre-publish extension resolution (`R2-01`, `R3-08`):
-        // Check DB before calling `StagedFile::finish()` to preserve any
-        // existing missing local record's original valid extension (e.g. `.md`
-        // under `format: "txt"`).
-        let remote_ext = planned
-            .validated_remote_extension
-            .clone()
-            .unwrap_or_else(|| planned.summary.extension.clone());
-        let resolved_ext = match resolve_pre_publish_extension(
-            db,
-            &book_id,
-            book_format,
-            &remote_ext,
-            planned.local_extension.as_deref(),
-        )
-        .await
-        {
-            Ok(ext) => ext,
-            Err(err) => {
-                let err_info = ImportErrorInfo::from_lan_error(&err);
-                let result = failed_file_result(
-                    book_id.clone(),
-                    planned.summary.local_document_id.clone(),
-                    planned.summary.state,
-                    err_info,
-                    decision,
-                );
-                on_progress(ImportProgress::BookCompleted {
-                    book_id,
-                    book_index,
-                    total_books,
-                    result: Box::new(result.clone()),
-                });
-                return (result, false, None);
-            }
-        };
+        #[cfg(test)]
+        if let Some(hook) = &hooks.before_file_download {
+            hook(&book_id);
+        }
 
-        let staged = match stage_factory.begin_stage(
-            library,
-            book_format,
-            &resolved_ext,
-            &book_id,
-            planned.summary.size_bytes,
-        ) {
-            Ok(staged) => staged,
-            Err(err) => {
-                let lan_err = map_core_storage_error(err, planned.summary.size_bytes, 0);
-                let err_info = ImportErrorInfo::from_lan_error(&lan_err);
-                let result = failed_file_result(
-                    book_id.clone(),
-                    planned.summary.local_document_id.clone(),
-                    planned.summary.state,
-                    err_info,
-                    decision,
-                );
-                on_progress(ImportProgress::BookCompleted {
-                    book_id,
-                    book_index,
-                    total_books,
-                    result: Box::new(result.clone()),
-                });
-                return (result, false, None);
-            }
-        };
-
-        let progress_book_id = book_id.clone();
-        let download_res = client
-            .download_book_into_staged(&book_id, staged, cancel, |downloaded, total| {
-                on_progress(ImportProgress::FileTransfer {
-                    book_id: progress_book_id.clone(),
-                    downloaded_bytes: downloaded,
-                    total_bytes: total,
-                });
-            })
-            .await;
-
-        let published_path = match download_res {
-            Ok(path) => path,
-            Err(LanError::Cancelled) => {
-                let result = BookImportResult {
-                    book_id: book_id.clone(),
-                    document_id: planned.summary.local_document_id.clone(),
-                    state: planned.summary.state,
-                    file: ComponentOutcome::Cancelled,
-                    position: if decision.import_position {
-                        ComponentOutcome::Cancelled
-                    } else {
-                        ComponentOutcome::Skipped { reason: None }
-                    },
-                    bookmarks: if decision.import_bookmarks {
-                        ComponentOutcome::Cancelled
-                    } else {
-                        ComponentOutcome::Skipped { reason: None }
-                    },
-                    bookmark_counts: BookmarkExecutionSummary::default(),
+        // Pre-transfer dedup check (`T-26`): if a healthy local copy with the
+        // same SHA-256 was registered after `plan_import`, reuse it directly
+        // without transferring any file bytes.
+        let precheck = find_and_verify_local_by_hash(db, &book_id).await;
+        match precheck {
+            Ok(Some((existing_doc, DocumentSourceState::Ok))) => {
+                target_doc = existing_doc;
+                file_outcome = ComponentOutcome::Skipped {
+                    reason: Some("already present locally".into()),
                 };
-                on_progress(ImportProgress::BookCompleted {
-                    book_id,
-                    book_index,
-                    total_books,
-                    result: Box::new(result.clone()),
-                });
-                return (result, true, None);
-            }
-            Err(err) => {
-                let fatal = is_session_fatal(&err).then(|| ImportErrorInfo::from_lan_error(&err));
-                let err_info = ImportErrorInfo::from_lan_error(&err);
-                let result = failed_file_result(
-                    book_id.clone(),
-                    planned.summary.local_document_id.clone(),
-                    planned.summary.state,
-                    err_info,
-                    decision,
-                );
-                on_progress(ImportProgress::BookCompleted {
-                    book_id,
-                    book_index,
-                    total_books,
-                    result: Box::new(result.clone()),
-                });
-                return (result, false, fatal);
-            }
-        };
-
-        // Commit imported/repaired document row inside a short DB lock.
-        let db_clone = Arc::clone(db);
-        let hash_clone = book_id.clone();
-        let title_clone = planned.summary.title.clone();
-        let import_res = tokio::task::spawn_blocking(move || -> LanResult<ImportDocumentResult> {
-            let mut guard = db_clone.lock().map_err(|_| {
-                LanError::Core(CoreError::Io(std::io::Error::other(
-                    "database lock poisoned",
-                )))
-            })?;
-            Ok(guard.import_document(&published_path, &hash_clone, &title_clone, book_format)?)
-        })
-        .await
-        .map_err(|err| LanError::Core(CoreError::Io(std::io::Error::other(err.to_string()))));
-
-        match import_res {
-            Ok(Ok(doc_res)) => {
-                target_doc = doc_res.document().clone();
-                file_commit_result = Some(doc_res);
-                file_outcome = ComponentOutcome::Applied;
                 planned.summary.local_document_id = Some(target_doc.id.clone());
                 planned.summary.state = BookSyncState::AlreadyPresent;
                 planned.summary.needs_file_download = false;
             }
-            Ok(Err(err)) | Err(err) => {
+            Ok(Some((existing_doc, DocumentSourceState::Changed))) => {
+                planned.summary.state = BookSyncState::LocalFileChanged;
+                planned.summary.eligible = false;
+                let reason = "local file changed on disk; book is ineligible".to_owned();
+                let result = local_file_changed_result(
+                    book_id.clone(),
+                    Some(existing_doc.id),
+                    reason,
+                    decision,
+                );
+                on_progress(ImportProgress::BookCompleted {
+                    book_id,
+                    book_index,
+                    total_books,
+                    result: Box::new(result.clone()),
+                });
+                return (result, false, None);
+            }
+            Ok(None) | Ok(Some((_, DocumentSourceState::Missing))) => {
+                // Pre-publish extension resolution (`R2-01`, `R3-08`):
+                // Check DB before calling `StagedFile::finish()` to preserve any
+                // existing missing local record's original valid extension (e.g. `.md`
+                // under `format: "txt"`).
+                let remote_ext = planned
+                    .validated_remote_extension
+                    .clone()
+                    .unwrap_or_else(|| planned.summary.extension.clone());
+                let resolved_ext = match resolve_pre_publish_extension(
+                    db,
+                    &book_id,
+                    book_format,
+                    &remote_ext,
+                    planned.local_extension.as_deref(),
+                )
+                .await
+                {
+                    Ok(ext) => ext,
+                    Err(err) => {
+                        let err_info = ImportErrorInfo::from_lan_error(&err);
+                        let result = failed_file_result(
+                            book_id.clone(),
+                            planned.summary.local_document_id.clone(),
+                            planned.summary.state,
+                            err_info,
+                            decision,
+                        );
+                        on_progress(ImportProgress::BookCompleted {
+                            book_id,
+                            book_index,
+                            total_books,
+                            result: Box::new(result.clone()),
+                        });
+                        return (result, false, None);
+                    }
+                };
+
+                let staged = match stage_factory.begin_stage(
+                    library,
+                    book_format,
+                    &resolved_ext,
+                    &book_id,
+                    planned.summary.size_bytes,
+                ) {
+                    Ok(staged) => staged,
+                    Err(err) => {
+                        let lan_err = map_core_storage_error(err, planned.summary.size_bytes, 0);
+                        let err_info = ImportErrorInfo::from_lan_error(&lan_err);
+                        let result = failed_file_result(
+                            book_id.clone(),
+                            planned.summary.local_document_id.clone(),
+                            planned.summary.state,
+                            err_info,
+                            decision,
+                        );
+                        on_progress(ImportProgress::BookCompleted {
+                            book_id,
+                            book_index,
+                            total_books,
+                            result: Box::new(result.clone()),
+                        });
+                        return (result, false, None);
+                    }
+                };
+
+                let progress_book_id = book_id.clone();
+                let download_res = client
+                    .download_book_into_staged_reporting_created(
+                        &book_id,
+                        staged,
+                        cancel,
+                        |downloaded, total| {
+                            on_progress(ImportProgress::FileTransfer {
+                                book_id: progress_book_id.clone(),
+                                downloaded_bytes: downloaded,
+                                total_bytes: total,
+                            });
+                        },
+                    )
+                    .await;
+
+                let (published_path, published_created) = match download_res {
+                    Ok(published) => published,
+                    Err(LanError::Cancelled) => {
+                        let result = BookImportResult {
+                            book_id: book_id.clone(),
+                            document_id: planned.summary.local_document_id.clone(),
+                            state: planned.summary.state,
+                            file: ComponentOutcome::Cancelled,
+                            position: if decision.import_position {
+                                ComponentOutcome::Cancelled
+                            } else {
+                                ComponentOutcome::Skipped { reason: None }
+                            },
+                            bookmarks: if decision.import_bookmarks {
+                                ComponentOutcome::Cancelled
+                            } else {
+                                ComponentOutcome::Skipped { reason: None }
+                            },
+                            bookmark_counts: BookmarkExecutionSummary::default(),
+                        };
+                        on_progress(ImportProgress::BookCompleted {
+                            book_id,
+                            book_index,
+                            total_books,
+                            result: Box::new(result.clone()),
+                        });
+                        return (result, true, None);
+                    }
+                    Err(err) => {
+                        let fatal =
+                            is_session_fatal(&err).then(|| ImportErrorInfo::from_lan_error(&err));
+                        let err_info = ImportErrorInfo::from_lan_error(&err);
+                        let result = failed_file_result(
+                            book_id.clone(),
+                            planned.summary.local_document_id.clone(),
+                            planned.summary.state,
+                            err_info,
+                            decision,
+                        );
+                        on_progress(ImportProgress::BookCompleted {
+                            book_id,
+                            book_index,
+                            total_books,
+                            result: Box::new(result.clone()),
+                        });
+                        return (result, false, fatal);
+                    }
+                };
+
+                #[cfg(test)]
+                if let Some(hook) = &hooks.before_import_document {
+                    hook(&book_id, &published_path);
+                }
+
+                // Commit imported/repaired document row inside a short DB lock.
+                // If a concurrent local registration won (`AlreadyPresent`),
+                // preserve the existing path and remove our newly created
+                // managed copy only after confirming it is unreferenced (`T-26`).
+                let db_clone = Arc::clone(db);
+                let hash_clone = book_id.clone();
+                let title_clone = planned.summary.title.clone();
+                let published_for_db = published_path.clone();
+                let import_res =
+                    tokio::task::spawn_blocking(move || -> LanResult<ImportDocumentResult> {
+                        let mut guard = db_clone.lock().map_err(|_| {
+                            LanError::Core(CoreError::Io(std::io::Error::other(
+                                "database lock poisoned",
+                            )))
+                        })?;
+                        let res = guard.import_document(
+                            &published_for_db,
+                            &hash_clone,
+                            &title_clone,
+                            book_format,
+                        )?;
+                        if published_created
+                            && matches!(res, ImportDocumentResult::AlreadyPresent(_))
+                        {
+                            cleanup_unreferenced_managed_copy(&guard, &published_for_db);
+                        }
+                        Ok(res)
+                    })
+                    .await
+                    .map_err(|err| {
+                        LanError::Core(CoreError::Io(std::io::Error::other(err.to_string())))
+                    });
+
+                match import_res {
+                    Ok(Ok(ImportDocumentResult::AlreadyPresent(existing_doc))) => {
+                        target_doc = existing_doc;
+                        file_outcome = ComponentOutcome::Skipped {
+                            reason: Some("already present locally".into()),
+                        };
+                        planned.summary.local_document_id = Some(target_doc.id.clone());
+                        planned.summary.state = BookSyncState::AlreadyPresent;
+                        planned.summary.needs_file_download = false;
+                    }
+                    Ok(Ok(doc_res)) => {
+                        target_doc = doc_res.document().clone();
+                        file_commit_result = Some(doc_res);
+                        file_outcome = ComponentOutcome::Applied;
+                        planned.summary.local_document_id = Some(target_doc.id.clone());
+                        planned.summary.state = BookSyncState::AlreadyPresent;
+                        planned.summary.needs_file_download = false;
+                    }
+                    Ok(Err(err)) | Err(err) => {
+                        if published_created {
+                            let db_cleanup = Arc::clone(db);
+                            let path_cleanup = published_path;
+                            let _ = tokio::task::spawn_blocking(move || {
+                                if let Ok(guard) = db_cleanup.lock() {
+                                    cleanup_unreferenced_managed_copy(&guard, &path_cleanup);
+                                }
+                            })
+                            .await;
+                        }
+                        let err_info = ImportErrorInfo::from_lan_error(&err);
+                        let result = failed_file_result(
+                            book_id.clone(),
+                            planned.summary.local_document_id.clone(),
+                            planned.summary.state,
+                            err_info,
+                            decision,
+                        );
+                        on_progress(ImportProgress::BookCompleted {
+                            book_id,
+                            book_index,
+                            total_books,
+                            result: Box::new(result.clone()),
+                        });
+                        return (result, false, None);
+                    }
+                }
+            }
+            Err(err) => {
                 let err_info = ImportErrorInfo::from_lan_error(&err);
                 let result = failed_file_result(
                     book_id.clone(),
@@ -1671,14 +1892,15 @@ where
         }
     } else {
         // AlreadyPresent: 0 file bytes transferred (`T-34`).
-        // Re-verify the local file via unlocked `verify_document_file` before
-        // applying position-only or bookmark-only updates.
+        // Verify that the target DB record still carries the planned SHA-256
+        // hash (catching relinks after preview) AND re-verify the local file
+        // via unlocked `verify_document_file` outside `Mutex<Database>`.
         let db_clone = Arc::clone(db);
         let doc_id_hint = planned.summary.local_document_id.clone();
         let hash_clone = book_id.clone();
 
-        let verified =
-            tokio::task::spawn_blocking(move || -> LanResult<(Document, DocumentSourceState)> {
+        let verified = tokio::task::spawn_blocking(
+            move || -> LanResult<(Document, DocumentSourceState, bool)> {
                 let doc = {
                     let guard = db_clone.lock().map_err(|_| {
                         LanError::Core(CoreError::Io(std::io::Error::other(
@@ -1694,49 +1916,40 @@ where
                             .find(|d| d.file_hash == hash_clone)
                             .ok_or_else(|| CoreError::NotFound {
                                 entity: "document",
-                                id: hash_clone,
+                                id: hash_clone.clone(),
                             })?
                     }
                 };
+                if doc.file_hash != hash_clone {
+                    return Ok((doc, DocumentSourceState::Changed, true));
+                }
                 // Unlocked hash verification outside Mutex<Database>.
                 let status = verify_document_file(&doc)?;
-                Ok((doc, status.state))
-            })
-            .await
-            .map_err(|err| LanError::Core(CoreError::Io(std::io::Error::other(err.to_string()))));
+                Ok((doc, status.state, false))
+            },
+        )
+        .await
+        .map_err(|err| LanError::Core(CoreError::Io(std::io::Error::other(err.to_string()))));
 
         match verified {
-            Ok(Ok((doc, DocumentSourceState::Ok))) => {
+            Ok(Ok((doc, DocumentSourceState::Ok, false))) => {
                 target_doc = doc;
                 file_outcome = ComponentOutcome::Skipped {
                     reason: Some("already present locally".into()),
                 };
             }
-            Ok(Ok((doc, DocumentSourceState::Changed))) => {
+            Ok(Ok((doc, DocumentSourceState::Changed, relinked)))
+            | Ok(Ok((doc, _, relinked @ true))) => {
                 planned.summary.state = BookSyncState::LocalFileChanged;
                 planned.summary.eligible = false;
-                let reason = "local file changed on disk; book is ineligible".to_owned();
-                let result = BookImportResult {
-                    book_id: book_id.clone(),
-                    document_id: Some(doc.id),
-                    state: BookSyncState::LocalFileChanged,
-                    file: ComponentOutcome::Failed {
-                        error: ImportErrorInfo::new("lan_local_file_changed", reason.clone()),
-                    },
-                    position: if decision.import_position {
-                        ComponentOutcome::Blocked {
-                            reason: reason.clone(),
-                        }
-                    } else {
-                        ComponentOutcome::Skipped { reason: None }
-                    },
-                    bookmarks: if decision.import_bookmarks {
-                        ComponentOutcome::Blocked { reason }
-                    } else {
-                        ComponentOutcome::Skipped { reason: None }
-                    },
-                    bookmark_counts: BookmarkExecutionSummary::default(),
+                let reason = if relinked {
+                    "local document was relinked to a different file after preview; book is ineligible"
+                        .to_owned()
+                } else {
+                    "local file changed on disk; book is ineligible".to_owned()
                 };
+                let result =
+                    local_file_changed_result(book_id.clone(), Some(doc.id), reason, decision);
                 on_progress(ImportProgress::BookCompleted {
                     book_id,
                     book_index,
@@ -1745,7 +1958,7 @@ where
                 });
                 return (result, false, None);
             }
-            Ok(Ok((doc, DocumentSourceState::Missing))) => {
+            Ok(Ok((doc, DocumentSourceState::Missing, false))) => {
                 planned.summary.state = BookSyncState::MissingFile;
                 planned.summary.needs_file_download = true;
                 let reason = "local file is missing on disk".to_owned();
@@ -1798,37 +2011,46 @@ where
         }
     }
 
-    // ---- Step 2: Position (`Database::replace_cursor_if`) -----------------
+    #[cfg(test)]
+    if let Some(hook) = &hooks.before_metadata_writes {
+        hook(&book_id, &target_doc.id);
+    }
+
+    // ---- Step 2: Position (`Database::replace_cursor_if_for_hash`) --------
     let mut position_replaced = false;
+    let mut target_relinked = false;
     let position_outcome = if !decision.import_position {
         ComponentOutcome::Skipped { reason: None }
     } else if let Some(next_cursor) = planned.remote_cursor.clone() {
+        // First execution ALWAYS uses the preview `expected_cursor` snapshot
+        // even if `override_position_conflict` is set. Re-confirmation only
+        // applies to a conflict snapshot already recorded on this plan for
+        // this book; if the cursor changes again after conflict, CAS returns
+        // a fresh conflict.
         let expected_for_cas = if decision.override_position_conflict {
-            planned.conflict_cursor.clone()
+            planned
+                .conflict_cursor
+                .clone()
+                .unwrap_or_else(|| planned.expected_cursor.clone())
         } else {
-            Some(planned.expected_cursor.clone())
+            planned.expected_cursor.clone()
         };
-        let override_without_recorded_conflict =
-            decision.override_position_conflict && expected_for_cas.is_none();
 
         let db_clone = Arc::clone(db);
         let doc_id = target_doc.id.clone();
+        let expected_hash = book_id.clone();
         let cas_res = tokio::task::spawn_blocking(move || -> LanResult<ReplaceCursorResult> {
             let mut guard = db_clone.lock().map_err(|_| {
                 LanError::Core(CoreError::Io(std::io::Error::other(
                     "database lock poisoned",
                 )))
             })?;
-            let expected = if override_without_recorded_conflict {
-                let current_doc = guard.get_document(&doc_id)?;
-                CursorSnapshot {
-                    anchor: current_doc.last_cursor_anchor,
-                    progress: current_doc.last_progress,
-                }
-            } else {
-                expected_for_cas.unwrap_or_default()
-            };
-            Ok(guard.replace_cursor_if(&doc_id, &expected, &next_cursor)?)
+            Ok(guard.replace_cursor_if_for_hash(
+                &doc_id,
+                &expected_hash,
+                &expected_for_cas,
+                &next_cursor,
+            )?)
         })
         .await
         .map_err(|err| LanError::Core(CoreError::Io(std::io::Error::other(err.to_string()))));
@@ -1854,6 +2076,17 @@ where
                     current_progress,
                 }
             }
+            Ok(Err(LanError::Core(CoreError::LanHashMismatch(_)))) => {
+                target_relinked = true;
+                planned.summary.state = BookSyncState::LocalFileChanged;
+                planned.summary.eligible = false;
+                ComponentOutcome::Failed {
+                    error: ImportErrorInfo::new(
+                        "lan_local_file_changed",
+                        "local document was relinked to a different file before position update",
+                    ),
+                }
+            }
             Ok(Err(err)) | Err(err) => ComponentOutcome::Failed {
                 error: ImportErrorInfo::from_lan_error(&err),
             },
@@ -1869,43 +2102,79 @@ where
         }
     };
 
-    // ---- Step 3: Bookmarks (`Database::import_bookmarks`) -----------------
+    // ---- Step 3: Bookmarks (`Database::import_bookmarks_for_hash`) --------
     let mut inserted_bookmarks = Vec::new();
     let mut bookmark_counts = BookmarkExecutionSummary::default();
 
     let bookmarks_outcome = if !decision.import_bookmarks {
         ComponentOutcome::Skipped { reason: None }
+    } else if target_relinked {
+        ComponentOutcome::Blocked {
+            reason: "local document was relinked to a different file".into(),
+        }
     } else {
-        let db_clone = Arc::clone(db);
-        let doc_id = target_doc.id.clone();
-        let entries = planned.remote_bookmarks.clone();
-        let limits_clone = limits.clone();
-        let wire_skipped = planned.wire_skipped_bookmarks;
-
-        let bm_res = tokio::task::spawn_blocking(move || -> LanResult<_> {
-            let mut guard = db_clone.lock().map_err(|_| {
-                LanError::Core(CoreError::Io(std::io::Error::other(
-                    "database lock poisoned",
-                )))
-            })?;
-            Ok(guard.import_bookmarks(&doc_id, &entries, &limits_clone)?)
-        })
-        .await
-        .map_err(|err| LanError::Core(CoreError::Io(std::io::Error::other(err.to_string()))));
-
-        match bm_res {
-            Ok(Ok(report)) => {
-                bookmark_counts = BookmarkExecutionSummary {
-                    inserted: report.inserted,
-                    existing: report.existing,
-                    skipped: report.skipped.saturating_add(wire_skipped),
-                };
-                inserted_bookmarks = report.inserted_bookmarks;
-                ComponentOutcome::Applied
-            }
-            Ok(Err(err)) | Err(err) => ComponentOutcome::Failed {
-                error: ImportErrorInfo::from_lan_error(&err),
+        match select_planned_bookmarks(planned, decision.selected_bookmark_indices.as_deref()) {
+            Ok(SelectedBookmarks::Skip(reason)) => ComponentOutcome::Skipped {
+                reason: Some(reason),
             },
+            Err(err_info) => ComponentOutcome::Failed { error: err_info },
+            Ok(SelectedBookmarks::Entries {
+                entries,
+                include_wire_skipped,
+            }) => {
+                let db_clone = Arc::clone(db);
+                let doc_id = target_doc.id.clone();
+                let expected_hash = book_id.clone();
+                let limits_clone = limits.clone();
+                let wire_skipped = if include_wire_skipped {
+                    planned.wire_skipped_bookmarks
+                } else {
+                    0
+                };
+
+                let bm_res = tokio::task::spawn_blocking(move || -> LanResult<_> {
+                    let mut guard = db_clone.lock().map_err(|_| {
+                        LanError::Core(CoreError::Io(std::io::Error::other(
+                            "database lock poisoned",
+                        )))
+                    })?;
+                    Ok(guard.import_bookmarks_for_hash(
+                        &doc_id,
+                        &expected_hash,
+                        &entries,
+                        &limits_clone,
+                    )?)
+                })
+                .await
+                .map_err(|err| {
+                    LanError::Core(CoreError::Io(std::io::Error::other(err.to_string())))
+                });
+
+                match bm_res {
+                    Ok(Ok(report)) => {
+                        bookmark_counts = BookmarkExecutionSummary {
+                            inserted: report.inserted,
+                            existing: report.existing,
+                            skipped: report.skipped.saturating_add(wire_skipped),
+                        };
+                        inserted_bookmarks = report.inserted_bookmarks;
+                        ComponentOutcome::Applied
+                    }
+                    Ok(Err(LanError::Core(CoreError::LanHashMismatch(_)))) => {
+                        planned.summary.state = BookSyncState::LocalFileChanged;
+                        planned.summary.eligible = false;
+                        ComponentOutcome::Failed {
+                            error: ImportErrorInfo::new(
+                                "lan_local_file_changed",
+                                "local document was relinked to a different file before bookmark import",
+                            ),
+                        }
+                    }
+                    Ok(Err(err)) | Err(err) => ComponentOutcome::Failed {
+                        error: ImportErrorInfo::from_lan_error(&err),
+                    },
+                }
+            }
         }
     };
 
@@ -2001,6 +2270,130 @@ async fn resolve_pre_publish_extension(
     })
     .await
     .map_err(|err| LanError::Core(CoreError::Io(std::io::Error::other(err.to_string()))))?
+}
+
+async fn find_and_verify_local_by_hash(
+    db: &Arc<Mutex<Database>>,
+    file_hash: &str,
+) -> LanResult<Option<(Document, DocumentSourceState)>> {
+    let db_clone = Arc::clone(db);
+    let hash_clone = file_hash.to_owned();
+    tokio::task::spawn_blocking(
+        move || -> LanResult<Option<(Document, DocumentSourceState)>> {
+            let existing = {
+                let guard = db_clone.lock().map_err(|_| {
+                    LanError::Core(CoreError::Io(std::io::Error::other(
+                        "database lock poisoned",
+                    )))
+                })?;
+                guard
+                    .list_documents()?
+                    .into_iter()
+                    .find(|doc| doc.file_hash == hash_clone)
+            };
+            let Some(doc) = existing else {
+                return Ok(None);
+            };
+            // Unlocked file verification outside Mutex<Database>.
+            let status = verify_document_file(&doc)?;
+            Ok(Some((doc, status.state)))
+        },
+    )
+    .await
+    .map_err(|err| LanError::Core(CoreError::Io(std::io::Error::other(err.to_string()))))?
+}
+
+/// Deletes a newly published managed library file ONLY after confirming that no
+/// row in `documents` currently references that canonicalized path (`T-26`).
+fn cleanup_unreferenced_managed_copy(db: &Database, published_path: &Path) {
+    let Ok(canonical_published) = std::fs::canonicalize(published_path) else {
+        return;
+    };
+    let Ok(docs) = db.list_documents() else {
+        return;
+    };
+    let is_referenced = docs.iter().any(|doc| {
+        let doc_path = Path::new(&doc.file_path);
+        doc_path == published_path
+            || std::fs::canonicalize(doc_path)
+                .ok()
+                .is_some_and(|canon| canon == canonical_published)
+    });
+    if !is_referenced {
+        let _ = std::fs::remove_file(published_path);
+    }
+}
+
+enum SelectedBookmarks {
+    Skip(String),
+    Entries {
+        entries: Vec<ImportBookmarkEntry>,
+        include_wire_skipped: bool,
+    },
+}
+
+fn select_planned_bookmarks(
+    planned: &PlannedBook,
+    selected_indices: Option<&[usize]>,
+) -> Result<SelectedBookmarks, ImportErrorInfo> {
+    let Some(indices) = selected_indices else {
+        return Ok(SelectedBookmarks::Entries {
+            entries: planned.remote_bookmarks.values().cloned().collect(),
+            include_wire_skipped: true,
+        });
+    };
+
+    if indices.is_empty() {
+        return Ok(SelectedBookmarks::Skip("no bookmarks selected".into()));
+    }
+
+    let mut seen = HashSet::with_capacity(indices.len());
+    let mut entries = Vec::with_capacity(indices.len());
+    for &idx in indices {
+        let Some(entry) = planned.remote_bookmarks.get(&idx) else {
+            return Err(ImportErrorInfo::new(
+                "invalid_bookmark_selection",
+                format!("bookmark index {idx} is not a selectable entry in this plan"),
+            ));
+        };
+        if seen.insert(idx) {
+            entries.push(entry.clone());
+        }
+    }
+
+    Ok(SelectedBookmarks::Entries {
+        entries,
+        include_wire_skipped: false,
+    })
+}
+
+fn local_file_changed_result(
+    book_id: String,
+    document_id: Option<String>,
+    reason: String,
+    decision: &BookImportDecision,
+) -> BookImportResult {
+    BookImportResult {
+        book_id,
+        document_id,
+        state: BookSyncState::LocalFileChanged,
+        file: ComponentOutcome::Failed {
+            error: ImportErrorInfo::new("lan_local_file_changed", reason.clone()),
+        },
+        position: if decision.import_position {
+            ComponentOutcome::Blocked {
+                reason: reason.clone(),
+            }
+        } else {
+            ComponentOutcome::Skipped { reason: None }
+        },
+        bookmarks: if decision.import_bookmarks {
+            ComponentOutcome::Blocked { reason }
+        } else {
+            ComponentOutcome::Skipped { reason: None }
+        },
+        bookmark_counts: BookmarkExecutionSummary::default(),
+    }
 }
 
 fn failed_file_result(

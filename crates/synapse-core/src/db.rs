@@ -277,20 +277,55 @@ impl Database {
         expected: &CursorSnapshot,
         next: &CursorSnapshot,
     ) -> CoreResult<ReplaceCursorResult> {
+        self.replace_cursor_if_inner(document_id, None, expected, next)
+    }
+
+    /// Like [`Self::replace_cursor_if`], but additionally verifies inside the
+    /// same SQLite transaction that the target document's `file_hash` still
+    /// matches `expected_file_hash` (returning [`CoreError::LanHashMismatch`]
+    /// if the document was relinked to another file).
+    pub fn replace_cursor_if_for_hash(
+        &mut self,
+        document_id: &str,
+        expected_file_hash: &str,
+        expected: &CursorSnapshot,
+        next: &CursorSnapshot,
+    ) -> CoreResult<ReplaceCursorResult> {
+        self.replace_cursor_if_inner(document_id, Some(expected_file_hash), expected, next)
+    }
+
+    fn replace_cursor_if_inner(
+        &mut self,
+        document_id: &str,
+        expected_file_hash: Option<&str>,
+        expected: &CursorSnapshot,
+        next: &CursorSnapshot,
+    ) -> CoreResult<ReplaceCursorResult> {
         let tx = self.conn.transaction()?;
-        let current = tx
+        let (file_hash, current): (String, CursorSnapshot) = tx
             .query_row(
-                "SELECT last_cursor_anchor, last_progress FROM documents WHERE id = ?1",
+                "SELECT file_hash, last_cursor_anchor, last_progress FROM documents WHERE id = ?1",
                 [document_id],
                 |row| {
-                    Ok(CursorSnapshot {
-                        anchor: optional_json_column(row, 0)?,
-                        progress: row.get(1)?,
-                    })
+                    Ok((
+                        row.get(0)?,
+                        CursorSnapshot {
+                            anchor: optional_json_column(row, 1)?,
+                            progress: row.get(2)?,
+                        },
+                    ))
                 },
             )
             .optional()?
             .ok_or_else(|| not_found("document", document_id))?;
+
+        if let Some(required_hash) = expected_file_hash
+            && file_hash != required_hash
+        {
+            return Err(CoreError::LanHashMismatch(
+                "target document file hash changed before cursor update".into(),
+            ));
+        }
 
         if !current.matches(expected) {
             return Ok(ReplaceCursorResult::Conflict { current });
@@ -1429,15 +1464,47 @@ impl Database {
         entries: &[ImportBookmarkEntry],
         limits: &ImportLimits,
     ) -> CoreResult<BookmarkImportReport> {
+        self.import_bookmarks_inner(document_id, None, entries, limits)
+    }
+
+    /// Like [`Self::import_bookmarks`], but additionally verifies inside the
+    /// same SQLite transaction that the target document's `file_hash` still
+    /// matches `expected_file_hash` (returning [`CoreError::LanHashMismatch`]
+    /// if the document was relinked to another file).
+    pub fn import_bookmarks_for_hash(
+        &mut self,
+        document_id: &str,
+        expected_file_hash: &str,
+        entries: &[ImportBookmarkEntry],
+        limits: &ImportLimits,
+    ) -> CoreResult<BookmarkImportReport> {
+        self.import_bookmarks_inner(document_id, Some(expected_file_hash), entries, limits)
+    }
+
+    fn import_bookmarks_inner(
+        &mut self,
+        document_id: &str,
+        expected_file_hash: Option<&str>,
+        entries: &[ImportBookmarkEntry],
+        limits: &ImportLimits,
+    ) -> CoreResult<BookmarkImportReport> {
         let tx = self.conn.transaction()?;
-        let doc_format: String = tx
+        let (doc_format, file_hash): (String, String) = tx
             .query_row(
-                "SELECT format FROM documents WHERE id = ?1",
+                "SELECT format, file_hash FROM documents WHERE id = ?1",
                 [document_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?
             .ok_or_else(|| not_found("document", document_id))?;
+
+        if let Some(required_hash) = expected_file_hash
+            && file_hash != required_hash
+        {
+            return Err(CoreError::LanHashMismatch(
+                "target document file hash changed before bookmark import".into(),
+            ));
+        }
 
         let count_i64: i64 = tx.query_row(
             "SELECT COUNT(*) FROM bookmarks WHERE document_id = ?1",
