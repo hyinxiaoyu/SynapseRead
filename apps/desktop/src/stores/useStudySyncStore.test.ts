@@ -7,6 +7,7 @@ import {
   DEFAULT_PDF_LAYOUT,
   type PdfLayout,
   type ReaderSelection,
+  type StudyDocument,
   type TxtAnchor,
 } from '@/types/domain';
 
@@ -1758,5 +1759,901 @@ describe('card deletion, undo, and pane layout persistence (#116, #119)', () => 
     });
     expect(succeeded).toBe(true);
     expect(state().cards[0]?.markdownNotes).toBe('saved');
+  });
+});
+
+describe('cursor write tracking, close-and-flush, and store refresh (#137)', () => {
+  let backend: StudyBackend;
+  let store: ReturnType<typeof createStudySyncStore>;
+
+  const state = () => store.getState();
+
+  const openDocument = async () => {
+    await state().openDocument();
+    return state().activeDocumentId as string;
+  };
+
+  beforeEach(async () => {
+    backend = createMemoryBackend({
+      library: Object.fromEntries(
+        ['a.pdf', 'b.epub', 'c.txt', 'd.md'].map((name) => [
+          `/test/${name}`,
+          new TextEncoder().encode(`content:${name}`),
+        ]),
+      ),
+    });
+    store = createStudySyncStore(backend);
+    await state().initialize();
+  });
+
+  it('flushCursorWrites waits until all in-flight updateDocumentCursor promises for that document settle', async () => {
+    const docA = await openDocument();
+    const docB = await openDocument();
+
+    let resolveA1!: () => void;
+    let resolveA2!: () => void;
+    let resolveB!: () => void;
+    const a1 = new Promise<void>((resolve) => {
+      resolveA1 = resolve;
+    });
+    const a2 = new Promise<void>((resolve) => {
+      resolveA2 = resolve;
+    });
+    const b1 = new Promise<void>((resolve) => {
+      resolveB = resolve;
+    });
+
+    const calls: string[] = [];
+    vi.spyOn(backend, 'updateDocumentCursor').mockImplementation((id) => {
+      calls.push(id);
+      if (id === docA && calls.filter((c) => c === docA).length === 1) return a1;
+      if (id === docA) return a2;
+      return b1;
+    });
+
+    state().reportCursor(docA, txtAnchor, 0.2);
+    state().reportCursor(docA, { ...txtAnchor, startByteOffset: 1, endByteOffset: 4 }, 0.4);
+    state().reportCursor(docB, txtAnchor, 0.5);
+
+    let flushedA = false;
+    const flushPromise = state()
+      .flushCursorWrites(docA)
+      .then(() => {
+        flushedA = true;
+      });
+
+    await Promise.resolve();
+    expect(flushedA).toBe(false);
+
+    resolveA1();
+    await Promise.resolve();
+    expect(flushedA).toBe(false);
+
+    resolveA2();
+    await flushPromise;
+    expect(flushedA).toBe(true);
+
+    // Unrelated docB write is still pending and did not block docA.
+    resolveB();
+    await state().flushCursorWrites(docB);
+  });
+
+  it('closeDocumentAndFlush skips unmount wait when headless and awaits delayed cursor writes (T-31)', async () => {
+    const docId = await openDocument();
+
+    let resolveWrite!: () => void;
+    const delayedWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    vi.spyOn(backend, 'updateDocumentCursor').mockReturnValueOnce(delayedWrite);
+
+    state().reportCursor(docId, txtAnchor, 0.3);
+
+    let finished = false;
+    const closing = state()
+      .closeDocumentAndFlush(docId)
+      .then(() => {
+        finished = true;
+      });
+
+    // Document is closed synchronously and locked while flushing.
+    expect(state().openDocumentIds).not.toContain(docId);
+    expect(state().lockedDocumentIds).toContain(docId);
+
+    // Reopen attempts are ignored while locked.
+    await state().reopenRecentDocument(docId);
+    await state().reopenClosedDocument();
+    expect(state().openDocumentIds).not.toContain(docId);
+
+    await Promise.resolve();
+    expect(finished).toBe(false);
+
+    resolveWrite();
+    await closing;
+    expect(finished).toBe(true);
+    expect(state().lockedDocumentIds).not.toContain(docId);
+
+    // Reopen works again once the lock is released.
+    await state().reopenClosedDocument();
+    expect(state().openDocumentIds).toContain(docId);
+  });
+
+  it('closeDocumentAndFlush waits for mounted viewer unmount before flushing its cursor write (T-31, R3-06)', async () => {
+    const docId = await openDocument();
+    const unregister = state().registerMountedViewer(docId);
+
+    let resolveWrite!: () => void;
+    const delayedWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    const updateSpy = vi.spyOn(backend, 'updateDocumentCursor').mockReturnValueOnce(delayedWrite);
+
+    let finished = false;
+    const closing = state()
+      .closeDocumentAndFlush(docId)
+      .then(() => {
+        finished = true;
+      });
+
+    expect(state().openDocumentIds).not.toContain(docId);
+    await Promise.resolve();
+    expect(finished).toBe(false);
+
+    // Simulate React sibling order: <Viewer> cleanup reports cursor, then <UnmountSentinel> unregisters.
+    state().reportCursor(docId, txtAnchor, 0.75);
+    unregister();
+
+    await Promise.resolve();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(finished).toBe(false);
+
+    resolveWrite();
+    await closing;
+    expect(finished).toBe(true);
+  });
+
+  it('concurrent closeDocumentAndFlush calls both block until viewer unmounts and cursor write settles', async () => {
+    const docId = await openDocument();
+    const unregister = state().registerMountedViewer(docId);
+
+    let resolveWrite!: () => void;
+    const delayedWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    const updateSpy = vi.spyOn(backend, 'updateDocumentCursor').mockReturnValueOnce(delayedWrite);
+
+    let firstFinished = false;
+    let secondFinished = false;
+    const first = state()
+      .closeDocumentAndFlush(docId)
+      .then(() => {
+        firstFinished = true;
+      });
+    const second = state()
+      .closeDocumentAndFlush(docId)
+      .then(() => {
+        secondFinished = true;
+      });
+
+    await Promise.resolve();
+    expect(firstFinished).toBe(false);
+    expect(secondFinished).toBe(false);
+    expect(state().lockedDocumentIds).toContain(docId);
+
+    // Viewer unmounts, reports cursor, then UnmountSentinel unregisters.
+    state().reportCursor(docId, txtAnchor, 0.8);
+    unregister();
+
+    await Promise.resolve();
+    expect(updateSpy).toHaveBeenCalledTimes(1);
+    expect(firstFinished).toBe(false);
+    expect(secondFinished).toBe(false);
+
+    resolveWrite();
+    await Promise.all([first, second]);
+    expect(firstFinished).toBe(true);
+    expect(secondFinished).toBe(true);
+    expect(state().lockedDocumentIds).not.toContain(docId);
+  });
+
+  it('blocks file-picker open, dropped files, activate, and jump paths while a document lock is held', async () => {
+    const docId = await openDocument();
+    const lockedDoc = state().documents.find((d) => d.id === docId)!;
+    const otherDocId = await openDocument();
+    const otherDoc = state().documents.find((d) => d.id === otherDocId)!;
+
+    // Seed an annotation, card/node, and bookmark on the locked document to test jump paths too.
+    state().setSelection({
+      documentId: docId,
+      anchor: pdfAnchor as ReaderSelection['anchor'],
+      text: 'Locked excerpt',
+      imagePng: null,
+    });
+    await state().excerptSelection();
+    const annotationId = state().annotations.find((a) => a.documentId === docId)!.id;
+    const nodeId = state().nodes[0]!.id;
+    const bookmark = await state().addBookmark(docId, pdfAnchor as ReaderSelection['anchor'], 'BM');
+
+    state().closeDocument(docId);
+    expect(state().openDocumentIds).toEqual([otherDocId]);
+    expect(state().activeDocumentId).toBe(otherDocId);
+
+    const pickSpy = vi.spyOn(backend, 'pickDocument').mockResolvedValue(lockedDoc);
+    const dropSpy = vi
+      .spyOn(backend, 'dropFiles')
+      .mockResolvedValue({ documents: [lockedDoc, otherDoc], error: null });
+
+    await state().withDocumentLock(docId, async () => {
+      // File picker returning the locked document must not reopen or activate it.
+      await state().openDocument();
+      expect(state().openDocumentIds).not.toContain(docId);
+      expect(state().activeDocumentId).toBe(otherDocId);
+
+      // Dropped files containing the locked document must not reopen or activate it.
+      await state().dropFiles([new File(['data'], 'locked.pdf')]);
+      expect(state().openDocumentIds).not.toContain(docId);
+      expect(state().activeDocumentId).toBe(otherDocId);
+
+      // Direct activate and jump paths must also be blocked while locked.
+      state().activateDocument(docId);
+      state().jumpToAnnotation(annotationId);
+      state().jumpToNode(nodeId);
+      if (bookmark) state().jumpToBookmark(bookmark.id);
+      expect(state().openDocumentIds).not.toContain(docId);
+      expect(state().activeDocumentId).toBe(otherDocId);
+    });
+
+    // Once the lock is released, file-picker open reopens and activates the document normally.
+    await state().openDocument();
+    expect(state().openDocumentIds).toContain(docId);
+    expect(state().activeDocumentId).toBe(docId);
+
+    pickSpy.mockRestore();
+    dropSpy.mockRestore();
+  });
+
+  it('withDocumentLock blocks reopenRecentDocument and reopenClosedDocument across a close-and-apply sequence', async () => {
+    const docId = await openDocument();
+    state().closeDocument(docId);
+
+    await state().withDocumentLock(docId, async () => {
+      expect(state().lockedDocumentIds).toContain(docId);
+      await state().reopenRecentDocument(docId);
+      await state().reopenClosedDocument();
+      expect(state().openDocumentIds).not.toContain(docId);
+    });
+
+    expect(state().lockedDocumentIds).not.toContain(docId);
+    await state().reopenClosedDocument();
+    expect(state().openDocumentIds).toContain(docId);
+  });
+
+  it('invalidates an in-flight reopenRecentDocument when a lock is acquired and released before its stale response returns', async () => {
+    const docId = await openDocument();
+    const oldAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 1,
+      rects: [{ x: 0, y: 0.1, width: 0.5, height: 0.05 }],
+    };
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 9,
+      rects: [{ x: 0, y: 0.4, width: 0.5, height: 0.05 }],
+    };
+
+    await backend.updateDocumentCursor(docId, oldAnchor, 0.1);
+    await state().refreshDocument(docId);
+    state().closeDocument(docId);
+
+    // Capture the pre-sync snapshot and delay touchDocumentOpened so sync can
+    // acquire the lock, apply new progress, refresh the store, and unlock first.
+    const staleSnapshot = {
+      ...state().documents.find((d) => d.id === docId)!,
+      lastOpenedAt: '2026-11-20T12:00:00Z',
+    };
+    let resolveStaleTouch!: (doc: StudyDocument) => void;
+    const touchSpy = vi.spyOn(backend, 'touchDocumentOpened').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument>((resolve) => {
+          resolveStaleTouch = resolve;
+        }),
+    );
+
+    const staleReopen = state().reopenRecentDocument(docId);
+    await Promise.resolve();
+
+    // Sync runs end-to-end (lock -> update DB -> refresh store -> unlock) while
+    // the old reopenRecentDocument request is still in flight.
+    await state().withDocumentLock(docId, async () => {
+      await backend.updateDocumentCursor(docId, syncedAnchor, 0.9);
+      await state().refreshDocument(docId);
+    });
+    expect(state().lockedDocumentIds).not.toContain(docId);
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
+
+    // Now the stale response returns after the lock has already been released.
+    resolveStaleTouch(staleSnapshot);
+    await staleReopen;
+
+    // The stale snapshot must not overwrite the synced progress or reopen the tab.
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(state().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.9);
+    expect(state().openDocumentIds).not.toContain(docId);
+
+    touchSpy.mockRestore();
+
+    // A fresh reopen after sync succeeds with the synced progress intact.
+    await state().reopenRecentDocument(docId);
+    expect(state().openDocumentIds).toContain(docId);
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
+  });
+
+  it('invalidates stale file-picker and browser drop snapshots when a lock is acquired and released in flight', async () => {
+    const docId = await openDocument();
+    const oldAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 1,
+      rects: [{ x: 0, y: 0.1, width: 0.5, height: 0.05 }],
+    };
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 7,
+      rects: [{ x: 0, y: 0.3, width: 0.5, height: 0.05 }],
+    };
+
+    await backend.updateDocumentCursor(docId, oldAnchor, 0.15);
+    await state().refreshDocument(docId);
+    state().closeDocument(docId);
+    const staleSnapshot = { ...state().documents.find((d) => d.id === docId)! };
+
+    // 1) File picker starts before sync, returns stale snapshot after sync unlocks.
+    let resolvePick!: (doc: StudyDocument | null) => void;
+    const pickSpy = vi.spyOn(backend, 'pickDocument').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument | null>((resolve) => {
+          resolvePick = resolve;
+        }),
+    );
+
+    const stalePick = state().openDocument();
+    await Promise.resolve();
+
+    await state().withDocumentLock(docId, async () => {
+      await backend.updateDocumentCursor(docId, syncedAnchor, 0.75);
+      await state().refreshDocument(docId);
+    });
+    expect(state().lockedDocumentIds).not.toContain(docId);
+
+    resolvePick(staleSnapshot);
+    await stalePick;
+
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(state().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.75);
+    expect(state().openDocumentIds).not.toContain(docId);
+
+    // 2) Browser drop starts before a second sync, returns stale snapshot after sync unlocks.
+    const newerAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 12,
+      rects: [{ x: 0, y: 0.6, width: 0.5, height: 0.05 }],
+    };
+    let resolveDrop!: (result: Awaited<ReturnType<StudyBackend['dropFiles']>>) => void;
+    const dropSpy = vi.spyOn(backend, 'dropFiles').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveDrop = resolve;
+        }),
+    );
+
+    const staleDrop = state().dropFiles([new File(['data'], 'a.pdf')]);
+    await Promise.resolve();
+
+    await state().withDocumentLock(docId, async () => {
+      await backend.updateDocumentCursor(docId, newerAnchor, 0.92);
+      await state().refreshDocument(docId);
+    });
+
+    resolveDrop({ documents: [staleSnapshot], error: null });
+    await staleDrop;
+
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(newerAnchor);
+    expect(state().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.92);
+    expect(state().openDocumentIds).not.toContain(docId);
+
+    // A fresh file-picker open after sync succeeds with the synced document.
+    const freshSyncedDoc = { ...state().documents.find((d) => d.id === docId)! };
+    pickSpy.mockResolvedValueOnce(freshSyncedDoc);
+    await state().openDocument();
+    expect(state().openDocumentIds).toContain(docId);
+    expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(newerAnchor);
+
+    pickSpy.mockRestore();
+    dropSpy.mockRestore();
+  });
+
+  it('prevents stale native onFileDrop snapshots from regressing synced progress', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument();
+    const docId = nativeStore.getState().activeDocumentId as string;
+
+    const oldAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 2,
+      rects: [{ x: 0, y: 0.2, width: 0.5, height: 0.05 }],
+    };
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 10,
+      rects: [{ x: 0, y: 0.5, width: 0.5, height: 0.05 }],
+    };
+
+    await nativeBackend.updateDocumentCursor(docId, oldAnchor, 0.2);
+    await nativeStore.getState().refreshDocument(docId);
+    nativeStore.getState().closeDocument(docId);
+    const staleSnapshot = { ...nativeStore.getState().documents.find((d) => d.id === docId)! };
+
+    // Case 1: overlapping native drags (enter1 -> leave1 -> sync -> enter2 -> delayed drop1)
+    // must never overwrite the synced progress with drop1's stale snapshot.
+    emitDrop?.({ type: 'enter' });
+    emitDrop?.({ type: 'leave' });
+    await nativeStore.getState().withDocumentLock(docId, async () => {
+      await nativeBackend.updateDocumentCursor(docId, syncedAnchor, 0.85);
+      await nativeStore.getState().refreshDocument(docId);
+    });
+    // A second drag enters after sync unlocked, before the first drop payload arrives.
+    emitDrop?.({ type: 'enter' });
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
+      syncedAnchor,
+    );
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.85);
+
+    // Case 2: bare drop without preceding enter triggers a background refreshDocument that
+    // reads old progress before a subsequent sync writes newer progress and unlocks.
+    const newerAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 14,
+      rects: [{ x: 0, y: 0.7, width: 0.5, height: 0.05 }],
+    };
+    const beforeSecondSync = await nativeBackend.listDocuments();
+    let resolveStaleRefresh!: (docs: StudyDocument[]) => void;
+    const listSpy = vi.spyOn(nativeBackend, 'listDocuments').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument[]>((resolve) => {
+          resolveStaleRefresh = resolve;
+        }),
+    );
+
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    await Promise.resolve();
+
+    // Next sync runs to completion while the drop-triggered refreshDocument is still in flight.
+    await nativeStore.getState().withDocumentLock(docId, async () => {
+      await nativeBackend.updateDocumentCursor(docId, newerAnchor, 0.95);
+      await nativeStore.getState().refreshDocument(docId);
+    });
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
+      newerAnchor,
+    );
+
+    // Stale background refreshDocument returns with the pre-sync list; it must not regress state.
+    resolveStaleRefresh(beforeSecondSync);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
+      newerAnchor,
+    );
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.95);
+    listSpy.mockRestore();
+  });
+
+  it('loads the authoritative moved filePath before opening a tab on native onFileDrop', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    await nativeStore.getState().openDocument(); // b.epub
+    const epubId = nativeStore.getState().activeDocumentId as string;
+    const originalEpub = nativeStore.getState().documents.find((d) => d.id === epubId)!;
+    expect(originalEpub.format).toBe('epub');
+    expect(originalEpub.filePath).toBe('/test/b.epub');
+
+    nativeStore.getState().closeDocument(epubId);
+    expect(nativeStore.getState().openDocumentIds).not.toContain(epubId);
+
+    // Simulate the backend registering the moved EPUB at its new path.
+    const movedEpub: StudyDocument = {
+      ...originalEpub,
+      filePath: '/moved/b.epub',
+    };
+    const existingDocs = await nativeBackend.listDocuments();
+    let resolveList!: (docs: StudyDocument[]) => void;
+    const listSpy = vi.spyOn(nativeBackend, 'listDocuments').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument[]>((resolve) => {
+          resolveList = resolve;
+        }),
+    );
+
+    emitDrop?.({ type: 'enter' });
+    emitDrop?.({ type: 'leave' });
+    emitDrop?.({ type: 'drop', documents: [movedEpub], error: null });
+
+    // Must NOT open the tab synchronously while the store still holds the old path.
+    expect(nativeStore.getState().openDocumentIds).not.toContain(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/test/b.epub',
+    );
+
+    // Once the authoritative DB record resolves, the tab opens directly on the new path.
+    resolveList(existingDocs.map((d) => (d.id === epubId ? movedEpub : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().openDocumentIds).toContain(epubId);
+    expect(nativeStore.getState().activeDocumentId).toBe(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/moved/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    listSpy.mockRestore();
+  });
+
+  it('ignores an out-of-order earlier native drop listDocuments response so filePath does not regress', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    await nativeStore.getState().openDocument(); // b.epub
+    const epubId = nativeStore.getState().activeDocumentId as string;
+    const originalEpub = nativeStore.getState().documents.find((d) => d.id === epubId)!;
+    nativeStore.getState().closeDocument(epubId);
+
+    const existingDocs = await nativeBackend.listDocuments();
+    const firstMoved: StudyDocument = { ...originalEpub, filePath: '/moved-first/b.epub' };
+    const secondMoved: StudyDocument = { ...originalEpub, filePath: '/moved-second/b.epub' };
+
+    let resolveFirst!: (docs: StudyDocument[]) => void;
+    let resolveSecond!: (docs: StudyDocument[]) => void;
+    const listSpy = vi
+      .spyOn(nativeBackend, 'listDocuments')
+      .mockImplementationOnce(
+        () =>
+          new Promise<StudyDocument[]>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<StudyDocument[]>((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+
+    // Drop 1 starts, then Drop 2 starts before Drop 1's listDocuments() returns.
+    emitDrop?.({ type: 'drop', documents: [firstMoved], error: null });
+    emitDrop?.({ type: 'drop', documents: [secondMoved], error: null });
+
+    // Second response arrives first -> opens directly on the latest path.
+    resolveSecond(existingDocs.map((d) => (d.id === epubId ? secondMoved : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().openDocumentIds).toContain(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/moved-second/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    // Earlier response arrives late -> must be discarded without regressing filePath.
+    resolveFirst(existingDocs.map((d) => (d.id === epubId ? firstMoved : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/moved-second/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    listSpy.mockRestore();
+  });
+
+  it('does not let a native drop arriving during a document lock invalidate the sync refreshDocument', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    const docId = nativeStore.getState().activeDocumentId as string;
+    const staleSnapshot = { ...nativeStore.getState().documents.find((d) => d.id === docId)! };
+    nativeStore.getState().closeDocument(docId);
+
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 11,
+      rects: [{ x: 0, y: 0.45, width: 0.5, height: 0.05 }],
+    };
+
+    let resolveSyncRefresh!: (docs: StudyDocument[]) => void;
+    const realListDocuments = nativeBackend.listDocuments.bind(nativeBackend);
+    const listSpy = vi.spyOn(nativeBackend, 'listDocuments').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument[]>((resolve) => {
+          resolveSyncRefresh = resolve;
+        }),
+    );
+
+    const syncTask = nativeStore.getState().withDocumentLock(docId, async () => {
+      await nativeBackend.updateDocumentCursor(docId, syncedAnchor, 0.88);
+      await nativeStore.getState().refreshDocument(docId);
+    });
+    await Promise.resolve();
+
+    // A native drop for the locked document arrives while refreshDocument is in flight.
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    expect(nativeStore.getState().openDocumentIds).not.toContain(docId);
+
+    // Sync's own refreshDocument resolves and must still apply the synced progress.
+    resolveSyncRefresh(await realListDocuments());
+    await syncTask;
+
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
+      syncedAnchor,
+    );
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.88);
+    expect(nativeStore.getState().openDocumentIds).not.toContain(docId);
+
+    listSpy.mockRestore();
+  });
+
+  it('prevents an in-flight native drop response from overwriting a newer file-picker open path', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    await nativeStore.getState().openDocument(); // b.epub
+    const epubId = nativeStore.getState().activeDocumentId as string;
+    const originalEpub = nativeStore.getState().documents.find((d) => d.id === epubId)!;
+    nativeStore.getState().closeDocument(epubId);
+
+    const existingDocs = await nativeBackend.listDocuments();
+    const dropOldPath: StudyDocument = { ...originalEpub, filePath: '/drop-old/b.epub' };
+    const pickerNewPath: StudyDocument = { ...originalEpub, filePath: '/picker-new/b.epub' };
+
+    let resolveDropList!: (docs: StudyDocument[]) => void;
+    const listSpy = vi.spyOn(nativeBackend, 'listDocuments').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument[]>((resolve) => {
+          resolveDropList = resolve;
+        }),
+    );
+    const pickSpy = vi.spyOn(nativeBackend, 'pickDocument').mockResolvedValueOnce(pickerNewPath);
+
+    // 1) Native drop starts and awaits listDocuments().
+    emitDrop?.({ type: 'drop', documents: [dropOldPath], error: null });
+
+    // 2) File picker opens the same book from its new path and finishes first.
+    await nativeStore.getState().openDocument();
+    expect(nativeStore.getState().openDocumentIds).toContain(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/picker-new/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    // 3) Earlier native drop listDocuments() returns late with the old path -> must be discarded.
+    resolveDropList(existingDocs.map((d) => (d.id === epubId ? dropOldPath : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/picker-new/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(1);
+
+    listSpy.mockRestore();
+    pickSpy.mockRestore();
+  });
+
+  it('reconciles a valid file-picker selection when a prior native drop completes while the picker is open', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    await nativeStore.getState().openDocument(); // b.epub
+    const epubId = nativeStore.getState().activeDocumentId as string;
+    const originalEpub = nativeStore.getState().documents.find((d) => d.id === epubId)!;
+    nativeStore.getState().closeDocument(epubId);
+
+    const existingDocs = await nativeBackend.listDocuments();
+    const dropOldPath: StudyDocument = { ...originalEpub, filePath: '/drop-old/b.epub' };
+    const pickerNewPath: StudyDocument = { ...originalEpub, filePath: '/picker-new/b.epub' };
+
+    let resolveDropList!: (docs: StudyDocument[]) => void;
+    let resolvePick!: (doc: StudyDocument | null) => void;
+    const listSpy = vi
+      .spyOn(nativeBackend, 'listDocuments')
+      .mockImplementationOnce(
+        () =>
+          new Promise<StudyDocument[]>((resolve) => {
+            resolveDropList = resolve;
+          }),
+      )
+      .mockImplementationOnce(async () =>
+        existingDocs.map((d) => (d.id === epubId ? pickerNewPath : d)),
+      );
+    const pickSpy = vi.spyOn(nativeBackend, 'pickDocument').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument | null>((resolve) => {
+          resolvePick = resolve;
+        }),
+    );
+
+    // 1) Prior native drop starts, then user opens the file picker.
+    emitDrop?.({ type: 'drop', documents: [dropOldPath], error: null });
+    const picking = nativeStore.getState().openDocument();
+
+    // 2) Prior native drop finishes while the file picker dialog is still open,
+    // advancing the document's refresh sequence.
+    resolveDropList(existingDocs.map((d) => (d.id === epubId ? dropOldPath : d)));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/drop-old/b.epub',
+    );
+
+    // 3) User selects the new path in the file picker; reconciliation re-reads
+    // the authoritative DB row and applies /picker-new/b.epub.
+    resolvePick(pickerNewPath);
+    await picking;
+
+    expect(nativeStore.getState().openDocumentIds).toContain(epubId);
+    expect(nativeStore.getState().documents.find((d) => d.id === epubId)?.filePath).toBe(
+      '/picker-new/b.epub',
+    );
+    expect(nativeStore.getState().relinkedNonceByDocumentId[epubId]).toBe(2);
+
+    listSpy.mockRestore();
+    pickSpy.mockRestore();
+  });
+
+  it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {
+    const docA = await openDocument();
+    const docB = await openDocument();
+    const originalA = state().documents.find((d) => d.id === docA)!;
+    const originalB = state().documents.find((d) => d.id === docB)!;
+
+    // Update cursor directly in backend (simulating a synced write).
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 4,
+      rects: [{ x: 0, y: 0.25, width: 0.5, height: 0.05 }],
+    };
+    await backend.updateDocumentCursor(docA, syncedAnchor, 0.8);
+
+    const updated = await state().refreshDocument(docA);
+    expect(updated?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(state().documents.find((d) => d.id === docA)?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(state().documents.find((d) => d.id === docB)).toEqual(originalB);
+
+    // Insert a newly imported document not yet in store state.
+    const imported = {
+      ...originalA,
+      id: 'doc-newly-imported',
+      title: 'Synced Book',
+      filePath: '/synced/book.pdf',
+    };
+    vi.spyOn(backend, 'listDocuments').mockResolvedValueOnce([
+      ...(await backend.listDocuments()),
+      imported,
+    ]);
+    await state().refreshDocument(imported.id);
+    expect(state().documents.find((d) => d.id === imported.id)).toEqual(imported);
+
+    // Missing document with unchanged filePath stays missing.
+    store.setState((s) => ({
+      documentSourceStatuses: {
+        ...s.documentSourceStatuses,
+        [docA]: {
+          documentId: docA,
+          state: 'missing',
+          currentFileHash: null,
+          fileSizeBytes: null,
+        },
+      },
+    }));
+    await state().refreshDocument(docA);
+    expect(state().documentSourceStatuses[docA]?.state).toBe('missing');
+    expect(state().relinkedNonceByDocumentId[docA] ?? 0).toBe(0);
+
+    // Missing document whose filePath changed transitions to ok and bumps relinkedNonce.
+    const restoredA = { ...originalA, filePath: '/restored/a.pdf', lastCursorAnchor: syncedAnchor };
+    vi.spyOn(backend, 'listDocuments').mockResolvedValueOnce([restoredA, originalB]);
+    await state().refreshDocument(docA);
+    expect(state().documentSourceStatuses[docA]).toEqual({
+      documentId: docA,
+      state: 'ok',
+      currentFileHash: restoredA.fileHash,
+      fileSizeBytes: null,
+    });
+    expect(state().relinkedNonceByDocumentId[docA]).toBe(1);
+    expect(state().documents.find((d) => d.id === docA)?.filePath).toBe('/restored/a.pdf');
+  });
+
+  it('refreshBookmarks replaces only the target document bookmarks without affecting others (T-32)', async () => {
+    const docA = await openDocument();
+    const docB = await openDocument();
+
+    await state().addBookmark(docA, pdfAnchor as ReaderSelection['anchor'], 'Old A');
+    await state().addBookmark(
+      docB,
+      { format: 'epub', cfiRange: 'epubcfi(/6/2!/4/2)', chapterHref: 'ch1.xhtml' },
+      'Keep B',
+    );
+    const oldAId = state().bookmarks.find((b) => b.documentId === docA)!.id;
+    const keepBId = state().bookmarks.find((b) => b.documentId === docB)!.id;
+
+    // Mutate backend directly for docA without going through store actions.
+    await backend.deleteBookmark(oldAId);
+    const syncedA = await backend.createBookmark({
+      documentId: docA,
+      anchor: { format: 'pdf', pageIndex: 3, rects: [{ x: 0, y: 0, width: 1, height: 0.1 }] },
+      label: 'Synced A',
+    });
+
+    await state().refreshBookmarks(docA);
+
+    const aBookmarks = state().bookmarks.filter((b) => b.documentId === docA);
+    const bBookmarks = state().bookmarks.filter((b) => b.documentId === docB);
+    expect(aBookmarks.map((b) => b.id)).toEqual([syncedA.id]);
+    expect(aBookmarks[0]?.label).toBe('Synced A');
+    expect(bBookmarks.map((b) => b.id)).toEqual([keepBId]);
   });
 });

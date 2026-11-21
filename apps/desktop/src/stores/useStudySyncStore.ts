@@ -78,6 +78,11 @@ export interface StudySyncState {
    * session's other tab state.
    */
   closedDocumentIds: string[];
+  /**
+   * Documents currently locked by a close-and-flush / close-and-apply sequence.
+   * Reopening a locked document is ignored until its lock is released.
+   */
+  lockedDocumentIds: string[];
   isDraggingFile: boolean;
   /** Immersive reading: chrome collapsed. Part of the session, so it survives a restart. */
   immersive: boolean;
@@ -144,6 +149,37 @@ export interface StudySyncState {
   dropFiles(files: readonly File[]): Promise<void>;
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
+  /**
+   * Closes an open document, waits for its mounted viewer to unmount and enqueue
+   * any final cursor write, then waits for all in-flight cursor writes to settle.
+   */
+  closeDocumentAndFlush(documentId: string): Promise<void>;
+  /** Waits until all in-flight `updateDocumentCursor` writes for `documentId` settle. */
+  flushCursorWrites(documentId: string): Promise<void>;
+  /**
+   * Registers a mounted viewer instance for `documentId` and returns an unregister
+   * callback to invoke on unmount after the viewer's own cleanup has run.
+   */
+  registerMountedViewer(documentId: string): () => void;
+  /**
+   * Acquires a reference-counted reopen lock for `documentId` and returns an
+   * idempotent release function. While locked, open, reopen, activate, and jump
+   * paths will not open or activate `documentId`.
+   */
+  lockDocument(documentId: string): () => void;
+  /** Runs `run` while holding a reopen lock on `documentId`. */
+  withDocumentLock<T>(documentId: string, run: () => Promise<T>): Promise<T>;
+  /**
+   * Reloads `documentId` via `backend.listDocuments()`, upserting it in `documents`.
+   * If it was previously `missing` and its `filePath` changed, resets its source
+   * status to `ok` and increments `relinkedNonceByDocumentId[documentId]`.
+   */
+  refreshDocument(documentId: string): Promise<StudyDocument | null>;
+  /**
+   * Reloads bookmarks via `backend.listBookmarks()` and replaces only bookmarks
+   * belonging to `documentId`.
+   */
+  refreshBookmarks(documentId: string): Promise<void>;
   /** `progress` is how far through the document the anchor is, `0..1`, if known. */
   reportCursor(
     documentId: string,
@@ -296,12 +332,14 @@ export function selectReopenableDocumentId(
   closedDocumentIds: readonly string[],
   openDocumentIds: readonly string[],
   documents: readonly StudyDocument[],
+  lockedDocumentIds: readonly string[] = [],
 ): string | null {
   for (let index = closedDocumentIds.length - 1; index >= 0; index -= 1) {
     const id = closedDocumentIds[index];
     if (id === undefined) continue;
     // A tab opened again by Open or Recent is no longer a closed tab.
     if (openDocumentIds.includes(id)) continue;
+    if (lockedDocumentIds.includes(id)) continue;
     if (!documents.some((document) => document.id === id)) continue;
     return id;
   }
@@ -333,6 +371,68 @@ export function createStudySyncStore(backend: StudyBackend) {
      */
     const pendingDeletes = new Map<string, Promise<void>>();
     const pendingCardDeletes = new Map<string, Promise<void>>();
+    /** In-flight `updateDocumentCursor` writes, by document id. */
+    const pendingCursorWrites = new Map<string, Set<Promise<void>>>();
+    /** Active mounted `<Viewer>` counts, registered by sibling `<UnmountSentinel>`. */
+    const mountedViewerCounts = new Map<string, number>();
+    /** Waiters resolved when the last mounted viewer for a document unmounts. */
+    const viewerUnmountWaiters = new Map<string, Set<() => void>>();
+    /** Reference-counted reopen locks, by document id. */
+    const documentLockCounts = new Map<string, number>();
+    /**
+     * Monotonic counter incremented whenever a lock is acquired for a document.
+     * In-flight async requests capture the epoch before awaiting backend I/O so
+     * a response that started before a close-and-apply cycle cannot overwrite
+     * refreshed state after the lock is released.
+     */
+    const documentLockEpochs = new Map<string, number>();
+    /** Monotonic per-document sequence numbers for `refreshDocument` and `refreshBookmarks`. */
+    const documentRefreshSeqs = new Map<string, number>();
+    const bookmarkRefreshSeqs = new Map<string, number>();
+
+    const isDocumentLocked = (documentId: string): boolean =>
+      (documentLockCounts.get(documentId) ?? 0) > 0;
+
+    const getDocumentLockEpoch = (documentId: string): number =>
+      documentLockEpochs.get(documentId) ?? 0;
+
+    const getDocumentRefreshSeq = (documentId: string): number =>
+      documentRefreshSeqs.get(documentId) ?? 0;
+
+    const nextDocumentRefreshSeq = (documentId: string): number => {
+      const next = getDocumentRefreshSeq(documentId) + 1;
+      documentRefreshSeqs.set(documentId, next);
+      return next;
+    };
+
+    const acquireLock = (documentId: string): (() => void) => {
+      documentLockEpochs.set(documentId, getDocumentLockEpoch(documentId) + 1);
+      const nextCount = (documentLockCounts.get(documentId) ?? 0) + 1;
+      documentLockCounts.set(documentId, nextCount);
+      if (nextCount === 1) {
+        set((state) =>
+          state.lockedDocumentIds.includes(documentId)
+            ? state
+            : { lockedDocumentIds: [...state.lockedDocumentIds, documentId] },
+        );
+      }
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const current = documentLockCounts.get(documentId) ?? 0;
+        if (current <= 1) {
+          documentLockCounts.delete(documentId);
+          set((state) =>
+            state.lockedDocumentIds.includes(documentId)
+              ? { lockedDocumentIds: state.lockedDocumentIds.filter((id) => id !== documentId) }
+              : state,
+          );
+        } else {
+          documentLockCounts.set(documentId, current - 1);
+        }
+      };
+    };
 
     const guarded = async (write: () => Promise<void>, rollback?: () => void) => {
       try {
@@ -359,9 +459,14 @@ export function createStudySyncStore(backend: StudyBackend) {
       documentId: string,
     ): Promise<DocumentSourceStatus | null> => {
       if (!get().documents.some((doc) => doc.id === documentId)) return null;
+      const lockEpoch = getDocumentLockEpoch(documentId);
       let status: DocumentSourceStatus | null = null;
       await guarded(async () => {
         status = await backend.verifyDocumentSource(documentId);
+        if (isDocumentLocked(documentId) || getDocumentLockEpoch(documentId) !== lockEpoch) {
+          status = null;
+          return;
+        }
         if (status) {
           const resolved = status;
           set((state) => ({
@@ -375,12 +480,47 @@ export function createStudySyncStore(backend: StudyBackend) {
       return status;
     };
 
-    const applyOpenedDocuments = (opened: readonly StudyDocument[], error?: unknown) => {
+    const applyOpenedDocuments = (
+      opened: readonly StudyDocument[],
+      error?: unknown,
+      epochsAtStart?: ReadonlyMap<string, number>,
+      seqsAtStart?: ReadonlyMap<string, number>,
+    ) => {
+      const committedIds = new Set<string>();
       set((state) => {
         let documents = state.documents;
         let openDocumentIds = state.openDocumentIds;
         const documentSourceStatuses = { ...state.documentSourceStatuses };
+        const relinkedNonceByDocumentId = { ...state.relinkedNonceByDocumentId };
+        const unlockedOpened: StudyDocument[] = [];
         for (const document of opened) {
+          if (isDocumentLocked(document.id)) {
+            if (!documents.some((d) => d.id === document.id)) {
+              documents = [...documents, document];
+            }
+            continue;
+          }
+          const currentEpoch = getDocumentLockEpoch(document.id);
+          if (
+            epochsAtStart !== undefined &&
+            currentEpoch !== (epochsAtStart.get(document.id) ?? 0)
+          ) {
+            // A close-and-apply lock was acquired (and possibly released) while this
+            // open/drop request was in flight, invalidating the pre-lock snapshot.
+            continue;
+          }
+          if (
+            seqsAtStart !== undefined &&
+            getDocumentRefreshSeq(document.id) !== (seqsAtStart.get(document.id) ?? 0)
+          ) {
+            // A newer open, drop, relink, or refresh superseded this response.
+            continue;
+          }
+          const existing = documents.find((d) => d.id === document.id);
+          if (existing !== undefined && existing.filePath !== document.filePath) {
+            relinkedNonceByDocumentId[document.id] =
+              (relinkedNonceByDocumentId[document.id] ?? 0) + 1;
+          }
           documents = [...documents.filter((d) => d.id !== document.id), document];
           if (!openDocumentIds.includes(document.id)) {
             openDocumentIds = [...openDocumentIds, document.id];
@@ -391,22 +531,113 @@ export function createStudySyncStore(backend: StudyBackend) {
             currentFileHash: document.fileHash,
             fileSizeBytes: null,
           };
+          unlockedOpened.push(document);
+          committedIds.add(document.id);
         }
-        const lastOpened = opened.at(-1);
+        const lastOpened = unlockedOpened.at(-1);
         return {
           documents,
           documentSourceStatuses,
+          relinkedNonceByDocumentId,
           openDocumentIds,
           // Opening a file again takes it off the closed-tab stack.
           closedDocumentIds: state.closedDocumentIds.filter(
-            (id) => !opened.some((document) => document.id === id),
+            (id) => !unlockedOpened.some((document) => document.id === id),
           ),
           activeDocumentId: lastOpened ? lastOpened.id : state.activeDocumentId,
-          selection: opened.length > 0 ? null : state.selection,
+          selection: unlockedOpened.length > 0 ? null : state.selection,
           ...(error !== undefined && error !== null ? { error: describeError(error) } : {}),
         };
       });
-      if (opened.length > 0) persistSession();
+      for (const id of committedIds) {
+        nextDocumentRefreshSeq(id);
+      }
+      if (committedIds.size > 0) persistSession();
+    };
+
+    const reconcileAndApplyOpenedDocuments = async (
+      opened: readonly StudyDocument[],
+      error: unknown,
+      epochsAtStart: ReadonlyMap<string, number>,
+      seqsAtStart: ReadonlyMap<string, number>,
+    ) => {
+      const hasSeqConflict = opened.some(
+        (doc) =>
+          !isDocumentLocked(doc.id) &&
+          getDocumentLockEpoch(doc.id) === (epochsAtStart.get(doc.id) ?? 0) &&
+          getDocumentRefreshSeq(doc.id) !== (seqsAtStart.get(doc.id) ?? 0),
+      );
+      if (!hasSeqConflict) {
+        applyOpenedDocuments(opened, error, epochsAtStart, seqsAtStart);
+        return;
+      }
+      // Another non-lock open, drop, or refresh completed while this picker or
+      // drop was awaiting. Re-read the authoritative DB rows under fresh
+      // per-document sequence numbers (keeping `epochsAtStart` so any sync lock
+      // still invalidates the request) so a valid selection is applied with the
+      // latest path without letting an older response regress state.
+      const reconcileSeqs = new Map<string, number>();
+      for (const doc of opened) {
+        if (
+          !isDocumentLocked(doc.id) &&
+          getDocumentLockEpoch(doc.id) === (epochsAtStart.get(doc.id) ?? 0)
+        ) {
+          reconcileSeqs.set(doc.id, nextDocumentRefreshSeq(doc.id));
+        }
+      }
+      const allDocuments = await backend.listDocuments();
+      const byId = new Map(allDocuments.map((doc) => [doc.id, doc]));
+      const resolved = opened
+        .filter(
+          (doc) =>
+            !isDocumentLocked(doc.id) &&
+            reconcileSeqs.has(doc.id) &&
+            getDocumentRefreshSeq(doc.id) === reconcileSeqs.get(doc.id),
+        )
+        .map((doc) => byId.get(doc.id) ?? doc);
+      if (resolved.length === 0 && (error === undefined || error === null)) return;
+      applyOpenedDocuments(resolved, error, epochsAtStart, reconcileSeqs);
+    };
+
+    const openNativeDroppedDocuments = (dropped: readonly StudyDocument[], error?: unknown) => {
+      const knownIds = new Set(get().documents.map((doc) => doc.id));
+      const hasUnlockedKnownDocument = dropped.some(
+        (doc) => knownIds.has(doc.id) && !isDocumentLocked(doc.id),
+      );
+      if (!hasUnlockedKnownDocument) {
+        // Either all dropped docs are brand new, or every known doc is currently
+        // locked (so applyOpenedDocuments skips locked known docs without bumping
+        // any refresh sequence and without interfering with in-lock refreshes).
+        applyOpenedDocuments(dropped, error);
+        return;
+      }
+      // Native drop push events carry no request id and may race with sync or
+      // move a known document to a new path. Read the authoritative DB rows
+      // under both a lock-epoch snapshot and per-document sequence numbers so
+      // out-of-order responses can never overwrite a newer path or synced state.
+      // Never bump sequence numbers for locked documents, or a drop arriving
+      // during a sync lock would invalidate the sync's own `refreshDocument`.
+      const epochsAtStart = new Map(documentLockEpochs);
+      const seqsAtStart = new Map<string, number>();
+      for (const doc of dropped) {
+        if (!isDocumentLocked(doc.id)) {
+          seqsAtStart.set(doc.id, nextDocumentRefreshSeq(doc.id));
+        }
+      }
+      void guarded(async () => {
+        const allDocuments = await backend.listDocuments();
+        const byId = new Map(allDocuments.map((doc) => [doc.id, doc]));
+        const resolved = dropped
+          .filter(
+            (doc) =>
+              !isDocumentLocked(doc.id) &&
+              seqsAtStart.has(doc.id) &&
+              getDocumentRefreshSeq(doc.id) === seqsAtStart.get(doc.id),
+          )
+          .map((doc) => byId.get(doc.id) ?? doc);
+        if (resolved.length === 0 && (error === undefined || error === null)) return;
+        applyOpenedDocuments(resolved, error, epochsAtStart, seqsAtStart);
+      });
     };
 
     // Leaving full screen by any other route (the window's button, View ▸ Exit Full
@@ -463,7 +694,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         set({ isDraggingFile: false });
       } else {
         set({ isDraggingFile: false });
-        applyOpenedDocuments(event.documents, event.error);
+        openNativeDroppedDocuments(event.documents, event.error);
       }
     });
 
@@ -482,6 +713,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       openDocumentIds: [],
       activeDocumentId: null,
       closedDocumentIds: [],
+      lockedDocumentIds: [],
       isDraggingFile: false,
       immersive: false,
       paneLayout: { ...DEFAULT_WORKSPACE_PANE_LAYOUT },
@@ -525,7 +757,9 @@ export function createStudySyncStore(backend: StudyBackend) {
           const notebook = notebooks[0] ?? (await backend.createNotebook(DEFAULT_NOTEBOOK_TITLE));
           const graph = await backend.loadNotebookGraph(notebook.id);
           const knownIds = new Set(documents.map((doc) => doc.id));
-          const openDocumentIds = session.openDocumentIds.filter((id) => knownIds.has(id));
+          const openDocumentIds = session.openDocumentIds.filter(
+            (id) => knownIds.has(id) && !isDocumentLocked(id),
+          );
           const activeDocumentId =
             session.activeDocumentId && openDocumentIds.includes(session.activeDocumentId)
               ? session.activeDocumentId
@@ -560,20 +794,34 @@ export function createStudySyncStore(backend: StudyBackend) {
       dismissError: () => set({ error: null }),
 
       async openDocument() {
+        const epochsAtStart = new Map(documentLockEpochs);
+        const seqsAtStart = new Map(documentRefreshSeqs);
         await guarded(async () => {
           const document = await backend.pickDocument();
           if (document === null) return;
-          applyOpenedDocuments([document]);
+          await reconcileAndApplyOpenedDocuments([document], undefined, epochsAtStart, seqsAtStart);
         });
       },
 
       async reopenRecentDocument(documentId) {
+        if (isDocumentLocked(documentId)) return;
         if (!get().documents.some((doc) => doc.id === documentId)) return;
+        const lockEpoch = getDocumentLockEpoch(documentId);
+        const refreshSeq = nextDocumentRefreshSeq(documentId);
         await guarded(async () => {
           const [touched, status] = await Promise.all([
             backend.touchDocumentOpened(documentId),
             backend.verifyDocumentSource(documentId),
           ]);
+          // A close-and-apply lock or newer open/drop/refresh may have occurred
+          // while awaiting backend I/O, invalidating this snapshot.
+          if (
+            isDocumentLocked(documentId) ||
+            getDocumentLockEpoch(documentId) !== lockEpoch ||
+            getDocumentRefreshSeq(documentId) !== refreshSeq
+          ) {
+            return;
+          }
           set((state) => ({
             documents: state.documents.map((doc) => (doc.id === documentId ? touched : doc)),
             documentSourceStatuses: {
@@ -592,11 +840,12 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async reopenClosedDocument() {
-        const { closedDocumentIds, openDocumentIds, documents } = get();
+        const { closedDocumentIds, openDocumentIds, documents, lockedDocumentIds } = get();
         const documentId = selectReopenableDocumentId(
           closedDocumentIds,
           openDocumentIds,
           documents,
+          lockedDocumentIds,
         );
         if (documentId === null) return;
         await get().reopenRecentDocument(documentId);
@@ -613,6 +862,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           const result = await backend.relinkDocument(documentId, confirmInPlace);
           if (!result) return;
           relinked = result;
+          nextDocumentRefreshSeq(documentId);
           set((state) => ({
             documents: state.documents.map((doc) =>
               doc.id === documentId ? result.document : doc,
@@ -638,13 +888,16 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async dropFiles(files) {
         if (files.length === 0) return;
+        const epochsAtStart = new Map(documentLockEpochs);
+        const seqsAtStart = new Map(documentRefreshSeqs);
         await guarded(async () => {
           const { documents, error } = await backend.dropFiles(files);
-          applyOpenedDocuments(documents, error);
+          await reconcileAndApplyOpenedDocuments(documents, error, epochsAtStart, seqsAtStart);
         });
       },
 
       activateDocument(documentId) {
+        if (isDocumentLocked(documentId)) return;
         if (documentId === get().activeDocumentId) return;
         set({ activeDocumentId: documentId, selection: null });
         persistSession();
@@ -677,6 +930,154 @@ export function createStudySyncStore(backend: StudyBackend) {
           };
         });
         persistSession();
+      },
+
+      async flushCursorWrites(documentId) {
+        // Loop in case another cursor write starts while awaiting the current batch.
+        for (;;) {
+          const writes = pendingCursorWrites.get(documentId);
+          if (!writes || writes.size === 0) return;
+          await Promise.allSettled([...writes]);
+        }
+      },
+
+      registerMountedViewer(documentId) {
+        mountedViewerCounts.set(documentId, (mountedViewerCounts.get(documentId) ?? 0) + 1);
+        let unregistered = false;
+        return () => {
+          if (unregistered) return;
+          unregistered = true;
+          const current = mountedViewerCounts.get(documentId) ?? 0;
+          if (current <= 1) {
+            mountedViewerCounts.delete(documentId);
+            const waiters = viewerUnmountWaiters.get(documentId);
+            if (waiters) {
+              viewerUnmountWaiters.delete(documentId);
+              for (const resolve of waiters) resolve();
+            }
+          } else {
+            mountedViewerCounts.set(documentId, current - 1);
+          }
+        };
+      },
+
+      lockDocument(documentId) {
+        return acquireLock(documentId);
+      },
+
+      async withDocumentLock(documentId, run) {
+        const release = acquireLock(documentId);
+        try {
+          return await run();
+        } finally {
+          release();
+        }
+      },
+
+      async closeDocumentAndFlush(documentId) {
+        const release = acquireLock(documentId);
+        try {
+          const isMounted = (mountedViewerCounts.get(documentId) ?? 0) > 0;
+          const wasOpen = get().openDocumentIds.includes(documentId);
+          // Wait whenever a viewer is still mounted, even if a concurrent
+          // `closeDocumentAndFlush` already removed `documentId` from
+          // `openDocumentIds` before React committed the unmount.
+          let unmountPromise: Promise<void> | null = null;
+          if (isMounted) {
+            unmountPromise = new Promise<void>((resolve) => {
+              let waiters = viewerUnmountWaiters.get(documentId);
+              if (!waiters) {
+                waiters = new Set();
+                viewerUnmountWaiters.set(documentId, waiters);
+              }
+              waiters.add(resolve);
+            });
+          }
+          if (wasOpen) {
+            get().closeDocument(documentId);
+          }
+          if (unmountPromise) {
+            await unmountPromise;
+          }
+          await get().flushCursorWrites(documentId);
+        } finally {
+          release();
+        }
+      },
+
+      async refreshDocument(documentId) {
+        const lockEpoch = getDocumentLockEpoch(documentId);
+        const startedWhileLocked = isDocumentLocked(documentId);
+        const refreshSeq = nextDocumentRefreshSeq(documentId);
+        let refreshed: StudyDocument | null = null;
+        await guarded(async () => {
+          const documents = await backend.listDocuments();
+          if (
+            getDocumentLockEpoch(documentId) !== lockEpoch ||
+            getDocumentRefreshSeq(documentId) !== refreshSeq ||
+            (!startedWhileLocked && isDocumentLocked(documentId))
+          ) {
+            return;
+          }
+          const target = documents.find((doc) => doc.id === documentId);
+          if (!target) return;
+          refreshed = target;
+          set((state) => {
+            const previous = state.documents.find((doc) => doc.id === documentId);
+            const nextDocuments = previous
+              ? state.documents.map((doc) => (doc.id === documentId ? target : doc))
+              : [...state.documents, target];
+
+            const wasMissing = state.documentSourceStatuses[documentId]?.state === 'missing';
+            const filePathChanged = previous !== undefined && previous.filePath !== target.filePath;
+            if (wasMissing && filePathChanged) {
+              return {
+                documents: nextDocuments,
+                documentSourceStatuses: {
+                  ...state.documentSourceStatuses,
+                  [documentId]: {
+                    documentId,
+                    state: 'ok',
+                    currentFileHash: target.fileHash,
+                    fileSizeBytes: null,
+                  },
+                },
+                relinkedNonceByDocumentId: {
+                  ...state.relinkedNonceByDocumentId,
+                  [documentId]: (state.relinkedNonceByDocumentId[documentId] ?? 0) + 1,
+                },
+                selection: state.selection?.documentId === documentId ? null : state.selection,
+              };
+            }
+
+            return { documents: nextDocuments };
+          });
+        });
+        return refreshed;
+      },
+
+      async refreshBookmarks(documentId) {
+        const lockEpoch = getDocumentLockEpoch(documentId);
+        const startedWhileLocked = isDocumentLocked(documentId);
+        const refreshSeq = (bookmarkRefreshSeqs.get(documentId) ?? 0) + 1;
+        bookmarkRefreshSeqs.set(documentId, refreshSeq);
+        await guarded(async () => {
+          const allBookmarks = await backend.listBookmarks();
+          if (
+            getDocumentLockEpoch(documentId) !== lockEpoch ||
+            bookmarkRefreshSeqs.get(documentId) !== refreshSeq ||
+            (!startedWhileLocked && isDocumentLocked(documentId))
+          ) {
+            return;
+          }
+          const forDocument = allBookmarks.filter((bookmark) => bookmark.documentId === documentId);
+          set((state) => ({
+            bookmarks: [
+              ...state.bookmarks.filter((bookmark) => bookmark.documentId !== documentId),
+              ...forDocument,
+            ],
+          }));
+        });
       },
 
       async setFullscreen(fullscreen) {
@@ -732,7 +1133,19 @@ export function createStudySyncStore(backend: StudyBackend) {
               : document,
           ),
         }));
-        void guarded(() => backend.updateDocumentCursor(documentId, anchor, progress));
+        let writes = pendingCursorWrites.get(documentId);
+        if (!writes) {
+          writes = new Set();
+          pendingCursorWrites.set(documentId, writes);
+        }
+        const bucket = writes;
+        const tracked = guarded(() =>
+          backend.updateDocumentCursor(documentId, anchor, progress),
+        ).finally(() => {
+          bucket.delete(tracked);
+          if (bucket.size === 0) pendingCursorWrites.delete(documentId);
+        });
+        bucket.add(tracked);
       },
 
       captureUrl: (annotationId) => backend.captureUrl(annotationId),
@@ -906,6 +1319,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           set({ error: 'The source document for this annotation is no longer available.' });
           return;
         }
+        if (isDocumentLocked(annotation.documentId)) return;
 
         jumpNonce += 1;
         set((state) => ({
@@ -938,6 +1352,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           set({ error: 'The source document for this card is no longer available.' });
           return;
         }
+        if (isDocumentLocked(annotation.documentId)) return;
 
         jumpNonce += 1;
         set((state) => ({
@@ -1293,6 +1708,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           set({ error: 'The source document for this bookmark is no longer available.' });
           return;
         }
+        if (isDocumentLocked(bookmark.documentId)) return;
 
         jumpNonce += 1;
         set((state) => ({

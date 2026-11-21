@@ -1961,4 +1961,46 @@ describe('TxtViewer', () => {
       }
     });
   });
+
+  describe('hostile anchor recovery (T-38)', () => {
+    it('falls back cleanly to the start when lastCursorAnchor.startByteOffset is past EOF', async () => {
+      const text = Array.from({ length: 40 }, (_, i) => `Line ${i + 1} content`).join('\n');
+      const { store, documentId } = await setup(new TextEncoder().encode(text), 64);
+
+      const hostileAnchor: TxtAnchor = {
+        format: 'txt',
+        startByteOffset: 999_999,
+        endByteOffset: 1_000_010,
+        lineIndex: 9999,
+      };
+      store.setState((state) => ({
+        documents: state.documents.map((doc) =>
+          doc.id === documentId ? { ...doc, lastCursorAnchor: hostileAnchor } : doc,
+        ),
+      }));
+
+      render(<Harness store={store} documentId={documentId} />);
+      await segmentWith('Line 1 content');
+      expect(scroller().scrollTop).toBe(0);
+
+      // Once streaming completes, restored.current is set so subsequent scrolling reports valid cursors.
+      vi.useFakeTimers();
+      try {
+        scroller().scrollTop = ROW_PX * 10;
+        fireEvent.scroll(scroller());
+        act(() => {
+          vi.advanceTimersByTime(500);
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+      const updatedAnchor = store
+        .getState()
+        .documents.find((d) => d.id === documentId)?.lastCursorAnchor;
+      expect(updatedAnchor?.format).toBe('txt');
+      if (updatedAnchor?.format === 'txt') {
+        expect(updatedAnchor.startByteOffset).toBeLessThan(text.length);
+      }
+    });
+  });
 });
