@@ -144,38 +144,22 @@ impl Database {
     /// content is already known. A known file found at a new path has its
     /// stored path updated, keeping its annotations attached.
     pub fn register_document(&self, path: &Path) -> CoreResult<Document> {
-        let extension = path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
-        let format = DocumentFormat::from_extension(extension)?;
-        let file_hash = hash_file(path)?;
-        let file_path = path.to_string_lossy();
-        let title = path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| file_path.clone().into_owned());
+        let file_hash = hash_document_for_registration(path)?;
+        upsert_document_with_hash(&self.conn, path, &file_hash)
+    }
 
-        self.conn.execute(
-            "INSERT INTO documents (id, title, file_path, file_hash, format, encoding, last_opened_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-             ON CONFLICT (file_hash) DO UPDATE SET
-                 file_path = excluded.file_path,
-                 last_opened_at = excluded.last_opened_at",
-            params![
-                new_id(),
-                title,
-                file_path,
-                file_hash,
-                format.as_str(),
-                UTF8_LABEL
-            ],
-        )?;
-        Ok(self.conn.query_row(
-            &format!("{DOCUMENT_SELECT} WHERE file_hash = ?1"),
-            [&file_hash],
-            map_document,
-        )?)
+    /// Commits a document registration inside a transaction using a `file_hash`
+    /// computed outside the database lock, rechecking the file format under the
+    /// lock before writing.
+    pub fn register_document_with_hash(
+        &mut self,
+        path: &Path,
+        file_hash: &str,
+    ) -> CoreResult<Document> {
+        let tx = self.conn.transaction()?;
+        let document = upsert_document_with_hash(&tx, path, file_hash)?;
+        tx.commit()?;
+        Ok(document)
     }
 
     pub fn touch_document_opened(&self, document_id: &str) -> CoreResult<Document> {
@@ -241,44 +225,14 @@ impl Database {
     }
 
     pub fn get_document(&self, document_id: &str) -> CoreResult<Document> {
-        self.conn
-            .query_row(
-                &format!("{DOCUMENT_SELECT} WHERE id = ?1"),
-                [document_id],
-                map_document,
-            )
-            .optional()?
-            .ok_or_else(|| not_found("document", document_id))
+        get_document_in_conn(&self.conn, document_id)
     }
 
     /// Checks whether a registered document's file is present and matches its
     /// recorded SHA-256 `file_hash`, without mutating the database.
     pub fn verify_document_source(&self, document_id: &str) -> CoreResult<DocumentSourceStatus> {
         let document = self.get_document(document_id)?;
-        let path = Path::new(&document.file_path);
-        let metadata = match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() => meta,
-            _ => {
-                return Ok(DocumentSourceStatus {
-                    document_id: document.id,
-                    state: DocumentSourceState::Missing,
-                    current_file_hash: None,
-                    file_size_bytes: None,
-                });
-            }
-        };
-        let current_hash = hash_file(path)?;
-        let state = if current_hash == document.file_hash {
-            DocumentSourceState::Ok
-        } else {
-            DocumentSourceState::Changed
-        };
-        Ok(DocumentSourceStatus {
-            document_id: document.id,
-            state,
-            current_file_hash: Some(current_hash),
-            file_size_bytes: Some(metadata.len()),
-        })
+        verify_document_file(&document)
     }
 
     /// Explicitly relinks an existing document to `new_path`, updating its stored
@@ -294,69 +248,23 @@ impl Database {
         new_path: &Path,
     ) -> CoreResult<RelinkDocumentResult> {
         let existing = self.get_document(document_id)?;
-        let extension = new_path
-            .extension()
-            .and_then(|value| value.to_str())
-            .unwrap_or_default();
-        let format = DocumentFormat::from_extension(extension)?;
-        if format != existing.format {
-            return Err(CoreError::UnsupportedFormat(format!(
-                "cannot relink a {} document to a {} file",
-                existing.format.as_str(),
-                format.as_str()
-            )));
-        }
+        let new_hash = hash_document_for_relink(existing.format, new_path)?;
+        relink_document_in_conn(&self.conn, document_id, new_path, &new_hash)
+    }
 
-        let new_hash = hash_file(new_path)?;
-        let duplicate_id: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT id FROM documents WHERE file_hash = ?1 AND id != ?2",
-                params![new_hash, document_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if duplicate_id.is_some() {
-            return Err(CoreError::InvalidGraph(
-                "that file is already registered as another document in your library".to_owned(),
-            ));
-        }
-
-        let content_changed = new_hash != existing.file_hash;
-        let file_path = new_path.to_string_lossy();
-        let title = new_path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_else(|| file_path.clone().into_owned());
-
-        if content_changed {
-            self.conn.execute(
-                "UPDATE documents SET
-                     title = ?2,
-                     file_path = ?3,
-                     file_hash = ?4,
-                     last_cursor_anchor = NULL,
-                     last_progress = NULL,
-                     last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE id = ?1",
-                params![document_id, title, file_path, new_hash],
-            )?;
-        } else {
-            self.conn.execute(
-                "UPDATE documents SET
-                     title = ?2,
-                     file_path = ?3,
-                     last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-                 WHERE id = ?1",
-                params![document_id, title, file_path],
-            )?;
-        }
-
-        Ok(RelinkDocumentResult {
-            document: self.get_document(document_id)?,
-            content_changed,
-            previous_file_hash: existing.file_hash,
-        })
+    /// Commits a document relink inside a transaction using a `new_hash` computed
+    /// outside the database lock, rechecking the existing document, format
+    /// compatibility, and `file_hash` uniqueness under the lock before writing.
+    pub fn relink_document_with_hash(
+        &mut self,
+        document_id: &str,
+        new_path: &Path,
+        new_hash: &str,
+    ) -> CoreResult<RelinkDocumentResult> {
+        let tx = self.conn.transaction()?;
+        let result = relink_document_in_conn(&tx, document_id, new_path, new_hash)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     // ---- Notebooks -------------------------------------------------------
@@ -1415,6 +1323,190 @@ impl Database {
             .optional()?;
         Ok(found.is_some())
     }
+}
+
+/// Validates `path`'s extension and hashes its bytes without touching the
+/// database, so callers can run file I/O outside any database lock.
+pub fn hash_document_for_registration(path: &Path) -> CoreResult<String> {
+    let _format = document_format_for_path(path)?;
+    hash_file(path)
+}
+
+/// Validates that `new_path` matches `expected_format` and hashes its bytes
+/// without touching the database, so callers can run file I/O outside any
+/// database lock.
+pub fn hash_document_for_relink(
+    expected_format: DocumentFormat,
+    new_path: &Path,
+) -> CoreResult<String> {
+    validate_relink_format(expected_format, new_path)?;
+    hash_file(new_path)
+}
+
+/// Checks whether `document`'s file on disk is present and matches its recorded
+/// SHA-256 `file_hash`, without touching the database.
+pub fn verify_document_file(document: &Document) -> CoreResult<DocumentSourceStatus> {
+    verify_document_file_with_hasher(document, hash_file)
+}
+
+/// Same as [`verify_document_file`] with an injectable file hasher for tests.
+pub fn verify_document_file_with_hasher<F>(
+    document: &Document,
+    hasher: F,
+) -> CoreResult<DocumentSourceStatus>
+where
+    F: FnOnce(&Path) -> CoreResult<String>,
+{
+    let path = Path::new(&document.file_path);
+    let metadata = match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => meta,
+        _ => {
+            return Ok(DocumentSourceStatus {
+                document_id: document.id.clone(),
+                state: DocumentSourceState::Missing,
+                current_file_hash: None,
+                file_size_bytes: None,
+            });
+        }
+    };
+    let current_hash = hasher(path)?;
+    let state = if current_hash == document.file_hash {
+        DocumentSourceState::Ok
+    } else {
+        DocumentSourceState::Changed
+    };
+    Ok(DocumentSourceStatus {
+        document_id: document.id.clone(),
+        state,
+        current_file_hash: Some(current_hash),
+        file_size_bytes: Some(metadata.len()),
+    })
+}
+
+fn document_format_for_path(path: &Path) -> CoreResult<DocumentFormat> {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    DocumentFormat::from_extension(extension)
+}
+
+fn validate_relink_format(
+    expected_format: DocumentFormat,
+    new_path: &Path,
+) -> CoreResult<DocumentFormat> {
+    let format = document_format_for_path(new_path)?;
+    if format != expected_format {
+        return Err(CoreError::UnsupportedFormat(format!(
+            "cannot relink a {} document to a {} file",
+            expected_format.as_str(),
+            format.as_str()
+        )));
+    }
+    Ok(format)
+}
+
+fn get_document_in_conn(conn: &Connection, document_id: &str) -> CoreResult<Document> {
+    conn.query_row(
+        &format!("{DOCUMENT_SELECT} WHERE id = ?1"),
+        [document_id],
+        map_document,
+    )
+    .optional()?
+    .ok_or_else(|| not_found("document", document_id))
+}
+
+fn upsert_document_with_hash(
+    conn: &Connection,
+    path: &Path,
+    file_hash: &str,
+) -> CoreResult<Document> {
+    let format = document_format_for_path(path)?;
+    let file_path = path.to_string_lossy();
+    let title = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_path.clone().into_owned());
+
+    conn.execute(
+        "INSERT INTO documents (id, title, file_path, file_hash, format, encoding, last_opened_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         ON CONFLICT (file_hash) DO UPDATE SET
+             file_path = excluded.file_path,
+             last_opened_at = excluded.last_opened_at",
+        params![
+            new_id(),
+            title,
+            file_path,
+            file_hash,
+            format.as_str(),
+            UTF8_LABEL
+        ],
+    )?;
+    Ok(conn.query_row(
+        &format!("{DOCUMENT_SELECT} WHERE file_hash = ?1"),
+        [file_hash],
+        map_document,
+    )?)
+}
+
+fn relink_document_in_conn(
+    conn: &Connection,
+    document_id: &str,
+    new_path: &Path,
+    new_hash: &str,
+) -> CoreResult<RelinkDocumentResult> {
+    let existing = get_document_in_conn(conn, document_id)?;
+    let _format = validate_relink_format(existing.format, new_path)?;
+
+    let duplicate_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM documents WHERE file_hash = ?1 AND id != ?2",
+            params![new_hash, document_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if duplicate_id.is_some() {
+        return Err(CoreError::InvalidGraph(
+            "that file is already registered as another document in your library".to_owned(),
+        ));
+    }
+
+    let content_changed = new_hash != existing.file_hash;
+    let file_path = new_path.to_string_lossy();
+    let title = new_path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file_path.clone().into_owned());
+
+    if content_changed {
+        conn.execute(
+            "UPDATE documents SET
+                 title = ?2,
+                 file_path = ?3,
+                 file_hash = ?4,
+                 last_cursor_anchor = NULL,
+                 last_progress = NULL,
+                 last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+            params![document_id, title, file_path, new_hash],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE documents SET
+                 title = ?2,
+                 file_path = ?3,
+                 last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
+            params![document_id, title, file_path],
+        )?;
+    }
+
+    Ok(RelinkDocumentResult {
+        document: get_document_in_conn(conn, document_id)?,
+        content_changed,
+        previous_file_hash: existing.file_hash,
+    })
 }
 
 fn migrate(conn: &mut Connection) -> CoreResult<()> {
@@ -3843,5 +3935,68 @@ mod tests {
         assert_eq!(sanitized.pane_layout.mind_map_size, None);
         assert_eq!(sanitized.pane_layout.inspector_size, None);
         assert!(sanitized.immersive);
+    }
+
+    #[test]
+    fn staged_hash_commits_recheck_format_and_hash_collisions_under_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&dir.path().join("staged.sqlite3")).unwrap();
+
+        let unsupported = dir.path().join("archive.zip");
+        std::fs::write(&unsupported, "zip").unwrap();
+        assert!(matches!(
+            db.register_document_with_hash(&unsupported, "deadbeef"),
+            Err(CoreError::UnsupportedFormat(_))
+        ));
+
+        let first_path = dir.path().join("first.txt");
+        let second_path = dir.path().join("second.txt");
+        let replacement_path = dir.path().join("replacement.txt");
+        let wrong_format_path = dir.path().join("other.pdf");
+        std::fs::write(&first_path, "first content").unwrap();
+        std::fs::write(&second_path, "second content").unwrap();
+        std::fs::write(&replacement_path, "replacement content").unwrap();
+        std::fs::write(&wrong_format_path, "pdf bytes").unwrap();
+
+        let first_hash = hash_document_for_registration(&first_path).unwrap();
+        let first = db
+            .register_document_with_hash(&first_path, &first_hash)
+            .unwrap();
+        assert_eq!(first.file_hash, first_hash);
+
+        // Compute hash for `replacement_path` outside the DB, then simulate another
+        // registration winning the race with the same content before commit.
+        let replacement_hash = hash_document_for_relink(first.format, &replacement_path).unwrap();
+        let _raced = db
+            .register_document_with_hash(&replacement_path, &replacement_hash)
+            .unwrap();
+
+        assert!(matches!(
+            db.relink_document_with_hash(&first.id, &replacement_path, &replacement_hash),
+            Err(CoreError::InvalidGraph(_))
+        ));
+        assert!(matches!(
+            db.relink_document_with_hash(&first.id, &wrong_format_path, "anyhash"),
+            Err(CoreError::UnsupportedFormat(_))
+        ));
+        // Original record remains untouched after failed relink commits.
+        assert_eq!(db.get_document(&first.id).unwrap().file_hash, first_hash);
+
+        // Valid staged relink commits cleanly.
+        let second_hash = hash_document_for_relink(first.format, &second_path).unwrap();
+        let relinked = db
+            .relink_document_with_hash(&first.id, &second_path, &second_hash)
+            .unwrap();
+        assert!(relinked.content_changed);
+        assert_eq!(relinked.document.file_hash, second_hash);
+        assert_eq!(relinked.document.title, "second");
+
+        // Lock-free file verification matches the committed record.
+        let verified = verify_document_file(&relinked.document).unwrap();
+        assert_eq!(verified.state, DocumentSourceState::Ok);
+        assert_eq!(
+            verified.current_file_hash.as_deref(),
+            Some(second_hash.as_str())
+        );
     }
 }
