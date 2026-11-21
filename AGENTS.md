@@ -45,13 +45,18 @@ cargo test --workspace
 
 ```
 React components ──> useStudySyncStore ──> StudyBackend ──> Tauri commands ──> synapse-core ──> SQLite
+                                                     │                     └──> synapse-lan (LAN sync, ADR 0008)
                                                      └──> memory backend (tests, browser)
 ```
 
-- **`crates/synapse-core`** holds all backend logic. It must not depend on Tauri,
+- **`crates/synapse-core`** holds all persistence and domain logic. It must not depend on Tauri,
   so it builds and tests anywhere.
-- **`apps/desktop/src-tauri`** only adapts core APIs to commands. A command body
-  should be a line or two; logic belongs in core.
+- **`crates/synapse-lan`** (planned per [ADR 0008](docs/adr/0008-lan-book-sync.md)) isolates
+  session-scoped LAN book sync (address policy, pairing, HTTP/1.1 server/client, import
+  orchestration). It must not depend on Tauri and inherits `unsafe` forbidden like all workspace
+  crates.
+- **`apps/desktop/src-tauri`** only adapts core/LAN APIs to commands. A command body
+  should be a line or two; logic belongs in workspace crates.
 - **`src/lib/backend`** is the only frontend code allowed to import `@tauri-apps/*`.
 - **`useStudySyncStore`** is the bus between Reader and MindMap. Neither imports
   the other: readers publish selections and consume `jumpRequest`; the canvas
@@ -95,8 +100,11 @@ paths outside a `cfg` or an adapter, and never hard-code path separators.
 `fixtures/contract/commands.json`. Components handle commands with `useCommands`; do not
 add a `keydown` listener for a shortcut ([ADR 0006](docs/adr/0006-command-registry.md)).
 
-**Local-first.** No telemetry and no network calls. User documents and data stay
-on the device.
+**Local-first.** No telemetry, no accounts, and no network calls—with
+[ADR 0008](docs/adr/0008-lan-book-sync.md) (user-initiated, session-scoped local LAN
+book sync between two SynapseRead desktop instances over private IPv4 literals) as the
+**only** exception. User documents and data stay on the device unless explicitly shared
+in a confirmed LAN session.
 
 ## Changing the IPC contract
 
@@ -139,6 +147,9 @@ beside the code in `#[cfg(test)]`, frontend as `*.test.ts(x)` beside the source.
 - `pdfjs-dist` is imported only from `features/reader/pdf/pdfEngine.ts`, and from its
   `legacy` build, because the modern build needs newer WebKit than we target
   ([ADR 0004](docs/adr/0004-pdfjs-worker-csp.md)).
+- `crates/synapse-lan` ([ADR 0008](docs/adr/0008-lan-book-sync.md)) stays Tauri-free with
+  `unsafe` forbidden, reuses the caller's Tokio runtime, enables only HTTP/1 features of
+  `hyper`/`hyper-util`, and pins existing `Cargo.lock` major versions where possible.
 
 ## Git
 

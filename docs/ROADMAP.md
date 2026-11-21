@@ -125,6 +125,23 @@ for task IDs, acceptance evidence, and measurements.
 - Error reporting and recovery (missing or moved source files).
 - Accessibility and keyboard navigation pass.
 
+## LAN Book Sync (V1, alongside/after M4 signing)
+
+Tracking issue `#132` ([ADR 0008](adr/0008-lan-book-sync.md)): pull-only, session-scoped
+HTTP/1.1 sharing of books, reading positions, and bookmarks between two SynapseRead desktop
+instances on the same private IPv4 LAN, with zero SQLite schema migrations.
+
+- Core persistence and managed library storage (`<app-data>/library/<sha256>.<ext>`),
+  insert-only bookmark merge, conditional cursor CAS (`replace_cursor_if`), and
+  sole-connection startup reconciliation.
+- Tauri-free `crates/synapse-lan` crate for address policy, pairing codes, HTTP/1.1
+  server/client, and import orchestration.
+- Native Rust confirmation before sharing, Share/Import dialogs exposed atomically in
+  `fixtures/contract/commands.json`, and Chromium E2E coverage.
+- **Native macOS acceptance prerequisite:** requires Apple-signed builds launched from
+  Finder (depends on M4 code signing) to validate Local Network privacy and macOS
+  Application Firewall behavior on two physical Macs.
+
 ## V1.1 and later
 
 - Multi-encoding support: `encoding_rs` decoders and a `chardetng` detector,
