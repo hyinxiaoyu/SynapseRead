@@ -215,6 +215,8 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
+type OnStopCallback = Arc<dyn Fn(ListenerStopReason) + Send + Sync>;
+
 enum ControlCommand {
     Stop,
     SessionEnded,
@@ -223,6 +225,7 @@ enum ControlCommand {
     RecordActivity,
     ResetCodeTimer,
     SetTransferActive(bool),
+    RegisterOnStop(OnStopCallback),
 }
 
 /// Cloneable control channel for notifying a running [`LanListener`] of
@@ -231,6 +234,7 @@ enum ControlCommand {
 #[derive(Clone)]
 pub struct ListenerControl {
     control_tx: mpsc::UnboundedSender<ControlCommand>,
+    stopped_rx: watch::Receiver<Option<ListenerStopReason>>,
 }
 
 impl std::fmt::Debug for ListenerControl {
@@ -268,6 +272,26 @@ impl ListenerControl {
 
     pub fn shutdown(&self) {
         let _ = self.control_tx.send(ControlCommand::Shutdown);
+    }
+
+    /// Registers a synchronous callback invoked when the listener terminates,
+    /// before `wait_stopped()` resolves. If the listener has already stopped,
+    /// the callback is invoked immediately.
+    pub fn on_stop(&self, callback: OnStopCallback) {
+        if let Some(reason) = *self.stopped_rx.borrow() {
+            callback(reason);
+            return;
+        }
+        if let Err(mpsc::error::SendError(ControlCommand::RegisterOnStop(cb))) = self
+            .control_tx
+            .send(ControlCommand::RegisterOnStop(callback))
+        {
+            let reason = self
+                .stopped_rx
+                .borrow()
+                .unwrap_or(ListenerStopReason::Shutdown);
+            cb(reason);
+        }
     }
 }
 
@@ -315,6 +339,7 @@ impl LanListenerHandle {
     pub fn control(&self) -> ListenerControl {
         ListenerControl {
             control_tx: self.control_tx.clone(),
+            stopped_rx: self.stopped_rx.clone(),
         }
     }
 
@@ -442,6 +467,7 @@ async fn run_listener_loop<H: ConnectionHandler>(
 
     let mut phase = SessionPhase::Listening;
     let mut transfer_active = false;
+    let mut on_stop_callbacks: Vec<OnStopCallback> = Vec::new();
     let mut deadline = clock.now() + config.code_expiry;
     let timer = tokio::time::sleep_until(deadline);
     tokio::pin!(timer);
@@ -484,6 +510,9 @@ async fn run_listener_loop<H: ConnectionHandler>(
                             deadline = clock.now() + config.idle_timeout;
                             timer.as_mut().reset(deadline);
                         }
+                    }
+                    Some(ControlCommand::RegisterOnStop(cb)) => {
+                        on_stop_callbacks.push(cb);
                     }
                 }
             }
@@ -561,13 +590,25 @@ async fn run_listener_loop<H: ConnectionHandler>(
     };
 
     // Stop accepting new sockets, cancel every active connection (including
-    // idle HTTP/1.1 keep-alive connections), and drain all connection tasks
+    // idle HTTP/1.1 keep-alive connections), drain all connection tasks, and
+    // run registered stop callbacks (e.g. revoking paired session credentials)
     // before publishing the stop reason so `wait_stopped()` guarantees zero
-    // live sockets remain (T-10).
+    // live sockets or active credentials remain (T-02, T-10).
     drop(bound.listener);
     let _ = shutdown_tx.send(true);
     active_connections.abort_all();
     while active_connections.join_next().await.is_some() {}
+
+    // Drain any RegisterOnStop commands queued right before loop exit.
+    control_rx.close();
+    while let Some(cmd) = control_rx.recv().await {
+        if let ControlCommand::RegisterOnStop(cb) = cmd {
+            on_stop_callbacks.push(cb);
+        }
+    }
+    for cb in on_stop_callbacks {
+        cb(stop_reason);
+    }
 
     let _ = stopped_tx.send(Some(stop_reason));
     let _ = events_tx.send(ListenerEvent::Stopped {

@@ -27,6 +27,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const PROTOCOL_HEADER: &str = "x-synapseread-protocol";
 /// Default HTTP header read timeout (ADR 0008: 10 s).
 pub const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default HTTP POST body read timeout (prevents slow-body connection slot
+/// starvation across the 4-connection cap, `T-04` / `T-11`).
+pub const DEFAULT_BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default HTTP/1.1 header buffer cap (ADR 0008: 8 KiB).
 pub const MAX_HEADER_BYTES: usize = 8 * 1024;
 /// Default POST request body cap (ADR 0008: 4 KiB).
@@ -46,6 +49,7 @@ pub type LanResponse = Response<LanBoxBody>;
 #[derive(Debug, Clone, Copy)]
 pub struct HttpServerConfig {
     pub header_read_timeout: Duration,
+    pub body_read_timeout: Duration,
     pub max_header_bytes: usize,
     pub max_post_body_bytes: usize,
 }
@@ -54,6 +58,7 @@ impl Default for HttpServerConfig {
     fn default() -> Self {
         Self {
             header_read_timeout: DEFAULT_HEADER_READ_TIMEOUT,
+            body_read_timeout: DEFAULT_BODY_READ_TIMEOUT,
             max_header_bytes: MAX_HEADER_BYTES,
             max_post_body_bytes: MAX_POST_BODY_BYTES,
         }
@@ -76,18 +81,36 @@ struct HelloResponse {
     app: &'static str,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PairRequest {
     code: String,
 }
 
-#[derive(Debug, Serialize)]
+impl std::fmt::Debug for PairRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairRequest")
+            .field("code", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PairResponse {
     token: String,
     idle_timeout_seconds: u64,
     permissions: SharePermissions,
+}
+
+impl std::fmt::Debug for PairResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PairResponse")
+            .field("token", &"[REDACTED]")
+            .field("idle_timeout_seconds", &self.idle_timeout_seconds)
+            .field("permissions", &self.permissions)
+            .finish()
+    }
 }
 
 /// Extension hook for authenticated `/v1` data endpoints (`/catalog`,
@@ -234,6 +257,7 @@ impl<A: SourceApiHandler> LanHttpHandler<A> {
             &self.session,
             self.api.as_ref(),
             self.config.max_post_body_bytes,
+            self.config.body_read_timeout,
             post_response_stop,
         )
         .await;
@@ -278,6 +302,7 @@ impl<A: SourceApiHandler> ConnectionHandler for LanHttpHandler<A> {
                             &session,
                             api.as_ref(),
                             config.max_post_body_bytes,
+                            config.body_read_timeout,
                             &post_response_stop,
                         )
                         .await;
@@ -363,6 +388,7 @@ pub fn is_valid_sha256_hex(value: &str) -> bool {
             .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn route_request_inner<B, A>(
     req: Request<B>,
     peer_ip: Ipv4Addr,
@@ -370,6 +396,7 @@ async fn route_request_inner<B, A>(
     session: &Arc<SessionManager>,
     api: &A,
     max_post_body_bytes: usize,
+    body_read_timeout: Duration,
     post_response_stop: &AtomicBool,
 ) -> LanResponse
 where
@@ -432,7 +459,7 @@ where
             },
         ),
         Route::Pair => {
-            let body = match read_bounded_body(req, max_post_body_bytes).await {
+            let body = match read_bounded_body(req, max_post_body_bytes, body_read_timeout).await {
                 Ok(bytes) => bytes,
                 Err(err) => return lan_error_response(&err),
             };
@@ -466,7 +493,7 @@ where
             if let Err(err) = session.authenticate(peer_ip, &token) {
                 return lan_error_response(&err);
             }
-            if let Err(err) = read_bounded_body(req, max_post_body_bytes).await {
+            if let Err(err) = read_bounded_body(req, max_post_body_bytes, body_read_timeout).await {
                 return lan_error_response(&err);
             }
             session.revoke_local();
@@ -626,7 +653,11 @@ fn authenticate_request<B>(
     session.authenticate(peer_ip, &token)
 }
 
-async fn read_bounded_body<B>(req: Request<B>, max_bytes: usize) -> LanResult<Vec<u8>>
+async fn read_bounded_body<B>(
+    req: Request<B>,
+    max_bytes: usize,
+    read_timeout: Duration,
+) -> LanResult<Vec<u8>>
 where
     B: Body<Data = Bytes> + Send + 'static,
     B::Error: std::fmt::Display,
@@ -643,20 +674,27 @@ where
 
     let body = req.into_body();
     tokio::pin!(body);
-    let mut buf = Vec::new();
-    while let Some(frame_res) = body.frame().await {
-        let frame = frame_res
-            .map_err(|_| LanError::PayloadTooLarge("failed to read HTTP request body".into()))?;
-        if let Some(data) = frame.data_ref() {
-            if buf.len().saturating_add(data.len()) > max_bytes {
-                return Err(LanError::PayloadTooLarge(format!(
-                    "request body exceeds {max_bytes} bytes"
-                )));
+    let read_fut = async move {
+        let mut buf = Vec::new();
+        while let Some(frame_res) = body.frame().await {
+            let frame = frame_res.map_err(|_| {
+                LanError::PayloadTooLarge("failed to read HTTP request body".into())
+            })?;
+            if let Some(data) = frame.data_ref() {
+                if buf.len().saturating_add(data.len()) > max_bytes {
+                    return Err(LanError::PayloadTooLarge(format!(
+                        "request body exceeds {max_bytes} bytes"
+                    )));
+                }
+                buf.extend_from_slice(data);
             }
-            buf.extend_from_slice(data);
         }
-    }
-    Ok(buf)
+        Ok(buf)
+    };
+
+    tokio::time::timeout(read_timeout, read_fut)
+        .await
+        .map_err(|_| LanError::Cancelled)?
 }
 
 /// Constructs an empty [`LanBoxBody`].
@@ -739,7 +777,16 @@ pub fn lan_error_response(err: &LanError) -> LanResponse {
         LanError::Cancelled => StatusCode::REQUEST_TIMEOUT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    error_response(status, err.code(), err.to_string())
+    let mut resp = error_response(status, err.code(), err.to_string());
+    if matches!(err, LanError::Cancelled | LanError::PayloadTooLarge(_)) {
+        // Close stalled or oversized-body connections immediately so they
+        // cannot hold listener connection slots (`T-04` / `T-11`).
+        resp.headers_mut().insert(
+            header::CONNECTION,
+            header::HeaderValue::from_static("close"),
+        );
+    }
+    resp
 }
 
 /// Guarantees every response carries `Cache-Control: no-store` and zero CORS
@@ -1342,6 +1389,195 @@ mod tests {
             handle.wait_stopped().await,
             ListenerStopReason::SessionEnded
         );
+    }
+
+    // T-03: PairRequest and PairResponse Debug impls must redact raw credentials
+    // while PairResponse JSON preserves the /v1/pair wire contract.
+    #[test]
+    fn t03_pair_http_dtos_redact_credentials_in_debug() {
+        let req = PairRequest {
+            code: "842913".into(),
+        };
+        let req_dbg = format!("{req:?}");
+        assert!(
+            !req_dbg.contains("842913"),
+            "leaked code in Debug: {req_dbg}"
+        );
+        assert!(req_dbg.contains("[REDACTED]"));
+
+        let resp = PairResponse {
+            token: "secret-bearer-token-value-1234567890".into(),
+            idle_timeout_seconds: 600,
+            permissions: SharePermissions {
+                positions: true,
+                bookmarks: false,
+            },
+        };
+        let resp_dbg = format!("{resp:?}");
+        assert!(
+            !resp_dbg.contains("secret-bearer-token-value-1234567890"),
+            "leaked token in Debug: {resp_dbg}"
+        );
+        assert!(resp_dbg.contains("[REDACTED]"));
+
+        let json: serde_json::Value = serde_json::to_value(&resp).expect("serialize");
+        assert_eq!(json["token"], "secret-bearer-token-value-1234567890");
+        assert_eq!(json["idleTimeoutSeconds"], 600);
+        assert_eq!(json["permissions"]["positions"], true);
+        assert_eq!(json["permissions"]["bookmarks"], false);
+    }
+
+    // T-04 / T-11: Slow/incomplete POST bodies time out and release all 4
+    // listener connection slots so subsequent requests succeed.
+    #[tokio::test]
+    async fn t04_slow_post_body_times_out_and_releases_connection_slots() {
+        let http_config = HttpServerConfig {
+            header_read_timeout: Duration::from_secs(10),
+            body_read_timeout: Duration::from_millis(120),
+            ..HttpServerConfig::default()
+        };
+        let (addr, _session, _code, mut handle) =
+            start_test_server(SessionConfig::default(), http_config);
+
+        // Occupy all 4 connection slots with complete headers + stalled partial
+        // POST bodies (within the 4 KiB cap).
+        let mut stalled_streams = Vec::with_capacity(4);
+        for _ in 0..4 {
+            let mut stream = TcpStream::connect(addr).await.expect("connect");
+            let partial = format!(
+                "POST /v1/pair HTTP/1.1\r\nHost: {addr}\r\nX-SynapseRead-Protocol: 1\r\nContent-Type: application/json\r\nContent-Length: 32\r\n\r\n{{\"co"
+            );
+            stream
+                .write_all(partial.as_bytes())
+                .await
+                .expect("write partial post");
+            stalled_streams.push(stream);
+        }
+
+        // Every stalled POST must time out with 408 and close the connection.
+        for mut stream in stalled_streams {
+            let mut resp = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut resp))
+                .await
+                .expect("slow body must time out and close")
+                .expect("read");
+            let resp_str = String::from_utf8_lossy(&resp);
+            assert!(
+                resp_str.starts_with("HTTP/1.1 408"),
+                "expected 408 Request Timeout, got: {resp_str}"
+            );
+            assert!(resp_str.contains("lan_cancelled"));
+        }
+
+        // Connection slots must now be free for a fresh request.
+        let health = send_http_close(
+            addr,
+            format!(
+                "GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nX-SynapseRead-Protocol: 1\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await;
+        assert!(health.starts_with("HTTP/1.1 200"), "health: {health}");
+
+        handle.stop();
+        assert_eq!(
+            handle.wait_stopped().await,
+            ListenerStopReason::StoppedByUser
+        );
+    }
+
+    // T-02: Listener termination via Stop, Shutdown, or NetworkChanged must
+    // synchronously revoke SessionManager to Off, abort active transfers, and
+    // invalidate previously issued bearer tokens.
+    #[tokio::test(start_paused = true)]
+    async fn t02_listener_stop_shutdown_and_network_change_revoke_session() {
+        struct MutableInterfaceProvider(std::sync::Mutex<Vec<RawInterface>>);
+        impl InterfaceProvider for MutableInterfaceProvider {
+            fn list_interfaces(&self) -> LanResult<Vec<RawInterface>> {
+                Ok(self.0.lock().expect("lock").clone())
+            }
+        }
+
+        for expected_reason in [
+            ListenerStopReason::StoppedByUser,
+            ListenerStopReason::Shutdown,
+            ListenerStopReason::NetworkChanged,
+        ] {
+            let bound = bind_ephemeral_loopback();
+            let addr = bound.local_addr;
+            let clock = Arc::new(TokioMonotonicClock);
+            let (session, code) = SessionManager::new(
+                SessionConfig::default(),
+                clock.clone(),
+                SharePermissions {
+                    positions: true,
+                    bookmarks: true,
+                },
+                vec![SnapshotBook {
+                    document_id: "doc-1".into(),
+                    snapshot_file_hash: "a".repeat(64),
+                }],
+            )
+            .expect("session");
+            let session = Arc::new(session);
+            let handler = Arc::new(LanHttpHandler::new(
+                addr,
+                Arc::clone(&session),
+                Arc::new(MockSourceApi::new()),
+                HttpServerConfig::default(),
+            ));
+            let provider = Arc::new(MutableInterfaceProvider(std::sync::Mutex::new(vec![
+                loopback_raw_iface(),
+            ])));
+            let mut handle = LanListener::start(
+                bound,
+                PeerPolicy::loopback_for_tests(),
+                Arc::clone(&provider) as Arc<dyn InterfaceProvider>,
+                clock,
+                ListenerConfig {
+                    interface_poll_interval: Duration::from_secs(5),
+                    enforce_candidate_interface: false,
+                    ..ListenerConfig::default()
+                },
+                handler,
+            );
+            session.attach_listener(handle.control());
+
+            let outcome = session
+                .pair(Ipv4Addr::LOCALHOST, code.expose())
+                .expect("pair");
+            let raw_token = outcome.token.expose().to_owned();
+            let transfer_guard = session.acquire_transfer().expect("active transfer");
+            tokio::task::yield_now().await;
+
+            match expected_reason {
+                ListenerStopReason::StoppedByUser => handle.stop(),
+                ListenerStopReason::Shutdown => handle.shutdown(),
+                ListenerStopReason::NetworkChanged => {
+                    provider.0.lock().expect("lock").clear();
+                    tokio::time::advance(Duration::from_secs(6)).await;
+                }
+                _ => unreachable!(),
+            }
+
+            let actual_reason = handle.wait_stopped().await;
+            assert_eq!(actual_reason, expected_reason);
+            assert_eq!(
+                session.status(),
+                crate::session::SessionStatus::Off,
+                "session must be Off after {expected_reason:?}"
+            );
+            assert!(
+                transfer_guard.is_aborted(),
+                "active transfer must be aborted after {expected_reason:?}"
+            );
+            let err = session
+                .authenticate(Ipv4Addr::LOCALHOST, &raw_token)
+                .expect_err("token must be revoked after listener stop");
+            assert_eq!(err.code(), "lan_auth_expired");
+            drop(transfer_guard);
+        }
     }
 
     // T-11: Deterministic fuzz/property test driving malformed raw TCP streams

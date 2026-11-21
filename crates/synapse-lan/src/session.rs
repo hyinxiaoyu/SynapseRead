@@ -216,6 +216,9 @@ enum SessionPhase {
         failed_attempts: u32,
     },
     CodeLocked {
+        /// Retained solely so `regenerate_code()` never re-issues the locked
+        /// code (`T-01` / `OD-5`).
+        previous_code_digest: [u8; 32],
         code_expires_at: Instant,
     },
     Paired {
@@ -294,8 +297,16 @@ impl SessionManager {
 
     /// Attaches the running [`LanListener`] control handle so pairing,
     /// activity, code regeneration, active transfers, and revocation keep the
-    /// listener timers synchronized.
-    pub fn attach_listener(&self, control: ListenerControl) {
+    /// listener timers synchronized, and any listener termination (`Stop`,
+    /// `Shutdown`, `NetworkChanged`, timeouts) synchronously revokes session
+    /// credentials (`T-02`).
+    pub fn attach_listener(self: &Arc<Self>, control: ListenerControl) {
+        let weak = Arc::downgrade(self);
+        control.on_stop(Arc::new(move |_reason| {
+            if let Some(session) = weak.upgrade() {
+                session.revoke_local();
+            }
+        }));
         let mut inner = self.lock_inner();
         inner.listener_control = Some(control);
     }
@@ -373,28 +384,32 @@ impl SessionManager {
             candidate_code.len() == 6 && candidate_code.bytes().all(|b| b.is_ascii_digit());
         let candidate_digest = sha256_bytes(candidate_code.as_bytes());
 
-        let (matched, code_expires_at, failed_attempts) = match &mut inner.phase {
-            SessionPhase::Listening {
-                code_digest,
-                code_expires_at,
-                failed_attempts,
-            } => {
-                if valid_format && constant_time_eq_32(code_digest, &candidate_digest) {
-                    (true, *code_expires_at, *failed_attempts)
-                } else {
-                    *failed_attempts = failed_attempts.saturating_add(1);
-                    (false, *code_expires_at, *failed_attempts)
+        let (matched, previous_code_digest, code_expires_at, failed_attempts) =
+            match &mut inner.phase {
+                SessionPhase::Listening {
+                    code_digest,
+                    code_expires_at,
+                    failed_attempts,
+                } => {
+                    if valid_format && constant_time_eq_32(code_digest, &candidate_digest) {
+                        (true, *code_digest, *code_expires_at, *failed_attempts)
+                    } else {
+                        *failed_attempts = failed_attempts.saturating_add(1);
+                        (false, *code_digest, *code_expires_at, *failed_attempts)
+                    }
                 }
-            }
-            _ => return Err(LanError::AuthExpired),
-        };
+                _ => return Err(LanError::AuthExpired),
+            };
 
         if !matched {
             let max_attempts = self.config.max_failed_attempts.max(1);
             if failed_attempts >= max_attempts {
                 // OD-5 / R3-09: lock/invalidate the current code while keeping
                 // the listener alive until code_expires_at or Stop.
-                inner.phase = SessionPhase::CodeLocked { code_expires_at };
+                inner.phase = SessionPhase::CodeLocked {
+                    previous_code_digest,
+                    code_expires_at,
+                };
                 return Err(LanError::AttemptsExceeded);
             }
             return Err(LanError::AuthInvalid);
@@ -429,22 +444,34 @@ impl SessionManager {
         })
     }
 
-    /// Generates a new 6-digit pairing code, revoking the previous code,
-    /// resetting failure counters, unlocking `CodeLocked`, and resetting the
-    /// code-expiry timer (`OD-5`, `T-01`).
+    /// Generates a new 6-digit pairing code distinct from the previous code,
+    /// revoking the previous code, resetting failure counters, unlocking
+    /// `CodeLocked`, and resetting the code-expiry timer (`OD-5`, `T-01`).
     pub fn regenerate_code(&self) -> LanResult<PairingCode> {
         let now = self.clock.now();
         let mut inner = self.lock_inner();
         self.expire_if_needed(&mut inner, now);
 
-        match &inner.phase {
-            SessionPhase::Listening { .. } | SessionPhase::CodeLocked { .. } => {}
+        let previous_digest = match &inner.phase {
+            SessionPhase::Listening { code_digest, .. } => *code_digest,
+            SessionPhase::CodeLocked {
+                previous_code_digest,
+                ..
+            } => *previous_code_digest,
             SessionPhase::Paired { .. } => return Err(LanError::SessionBusy),
             SessionPhase::Off => return Err(LanError::AuthExpired),
-        }
+        };
 
-        let code = PairingCode::generate()?;
-        let code_digest = sha256_bytes(code.expose().as_bytes());
+        // Never re-issue the immediately preceding code so regeneration
+        // deterministically revokes the old code (`T-01`).
+        let (code, code_digest) = loop {
+            let candidate = PairingCode::generate()?;
+            let digest = sha256_bytes(candidate.expose().as_bytes());
+            if !constant_time_eq_32(&digest, &previous_digest) {
+                break (candidate, digest);
+            }
+        };
+
         inner.phase = SessionPhase::Listening {
             code_digest,
             code_expires_at: now + self.config.code_expiry,
@@ -605,7 +632,9 @@ impl SessionManager {
             SessionPhase::Listening {
                 code_expires_at, ..
             }
-            | SessionPhase::CodeLocked { code_expires_at } => now >= *code_expires_at,
+            | SessionPhase::CodeLocked {
+                code_expires_at, ..
+            } => now >= *code_expires_at,
             SessionPhase::Paired { tokens } => tokens.values().next().is_none_or(|paired| {
                 !paired.active_transfer
                     && now.saturating_duration_since(paired.last_activity_at)
@@ -730,8 +759,10 @@ mod tests {
             .expect_err("locked code rejected");
         assert_eq!(err.code(), "lan_attempts_exceeded");
 
-        // Regenerate code unlocks CodeLocked -> Listening and revokes code1.
+        // Regenerate code unlocks CodeLocked -> Listening and unconditionally
+        // revokes code1 (new code is guaranteed distinct from code1).
         let code2 = session.regenerate_code().expect("regenerate");
+        assert_ne!(code1.expose(), code2.expose());
         assert_eq!(
             session.status(),
             SessionStatus::Listening {
@@ -739,26 +770,35 @@ mod tests {
                 max_failed_attempts: 5,
             }
         );
-        if code1.expose() != code2.expose() {
-            let err = session
-                .pair(peer, code1.expose())
-                .expect_err("old code revoked");
-            assert_eq!(err.code(), "lan_auth_invalid");
-        }
+        let err = session
+            .pair(peer, code1.expose())
+            .expect_err("old code revoked");
+        assert_eq!(err.code(), "lan_auth_invalid");
+
+        // Regenerating directly from Listening also produces a distinct code
+        // and unconditionally revokes code2.
+        let code3 = session
+            .regenerate_code()
+            .expect("regenerate from listening");
+        assert_ne!(code2.expose(), code3.expose());
+        let err = session
+            .pair(peer, code2.expose())
+            .expect_err("previous listening code revoked");
+        assert_eq!(err.code(), "lan_auth_invalid");
 
         // Correct new code succeeds once and consumes the code.
-        let outcome = session.pair(peer, code2.expose()).expect("pair succeeds");
+        let outcome = session.pair(peer, code3.expose()).expect("pair succeeds");
         assert_eq!(outcome.idle_timeout_seconds, 600);
         assert_eq!(outcome.permissions, default_perms());
         assert_eq!(session.status(), SessionStatus::Paired { peer_ip: peer });
 
         // Reusing the same code or pairing from a second IP returns SessionBusy.
         let err = session
-            .pair(peer, code2.expose())
+            .pair(peer, code3.expose())
             .expect_err("single-use code");
         assert_eq!(err.code(), "lan_session_busy");
         let err = session
-            .pair(Ipv4Addr::new(192, 168, 1, 21), code2.expose())
+            .pair(Ipv4Addr::new(192, 168, 1, 21), code3.expose())
             .expect_err("second receiver busy");
         assert_eq!(err.code(), "lan_session_busy");
     }
