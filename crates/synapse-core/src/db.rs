@@ -12,11 +12,12 @@ use uuid::Uuid;
 use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
     AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, CardPatch,
-    CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, DeletedCard,
-    Document, DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge, MindMapNode,
-    NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout,
-    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, RestoredAnnotation, RestoredCard,
-    ScrollPageTransition, StudyNotebook, Viewport, WorkspacePaneLayout, WorkspaceSession,
+    CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, CursorSnapshot,
+    DeletedCard, Document, DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge,
+    MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode,
+    PdfLayout, PdfZoomMode, ReadingPreferences, RelinkDocumentResult, ReplaceCursorResult,
+    RestoredAnnotation, RestoredCard, ScrollPageTransition, StudyNotebook, Viewport,
+    WorkspacePaneLayout, WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::{CoreError, CoreResult};
@@ -222,6 +223,62 @@ impl Database {
             params![document_id, serde_json::to_string(anchor)?, progress],
         )?;
         expect_changed(changed, "document", document_id)
+    }
+
+    /// Atomically replaces a document's saved reading position and progress if
+    /// and only if the currently persisted values match `expected` structurally.
+    ///
+    /// Returns [`ReplaceCursorResult::Conflict`] with the loaded state without
+    /// modifying the row when another write has already changed either field.
+    pub fn replace_cursor_if(
+        &mut self,
+        document_id: &str,
+        expected: &CursorSnapshot,
+        next: &CursorSnapshot,
+    ) -> CoreResult<ReplaceCursorResult> {
+        let tx = self.conn.transaction()?;
+        let current = tx
+            .query_row(
+                "SELECT last_cursor_anchor, last_progress FROM documents WHERE id = ?1",
+                [document_id],
+                |row| {
+                    Ok(CursorSnapshot {
+                        anchor: optional_json_column(row, 0)?,
+                        progress: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| not_found("document", document_id))?;
+
+        if !current.matches(expected) {
+            return Ok(ReplaceCursorResult::Conflict { current });
+        }
+
+        if let Some(anchor) = &next.anchor {
+            anchor.validate()?;
+            check_anchor_matches_document(&tx, document_id, anchor)?;
+        }
+        if let Some(progress) = next.progress
+            && (!progress.is_finite() || !(0.0..=1.0).contains(&progress))
+        {
+            return Err(CoreError::InvalidProgress(format!(
+                "progress must be a fraction between 0 and 1, got {progress}"
+            )));
+        }
+
+        let anchor_json = next
+            .anchor
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let changed = tx.execute(
+            "UPDATE documents SET last_cursor_anchor = ?2, last_progress = ?3 WHERE id = ?1",
+            params![document_id, anchor_json, next.progress],
+        )?;
+        expect_changed(changed, "document", document_id)?;
+        tx.commit()?;
+        Ok(ReplaceCursorResult::Replaced)
     }
 
     pub fn get_document(&self, document_id: &str) -> CoreResult<Document> {
@@ -2225,6 +2282,271 @@ mod tests {
             [&f.document_id],
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn replace_cursor_if_updates_when_expected_matches_including_unset_and_signed_zero() {
+        let mut f = fixture();
+        let initial_anchor = txt_anchor();
+        let next_anchor = AnchorLocation::Txt {
+            start_byte_offset: 5,
+            end_byte_offset: 12,
+            line_index: 1,
+        };
+
+        // T-29: matching unset (None/None) cursor updates anchor and progress together.
+        let result =
+            f.db.replace_cursor_if(
+                &f.document_id,
+                &CursorSnapshot {
+                    anchor: None,
+                    progress: None,
+                },
+                &CursorSnapshot {
+                    anchor: Some(initial_anchor.clone()),
+                    progress: Some(0.0),
+                },
+            )
+            .unwrap();
+        assert_eq!(result, ReplaceCursorResult::Replaced);
+        let doc = f.db.get_document(&f.document_id).unwrap();
+        assert_eq!(doc.last_cursor_anchor, Some(initial_anchor.clone()));
+        assert_eq!(doc.last_progress, Some(0.0));
+
+        // Structural equality treats -0.0 == 0.0 (never raw f64::to_bits()).
+        let result =
+            f.db.replace_cursor_if(
+                &f.document_id,
+                &CursorSnapshot {
+                    anchor: Some(initial_anchor.clone()),
+                    progress: Some(-0.0),
+                },
+                &CursorSnapshot {
+                    anchor: Some(next_anchor.clone()),
+                    progress: Some(0.75),
+                },
+            )
+            .unwrap();
+        assert_eq!(result, ReplaceCursorResult::Replaced);
+        let doc = f.db.get_document(&f.document_id).unwrap();
+        assert_eq!(doc.last_cursor_anchor, Some(next_anchor.clone()));
+        assert_eq!(doc.last_progress, Some(0.75));
+
+        // Structural equality ignores raw JSON key ordering and whitespace.
+        f.db.conn
+            .execute(
+                "UPDATE documents SET last_cursor_anchor = ?2 WHERE id = ?1",
+                params![
+                    &f.document_id,
+                    r#"{ "lineIndex" : 1, "endByteOffset": 12, "startByteOffset": 5, "format": "txt" }"#,
+                ],
+            )
+            .unwrap();
+        let result =
+            f.db.replace_cursor_if(
+                &f.document_id,
+                &CursorSnapshot {
+                    anchor: Some(next_anchor),
+                    progress: Some(0.75),
+                },
+                &CursorSnapshot {
+                    anchor: None,
+                    progress: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(result, ReplaceCursorResult::Replaced);
+        let doc = f.db.get_document(&f.document_id).unwrap();
+        assert_eq!(doc.last_cursor_anchor, None);
+        assert_eq!(doc.last_progress, None);
+    }
+
+    #[test]
+    fn replace_cursor_if_detects_anchor_only_and_progress_only_conflicts() {
+        let mut f = fixture();
+        let anchor_a = txt_anchor();
+        let anchor_b = AnchorLocation::Txt {
+            start_byte_offset: 5,
+            end_byte_offset: 10,
+            line_index: 1,
+        };
+        let anchor_c = AnchorLocation::Txt {
+            start_byte_offset: 6,
+            end_byte_offset: 12,
+            line_index: 2,
+        };
+
+        f.db.update_document_cursor(&f.document_id, &anchor_a, Some(0.25))
+            .unwrap();
+
+        // T-30: anchor changed alone -> Conflict with current, row untouched.
+        let conflict =
+            f.db.replace_cursor_if(
+                &f.document_id,
+                &CursorSnapshot {
+                    anchor: Some(anchor_b.clone()),
+                    progress: Some(0.25),
+                },
+                &CursorSnapshot {
+                    anchor: Some(anchor_c.clone()),
+                    progress: Some(0.9),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            conflict,
+            ReplaceCursorResult::Conflict {
+                current: CursorSnapshot {
+                    anchor: Some(anchor_a.clone()),
+                    progress: Some(0.25),
+                }
+            }
+        );
+
+        // T-30: progress changed alone (different value) -> Conflict with current, row untouched.
+        let conflict =
+            f.db.replace_cursor_if(
+                &f.document_id,
+                &CursorSnapshot {
+                    anchor: Some(anchor_a.clone()),
+                    progress: Some(0.5),
+                },
+                &CursorSnapshot {
+                    anchor: Some(anchor_c.clone()),
+                    progress: Some(0.9),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            conflict,
+            ReplaceCursorResult::Conflict {
+                current: CursorSnapshot {
+                    anchor: Some(anchor_a.clone()),
+                    progress: Some(0.25),
+                }
+            }
+        );
+
+        // T-30: progress changed alone (None vs Some) -> Conflict with current, row untouched.
+        let conflict =
+            f.db.replace_cursor_if(
+                &f.document_id,
+                &CursorSnapshot {
+                    anchor: Some(anchor_a.clone()),
+                    progress: None,
+                },
+                &CursorSnapshot {
+                    anchor: Some(anchor_c),
+                    progress: Some(0.9),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            conflict,
+            ReplaceCursorResult::Conflict {
+                current: CursorSnapshot {
+                    anchor: Some(anchor_a.clone()),
+                    progress: Some(0.25),
+                }
+            }
+        );
+
+        let doc = f.db.get_document(&f.document_id).unwrap();
+        assert_eq!(doc.last_cursor_anchor, Some(anchor_a));
+        assert_eq!(doc.last_progress, Some(0.25));
+    }
+
+    #[test]
+    fn replace_cursor_if_validates_format_anchor_progress_and_document() {
+        let mut f = fixture();
+        let epub_path = f._dir.path().join("book.epub");
+        std::fs::write(&epub_path, "fake epub bytes").unwrap();
+        let epub_doc = f.db.register_document(&epub_path).unwrap();
+
+        let empty = CursorSnapshot::default();
+        let pdf_anchor = AnchorLocation::Pdf {
+            page_index: 0,
+            rects: vec![crate::domain::NormalizedRect {
+                x: 0.1,
+                y: 0.1,
+                width: 0.5,
+                height: 0.1,
+            }],
+            page_spans: None,
+        };
+
+        // T-33: format mismatch (PDF anchor on EPUB) -> invalid_anchor.
+        let err =
+            f.db.replace_cursor_if(
+                &epub_doc.id,
+                &empty,
+                &CursorSnapshot {
+                    anchor: Some(pdf_anchor),
+                    progress: Some(0.4),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidAnchor(_)));
+        assert_eq!(err.code(), "invalid_anchor");
+
+        // T-33: structurally invalid anchor -> invalid_anchor.
+        let err =
+            f.db.replace_cursor_if(
+                &f.document_id,
+                &empty,
+                &CursorSnapshot {
+                    anchor: Some(AnchorLocation::Txt {
+                        start_byte_offset: 10,
+                        end_byte_offset: 10,
+                        line_index: 0,
+                    }),
+                    progress: Some(0.4),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidAnchor(_)));
+        assert_eq!(err.code(), "invalid_anchor");
+
+        // T-33: non-finite or out-of-range progress -> invalid_progress.
+        for bad in [-0.01, 1.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err =
+                f.db.replace_cursor_if(
+                    &f.document_id,
+                    &empty,
+                    &CursorSnapshot {
+                        anchor: Some(txt_anchor()),
+                        progress: Some(bad),
+                    },
+                )
+                .unwrap_err();
+            assert!(
+                matches!(err, CoreError::InvalidProgress(_)),
+                "{bad} must be rejected with InvalidProgress"
+            );
+            assert_eq!(err.code(), "invalid_progress");
+        }
+
+        // Rejected writes must leave both rows untouched.
+        let epub_after = f.db.get_document(&epub_doc.id).unwrap();
+        assert_eq!(epub_after.last_cursor_anchor, None);
+        assert_eq!(epub_after.last_progress, None);
+        let txt_after = f.db.get_document(&f.document_id).unwrap();
+        assert_eq!(txt_after.last_cursor_anchor, None);
+        assert_eq!(txt_after.last_progress, None);
+
+        // T-33: unknown document -> not_found.
+        let err =
+            f.db.replace_cursor_if(
+                "missing-doc",
+                &empty,
+                &CursorSnapshot {
+                    anchor: Some(txt_anchor()),
+                    progress: Some(0.2),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, CoreError::NotFound { .. }));
+        assert_eq!(err.code(), "not_found");
     }
 
     #[test]

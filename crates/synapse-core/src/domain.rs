@@ -246,6 +246,42 @@ pub struct Document {
     pub last_progress: Option<f64>,
 }
 
+/// Saved reading position and progress for a document, used as the expected
+/// and replacement state in [`crate::db::Database::replace_cursor_if`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CursorSnapshot {
+    #[serde(default)]
+    pub anchor: Option<AnchorLocation>,
+    #[serde(default)]
+    pub progress: Option<f64>,
+}
+
+impl CursorSnapshot {
+    /// Structural equality between two cursor snapshots.
+    ///
+    /// Compares parsed anchors and `Option<f64>` progress values using
+    /// standard finite float equality (so `-0.0 == 0.0` and `None == None`)
+    /// rather than raw JSON strings or `f64::to_bits()`. Non-finite floats
+    /// never compare equal.
+    pub fn matches(&self, other: &Self) -> bool {
+        let progress_matches = match (self.progress, other.progress) {
+            (None, None) => true,
+            (Some(a), Some(b)) => a.is_finite() && b.is_finite() && a == b,
+            _ => false,
+        };
+        progress_matches && self.anchor == other.anchor
+    }
+}
+
+/// Outcome of [`crate::db::Database::replace_cursor_if`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReplaceCursorResult {
+    Replaced,
+    Conflict { current: CursorSnapshot },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DocumentSourceState {
@@ -1332,5 +1368,49 @@ mod tests {
             }
         }
         assert_eq!(listed, DocumentFormat::EXTENSIONS);
+    }
+
+    #[test]
+    fn cursor_snapshot_matches_structurally_and_treats_signed_zero_as_equal() {
+        let empty = CursorSnapshot::default();
+        assert!(empty.matches(&CursorSnapshot {
+            anchor: None,
+            progress: None,
+        }));
+
+        let anchor = AnchorLocation::Txt {
+            start_byte_offset: 10,
+            end_byte_offset: 20,
+            line_index: 1,
+        };
+        let pos_zero = CursorSnapshot {
+            anchor: Some(anchor.clone()),
+            progress: Some(0.0),
+        };
+        let neg_zero = CursorSnapshot {
+            anchor: Some(anchor.clone()),
+            progress: Some(-0.0),
+        };
+        assert!(pos_zero.matches(&neg_zero));
+        assert!(neg_zero.matches(&pos_zero));
+
+        let no_progress = CursorSnapshot {
+            anchor: Some(anchor.clone()),
+            progress: None,
+        };
+        assert!(!pos_zero.matches(&no_progress));
+        assert!(!no_progress.matches(&pos_zero));
+
+        let nan = CursorSnapshot {
+            anchor: Some(anchor.clone()),
+            progress: Some(f64::NAN),
+        };
+        assert!(!nan.matches(&nan));
+
+        let inf = CursorSnapshot {
+            anchor: Some(anchor),
+            progress: Some(f64::INFINITY),
+        };
+        assert!(!inf.matches(&inf));
     }
 }
