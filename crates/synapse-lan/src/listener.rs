@@ -91,6 +91,7 @@ impl Default for ListenerConfig {
 #[serde(rename_all = "camelCase")]
 pub enum ListenerStopReason {
     StoppedByUser,
+    SessionEnded,
     Shutdown,
     NetworkChanged,
     CodeExpired,
@@ -103,7 +104,11 @@ impl ListenerStopReason {
     pub const fn error_code(self) -> Option<&'static str> {
         match self {
             Self::NetworkChanged => Some("lan_network_changed"),
-            Self::StoppedByUser | Self::Shutdown | Self::CodeExpired | Self::IdleTimeout => None,
+            Self::StoppedByUser
+            | Self::SessionEnded
+            | Self::Shutdown
+            | Self::CodeExpired
+            | Self::IdleTimeout => None,
         }
     }
 
@@ -212,10 +217,58 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
 
 enum ControlCommand {
     Stop,
+    SessionEnded,
     Shutdown,
     MarkPaired,
     RecordActivity,
     ResetCodeTimer,
+    SetTransferActive(bool),
+}
+
+/// Cloneable control channel for notifying a running [`LanListener`] of
+/// session lifecycle transitions (`MarkPaired`, `RecordActivity`,
+/// `ResetCodeTimer`, transfer activity, and `SessionEnded`).
+#[derive(Clone)]
+pub struct ListenerControl {
+    control_tx: mpsc::UnboundedSender<ControlCommand>,
+}
+
+impl std::fmt::Debug for ListenerControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListenerControl").finish_non_exhaustive()
+    }
+}
+
+impl ListenerControl {
+    pub fn mark_paired(&self) {
+        let _ = self.control_tx.send(ControlCommand::MarkPaired);
+    }
+
+    pub fn record_activity(&self) {
+        let _ = self.control_tx.send(ControlCommand::RecordActivity);
+    }
+
+    pub fn reset_code_timer(&self) {
+        let _ = self.control_tx.send(ControlCommand::ResetCodeTimer);
+    }
+
+    pub fn set_transfer_active(&self, active: bool) {
+        let _ = self
+            .control_tx
+            .send(ControlCommand::SetTransferActive(active));
+    }
+
+    pub fn end_session(&self) {
+        let _ = self.control_tx.send(ControlCommand::SessionEnded);
+    }
+
+    pub fn stop(&self) {
+        let _ = self.control_tx.send(ControlCommand::Stop);
+    }
+
+    pub fn shutdown(&self) {
+        let _ = self.control_tx.send(ControlCommand::Shutdown);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +308,14 @@ impl LanListenerHandle {
     /// stop notifications).
     pub fn subscribe_events(&self) -> broadcast::Receiver<ListenerEvent> {
         self.events_tx.subscribe()
+    }
+
+    /// Returns a cloneable control handle for session state machines to signal
+    /// pairing, activity, code regeneration, active transfers, and session end.
+    pub fn control(&self) -> ListenerControl {
+        ListenerControl {
+            control_tx: self.control_tx.clone(),
+        }
     }
 
     /// Transitions the listener from unpaired (code-expiry timer) to paired
@@ -380,6 +441,7 @@ async fn run_listener_loop<H: ConnectionHandler>(
     let mut active_connections: JoinSet<()> = JoinSet::new();
 
     let mut phase = SessionPhase::Listening;
+    let mut transfer_active = false;
     let mut deadline = clock.now() + config.code_expiry;
     let timer = tokio::time::sleep_until(deadline);
     tokio::pin!(timer);
@@ -397,6 +459,7 @@ async fn run_listener_loop<H: ConnectionHandler>(
             cmd = control_rx.recv() => {
                 match cmd {
                     Some(ControlCommand::Stop) => break ListenerStopReason::StoppedByUser,
+                    Some(ControlCommand::SessionEnded) => break ListenerStopReason::SessionEnded,
                     Some(ControlCommand::Shutdown) | None => break ListenerStopReason::Shutdown,
                     Some(ControlCommand::MarkPaired) => {
                         phase = SessionPhase::Paired;
@@ -415,13 +478,28 @@ async fn run_listener_loop<H: ConnectionHandler>(
                             timer.as_mut().reset(deadline);
                         }
                     }
+                    Some(ControlCommand::SetTransferActive(active)) => {
+                        transfer_active = active;
+                        if phase == SessionPhase::Paired {
+                            deadline = clock.now() + config.idle_timeout;
+                            timer.as_mut().reset(deadline);
+                        }
+                    }
                 }
             }
 
             () = &mut timer => {
                 match phase {
                     SessionPhase::Listening => break ListenerStopReason::CodeExpired,
-                    SessionPhase::Paired => break ListenerStopReason::IdleTimeout,
+                    SessionPhase::Paired => {
+                        if transfer_active {
+                            // Active file transfers count as session activity (ADR 0008).
+                            deadline = clock.now() + config.idle_timeout;
+                            timer.as_mut().reset(deadline);
+                        } else {
+                            break ListenerStopReason::IdleTimeout;
+                        }
+                    }
                 }
             }
 

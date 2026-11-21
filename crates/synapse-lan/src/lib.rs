@@ -9,7 +9,9 @@
 pub mod address;
 pub mod bind;
 pub mod error;
+pub mod http;
 pub mod listener;
+pub mod session;
 
 pub use address::{
     AddressPolicy, InterfaceProvider, Ipv4Subnet, LanInterface, PeerPolicy, PeerRejectReason,
@@ -18,9 +20,21 @@ pub use address::{
 };
 pub use bind::{BoundListener, DEFAULT_LAN_PORT, LAN_PORT_END, LAN_PORT_START, bind_auto};
 pub use error::{LanError, LanResult};
+pub use http::{
+    DEFAULT_HEADER_READ_TIMEOUT, ErrorResponseBody, HttpServerConfig, LanBoxBody, LanHttpHandler,
+    LanResponse, MAX_HEADER_BYTES, MAX_POST_BODY_BYTES, MAX_REQUEST_HEADERS, PROTOCOL_HEADER,
+    PROTOCOL_VERSION, SourceApiHandler, UnimplementedSourceApiHandler, empty_body, error_response,
+    finalize_response, full_body, is_valid_sha256_hex, json_response, lan_error_response,
+    no_content_response,
+};
 pub use listener::{
     ConnectionHandler, DEFAULT_CODE_EXPIRY, DEFAULT_IDLE_TIMEOUT, DEFAULT_INTERFACE_POLL_INTERVAL,
-    DEFAULT_MAX_CONNECTIONS, LanListener, LanListenerHandle, ListenerConfig, ListenerEvent,
-    ListenerStopReason, MAX_CONCURRENT_CONNECTIONS, MonotonicClock, PlaceholderHttp1Handler,
-    TokioMonotonicClock,
+    DEFAULT_MAX_CONNECTIONS, LanListener, LanListenerHandle, ListenerConfig, ListenerControl,
+    ListenerEvent, ListenerStopReason, MAX_CONCURRENT_CONNECTIONS, MonotonicClock,
+    PlaceholderHttp1Handler, TokioMonotonicClock,
+};
+pub use session::{
+    AuthorizedContext, BearerToken, DEFAULT_MAX_FAILED_ATTEMPTS, DEFAULT_PER_IP_MAX_ATTEMPTS,
+    DEFAULT_PER_IP_WINDOW, PairOutcome, PairingCode, SessionConfig, SessionManager, SessionStatus,
+    SharePermissions, SnapshotBook, TransferGuard,
 };

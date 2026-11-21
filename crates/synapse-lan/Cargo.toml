@@ -15,7 +15,9 @@ test-loopback = []
 
 [dependencies]
 base64.workspace = true
+bytes = "1"
 getrandom = "0.4"
+http-body-util = "0.1"
 hyper = { version = "1.12", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["http1", "tokio"] }
 if-addrs = "0.15"
