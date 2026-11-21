@@ -1,0 +1,30 @@
+{
+  "bookmarks": [
+    {
+      "anchor": {
+        "format": "pdf",
+        "pageIndex": 3,
+        "rects": [
+          {
+            "x": 0.1,
+            "y": 0.2,
+            "width": 0.5,
+            "height": 0.05
+          }
+        ]
+      },
+      "label": "Chapter 1 summary",
+      "createdAt": "2026-05-01T10:15:30Z"
+    },
+    {
+      "anchor": {
+        "format": "txt",
+        "startByteOffset": 128,
+        "endByteOffset": 256,
+        "lineIndex": 4
+      },
+      "label": "Key definition",
+      "createdAt": "2026-05-02T14:20:00Z"
+    }
+  ]
+}
