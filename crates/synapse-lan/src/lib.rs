@@ -9,9 +9,12 @@
 pub mod address;
 pub mod bind;
 pub mod client;
+#[cfg(test)]
+mod e2e_tests;
 pub mod error;
 pub mod http;
 pub mod listener;
+pub mod orchestrator;
 pub mod session;
 pub mod source;
 pub mod wire;
@@ -43,6 +46,15 @@ pub use listener::{
     DEFAULT_MAX_CONNECTIONS, LanListener, LanListenerHandle, ListenerConfig, ListenerControl,
     ListenerEvent, ListenerStopReason, MAX_CONCURRENT_CONNECTIONS, MonotonicClock,
     PlaceholderHttp1Handler, TokioMonotonicClock,
+};
+pub use orchestrator::{
+    BookCommitEvent, BookImportDecision, BookImportResult, BookPlanSummary, BookSyncState,
+    BookmarkExecutionSummary, BookmarkPlanSkipReason, BookmarkPlanSummary,
+    CatalogBookClassification, ComponentOutcome, DefaultStageFactory, ImportErrorInfo,
+    ImportExecutionReport, ImportPlan, ImportPlanSummary, ImportProgress, MAX_PLANNER_CONCURRENCY,
+    OrchestratorConfig, PlanProgress, PlannedBookmarkPreview, PlannedBookmarkStatus,
+    PositionPlanSummary, StageFactory, classify_catalog, execute_import,
+    execute_import_with_stage_factory, plan_import,
 };
 pub use session::{
     AuthorizedContext, BearerToken, DEFAULT_MAX_FAILED_ATTEMPTS, DEFAULT_PER_IP_MAX_ATTEMPTS,
