@@ -1125,6 +1125,11 @@ mod tests {
             handle.wait_stopped().await,
             ListenerStopReason::StoppedByUser
         );
+        assert_eq!(
+            handle.panicked_connection_count(),
+            0,
+            "malformed TCP streams must never panic any connection task"
+        );
     }
 
     // T-01, T-03, R3-02: Pair over loopback, reject token in URL, reuse HTTP/1.1
@@ -1221,6 +1226,11 @@ mod tests {
             handle.wait_stopped().await,
             ListenerStopReason::StoppedByUser
         );
+        assert_eq!(
+            handle.panicked_connection_count(),
+            0,
+            "malformed TCP streams must never panic any connection task"
+        );
     }
 
     // T-01 (loopback): 5 failed attempts lock the code while keeping the
@@ -1300,6 +1310,11 @@ mod tests {
             handle.wait_stopped().await,
             ListenerStopReason::StoppedByUser
         );
+        assert_eq!(
+            handle.panicked_connection_count(),
+            0,
+            "malformed TCP streams must never panic any connection task"
+        );
     }
 
     // T-04: Chunked POST body without Content-Length exceeding 4 KiB -> 413.
@@ -1321,6 +1336,11 @@ mod tests {
         assert_eq!(
             handle.wait_stopped().await,
             ListenerStopReason::StoppedByUser
+        );
+        assert_eq!(
+            handle.panicked_connection_count(),
+            0,
+            "malformed TCP streams must never panic any connection task"
         );
     }
 
@@ -1356,6 +1376,11 @@ mod tests {
         assert_eq!(
             handle.wait_stopped().await,
             ListenerStopReason::StoppedByUser
+        );
+        assert_eq!(
+            handle.panicked_connection_count(),
+            0,
+            "malformed TCP streams must never panic any connection task"
         );
     }
 
@@ -1485,6 +1510,11 @@ mod tests {
             handle.wait_stopped().await,
             ListenerStopReason::StoppedByUser
         );
+        assert_eq!(
+            handle.panicked_connection_count(),
+            0,
+            "malformed TCP streams must never panic any connection task"
+        );
     }
 
     // T-02: Listener termination via Stop, Shutdown, or NetworkChanged must
@@ -1606,11 +1636,22 @@ mod tests {
             let _ = send_raw(addr, payload).await;
         }
 
-        // Oversized header > 8 KiB.
-        let mut oversized_hdr = format!("GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nX-Pad: ");
-        oversized_hdr.push_str(&"A".repeat(10 * 1024));
-        oversized_hdr.push_str("\r\n\r\n");
-        let _ = send_raw(addr, oversized_hdr.as_bytes()).await;
+        // Oversized header > 8 KiB must be explicitly rejected (431) with zero CORS headers.
+        let mut oversized_hdr = format!(
+            "GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nX-SynapseRead-Protocol: 1\r\nX-Pad: "
+        );
+        oversized_hdr.push_str(&"A".repeat(MAX_HEADER_BYTES + 1024));
+        oversized_hdr.push_str("\r\nConnection: close\r\n\r\n");
+        let oversized_resp = send_http_close(addr, oversized_hdr.as_bytes()).await;
+        assert!(
+            oversized_resp.starts_with("HTTP/1.1 431"),
+            "oversized header (> 8 KiB) must be rejected with 431, got: {oversized_resp}"
+        );
+        assert!(
+            !oversized_resp
+                .to_ascii_lowercase()
+                .contains("access-control-")
+        );
 
         // Deterministic PRNG raw byte streams (64 cases).
         let mut state: u64 = 0x5EED_CAFE_1234_5678;
@@ -1724,6 +1765,11 @@ mod tests {
         assert_eq!(
             handle.wait_stopped().await,
             ListenerStopReason::StoppedByUser
+        );
+        assert_eq!(
+            handle.panicked_connection_count(),
+            0,
+            "malformed TCP streams must never panic any connection task"
         );
     }
 }

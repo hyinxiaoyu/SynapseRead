@@ -311,6 +311,7 @@ pub struct LanListenerHandle {
     stopped_rx: watch::Receiver<Option<ListenerStopReason>>,
     events_tx: broadcast::Sender<ListenerEvent>,
     blocked_peers: Arc<AtomicU64>,
+    panicked_connections: Arc<AtomicU64>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -326,6 +327,11 @@ impl LanListenerHandle {
     /// Number of incoming peers rejected by [`PeerPolicy`] before HTTP parsing.
     pub fn blocked_peer_count(&self) -> u64 {
         self.blocked_peers.load(Ordering::Relaxed)
+    }
+
+    /// Number of connection tasks that terminated due to a panic (`T-11`).
+    pub fn panicked_connection_count(&self) -> u64 {
+        self.panicked_connections.load(Ordering::Acquire)
     }
 
     /// Subscribes to diagnostic events (e.g. blocked out-of-subnet peers and
@@ -421,6 +427,7 @@ impl LanListener {
         let (stopped_tx, stopped_rx) = watch::channel(None);
         let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let blocked_peers = Arc::new(AtomicU64::new(0));
+        let panicked_connections = Arc::new(AtomicU64::new(0));
 
         let task = tokio::spawn(run_listener_loop(
             bound,
@@ -433,6 +440,7 @@ impl LanListener {
             stopped_tx,
             events_tx.clone(),
             Arc::clone(&blocked_peers),
+            Arc::clone(&panicked_connections),
         ));
 
         LanListenerHandle {
@@ -442,6 +450,7 @@ impl LanListener {
             stopped_rx,
             events_tx,
             blocked_peers,
+            panicked_connections,
             task: Some(task),
         }
     }
@@ -459,6 +468,7 @@ async fn run_listener_loop<H: ConnectionHandler>(
     stopped_tx: watch::Sender<Option<ListenerStopReason>>,
     events_tx: broadcast::Sender<ListenerEvent>,
     blocked_peers: Arc<AtomicU64>,
+    panicked_connections: Arc<AtomicU64>,
 ) {
     let bound_ip = *bound.local_addr.ip();
     let conn_semaphore = Arc::new(Semaphore::new(config.effective_max_connections()));
@@ -542,7 +552,13 @@ async fn run_listener_loop<H: ConnectionHandler>(
                 }
             }
 
-            Some(_) = active_connections.join_next(), if !active_connections.is_empty() => {}
+            Some(join_res) = active_connections.join_next(), if !active_connections.is_empty() => {
+                if let Err(err) = join_res
+                    && err.is_panic()
+                {
+                    panicked_connections.fetch_add(1, Ordering::Release);
+                }
+            }
 
             accept_res = bound.listener.accept() => {
                 match accept_res {
@@ -597,7 +613,13 @@ async fn run_listener_loop<H: ConnectionHandler>(
     drop(bound.listener);
     let _ = shutdown_tx.send(true);
     active_connections.abort_all();
-    while active_connections.join_next().await.is_some() {}
+    while let Some(join_res) = active_connections.join_next().await {
+        if let Err(err) = join_res
+            && err.is_panic()
+        {
+            panicked_connections.fetch_add(1, Ordering::Release);
+        }
+    }
 
     // Drain any RegisterOnStop commands queued right before loop exit.
     control_rx.close();
