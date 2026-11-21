@@ -119,8 +119,7 @@ impl ManagedLibrary {
         validate_file_hash(expected_hash)?;
         let validated_ext = validate_extension(format, extension)?;
 
-        let staging_dir = self.staging_dir();
-        fs::create_dir_all(&staging_dir).map_err(map_storage_io_error)?;
+        let staging_dir = ensure_safe_managed_dir(&self.data_dir, SYNC_STAGING_DIR)?;
 
         let part_name = format!("{expected_hash}-{}.part", Uuid::new_v4());
         let part_path = staging_dir.join(part_name);
@@ -132,7 +131,7 @@ impl ManagedLibrary {
         Ok(StagedFile {
             writer: Some(writer),
             part_path,
-            library_dir: self.library_dir(),
+            data_dir: self.data_dir.clone(),
             format,
             extension: validated_ext,
             expected_hash: expected_hash.to_owned(),
@@ -245,7 +244,7 @@ impl ManagedLibrary {
 pub struct StagedFile {
     writer: Option<Box<dyn StageWriter>>,
     part_path: PathBuf,
-    library_dir: PathBuf,
+    data_dir: PathBuf,
     format: DocumentFormat,
     extension: String,
     expected_hash: String,
@@ -336,21 +335,37 @@ impl StagedFile {
             return Err(err);
         }
 
-        if let Err(err) = fs::create_dir_all(&self.library_dir) {
-            self.cleanup_part();
-            return Err(map_storage_io_error(err));
-        }
+        let library_dir = match ensure_safe_managed_dir(&self.data_dir, LIBRARY_DIR) {
+            Ok(dir) => dir,
+            Err(err) => {
+                self.cleanup_part();
+                return Err(err);
+            }
+        };
 
-        let target = self
-            .library_dir
-            .join(format!("{}.{}", self.expected_hash, self.extension));
+        let target = library_dir.join(format!("{}.{}", self.expected_hash, self.extension));
 
-        if target.exists()
-            && hash_file(&target).is_ok_and(|existing| existing == self.expected_hash)
-            && validate_magic_bytes(&target, self.format).is_ok()
-        {
-            self.cleanup_part();
-            return Ok(target);
+        match fs::symlink_metadata(&target) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    self.cleanup_part();
+                    return Err(CoreError::Io(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "managed library target must be a regular file, not a symlink",
+                    )));
+                }
+                if hash_file(&target).is_ok_and(|existing| existing == self.expected_hash)
+                    && validate_magic_bytes(&target, self.format).is_ok()
+                {
+                    self.cleanup_part();
+                    return Ok(target);
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                self.cleanup_part();
+                return Err(map_storage_io_error(err));
+            }
         }
 
         if let Err(err) = replace_file(&self.part_path, &target) {
@@ -376,6 +391,49 @@ impl Drop for StagedFile {
     fn drop(&mut self) {
         self.cleanup_part();
     }
+}
+
+/// Ensures `<data_dir>/<subdir>` exists as a real (non-symlink) directory whose
+/// canonical path is strictly `<canonical_data_dir>/<subdir>`. Rejects symlinks
+/// or non-directories without creating or touching anything inside their target.
+fn ensure_safe_managed_dir(data_dir: &Path, subdir: &str) -> CoreResult<PathBuf> {
+    let candidate = data_dir.join(subdir);
+    match fs::symlink_metadata(&candidate) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(CoreError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("managed directory '{subdir}' must be a regular directory"),
+                )));
+            }
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir_all(data_dir).map_err(map_storage_io_error)?;
+            match fs::create_dir(&candidate) {
+                Ok(()) => {}
+                Err(create_err) if create_err.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(create_err) => return Err(map_storage_io_error(create_err)),
+            }
+        }
+        Err(err) => return Err(map_storage_io_error(err)),
+    }
+
+    let meta = fs::symlink_metadata(&candidate).map_err(map_storage_io_error)?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(CoreError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("managed directory '{subdir}' must be a regular directory"),
+        )));
+    }
+    let canonical_data_dir = fs::canonicalize(data_dir).map_err(map_storage_io_error)?;
+    let canonical_candidate = fs::canonicalize(&candidate).map_err(map_storage_io_error)?;
+    if canonical_candidate != canonical_data_dir.join(subdir) {
+        return Err(CoreError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("managed directory '{subdir}' escapes the application data directory"),
+        )));
+    }
+    Ok(candidate)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -1380,5 +1438,79 @@ mod tests {
         assert!(!unreferenced_txt.exists());
         assert!(capture_file.exists());
         assert!(outside_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn begin_stage_rejects_symlinked_sync_staging_directory() {
+        let app_data = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(external.path(), app_data.path().join("sync-staging")).unwrap();
+
+        let lib = ManagedLibrary::new(app_data.path());
+        let bytes = b"should not escape";
+        let hash = sha256_hex(bytes);
+
+        let err = lib
+            .begin_stage(DocumentFormat::Txt, "txt", &hash, bytes.len() as u64)
+            .err()
+            .expect("begin_stage must reject symlinked sync-staging");
+        assert_eq!(err.code(), "io");
+        assert_eq!(fs::read_dir(external.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finish_rejects_symlinked_library_directory_and_preserves_external_file() {
+        let app_data = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(external.path(), app_data.path().join("library")).unwrap();
+
+        let bytes = b"%PDF-1.7\nnew content\n";
+        let hash = sha256_hex(bytes);
+        let sentinel = b"EXTERNAL SENTINEL DO NOT OVERWRITE";
+        let external_target = external.path().join(format!("{hash}.pdf"));
+        fs::write(&external_target, sentinel).unwrap();
+
+        let lib = ManagedLibrary::new(app_data.path());
+        let mut staged = lib
+            .begin_stage(DocumentFormat::Pdf, "pdf", &hash, bytes.len() as u64)
+            .unwrap();
+        let part_path = staged.part_path().to_path_buf();
+        staged.write_chunk(bytes).unwrap();
+
+        let err = staged.finish().unwrap_err();
+        assert_eq!(err.code(), "io");
+        assert!(!part_path.exists());
+        assert_eq!(fs::read(&external_target).unwrap(), sentinel);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finish_rejects_symlinked_target_file_inside_library() {
+        let app_data = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let sentinel = b"EXTERNAL FILE SENTINEL";
+        let external_file = external.path().join("victim.pdf");
+        fs::write(&external_file, sentinel).unwrap();
+
+        let lib = ManagedLibrary::new(app_data.path());
+        fs::create_dir_all(lib.library_dir()).unwrap();
+
+        let bytes = b"%PDF-1.7\nvalid pdf payload\n";
+        let hash = sha256_hex(bytes);
+        let symlink_target = lib.library_dir().join(format!("{hash}.pdf"));
+        std::os::unix::fs::symlink(&external_file, &symlink_target).unwrap();
+
+        let mut staged = lib
+            .begin_stage(DocumentFormat::Pdf, "pdf", &hash, bytes.len() as u64)
+            .unwrap();
+        let part_path = staged.part_path().to_path_buf();
+        staged.write_chunk(bytes).unwrap();
+
+        let err = staged.finish().unwrap_err();
+        assert_eq!(err.code(), "io");
+        assert!(!part_path.exists());
+        assert_eq!(fs::read(&external_file).unwrap(), sentinel);
     }
 }
