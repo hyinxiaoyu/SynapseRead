@@ -102,7 +102,7 @@ All timers use an injectable monotonic clock for deterministic tests. Sharing pe
 
 ### `/v1` Wire Endpoints
 
-Every request must include `Host: <bound ip:port>` and `X-SynapseRead-Protocol: 1`. Every authenticated request includes `Authorization: Bearer <token>`. Every response includes `Cache-Control: no-store` and no CORS headers. Both server and client reuse HTTP/1.1 keep-alive connections (`R3-02`).
+Every request must include `Host: <bound ip:port>` and `X-SynapseRead-Protocol: 1`. Every authenticated request includes `Authorization: Bearer <token>`. Every application-routed response includes `Cache-Control: no-store` and no CORS headers (pre-router HTTP/1.1 framing rejections emitted directly by `hyper`, such as `400 Bad Request` or `431 Request Header Fields Too Large`, carry no credentials or book data and are exempt). Both server and client reuse HTTP/1.1 keep-alive connections (`R3-02`).
 
 | Endpoint                           | Response / Status Codes                                                                                                                                                                               | Notes                                                                                                           |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |

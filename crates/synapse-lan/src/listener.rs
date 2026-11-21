@@ -91,6 +91,7 @@ impl Default for ListenerConfig {
 #[serde(rename_all = "camelCase")]
 pub enum ListenerStopReason {
     StoppedByUser,
+    SessionEnded,
     Shutdown,
     NetworkChanged,
     CodeExpired,
@@ -103,7 +104,11 @@ impl ListenerStopReason {
     pub const fn error_code(self) -> Option<&'static str> {
         match self {
             Self::NetworkChanged => Some("lan_network_changed"),
-            Self::StoppedByUser | Self::Shutdown | Self::CodeExpired | Self::IdleTimeout => None,
+            Self::StoppedByUser
+            | Self::SessionEnded
+            | Self::Shutdown
+            | Self::CodeExpired
+            | Self::IdleTimeout => None,
         }
     }
 
@@ -210,12 +215,84 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
+type OnStopCallback = Arc<dyn Fn(ListenerStopReason) + Send + Sync>;
+
 enum ControlCommand {
     Stop,
+    SessionEnded,
     Shutdown,
     MarkPaired,
     RecordActivity,
     ResetCodeTimer,
+    SetTransferActive(bool),
+    RegisterOnStop(OnStopCallback),
+}
+
+/// Cloneable control channel for notifying a running [`LanListener`] of
+/// session lifecycle transitions (`MarkPaired`, `RecordActivity`,
+/// `ResetCodeTimer`, transfer activity, and `SessionEnded`).
+#[derive(Clone)]
+pub struct ListenerControl {
+    control_tx: mpsc::UnboundedSender<ControlCommand>,
+    stopped_rx: watch::Receiver<Option<ListenerStopReason>>,
+}
+
+impl std::fmt::Debug for ListenerControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListenerControl").finish_non_exhaustive()
+    }
+}
+
+impl ListenerControl {
+    pub fn mark_paired(&self) {
+        let _ = self.control_tx.send(ControlCommand::MarkPaired);
+    }
+
+    pub fn record_activity(&self) {
+        let _ = self.control_tx.send(ControlCommand::RecordActivity);
+    }
+
+    pub fn reset_code_timer(&self) {
+        let _ = self.control_tx.send(ControlCommand::ResetCodeTimer);
+    }
+
+    pub fn set_transfer_active(&self, active: bool) {
+        let _ = self
+            .control_tx
+            .send(ControlCommand::SetTransferActive(active));
+    }
+
+    pub fn end_session(&self) {
+        let _ = self.control_tx.send(ControlCommand::SessionEnded);
+    }
+
+    pub fn stop(&self) {
+        let _ = self.control_tx.send(ControlCommand::Stop);
+    }
+
+    pub fn shutdown(&self) {
+        let _ = self.control_tx.send(ControlCommand::Shutdown);
+    }
+
+    /// Registers a synchronous callback invoked when the listener terminates,
+    /// before `wait_stopped()` resolves. If the listener has already stopped,
+    /// the callback is invoked immediately.
+    pub fn on_stop(&self, callback: OnStopCallback) {
+        if let Some(reason) = *self.stopped_rx.borrow() {
+            callback(reason);
+            return;
+        }
+        if let Err(mpsc::error::SendError(ControlCommand::RegisterOnStop(cb))) = self
+            .control_tx
+            .send(ControlCommand::RegisterOnStop(callback))
+        {
+            let reason = self
+                .stopped_rx
+                .borrow()
+                .unwrap_or(ListenerStopReason::Shutdown);
+            cb(reason);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +311,7 @@ pub struct LanListenerHandle {
     stopped_rx: watch::Receiver<Option<ListenerStopReason>>,
     events_tx: broadcast::Sender<ListenerEvent>,
     blocked_peers: Arc<AtomicU64>,
+    panicked_connections: Arc<AtomicU64>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -251,10 +329,24 @@ impl LanListenerHandle {
         self.blocked_peers.load(Ordering::Relaxed)
     }
 
+    /// Number of connection tasks that terminated due to a panic (`T-11`).
+    pub fn panicked_connection_count(&self) -> u64 {
+        self.panicked_connections.load(Ordering::Acquire)
+    }
+
     /// Subscribes to diagnostic events (e.g. blocked out-of-subnet peers and
     /// stop notifications).
     pub fn subscribe_events(&self) -> broadcast::Receiver<ListenerEvent> {
         self.events_tx.subscribe()
+    }
+
+    /// Returns a cloneable control handle for session state machines to signal
+    /// pairing, activity, code regeneration, active transfers, and session end.
+    pub fn control(&self) -> ListenerControl {
+        ListenerControl {
+            control_tx: self.control_tx.clone(),
+            stopped_rx: self.stopped_rx.clone(),
+        }
     }
 
     /// Transitions the listener from unpaired (code-expiry timer) to paired
@@ -335,6 +427,7 @@ impl LanListener {
         let (stopped_tx, stopped_rx) = watch::channel(None);
         let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let blocked_peers = Arc::new(AtomicU64::new(0));
+        let panicked_connections = Arc::new(AtomicU64::new(0));
 
         let task = tokio::spawn(run_listener_loop(
             bound,
@@ -347,6 +440,7 @@ impl LanListener {
             stopped_tx,
             events_tx.clone(),
             Arc::clone(&blocked_peers),
+            Arc::clone(&panicked_connections),
         ));
 
         LanListenerHandle {
@@ -356,6 +450,7 @@ impl LanListener {
             stopped_rx,
             events_tx,
             blocked_peers,
+            panicked_connections,
             task: Some(task),
         }
     }
@@ -373,6 +468,7 @@ async fn run_listener_loop<H: ConnectionHandler>(
     stopped_tx: watch::Sender<Option<ListenerStopReason>>,
     events_tx: broadcast::Sender<ListenerEvent>,
     blocked_peers: Arc<AtomicU64>,
+    panicked_connections: Arc<AtomicU64>,
 ) {
     let bound_ip = *bound.local_addr.ip();
     let conn_semaphore = Arc::new(Semaphore::new(config.effective_max_connections()));
@@ -380,6 +476,8 @@ async fn run_listener_loop<H: ConnectionHandler>(
     let mut active_connections: JoinSet<()> = JoinSet::new();
 
     let mut phase = SessionPhase::Listening;
+    let mut transfer_active = false;
+    let mut on_stop_callbacks: Vec<OnStopCallback> = Vec::new();
     let mut deadline = clock.now() + config.code_expiry;
     let timer = tokio::time::sleep_until(deadline);
     tokio::pin!(timer);
@@ -397,6 +495,7 @@ async fn run_listener_loop<H: ConnectionHandler>(
             cmd = control_rx.recv() => {
                 match cmd {
                     Some(ControlCommand::Stop) => break ListenerStopReason::StoppedByUser,
+                    Some(ControlCommand::SessionEnded) => break ListenerStopReason::SessionEnded,
                     Some(ControlCommand::Shutdown) | None => break ListenerStopReason::Shutdown,
                     Some(ControlCommand::MarkPaired) => {
                         phase = SessionPhase::Paired;
@@ -415,13 +514,31 @@ async fn run_listener_loop<H: ConnectionHandler>(
                             timer.as_mut().reset(deadline);
                         }
                     }
+                    Some(ControlCommand::SetTransferActive(active)) => {
+                        transfer_active = active;
+                        if phase == SessionPhase::Paired {
+                            deadline = clock.now() + config.idle_timeout;
+                            timer.as_mut().reset(deadline);
+                        }
+                    }
+                    Some(ControlCommand::RegisterOnStop(cb)) => {
+                        on_stop_callbacks.push(cb);
+                    }
                 }
             }
 
             () = &mut timer => {
                 match phase {
                     SessionPhase::Listening => break ListenerStopReason::CodeExpired,
-                    SessionPhase::Paired => break ListenerStopReason::IdleTimeout,
+                    SessionPhase::Paired => {
+                        if transfer_active {
+                            // Active file transfers count as session activity (ADR 0008).
+                            deadline = clock.now() + config.idle_timeout;
+                            timer.as_mut().reset(deadline);
+                        } else {
+                            break ListenerStopReason::IdleTimeout;
+                        }
+                    }
                 }
             }
 
@@ -435,7 +552,13 @@ async fn run_listener_loop<H: ConnectionHandler>(
                 }
             }
 
-            Some(_) = active_connections.join_next(), if !active_connections.is_empty() => {}
+            Some(join_res) = active_connections.join_next(), if !active_connections.is_empty() => {
+                if let Err(err) = join_res
+                    && err.is_panic()
+                {
+                    panicked_connections.fetch_add(1, Ordering::Release);
+                }
+            }
 
             accept_res = bound.listener.accept() => {
                 match accept_res {
@@ -483,13 +606,31 @@ async fn run_listener_loop<H: ConnectionHandler>(
     };
 
     // Stop accepting new sockets, cancel every active connection (including
-    // idle HTTP/1.1 keep-alive connections), and drain all connection tasks
+    // idle HTTP/1.1 keep-alive connections), drain all connection tasks, and
+    // run registered stop callbacks (e.g. revoking paired session credentials)
     // before publishing the stop reason so `wait_stopped()` guarantees zero
-    // live sockets remain (T-10).
+    // live sockets or active credentials remain (T-02, T-10).
     drop(bound.listener);
     let _ = shutdown_tx.send(true);
     active_connections.abort_all();
-    while active_connections.join_next().await.is_some() {}
+    while let Some(join_res) = active_connections.join_next().await {
+        if let Err(err) = join_res
+            && err.is_panic()
+        {
+            panicked_connections.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    // Drain any RegisterOnStop commands queued right before loop exit.
+    control_rx.close();
+    while let Some(cmd) = control_rx.recv().await {
+        if let ControlCommand::RegisterOnStop(cb) = cmd {
+            on_stop_callbacks.push(cb);
+        }
+    }
+    for cb in on_stop_callbacks {
+        cb(stop_reason);
+    }
 
     let _ = stopped_tx.send(Some(stop_reason));
     let _ = events_tx.send(ListenerEvent::Stopped {
