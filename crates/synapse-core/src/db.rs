@@ -14,13 +14,17 @@ use crate::domain::{
     AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, BookmarkImportReport,
     BookmarkSkipReason, CardPatch, CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput,
     CreatedExcerpt, CursorSnapshot, DeletedCard, Document, DocumentFormat, DocumentSourceState,
-    DocumentSourceStatus, ImportBookmarkEntry, ImportLimits, MindMapEdge, MindMapNode,
-    NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout,
-    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, ReplaceCursorResult, RestoredAnnotation,
-    RestoredCard, ScrollPageTransition, SkippedBookmark, StudyNotebook, Viewport,
-    WorkspacePaneLayout, WorkspaceSession,
+    DocumentSourceStatus, ExportBookmark, ExportCatalogBook, ExportPosition, ImportBookmarkEntry,
+    ImportDocumentResult, ImportLimits, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard,
+    NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout, PdfZoomMode, ReadingPreferences,
+    RelinkDocumentResult, ReplaceCursorResult, RestoredAnnotation, RestoredCard,
+    ScrollPageTransition, SkippedBookmark, StudyNotebook, Viewport, WorkspacePaneLayout,
+    WorkspaceSession, sanitize_import_title, sanitize_single_line, truncate_chars,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
+use crate::library::{
+    ManagedLibrary, validate_extension, validate_file_hash, validated_extension_for_export,
+};
 use crate::{CoreError, CoreResult};
 
 /// Ordered and append-only: a migration's position is its schema version.
@@ -62,8 +66,12 @@ pub struct Database {
     conn: Connection,
     /// `None` only for a purely in-memory database, which has no data directory.
     captures: Option<CaptureStore>,
+    /// `None` only for a purely in-memory database, which has no data directory.
+    library: Option<ManagedLibrary>,
+    /// Whether this connection acquired the exclusive sole-connection lock on open.
+    sole_connection_on_open: bool,
     /// Shared advisory lock held while this connection is alive so a concurrent
-    /// `Database::open` does not purge pending Undo rows or captures under it.
+    /// `Database::open` does not purge pending Undo rows, captures, or staged files under it.
     _session_lock: Option<std::fs::File>,
 }
 
@@ -89,12 +97,19 @@ fn acquire_session_lock(path: &Path) -> CoreResult<(std::fs::File, bool)> {
 
 impl Database {
     /// Opens (or creates) the database at `path` and brings its schema up to date.
-    /// Captures are stored next to the database file.
+    /// Captures and the managed library live next to the database file.
     pub fn open(path: &Path) -> CoreResult<Self> {
         let captures = path.parent().map(CaptureStore::new);
+        let library = path.parent().map(ManagedLibrary::new);
         let conn = Connection::open(path)?;
         let (session_lock, is_sole_connection) = acquire_session_lock(path)?;
-        let database = Self::init(conn, captures, Some(session_lock), is_sole_connection)?;
+        let database = Self::init(
+            conn,
+            captures,
+            library,
+            Some(session_lock),
+            is_sole_connection,
+        )?;
         if is_sole_connection && let Some(lock) = &database._session_lock {
             lock.unlock()?;
             lock.lock_shared()?;
@@ -103,12 +118,13 @@ impl Database {
     }
 
     pub fn open_in_memory() -> CoreResult<Self> {
-        Self::init(Connection::open_in_memory()?, None, None, true)
+        Self::init(Connection::open_in_memory()?, None, None, None, true)
     }
 
     fn init(
         mut conn: Connection,
         captures: Option<CaptureStore>,
+        library: Option<ManagedLibrary>,
         session_lock: Option<std::fs::File>,
         is_sole_connection: bool,
     ) -> CoreResult<Self> {
@@ -121,17 +137,41 @@ impl Database {
         let mut database = Self {
             conn,
             captures,
+            library,
+            sole_connection_on_open: is_sole_connection,
             _session_lock: session_lock,
         };
         if is_sole_connection {
             database.purge_deleted_annotations()?;
             database.purge_deleted_card_snapshots()?;
+            database.reconcile_managed_library()?;
         }
         Ok(database)
     }
 
     pub fn captures_directory(&self) -> Option<PathBuf> {
         self.captures.as_ref().map(CaptureStore::directory)
+    }
+
+    pub fn managed_library(&self) -> Option<&ManagedLibrary> {
+        self.library.as_ref()
+    }
+
+    pub fn is_sole_connection(&self) -> bool {
+        self.sole_connection_on_open
+    }
+
+    fn reconcile_managed_library(&self) -> CoreResult<()> {
+        let Some(library) = &self.library else {
+            return Ok(());
+        };
+        let mut statement = self.conn.prepare("SELECT file_path FROM documents")?;
+        let referenced_paths: Vec<PathBuf> = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .map(|res| res.map(PathBuf::from))
+            .collect::<Result<_, _>>()?;
+        let _ = library.reconcile(&referenced_paths)?;
+        Ok(())
     }
 
     pub fn schema_version(&self) -> CoreResult<u32> {
@@ -323,6 +363,126 @@ impl Database {
         let result = relink_document_in_conn(&tx, document_id, new_path, new_hash)?;
         tx.commit()?;
         Ok(result)
+    }
+
+    // ---- LAN Sync Import / Export ----------------------------------------
+
+    /// Imports a verified document file published into the managed library
+    /// without touching `last_opened_at` or clobbering healthy local records
+    /// (ADR 0008, LS-06).
+    ///
+    /// - On insert: uses the sanitized peer `title` (never the SHA-256 filename
+    ///   stem) and sets `last_opened_at = NULL`.
+    /// - On hash match: repairs `file_path` only when the existing record's file
+    ///   is missing on disk (rechecked under the transaction, preserving title,
+    ///   format, cursor, bookmarks, annotations, and cards); leaves existing
+    ///   on-disk records untouched (`AlreadyPresent`).
+    /// - Resolves `file_hash UNIQUE` races cleanly to `AlreadyPresent`.
+    pub fn import_document(
+        &mut self,
+        path: &Path,
+        file_hash: &str,
+        title: &str,
+        format: DocumentFormat,
+    ) -> CoreResult<ImportDocumentResult> {
+        validate_file_hash(file_hash)?;
+        let ext = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        let _ = validate_extension(format, ext)?;
+        let sanitized_title = sanitize_import_title(title, &ImportLimits::default());
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let result = import_document_in_conn(&tx, path, file_hash, &sanitized_title, format)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Reads privacy-filtered catalog metadata for a LAN sync session snapshot.
+    /// Never returns `file_path` or `last_opened_at` (ADR 0008, T-14).
+    pub fn export_catalog_books(&self) -> CoreResult<Vec<ExportCatalogBook>> {
+        let mut statement = self.conn.prepare(
+            "SELECT d.id, d.file_hash, d.title, d.format, d.file_path,
+                    d.last_cursor_anchor IS NOT NULL,
+                    (SELECT COUNT(*) FROM bookmarks b WHERE b.document_id = d.id)
+             FROM documents d
+             ORDER BY d.created_at, d.id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                let document_id: String = row.get(0)?;
+                let file_hash: String = row.get(1)?;
+                let title: String = row.get(2)?;
+                let raw_format: String = row.get(3)?;
+                let file_path: String = row.get(4)?;
+                let has_position: bool = row.get(5)?;
+                let bookmark_count: i64 = row.get(6)?;
+                let format =
+                    DocumentFormat::parse(&raw_format).map_err(|err| conversion_failure(3, err))?;
+                let extension = validated_extension_for_export(format, Path::new(&file_path));
+                Ok(ExportCatalogBook {
+                    document_id,
+                    file_hash,
+                    title,
+                    format,
+                    extension,
+                    has_position,
+                    bookmark_count: u64::try_from(bookmark_count).unwrap_or(0),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Reads a document's saved reading position for LAN sync export.
+    /// Never returns `file_path` or `last_opened_at` (ADR 0008, T-14).
+    pub fn export_document_position(
+        &self,
+        document_id: &str,
+    ) -> CoreResult<Option<ExportPosition>> {
+        let row: Option<(Option<String>, Option<f64>)> = self
+            .conn
+            .query_row(
+                "SELECT last_cursor_anchor, last_progress FROM documents WHERE id = ?1",
+                [document_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((anchor_json, progress)) = row else {
+            return Err(not_found("document", document_id));
+        };
+        let Some(anchor_json) = anchor_json else {
+            return Ok(None);
+        };
+        let anchor: AnchorLocation = serde_json::from_str(&anchor_json)?;
+        Ok(Some(ExportPosition { anchor, progress }))
+    }
+
+    /// Reads a document's bookmarks for LAN sync export.
+    /// Never returns `file_path`, `last_opened_at`, or internal row IDs (ADR 0008, T-14).
+    pub fn export_document_bookmarks(&self, document_id: &str) -> CoreResult<Vec<ExportBookmark>> {
+        if !self.document_exists(document_id)? {
+            return Err(not_found("document", document_id));
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT anchor_payload_json, label, created_at
+             FROM bookmarks
+             WHERE document_id = ?1
+             ORDER BY created_at, id",
+        )?;
+        let rows = statement
+            .query_map([document_id], |row| {
+                Ok(ExportBookmark {
+                    anchor: json_column(row, 0)?,
+                    label: row.get(1)?,
+                    created_at: row.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // ---- Notebooks -------------------------------------------------------
@@ -1652,6 +1812,80 @@ fn upsert_document_with_hash(
     )?)
 }
 
+fn is_existing_regular_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
+fn import_document_in_conn(
+    conn: &Connection,
+    path: &Path,
+    file_hash: &str,
+    sanitized_title: &str,
+    format: DocumentFormat,
+) -> CoreResult<ImportDocumentResult> {
+    if let Some(existing) = conn
+        .query_row(
+            &format!("{DOCUMENT_SELECT} WHERE file_hash = ?1"),
+            [file_hash],
+            map_document,
+        )
+        .optional()?
+    {
+        if !is_existing_regular_file(Path::new(&existing.file_path)) {
+            let file_path = path.to_string_lossy();
+            conn.execute(
+                "UPDATE documents SET file_path = ?2 WHERE id = ?1",
+                params![existing.id, file_path],
+            )?;
+            let repaired = get_document_in_conn(conn, &existing.id)?;
+            return Ok(ImportDocumentResult::Repaired(repaired));
+        }
+        return Ok(ImportDocumentResult::AlreadyPresent(existing));
+    }
+
+    insert_imported_document_row(conn, path, file_hash, sanitized_title, format)
+}
+
+fn insert_imported_document_row(
+    conn: &Connection,
+    path: &Path,
+    file_hash: &str,
+    sanitized_title: &str,
+    format: DocumentFormat,
+) -> CoreResult<ImportDocumentResult> {
+    let id = new_id();
+    let file_path = path.to_string_lossy();
+    let insert = conn.execute(
+        "INSERT INTO documents (id, title, file_path, file_hash, format, encoding, last_opened_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+        params![
+            id,
+            sanitized_title,
+            file_path,
+            file_hash,
+            format.as_str(),
+            UTF8_LABEL,
+        ],
+    );
+    match insert {
+        Ok(_) => {
+            let created = get_document_in_conn(conn, &id)?;
+            Ok(ImportDocumentResult::Created(created))
+        }
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            let existing = conn.query_row(
+                &format!("{DOCUMENT_SELECT} WHERE file_hash = ?1"),
+                [file_hash],
+                map_document,
+            )?;
+            Ok(ImportDocumentResult::AlreadyPresent(existing))
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 fn relink_document_in_conn(
     conn: &Connection,
     document_id: &str,
@@ -1829,50 +2063,6 @@ fn card_title(excerpt_text: Option<&str>) -> String {
 
 fn truncate_label(text: &str) -> String {
     truncate_chars(text, CARD_TITLE_MAX_CHARS)
-}
-
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    if max_chars == 1 {
-        return "…".to_owned();
-    }
-    let mut title: String = text.chars().take(max_chars - 1).collect();
-    title.push('…');
-    title
-}
-
-fn is_disallowed_control_or_bidi(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{0000}'..='\u{001F}'
-            | '\u{007F}'
-            | '\u{0080}'..='\u{009F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2066}'..='\u{2069}'
-    )
-}
-
-fn strip_control_and_bidi(text: &str) -> String {
-    text.chars()
-        .filter(|&ch| !is_disallowed_control_or_bidi(ch))
-        .collect()
-}
-
-fn sanitize_single_line(raw: &str) -> Option<String> {
-    raw.lines().find_map(|line| {
-        let cleaned = strip_control_and_bidi(line);
-        let trimmed = cleaned.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_owned())
-        }
-    })
 }
 
 fn normalize_bookmark_label(
@@ -2506,6 +2696,8 @@ mod tests {
         let db = Database {
             conn,
             captures: None,
+            library: None,
+            sole_connection_on_open: true,
             _session_lock: None,
         };
 
@@ -3459,6 +3651,8 @@ mod tests {
         let db = Database {
             conn,
             captures: None,
+            library: None,
+            sole_connection_on_open: true,
             _session_lock: None,
         };
 
@@ -3681,6 +3875,8 @@ mod tests {
             let db = Database {
                 conn,
                 captures: None,
+                library: None,
+                sole_connection_on_open: true,
                 _session_lock: None,
             };
 
@@ -3916,6 +4112,8 @@ mod tests {
         let db = Database {
             conn,
             captures: None,
+            library: None,
+            sole_connection_on_open: true,
             _session_lock: None,
         };
         // Registered as the version 8 schema stores it: today's registration
@@ -3933,6 +4131,8 @@ mod tests {
         let db = Database {
             conn,
             captures: None,
+            library: None,
+            sole_connection_on_open: true,
             _session_lock: None,
         };
 
@@ -5156,5 +5356,383 @@ mod tests {
             verified.current_file_hash.as_deref(),
             Some(second_hash.as_str())
         );
+    }
+
+    #[test]
+    fn import_document_creates_with_sanitized_title_null_last_opened_and_preserves_md_r2_01() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("synapse.sqlite3");
+        let mut db = Database::open(&db_path).unwrap();
+        let lib = db.managed_library().unwrap().clone();
+
+        let bytes = b"# Research Notes\nHello world\n";
+        let hash = hash_file(&{
+            let tmp = dir.path().join("seed.md");
+            std::fs::write(&tmp, bytes).unwrap();
+            tmp
+        })
+        .unwrap();
+
+        let mut staged = lib
+            .begin_stage(DocumentFormat::Txt, "md", &hash, bytes.len() as u64)
+            .unwrap();
+        staged.write_chunk(bytes).unwrap();
+        let managed_path = staged.finish().unwrap();
+        assert!(managed_path.ends_with(format!("{hash}.md")));
+
+        let result = db
+            .import_document(
+                &managed_path,
+                &hash,
+                " \u{202E}Research Notes\u{0007} ",
+                DocumentFormat::Txt,
+            )
+            .unwrap();
+        let ImportDocumentResult::Created(doc) = result else {
+            panic!("expected Created, got {result:?}");
+        };
+        assert_eq!(doc.title, "Research Notes");
+        assert_ne!(doc.title, hash);
+        assert_eq!(doc.format, DocumentFormat::Txt);
+        assert_eq!(doc.file_path, managed_path.to_string_lossy());
+        assert_eq!(doc.last_opened_at, None);
+    }
+
+    #[test]
+    fn import_document_leaves_healthy_record_untouched_t21() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&dir.path().join("synapse.sqlite3")).unwrap();
+
+        let original_path = dir.path().join("original.txt");
+        std::fs::write(&original_path, "healthy local content").unwrap();
+        let original = db.register_document(&original_path).unwrap();
+        assert!(original.last_opened_at.is_some());
+
+        let cursor = AnchorLocation::Txt {
+            start_byte_offset: 0,
+            end_byte_offset: 7,
+            line_index: 0,
+        };
+        db.update_document_cursor(&original.id, &cursor, Some(0.4))
+            .unwrap();
+
+        let managed_copy = dir
+            .path()
+            .join("library")
+            .join(format!("{}.txt", original.file_hash));
+        std::fs::create_dir_all(managed_copy.parent().unwrap()).unwrap();
+        std::fs::write(&managed_copy, "healthy local content").unwrap();
+
+        let result = db
+            .import_document(
+                &managed_copy,
+                &original.file_hash,
+                "Peer Title Should Not Overwrite",
+                DocumentFormat::Txt,
+            )
+            .unwrap();
+        let ImportDocumentResult::AlreadyPresent(returned) = result else {
+            panic!("expected AlreadyPresent, got {result:?}");
+        };
+        assert_eq!(returned.id, original.id);
+        assert_eq!(returned.file_path, original.file_path);
+        assert_eq!(returned.title, original.title);
+        assert_eq!(returned.last_opened_at, original.last_opened_at);
+        assert_eq!(returned.last_cursor_anchor, Some(cursor));
+        assert_eq!(returned.last_progress, Some(0.4));
+    }
+
+    #[test]
+    fn import_document_repairs_missing_file_without_dropping_study_records_t23() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&dir.path().join("synapse.sqlite3")).unwrap();
+
+        let original_path = dir.path().join("missing-soon.md");
+        std::fs::write(&original_path, "# My Book\nChapter 1\n").unwrap();
+        let original = db.register_document(&original_path).unwrap();
+        let notebook = db.create_notebook("Notes").unwrap();
+
+        let cursor = AnchorLocation::Txt {
+            start_byte_offset: 0,
+            end_byte_offset: 9,
+            line_index: 0,
+        };
+        db.update_document_cursor(&original.id, &cursor, Some(0.25))
+            .unwrap();
+        let bookmark = db
+            .create_bookmark(&CreateBookmarkInput {
+                document_id: original.id.clone(),
+                anchor: cursor.clone(),
+                label: Some("Start".to_owned()),
+            })
+            .unwrap();
+        let excerpt = db
+            .create_excerpt(&CreateExcerptInput {
+                document_id: original.id.clone(),
+                notebook_id: notebook.id.clone(),
+                anchor: cursor.clone(),
+                excerpt_text: Some("My Book".to_owned()),
+                excerpt_image_png: None,
+                color: "#fde68a".to_owned(),
+                parent_node_id: None,
+                pos_x: 10.0,
+                pos_y: 20.0,
+            })
+            .unwrap();
+
+        // Remove the original file so the local record is now Missing.
+        std::fs::remove_file(&original_path).unwrap();
+
+        let replacement_path = dir
+            .path()
+            .join("library")
+            .join(format!("{}.md", original.file_hash));
+        std::fs::create_dir_all(replacement_path.parent().unwrap()).unwrap();
+        std::fs::write(&replacement_path, "# My Book\nChapter 1\n").unwrap();
+
+        let result = db
+            .import_document(
+                &replacement_path,
+                &original.file_hash,
+                "Different Peer Title",
+                DocumentFormat::Txt,
+            )
+            .unwrap();
+        let ImportDocumentResult::Repaired(repaired) = result else {
+            panic!("expected Repaired, got {result:?}");
+        };
+
+        assert_eq!(repaired.id, original.id);
+        assert_eq!(repaired.file_path, replacement_path.to_string_lossy());
+        assert_eq!(repaired.title, original.title);
+        assert_eq!(repaired.format, original.format);
+        assert_eq!(repaired.last_opened_at, original.last_opened_at);
+        assert_eq!(repaired.last_cursor_anchor, Some(cursor));
+        assert_eq!(repaired.last_progress, Some(0.25));
+
+        // Bookmarks, annotations, and cards stay attached.
+        let bookmarks = db.list_bookmarks().unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].id, bookmark.id);
+        let graph = db.load_notebook_graph(&notebook.id).unwrap();
+        assert_eq!(graph.annotations.len(), 1);
+        assert_eq!(graph.annotations[0].id, excerpt.annotation.id);
+        assert_eq!(graph.cards.len(), 1);
+        assert_eq!(graph.cards[0].id, excerpt.card.id);
+    }
+
+    #[test]
+    fn import_document_resolves_file_hash_unique_races_cleanly_t26() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("race.sqlite3");
+        let mut db = Database::open(&db_path).unwrap();
+
+        let file_path = dir.path().join("shared.txt");
+        std::fs::write(&file_path, "race content").unwrap();
+        let hash = hash_file(&file_path).unwrap();
+
+        let first = db
+            .import_document(&file_path, &hash, "Shared Book", DocumentFormat::Txt)
+            .unwrap();
+        let ImportDocumentResult::Created(first_doc) = first else {
+            panic!("expected Created");
+        };
+
+        // Deterministic simulation of a concurrent writer winning between SELECT and INSERT.
+        let race_result =
+            insert_imported_document_row(&db.conn, &file_path, &hash, "Raced", DocumentFormat::Txt)
+                .unwrap();
+        let ImportDocumentResult::AlreadyPresent(raced_doc) = race_result else {
+            panic!("expected AlreadyPresent on UNIQUE race, got {race_result:?}");
+        };
+        assert_eq!(raced_doc.id, first_doc.id);
+
+        // Multi-threaded race against the same on-disk SQLite database.
+        let file2 = dir.path().join("concurrent.txt");
+        std::fs::write(&file2, "concurrent content").unwrap();
+        let hash2 = hash_file(&file2).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for idx in 0..2 {
+            let db_path = db_path.clone();
+            let file2 = file2.clone();
+            let hash2 = hash2.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let mut thread_db = Database::open(&db_path).unwrap();
+                barrier.wait();
+                thread_db
+                    .import_document(&file2, &hash2, &format!("Book {idx}"), DocumentFormat::Txt)
+                    .unwrap()
+            }));
+        }
+        let outcomes: Vec<ImportDocumentResult> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let created_count = outcomes
+            .iter()
+            .filter(|res| matches!(res, ImportDocumentResult::Created(_)))
+            .count();
+        let already_count = outcomes
+            .iter()
+            .filter(|res| matches!(res, ImportDocumentResult::AlreadyPresent(_)))
+            .count();
+        assert_eq!(created_count, 1);
+        assert_eq!(already_count, 1);
+        assert_eq!(outcomes[0].document().id, outcomes[1].document().id);
+    }
+
+    #[test]
+    fn export_reads_omit_file_path_and_last_opened_at_t14() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open(&dir.path().join("export.sqlite3")).unwrap();
+
+        let secret_path = dir.path().join("private-notes.md");
+        std::fs::write(&secret_path, "# Secret\nLine 2\n").unwrap();
+        let doc = db.register_document(&secret_path).unwrap();
+        assert!(doc.last_opened_at.is_some());
+
+        let cursor = AnchorLocation::Txt {
+            start_byte_offset: 0,
+            end_byte_offset: 8,
+            line_index: 0,
+        };
+        db.update_document_cursor(&doc.id, &cursor, Some(0.5))
+            .unwrap();
+        db.create_bookmark(&CreateBookmarkInput {
+            document_id: doc.id.clone(),
+            anchor: cursor.clone(),
+            label: Some("Intro".to_owned()),
+        })
+        .unwrap();
+
+        let catalog = db.export_catalog_books().unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].document_id, doc.id);
+        assert_eq!(catalog[0].file_hash, doc.file_hash);
+        assert_eq!(catalog[0].format, DocumentFormat::Txt);
+        assert_eq!(catalog[0].extension, "md");
+        assert!(catalog[0].has_position);
+        assert_eq!(catalog[0].bookmark_count, 1);
+
+        let position = db.export_document_position(&doc.id).unwrap().unwrap();
+        assert_eq!(position.anchor, cursor);
+        assert_eq!(position.progress, Some(0.5));
+
+        let bookmarks = db.export_document_bookmarks(&doc.id).unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].label, "Intro");
+        assert_eq!(bookmarks[0].anchor, cursor);
+
+        // Verify serialized export payloads never leak local paths or last_opened_at.
+        let catalog_json = serde_json::to_string(&catalog).unwrap();
+        let position_json = serde_json::to_string(&position).unwrap();
+        let bookmarks_json = serde_json::to_string(&bookmarks).unwrap();
+        for payload in [&catalog_json, &position_json, &bookmarks_json] {
+            assert!(!payload.contains("filePath"));
+            assert!(!payload.contains("file_path"));
+            assert!(!payload.contains("lastOpenedAt"));
+            assert!(!payload.contains("last_opened_at"));
+            assert!(!payload.contains("private-notes.md"));
+        }
+
+        assert!(matches!(
+            db.export_document_position("missing-id"),
+            Err(CoreError::NotFound { .. })
+        ));
+        assert!(matches!(
+            db.export_document_bookmarks("missing-id"),
+            Err(CoreError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn sole_connection_reconciliation_protects_concurrent_instance_r3_01_r3_08() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("synapse.sqlite3");
+
+        let mut first = Database::open(&db_path).unwrap();
+        assert!(first.is_sole_connection());
+        let lib = first.managed_library().unwrap().clone();
+
+        // Simulate an active transfer (.part) and a freshly published file not yet committed,
+        // plus a committed `.md` file and an unreferenced `.txt` file sharing the same hash.
+        let bytes = b"# Sole connection test";
+        let hash = hash_file(&{
+            let seed = dir.path().join("seed.md");
+            std::fs::write(&seed, bytes).unwrap();
+            seed
+        })
+        .unwrap();
+
+        let mut staged_md = lib
+            .begin_stage(DocumentFormat::Txt, "md", &hash, bytes.len() as u64)
+            .unwrap();
+        staged_md.write_chunk(bytes).unwrap();
+        let kept_md = staged_md.finish().unwrap();
+        first
+            .import_document(&kept_md, &hash, "Kept Markdown", DocumentFormat::Txt)
+            .unwrap();
+
+        let unreferenced_txt = lib.library_dir().join(format!("{hash}.txt"));
+        std::fs::write(&unreferenced_txt, bytes).unwrap();
+
+        std::fs::create_dir_all(lib.staging_dir()).unwrap();
+        let in_flight_part = lib.staging_dir().join("in-flight.part");
+        std::fs::write(&in_flight_part, b"partial").unwrap();
+
+        // Opening a second connection while `first` is alive must NOT reconcile.
+        {
+            let second = Database::open(&db_path).unwrap();
+            assert!(!second.is_sole_connection());
+            assert!(in_flight_part.exists());
+            assert!(unreferenced_txt.exists());
+            assert!(kept_md.exists());
+        }
+
+        // Once all connections close, the next sole-connection open reconciles cleanly.
+        drop(first);
+        let reopened = Database::open(&db_path).unwrap();
+        assert!(reopened.is_sole_connection());
+        assert!(!in_flight_part.exists());
+        assert!(!unreferenced_txt.exists());
+        assert!(kept_md.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_open_does_not_traverse_symlinked_sync_staging_directory_t19() {
+        let app_data = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let external_file = external.path().join("do-not-delete.txt");
+        std::fs::write(&external_file, b"precious user file").unwrap();
+
+        std::os::unix::fs::symlink(external.path(), app_data.path().join("sync-staging")).unwrap();
+
+        let db = Database::open(&app_data.path().join("synapse.sqlite3")).unwrap();
+        assert!(db.is_sole_connection());
+        assert!(external_file.exists());
+        assert_eq!(
+            std::fs::read(&external_file).unwrap(),
+            b"precious user file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_open_does_not_traverse_symlinked_library_directory_t19() {
+        let app_data = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let external_file = external.path().join("do-not-delete.pdf");
+        std::fs::write(&external_file, b"%PDF-1.7 precious").unwrap();
+
+        std::os::unix::fs::symlink(external.path(), app_data.path().join("library")).unwrap();
+
+        let db = Database::open(&app_data.path().join("synapse.sqlite3")).unwrap();
+        assert!(db.is_sole_connection());
+        assert!(external_file.exists());
+        assert_eq!(std::fs::read(&external_file).unwrap(), b"%PDF-1.7 precious");
     }
 }
