@@ -382,6 +382,11 @@ impl StagedFile {
             return Err(err);
         }
 
+        if let Err(err) = self.verify_on_disk_part_hash() {
+            self.cleanup_part();
+            return Err(err);
+        }
+
         if let Err(err) = validate_magic_bytes(&self.part_path, self.format) {
             self.cleanup_part();
             return Err(err);
@@ -473,6 +478,59 @@ impl StagedFile {
             return Err(CoreError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "staged file identity changed mid-transfer",
+            )));
+        }
+        Ok(())
+    }
+
+    fn verify_on_disk_part_hash(&self) -> CoreResult<()> {
+        let mut file = File::open(&self.part_path).map_err(map_storage_io_error)?;
+        let meta = file.metadata().map_err(map_storage_io_error)?;
+        if meta.len() != self.expected_len {
+            return Err(CoreError::LanSizeMismatch(format!(
+                "expected {} bytes on disk, found {}",
+                self.expected_len,
+                meta.len()
+            )));
+        }
+        if let Some(expected) = self.file_identity
+            && !expected.matches(&meta)
+        {
+            return Err(CoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged file identity changed mid-transfer",
+            )));
+        }
+
+        let mut hasher = Sha256::new();
+        let mut buf = [0_u8; 64 * 1024];
+        let mut total_read = 0_u64;
+        loop {
+            let n = file.read(&mut buf).map_err(map_storage_io_error)?;
+            if n == 0 {
+                break;
+            }
+            total_read = total_read.saturating_add(n as u64);
+            if total_read > self.expected_len {
+                return Err(CoreError::LanSizeMismatch(format!(
+                    "on-disk staged file exceeded declared size of {} bytes",
+                    self.expected_len
+                )));
+            }
+            hasher.update(&buf[..n]);
+        }
+        if total_read != self.expected_len {
+            return Err(CoreError::LanSizeMismatch(format!(
+                "expected {} bytes on disk, read {total_read}",
+                self.expected_len
+            )));
+        }
+
+        let actual_hash = hex_lower(&hasher.finalize());
+        if actual_hash != self.expected_hash {
+            return Err(CoreError::LanHashMismatch(format!(
+                "on-disk SHA-256 mismatch: expected {}, got {actual_hash}",
+                self.expected_hash
             )));
         }
         Ok(())
@@ -1759,5 +1817,33 @@ mod tests {
             assert!(external_part.exists());
             assert_eq!(fs::read(&external_part).unwrap(), sentinel);
         }
+    }
+
+    #[test]
+    fn finish_rejects_in_place_modified_staged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = ManagedLibrary::new(dir.path());
+        let original = b"authentic plain text payload";
+        let tampered = b"TAMPERED! plain text payload";
+        assert_eq!(original.len(), tampered.len());
+        let hash = sha256_hex(original);
+
+        let mut staged = lib
+            .begin_stage(DocumentFormat::Txt, "txt", &hash, original.len() as u64)
+            .unwrap();
+        let part_path = staged.part_path().to_path_buf();
+        staged.write_chunk(original).unwrap();
+
+        // Overwrite the staged `.part` file in place (same inode, same length, different bytes).
+        {
+            let mut handle = OpenOptions::new().write(true).open(&part_path).unwrap();
+            handle.write_all(tampered).unwrap();
+            handle.sync_all().unwrap();
+        }
+
+        let err = staged.finish().unwrap_err();
+        assert_eq!(err.code(), "lan_hash_mismatch");
+        assert!(!lib.library_dir().join(format!("{hash}.txt")).exists());
+        assert!(!part_path.exists());
     }
 }
