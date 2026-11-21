@@ -555,6 +555,50 @@ export function createStudySyncStore(backend: StudyBackend) {
       if (committedIds.size > 0) persistSession();
     };
 
+    const reconcileAndApplyOpenedDocuments = async (
+      opened: readonly StudyDocument[],
+      error: unknown,
+      epochsAtStart: ReadonlyMap<string, number>,
+      seqsAtStart: ReadonlyMap<string, number>,
+    ) => {
+      const hasSeqConflict = opened.some(
+        (doc) =>
+          !isDocumentLocked(doc.id) &&
+          getDocumentLockEpoch(doc.id) === (epochsAtStart.get(doc.id) ?? 0) &&
+          getDocumentRefreshSeq(doc.id) !== (seqsAtStart.get(doc.id) ?? 0),
+      );
+      if (!hasSeqConflict) {
+        applyOpenedDocuments(opened, error, epochsAtStart, seqsAtStart);
+        return;
+      }
+      // Another non-lock open, drop, or refresh completed while this picker or
+      // drop was awaiting. Re-read the authoritative DB rows under fresh
+      // per-document sequence numbers (keeping `epochsAtStart` so any sync lock
+      // still invalidates the request) so a valid selection is applied with the
+      // latest path without letting an older response regress state.
+      const reconcileSeqs = new Map<string, number>();
+      for (const doc of opened) {
+        if (
+          !isDocumentLocked(doc.id) &&
+          getDocumentLockEpoch(doc.id) === (epochsAtStart.get(doc.id) ?? 0)
+        ) {
+          reconcileSeqs.set(doc.id, nextDocumentRefreshSeq(doc.id));
+        }
+      }
+      const allDocuments = await backend.listDocuments();
+      const byId = new Map(allDocuments.map((doc) => [doc.id, doc]));
+      const resolved = opened
+        .filter(
+          (doc) =>
+            !isDocumentLocked(doc.id) &&
+            reconcileSeqs.has(doc.id) &&
+            getDocumentRefreshSeq(doc.id) === reconcileSeqs.get(doc.id),
+        )
+        .map((doc) => byId.get(doc.id) ?? doc);
+      if (resolved.length === 0 && (error === undefined || error === null)) return;
+      applyOpenedDocuments(resolved, error, epochsAtStart, reconcileSeqs);
+    };
+
     const openNativeDroppedDocuments = (dropped: readonly StudyDocument[], error?: unknown) => {
       const knownIds = new Set(get().documents.map((doc) => doc.id));
       const hasUnlockedKnownDocument = dropped.some(
@@ -755,7 +799,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         await guarded(async () => {
           const document = await backend.pickDocument();
           if (document === null) return;
-          applyOpenedDocuments([document], undefined, epochsAtStart, seqsAtStart);
+          await reconcileAndApplyOpenedDocuments([document], undefined, epochsAtStart, seqsAtStart);
         });
       },
 
@@ -848,7 +892,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         const seqsAtStart = new Map(documentRefreshSeqs);
         await guarded(async () => {
           const { documents, error } = await backend.dropFiles(files);
-          applyOpenedDocuments(documents, error, epochsAtStart, seqsAtStart);
+          await reconcileAndApplyOpenedDocuments(documents, error, epochsAtStart, seqsAtStart);
         });
       },
 
