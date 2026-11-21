@@ -586,6 +586,84 @@ pub struct CreateBookmarkInput {
     pub label: Option<String>,
 }
 
+/// Bounds applied to untrusted LAN-sync payloads during import (ADR 0008).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportLimits {
+    pub max_title_chars: usize,
+    pub max_bookmark_label_chars: usize,
+    pub max_cfi_bytes: usize,
+    pub max_href_bytes: usize,
+    pub max_rects: usize,
+    pub max_page_spans: usize,
+    pub max_bookmarks_per_book: usize,
+    pub max_catalog_books: usize,
+}
+
+impl Default for ImportLimits {
+    fn default() -> Self {
+        Self {
+            max_title_chars: 512,
+            max_bookmark_label_chars: 80,
+            max_cfi_bytes: 4096,
+            max_href_bytes: 1024,
+            max_rects: 256,
+            max_page_spans: 64,
+            max_bookmarks_per_book: 10_000,
+            max_catalog_books: 10_000,
+        }
+    }
+}
+
+/// A bookmark payload supplied to [`crate::db::Database::import_bookmarks`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBookmarkEntry {
+    pub anchor: AnchorLocation,
+    pub label: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// Stable reason a bookmark entry was skipped during [`crate::db::Database::import_bookmarks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BookmarkSkipReason {
+    InvalidAnchor,
+    FormatMismatch,
+    AnchorLimitExceeded,
+    BookmarkCapExceeded,
+}
+
+impl BookmarkSkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidAnchor => "invalid_anchor",
+            Self::FormatMismatch => "format_mismatch",
+            Self::AnchorLimitExceeded => "anchor_limit_exceeded",
+            Self::BookmarkCapExceeded => "bookmark_cap_exceeded",
+        }
+    }
+}
+
+/// Diagnostic record for a single skipped entry in [`BookmarkImportReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedBookmark {
+    /// Zero-based index of the entry in the input slice.
+    pub index: usize,
+    pub reason: BookmarkSkipReason,
+}
+
+/// Outcome of [`crate::db::Database::import_bookmarks`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookmarkImportReport {
+    pub inserted: usize,
+    pub existing: usize,
+    pub skipped: usize,
+    pub skipped_entries: Vec<SkippedBookmark>,
+    pub inserted_bookmarks: Vec<Bookmark>,
+}
+
 /// The page palette. `Auto` follows the system's light or dark appearance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1412,5 +1490,18 @@ mod tests {
             progress: Some(f64::INFINITY),
         };
         assert!(!inf.matches(&inf));
+    }
+
+    #[test]
+    fn import_limits_default_matches_adr_0008() {
+        let limits = ImportLimits::default();
+        assert_eq!(limits.max_title_chars, 512);
+        assert_eq!(limits.max_bookmark_label_chars, 80);
+        assert_eq!(limits.max_cfi_bytes, 4096);
+        assert_eq!(limits.max_href_bytes, 1024);
+        assert_eq!(limits.max_rects, 256);
+        assert_eq!(limits.max_page_spans, 64);
+        assert_eq!(limits.max_bookmarks_per_book, 10_000);
+        assert_eq!(limits.max_catalog_books, 10_000);
     }
 }

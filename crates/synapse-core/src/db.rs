@@ -11,12 +11,13 @@ use uuid::Uuid;
 
 use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
-    AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, CardPatch,
-    CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, CursorSnapshot,
-    DeletedCard, Document, DocumentFormat, DocumentSourceState, DocumentSourceStatus, MindMapEdge,
-    MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode,
-    PdfLayout, PdfZoomMode, ReadingPreferences, RelinkDocumentResult, ReplaceCursorResult,
-    RestoredAnnotation, RestoredCard, ScrollPageTransition, StudyNotebook, Viewport,
+    AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, BookmarkImportReport,
+    BookmarkSkipReason, CardPatch, CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput,
+    CreatedExcerpt, CursorSnapshot, DeletedCard, Document, DocumentFormat, DocumentSourceState,
+    DocumentSourceStatus, ImportBookmarkEntry, ImportLimits, MindMapEdge, MindMapNode,
+    NodeLayoutPatch, NoteCard, NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout,
+    PdfZoomMode, ReadingPreferences, RelinkDocumentResult, ReplaceCursorResult, RestoredAnnotation,
+    RestoredCard, ScrollPageTransition, SkippedBookmark, StudyNotebook, Viewport,
     WorkspacePaneLayout, WorkspaceSession,
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
@@ -1221,12 +1222,11 @@ impl Database {
         let tx = self.conn.transaction()?;
         check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
 
-        let label = input
-            .label
-            .as_deref()
-            .and_then(|raw| raw.lines().map(str::trim).find(|line| !line.is_empty()))
-            .map(truncate_label)
-            .unwrap_or_else(|| input.anchor.default_bookmark_label());
+        let label = normalize_bookmark_label(
+            input.label.as_deref(),
+            &input.anchor,
+            ImportLimits::default().max_bookmark_label_chars,
+        );
         let location_key = input.anchor.location_key();
         let anchor_type = input.anchor.format().as_str();
         let anchor_json = serde_json::to_string(&input.anchor)?;
@@ -1255,6 +1255,151 @@ impl Database {
         )?;
         tx.commit()?;
         Ok(bookmark)
+    }
+
+    /// Insert-only bookmark import for LAN book sync (ADR 0008).
+    ///
+    /// Runs in a single SQLite transaction, validates each entry individually
+    /// (skipping invalid, wrong-format, oversized, or over-cap entries without
+    /// aborting valid entries), and leaves existing `(document_id, location_key)`
+    /// rows untouched via `ON CONFLICT DO NOTHING`.
+    pub fn import_bookmarks(
+        &mut self,
+        document_id: &str,
+        entries: &[ImportBookmarkEntry],
+        limits: &ImportLimits,
+    ) -> CoreResult<BookmarkImportReport> {
+        let tx = self.conn.transaction()?;
+        let doc_format: String = tx
+            .query_row(
+                "SELECT format FROM documents WHERE id = ?1",
+                [document_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found("document", document_id))?;
+
+        let count_i64: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM bookmarks WHERE document_id = ?1",
+            [document_id],
+            |row| row.get(0),
+        )?;
+        let mut current_count = usize::try_from(count_i64).unwrap_or(0);
+
+        let mut fallback_now: Option<String> = None;
+        let mut inserted = 0usize;
+        let mut existing = 0usize;
+        let mut skipped_entries = Vec::new();
+        let mut inserted_bookmarks = Vec::new();
+
+        {
+            let mut exists_stmt =
+                tx.prepare("SELECT 1 FROM bookmarks WHERE document_id = ?1 AND location_key = ?2")?;
+            let mut insert_stmt = tx.prepare(
+                "INSERT INTO bookmarks (id, document_id, anchor_type, anchor_payload_json,
+                     location_key, label, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (document_id, location_key) DO NOTHING",
+            )?;
+
+            for (index, entry) in entries.iter().enumerate() {
+                if entry.anchor.validate().is_err() {
+                    skipped_entries.push(SkippedBookmark {
+                        index,
+                        reason: BookmarkSkipReason::InvalidAnchor,
+                    });
+                    continue;
+                }
+                if doc_format != entry.anchor.format().as_str() {
+                    skipped_entries.push(SkippedBookmark {
+                        index,
+                        reason: BookmarkSkipReason::FormatMismatch,
+                    });
+                    continue;
+                }
+                if !check_anchor_limits(&entry.anchor, limits) {
+                    skipped_entries.push(SkippedBookmark {
+                        index,
+                        reason: BookmarkSkipReason::AnchorLimitExceeded,
+                    });
+                    continue;
+                }
+
+                let location_key = entry.anchor.location_key();
+                if current_count >= limits.max_bookmarks_per_book {
+                    let already_exists = exists_stmt
+                        .query_row(params![document_id, location_key], |_| Ok(()))
+                        .optional()?
+                        .is_some();
+                    if already_exists {
+                        existing += 1;
+                    } else {
+                        skipped_entries.push(SkippedBookmark {
+                            index,
+                            reason: BookmarkSkipReason::BookmarkCapExceeded,
+                        });
+                    }
+                    continue;
+                }
+
+                let label = normalize_bookmark_label(
+                    entry.label.as_deref(),
+                    &entry.anchor,
+                    limits.max_bookmark_label_chars,
+                );
+                let created_at = match entry.created_at.as_deref() {
+                    Some(ts) if is_valid_iso8601_utc(ts) => ts.to_owned(),
+                    _ => {
+                        if let Some(ref ts) = fallback_now {
+                            ts.clone()
+                        } else {
+                            let ts: String = tx.query_row(
+                                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+                                [],
+                                |row| row.get(0),
+                            )?;
+                            fallback_now = Some(ts.clone());
+                            ts
+                        }
+                    }
+                };
+                let id = new_id();
+                let anchor_type = entry.anchor.format().as_str();
+                let anchor_json = serde_json::to_string(&entry.anchor)?;
+
+                let changed = insert_stmt.execute(params![
+                    id,
+                    document_id,
+                    anchor_type,
+                    anchor_json,
+                    location_key,
+                    label,
+                    created_at,
+                ])?;
+                if changed == 0 {
+                    existing += 1;
+                } else {
+                    current_count += 1;
+                    inserted += 1;
+                    inserted_bookmarks.push(Bookmark {
+                        id,
+                        document_id: document_id.to_owned(),
+                        anchor: entry.anchor.clone(),
+                        label,
+                        created_at,
+                    });
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(BookmarkImportReport {
+            inserted,
+            existing,
+            skipped: skipped_entries.len(),
+            skipped_entries,
+            inserted_bookmarks,
+        })
     }
 
     pub fn delete_bookmark(&self, bookmark_id: &str) -> CoreResult<()> {
@@ -1683,12 +1828,153 @@ fn card_title(excerpt_text: Option<&str>) -> String {
 }
 
 fn truncate_label(text: &str) -> String {
-    if text.chars().count() <= CARD_TITLE_MAX_CHARS {
+    truncate_chars(text, CARD_TITLE_MAX_CHARS)
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max_chars {
         return text.to_owned();
     }
-    let mut title: String = text.chars().take(CARD_TITLE_MAX_CHARS - 1).collect();
+    if max_chars == 1 {
+        return "…".to_owned();
+    }
+    let mut title: String = text.chars().take(max_chars - 1).collect();
     title.push('…');
     title
+}
+
+fn is_disallowed_control_or_bidi(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{001F}'
+            | '\u{007F}'
+            | '\u{0080}'..='\u{009F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+fn strip_control_and_bidi(text: &str) -> String {
+    text.chars()
+        .filter(|&ch| !is_disallowed_control_or_bidi(ch))
+        .collect()
+}
+
+fn sanitize_single_line(raw: &str) -> Option<String> {
+    raw.lines().find_map(|line| {
+        let cleaned = strip_control_and_bidi(line);
+        let trimmed = cleaned.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
+}
+
+fn normalize_bookmark_label(
+    raw: Option<&str>,
+    anchor: &AnchorLocation,
+    max_chars: usize,
+) -> String {
+    let candidate = raw
+        .and_then(sanitize_single_line)
+        .or_else(|| sanitize_single_line(&anchor.default_bookmark_label()))
+        .unwrap_or_else(|| "Bookmark".to_owned());
+    truncate_chars(&candidate, max_chars)
+}
+
+fn check_anchor_limits(anchor: &AnchorLocation, limits: &ImportLimits) -> bool {
+    match anchor {
+        AnchorLocation::Pdf {
+            rects, page_spans, ..
+        } => {
+            if rects.len() > limits.max_rects {
+                return false;
+            }
+            if let Some(spans) = page_spans {
+                if spans.len() > limits.max_page_spans {
+                    return false;
+                }
+                if spans.iter().any(|span| span.rects.len() > limits.max_rects) {
+                    return false;
+                }
+            }
+            true
+        }
+        AnchorLocation::Epub {
+            cfi_range,
+            chapter_href,
+        } => cfi_range.len() <= limits.max_cfi_bytes && chapter_href.len() <= limits.max_href_bytes,
+        AnchorLocation::Txt { .. } | AnchorLocation::Md { .. } => true,
+    }
+}
+
+/// Validates an ISO-8601 UTC timestamp such as `2026-11-21T02:55:34Z` or
+/// `2026-11-21T02:55:34.123Z` (1 to 9 fractional digits).
+fn is_valid_iso8601_utc(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20 || *bytes.last().unwrap_or(&0) != b'Z' {
+        return false;
+    }
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return false;
+    }
+
+    let parse_digits = |slice: &[u8]| -> Option<u32> {
+        let mut acc: u32 = 0;
+        for &b in slice {
+            if !b.is_ascii_digit() {
+                return None;
+            }
+            acc = acc * 10 + u32::from(b - b'0');
+        }
+        Some(acc)
+    };
+
+    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
+        parse_digits(&bytes[0..4]),
+        parse_digits(&bytes[5..7]),
+        parse_digits(&bytes[8..10]),
+        parse_digits(&bytes[11..13]),
+        parse_digits(&bytes[14..16]),
+        parse_digits(&bytes[17..19]),
+    ) else {
+        return false;
+    };
+
+    if year == 0 || !(1..=12).contains(&month) {
+        return false;
+    }
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    if !(1..=max_day).contains(&day) || hour > 23 || minute > 59 || second > 59 {
+        return false;
+    }
+
+    let frac = &bytes[19..bytes.len() - 1];
+    if frac.is_empty() {
+        return true;
+    }
+    if frac[0] != b'.' {
+        return false;
+    }
+    let digits = &frac[1..];
+    (1..=9).contains(&digits.len()) && digits.iter().all(u8::is_ascii_digit)
 }
 
 // ---- Row mapping ---------------------------------------------------------
@@ -3819,6 +4105,556 @@ mod tests {
 
         let reopened = Database::open(&db_path).unwrap();
         assert_eq!(reopened.list_bookmarks().unwrap(), vec![saved]);
+    }
+
+    /// T-35 & T-36: Insert-only import preserves existing `(document_id, location_key)`
+    /// rows byte-identically, and re-importing the same payload inserts 0 rows.
+    #[test]
+    fn import_bookmarks_is_insert_only_and_idempotent_on_reimport() {
+        let mut f = fixture();
+        let existing_anchor = AnchorLocation::Txt {
+            start_byte_offset: 0,
+            end_byte_offset: 5,
+            line_index: 0,
+        };
+        let existing_row =
+            f.db.create_bookmark(&CreateBookmarkInput {
+                document_id: f.document_id.clone(),
+                anchor: existing_anchor.clone(),
+                label: Some("Original receiver label".to_owned()),
+            })
+            .unwrap();
+
+        let raw_before: (String, String, String, String) = f
+            .db
+            .conn
+            .query_row(
+                "SELECT id, label, anchor_payload_json, created_at FROM bookmarks WHERE id = ?1",
+                [&existing_row.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        // Colliding location_key with different end_byte_offset, label, and created_at,
+        // plus two new entries (and an in-batch duplicate of the second new entry).
+        let payload = vec![
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 0,
+                    end_byte_offset: 12,
+                    line_index: 0,
+                },
+                label: Some("Sender overwrite attempt".to_owned()),
+                created_at: Some("2025-01-02T03:04:05.678Z".to_owned()),
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 10,
+                    end_byte_offset: 20,
+                    line_index: 1,
+                },
+                label: Some("Chapter 2".to_owned()),
+                created_at: Some("2025-02-03T04:05:06Z".to_owned()),
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 10,
+                    end_byte_offset: 25,
+                    line_index: 1,
+                },
+                label: Some("Duplicate in same batch".to_owned()),
+                created_at: Some("2025-02-04T00:00:00Z".to_owned()),
+            },
+        ];
+
+        let report =
+            f.db.import_bookmarks(&f.document_id, &payload, &ImportLimits::default())
+                .unwrap();
+        assert_eq!(report.inserted, 1);
+        assert_eq!(report.existing, 2);
+        assert_eq!(report.skipped, 0);
+        assert!(report.skipped_entries.is_empty());
+        assert_eq!(report.inserted_bookmarks.len(), 1);
+        assert_ne!(report.inserted_bookmarks[0].id, existing_row.id);
+        assert_eq!(report.inserted_bookmarks[0].label, "Chapter 2");
+        assert_eq!(
+            report.inserted_bookmarks[0].created_at,
+            "2025-02-03T04:05:06Z"
+        );
+
+        // T-36: Existing row is byte-identical after import.
+        let raw_after: (String, String, String, String) = f
+            .db
+            .conn
+            .query_row(
+                "SELECT id, label, anchor_payload_json, created_at FROM bookmarks WHERE id = ?1",
+                [&existing_row.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(raw_before, raw_after);
+
+        // T-35: Re-importing the exact same payload inserts 0 rows and classifies all as existing.
+        let second =
+            f.db.import_bookmarks(&f.document_id, &payload, &ImportLimits::default())
+                .unwrap();
+        assert_eq!(second.inserted, 0);
+        assert_eq!(second.existing, payload.len());
+        assert_eq!(second.skipped, 0);
+        assert!(second.skipped_entries.is_empty());
+        assert!(second.inserted_bookmarks.is_empty());
+        assert_eq!(f.db.list_bookmarks().unwrap().len(), 2);
+    }
+
+    /// T-38: Invalid, wrong-format, and oversized entries are skipped with stable
+    /// reasons without aborting valid entries in the same batch.
+    #[test]
+    fn import_bookmarks_skips_invalid_wrong_format_and_oversized_entries_individually() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = Database::open_in_memory().unwrap();
+
+        let txt_path = dir.path().join("notes.txt");
+        let epub_path = dir.path().join("book.epub");
+        let pdf_path = dir.path().join("paper.pdf");
+        std::fs::write(&txt_path, "hello world").unwrap();
+        std::fs::write(&epub_path, "epub").unwrap();
+        std::fs::write(&pdf_path, "pdf").unwrap();
+
+        let txt_doc = db.register_document(&txt_path).unwrap();
+        let epub_doc = db.register_document(&epub_path).unwrap();
+        let pdf_doc = db.register_document(&pdf_path).unwrap();
+
+        // 1. TXT document: invalid TXT range, wrong-format Md & Pdf, and one valid TXT entry.
+        let txt_report = db
+            .import_bookmarks(
+                &txt_doc.id,
+                &[
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Txt {
+                            start_byte_offset: 5,
+                            end_byte_offset: 5,
+                            line_index: 0,
+                        },
+                        label: Some("empty range".to_owned()),
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Md {
+                            ast_node_id: "heading-1".to_owned(),
+                            offset: 0,
+                        },
+                        label: Some("md on txt".to_owned()),
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Txt {
+                            start_byte_offset: 0,
+                            end_byte_offset: 5,
+                            line_index: 0,
+                        },
+                        label: Some("valid txt".to_owned()),
+                        created_at: None,
+                    },
+                ],
+                &ImportLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(txt_report.inserted, 1);
+        assert_eq!(txt_report.existing, 0);
+        assert_eq!(txt_report.skipped, 2);
+        assert_eq!(
+            txt_report.skipped_entries,
+            vec![
+                SkippedBookmark {
+                    index: 0,
+                    reason: BookmarkSkipReason::InvalidAnchor,
+                },
+                SkippedBookmark {
+                    index: 1,
+                    reason: BookmarkSkipReason::FormatMismatch,
+                },
+            ]
+        );
+        assert_eq!(txt_report.inserted_bookmarks[0].label, "valid txt");
+
+        // 2. EPUB document: Pdf on Epub, oversized CFI, oversized href, and one valid EPUB entry.
+        let limits = ImportLimits::default();
+        let valid_rect = NormalizedRect {
+            x: 0.1,
+            y: 0.1,
+            width: 0.2,
+            height: 0.1,
+        };
+        let epub_report = db
+            .import_bookmarks(
+                &epub_doc.id,
+                &[
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Pdf {
+                            page_index: 0,
+                            rects: vec![valid_rect],
+                            page_spans: None,
+                        },
+                        label: Some("pdf on epub".to_owned()),
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Epub {
+                            cfi_range: "a".repeat(limits.max_cfi_bytes + 1),
+                            chapter_href: "ch1.xhtml".to_owned(),
+                        },
+                        label: Some("huge cfi".to_owned()),
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Epub {
+                            cfi_range: "epubcfi(/6/2!/4/2)".to_owned(),
+                            chapter_href: "b".repeat(limits.max_href_bytes + 1),
+                        },
+                        label: Some("huge href".to_owned()),
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Epub {
+                            cfi_range: "epubcfi(/6/2!/4/2)".to_owned(),
+                            chapter_href: "ch1.xhtml".to_owned(),
+                        },
+                        label: Some("valid epub".to_owned()),
+                        created_at: None,
+                    },
+                ],
+                &limits,
+            )
+            .unwrap();
+        assert_eq!(epub_report.inserted, 1);
+        assert_eq!(epub_report.skipped, 3);
+        assert_eq!(
+            epub_report.skipped_entries,
+            vec![
+                SkippedBookmark {
+                    index: 0,
+                    reason: BookmarkSkipReason::FormatMismatch,
+                },
+                SkippedBookmark {
+                    index: 1,
+                    reason: BookmarkSkipReason::AnchorLimitExceeded,
+                },
+                SkippedBookmark {
+                    index: 2,
+                    reason: BookmarkSkipReason::AnchorLimitExceeded,
+                },
+            ]
+        );
+
+        // 3. PDF document: too many rects, too many pageSpans, span with too many rects, and one valid PDF entry.
+        let small_limits = ImportLimits {
+            max_rects: 2,
+            max_page_spans: 2,
+            ..ImportLimits::default()
+        };
+        let pdf_report = db
+            .import_bookmarks(
+                &pdf_doc.id,
+                &[
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Pdf {
+                            page_index: 0,
+                            rects: vec![valid_rect, valid_rect, valid_rect],
+                            page_spans: None,
+                        },
+                        label: None,
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Pdf {
+                            page_index: 0,
+                            rects: vec![valid_rect],
+                            page_spans: Some(vec![
+                                crate::domain::PdfPageSpan {
+                                    page_index: 0,
+                                    rects: vec![valid_rect],
+                                },
+                                crate::domain::PdfPageSpan {
+                                    page_index: 1,
+                                    rects: vec![valid_rect],
+                                },
+                                crate::domain::PdfPageSpan {
+                                    page_index: 2,
+                                    rects: vec![valid_rect],
+                                },
+                            ]),
+                        },
+                        label: None,
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Pdf {
+                            page_index: 0,
+                            rects: vec![valid_rect],
+                            page_spans: Some(vec![crate::domain::PdfPageSpan {
+                                page_index: 0,
+                                rects: vec![valid_rect, valid_rect, valid_rect],
+                            }]),
+                        },
+                        label: None,
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Pdf {
+                            page_index: 4,
+                            rects: vec![valid_rect],
+                            page_spans: None,
+                        },
+                        label: Some("valid pdf".to_owned()),
+                        created_at: None,
+                    },
+                ],
+                &small_limits,
+            )
+            .unwrap();
+        assert_eq!(pdf_report.inserted, 1);
+        assert_eq!(pdf_report.skipped, 3);
+        assert_eq!(
+            pdf_report.skipped_entries,
+            vec![
+                SkippedBookmark {
+                    index: 0,
+                    reason: BookmarkSkipReason::AnchorLimitExceeded,
+                },
+                SkippedBookmark {
+                    index: 1,
+                    reason: BookmarkSkipReason::AnchorLimitExceeded,
+                },
+                SkippedBookmark {
+                    index: 2,
+                    reason: BookmarkSkipReason::AnchorLimitExceeded,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn import_bookmarks_preserves_valid_utc_timestamps_and_falls_back_otherwise() {
+        let mut f = fixture();
+        let entries = vec![
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 0,
+                    end_byte_offset: 1,
+                    line_index: 0,
+                },
+                label: Some("whole seconds".to_owned()),
+                created_at: Some("2024-02-29T23:59:59Z".to_owned()),
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 2,
+                    end_byte_offset: 3,
+                    line_index: 1,
+                },
+                label: Some("millis".to_owned()),
+                created_at: Some("2026-11-21T02:55:34.123Z".to_owned()),
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 4,
+                    end_byte_offset: 5,
+                    line_index: 2,
+                },
+                label: Some("missing ts".to_owned()),
+                created_at: None,
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 6,
+                    end_byte_offset: 7,
+                    line_index: 3,
+                },
+                label: Some("non-utc offset".to_owned()),
+                created_at: Some("2026-11-21T02:55:34+08:00".to_owned()),
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 8,
+                    end_byte_offset: 9,
+                    line_index: 4,
+                },
+                label: Some("non-leap feb 29".to_owned()),
+                created_at: Some("2026-02-29T00:00:00Z".to_owned()),
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 10,
+                    end_byte_offset: 11,
+                    line_index: 5,
+                },
+                label: Some("garbage".to_owned()),
+                created_at: Some("not-a-timestamp".to_owned()),
+            },
+        ];
+
+        let report =
+            f.db.import_bookmarks(&f.document_id, &entries, &ImportLimits::default())
+                .unwrap();
+        assert_eq!(report.inserted, 6);
+        assert_eq!(
+            report.inserted_bookmarks[0].created_at,
+            "2024-02-29T23:59:59Z"
+        );
+        assert_eq!(
+            report.inserted_bookmarks[1].created_at,
+            "2026-11-21T02:55:34.123Z"
+        );
+        for bookmark in &report.inserted_bookmarks[2..] {
+            assert!(
+                is_valid_iso8601_utc(&bookmark.created_at),
+                "fallback timestamp must be valid ISO-8601 UTC, got {}",
+                bookmark.created_at
+            );
+            assert_ne!(bookmark.created_at, "2026-11-21T02:55:34+08:00");
+            assert_ne!(bookmark.created_at, "2026-02-29T00:00:00Z");
+            assert_ne!(bookmark.created_at, "not-a-timestamp");
+        }
+    }
+
+    #[test]
+    fn bookmark_label_normalization_strips_control_and_bidi_chars_and_truncates() {
+        let mut f = fixture();
+        // `create_bookmark` and `import_bookmarks` share the same label sanitizer.
+        let created = f
+            .db
+            .create_bookmark(&CreateBookmarkInput {
+                document_id: f.document_id.clone(),
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 0,
+                    end_byte_offset: 4,
+                    line_index: 0,
+                },
+                label: Some(
+                    "\u{0000}\u{202E}   \n  Hello\u{0007}\u{007F}\u{0085}\u{202A}\u{2066}World\u{2069}  \nSecond"
+                        .to_owned(),
+                ),
+            })
+            .unwrap();
+        assert_eq!(created.label, "HelloWorld");
+
+        let long_label = "x".repeat(120);
+        let report =
+            f.db.import_bookmarks(
+                &f.document_id,
+                &[
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Txt {
+                            start_byte_offset: 10,
+                            end_byte_offset: 14,
+                            line_index: 4,
+                        },
+                        label: Some("\u{0001}\u{001F}\u{007F}\u{009F}\u{202E}\u{2067}".to_owned()),
+                        created_at: None,
+                    },
+                    ImportBookmarkEntry {
+                        anchor: AnchorLocation::Txt {
+                            start_byte_offset: 20,
+                            end_byte_offset: 24,
+                            line_index: 5,
+                        },
+                        label: Some(long_label),
+                        created_at: None,
+                    },
+                ],
+                &ImportLimits::default(),
+            )
+            .unwrap();
+        assert_eq!(report.inserted, 2);
+        // Control/bidi-only label falls back to `anchor.default_bookmark_label()`.
+        assert_eq!(report.inserted_bookmarks[0].label, "Line 5");
+        // Long label is truncated to `max_bookmark_label_chars` (80) with trailing ellipsis.
+        assert_eq!(report.inserted_bookmarks[1].label.chars().count(), 80);
+        assert!(report.inserted_bookmarks[1].label.ends_with('…'));
+    }
+
+    #[test]
+    fn import_bookmarks_enforces_max_bookmarks_per_book_cap_while_classifying_existing() {
+        let mut f = fixture();
+        let limits = ImportLimits {
+            max_bookmarks_per_book: 2,
+            ..ImportLimits::default()
+        };
+
+        let entries = vec![
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 0,
+                    end_byte_offset: 2,
+                    line_index: 0,
+                },
+                label: Some("One".to_owned()),
+                created_at: None,
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 4,
+                    end_byte_offset: 6,
+                    line_index: 1,
+                },
+                label: Some("Two".to_owned()),
+                created_at: None,
+            },
+            ImportBookmarkEntry {
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 8,
+                    end_byte_offset: 10,
+                    line_index: 2,
+                },
+                label: Some("Three (over cap)".to_owned()),
+                created_at: None,
+            },
+        ];
+
+        let first =
+            f.db.import_bookmarks(&f.document_id, &entries, &limits)
+                .unwrap();
+        assert_eq!(first.inserted, 2);
+        assert_eq!(first.existing, 0);
+        assert_eq!(first.skipped, 1);
+        assert_eq!(
+            first.skipped_entries,
+            vec![SkippedBookmark {
+                index: 2,
+                reason: BookmarkSkipReason::BookmarkCapExceeded,
+            }]
+        );
+
+        // Re-importing when already at the cap still classifies the existing two as `existing`
+        // and only skips the third new entry as `BookmarkCapExceeded`.
+        let second =
+            f.db.import_bookmarks(&f.document_id, &entries, &limits)
+                .unwrap();
+        assert_eq!(second.inserted, 0);
+        assert_eq!(second.existing, 2);
+        assert_eq!(second.skipped, 1);
+        assert_eq!(
+            second.skipped_entries,
+            vec![SkippedBookmark {
+                index: 2,
+                reason: BookmarkSkipReason::BookmarkCapExceeded,
+            }]
+        );
+    }
+
+    #[test]
+    fn import_bookmarks_rejects_unknown_document() {
+        let mut f = fixture();
+        let err =
+            f.db.import_bookmarks("nonexistent-doc", &[], &ImportLimits::default())
+                .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::NotFound {
+                entity: "document",
+                ..
+            }
+        ));
     }
 
     #[test]
