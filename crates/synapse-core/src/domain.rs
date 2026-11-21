@@ -979,6 +979,140 @@ impl PdfLayout {
     }
 }
 
+/// Returns `true` for C0 controls, DEL, C1 controls, and Unicode bidirectional
+/// override/embedding/isolate formatting characters that must be stripped from
+/// untrusted peer strings.
+pub fn is_forbidden_control_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0000}'..='\u{001F}'
+            | '\u{007F}'
+            | '\u{0080}'..='\u{009F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Strips forbidden control and bidi formatting characters from `text`.
+pub fn strip_control_and_bidi(text: &str) -> String {
+    text.chars()
+        .filter(|&ch| !is_forbidden_control_char(ch))
+        .collect()
+}
+
+/// Extracts the first non-empty trimmed line after stripping forbidden control
+/// and bidi formatting characters.
+pub fn sanitize_single_line(raw: &str) -> Option<String> {
+    raw.lines().find_map(|line| {
+        let cleaned = strip_control_and_bidi(line);
+        let trimmed = cleaned.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
+}
+
+/// Truncates `text` to at most `max_chars` Unicode scalar values, appending an
+/// ellipsis when shortened.
+pub fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    if max_chars == 1 {
+        return "…".to_owned();
+    }
+    let mut shortened: String = text.chars().take(max_chars - 1).collect();
+    shortened.push('…');
+    shortened
+}
+
+/// Sanitizes a book title received from a peer (first non-empty trimmed line,
+/// controls/bidi stripped, capped to `limits.max_title_chars`), falling back to
+/// `"Untitled"` when nothing remains.
+pub fn sanitize_import_title(raw: &str, limits: &ImportLimits) -> String {
+    sanitize_single_line(raw)
+        .map(|line| truncate_chars(&line, limits.max_title_chars))
+        .unwrap_or_else(|| "Untitled".to_owned())
+}
+
+/// Sanitizes a bookmark label received from a peer using the same rules as
+/// `Database::import_bookmarks` (first non-empty trimmed line, controls/bidi
+/// stripped, falling back to the anchor's default label or `"Bookmark"`, and
+/// capped to `limits.max_bookmark_label_chars`).
+pub fn sanitize_bookmark_label(
+    raw: Option<&str>,
+    anchor: &AnchorLocation,
+    limits: &ImportLimits,
+) -> String {
+    let candidate = raw
+        .and_then(sanitize_single_line)
+        .or_else(|| sanitize_single_line(&anchor.default_bookmark_label()))
+        .unwrap_or_else(|| "Bookmark".to_owned());
+    truncate_chars(&candidate, limits.max_bookmark_label_chars)
+}
+
+/// Outcome of importing a verified document file into the local database.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "document", rename_all = "camelCase")]
+pub enum ImportDocumentResult {
+    /// A new document record was inserted.
+    Created(Document),
+    /// An existing record whose source file was missing had its `file_path` repaired.
+    Repaired(Document),
+    /// An existing record already points to an on-disk file and was left untouched.
+    AlreadyPresent(Document),
+}
+
+impl ImportDocumentResult {
+    pub fn document(&self) -> &Document {
+        match self {
+            Self::Created(doc) | Self::Repaired(doc) | Self::AlreadyPresent(doc) => doc,
+        }
+    }
+
+    pub fn into_document(self) -> Document {
+        match self {
+            Self::Created(doc) | Self::Repaired(doc) | Self::AlreadyPresent(doc) => doc,
+        }
+    }
+}
+
+/// Privacy-filtered catalog metadata for LAN sync export.
+/// Intentionally omits `file_path` and `last_opened_at` (ADR 0008, T-14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCatalogBook {
+    pub document_id: String,
+    pub file_hash: String,
+    pub title: String,
+    pub format: DocumentFormat,
+    pub extension: String,
+    pub has_position: bool,
+    pub bookmark_count: u64,
+}
+
+/// Saved reading position for LAN sync export.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportPosition {
+    pub anchor: AnchorLocation,
+    pub progress: Option<f64>,
+}
+
+/// Privacy-filtered bookmark entry for LAN sync export.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportBookmark {
+    pub anchor: AnchorLocation,
+    pub label: String,
+    pub created_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1493,7 +1627,7 @@ mod tests {
     }
 
     #[test]
-    fn import_limits_default_matches_adr_0008() {
+    fn import_limits_and_sanitizers_strip_controls_bidi_and_enforce_caps() {
         let limits = ImportLimits::default();
         assert_eq!(limits.max_title_chars, 512);
         assert_eq!(limits.max_bookmark_label_chars, 80);
@@ -1503,5 +1637,38 @@ mod tests {
         assert_eq!(limits.max_page_spans, 64);
         assert_eq!(limits.max_bookmarks_per_book, 10_000);
         assert_eq!(limits.max_catalog_books, 10_000);
+
+        let anchor = AnchorLocation::Txt {
+            start_byte_offset: 0,
+            end_byte_offset: 10,
+            line_index: 4,
+        };
+
+        // Strips C0, DEL, C1, bidi overrides (U+202A..=U+202E), and bidi isolates (U+2066..=U+2069)
+        let hostile = "  \u{0000}Hello\u{0007}\u{001F}\u{007F}\u{0080}\u{009F} \u{202E}World\u{202C}\u{2066}!\u{2069}  \nSecond line";
+        assert_eq!(sanitize_import_title(hostile, &limits), "Hello World!");
+        assert_eq!(
+            sanitize_bookmark_label(Some(hostile), &anchor, &limits),
+            "Hello World!"
+        );
+
+        // Empty or control-only inputs fall back cleanly
+        let only_controls = "\u{0000}\u{001B}\u{202E}\u{2066}   \t\n";
+        assert_eq!(sanitize_import_title(only_controls, &limits), "Untitled");
+        assert_eq!(
+            sanitize_bookmark_label(Some(only_controls), &anchor, &limits),
+            "Line 5"
+        );
+
+        // Character caps apply on Unicode scalar boundaries with ellipsis
+        let long_title = "书".repeat(600);
+        let sanitized_title = sanitize_import_title(&long_title, &limits);
+        assert_eq!(sanitized_title.chars().count(), 512);
+        assert!(sanitized_title.ends_with('…'));
+
+        let long_label = "章".repeat(120);
+        let sanitized_label = sanitize_bookmark_label(Some(&long_label), &anchor, &limits);
+        assert_eq!(sanitized_label.chars().count(), 80);
+        assert!(sanitized_label.ends_with('…'));
     }
 }

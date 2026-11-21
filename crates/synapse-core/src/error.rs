@@ -43,6 +43,18 @@ pub enum CoreError {
     /// The consumer of a text stream went away; reading stops without error UI.
     #[error("stream cancelled by consumer")]
     StreamCancelled,
+
+    #[error("not enough disk space for LAN sync: {0}")]
+    LanDiskFull(String),
+
+    #[error("LAN transfer size mismatch: {0}")]
+    LanSizeMismatch(String),
+
+    #[error("LAN transfer hash mismatch: {0}")]
+    LanHashMismatch(String),
+
+    #[error("LAN payload too large: {0}")]
+    LanPayloadTooLarge(String),
 }
 
 impl CoreError {
@@ -62,6 +74,10 @@ impl CoreError {
             Self::InvalidProgress(_) => "invalid_progress",
             Self::NotFound { .. } => "not_found",
             Self::StreamCancelled => "stream_cancelled",
+            Self::LanDiskFull(_) => "lan_disk_full",
+            Self::LanSizeMismatch(_) => "lan_size_mismatch",
+            Self::LanHashMismatch(_) => "lan_hash_mismatch",
+            Self::LanPayloadTooLarge(_) => "lan_payload_too_large",
         }
     }
 }

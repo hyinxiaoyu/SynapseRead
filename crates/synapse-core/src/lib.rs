@@ -9,5 +9,6 @@ pub mod db;
 pub mod domain;
 pub mod error;
 pub mod fs_reader;
+pub mod library;
 
 pub use error::{CoreError, CoreResult};
