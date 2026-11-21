@@ -312,13 +312,16 @@ impl<A: SourceApiHandler> ConnectionHandler for LanHttpHandler<A> {
             };
 
             let io = TokioIo::new(stream);
-            // hyper requires max_buf_size >= 8192 bytes.
+            // hyper requires max_buf_size >= 8192 bytes; set max_header_size
+            // explicitly so every request (including reused keep-alive requests
+            // and chunked trailers) is strictly capped at `max_header_bytes`.
             let max_buf_size = config.max_header_bytes.max(8 * 1024);
             let conn = hyper::server::conn::http1::Builder::new()
                 .timer(TokioTimer::new())
                 .keep_alive(true)
                 .header_read_timeout(config.header_read_timeout)
                 .max_buf_size(max_buf_size)
+                .max_header_size(config.max_header_bytes)
                 .max_headers(MAX_REQUEST_HEADERS)
                 .serve_connection(io, service);
             tokio::pin!(conn);
@@ -1608,6 +1611,86 @@ mod tests {
             assert_eq!(err.code(), "lan_auth_expired");
             drop(transfer_guard);
         }
+    }
+
+    // T-04: Exact 8 KiB header boundary on a reused HTTP/1.1 keep-alive
+    // connection: exactly 8192 bytes is accepted (200), 8193 bytes returns 431.
+    #[tokio::test]
+    async fn t04_exact_8kib_header_boundary_on_reused_keep_alive_connection() {
+        let (addr, _session, _code, mut handle) =
+            start_test_server(SessionConfig::default(), HttpServerConfig::default());
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+
+        // 1. Warm up keep-alive connection with a normal request.
+        let warmup =
+            format!("GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nX-SynapseRead-Protocol: 1\r\n\r\n");
+        stream.write_all(warmup.as_bytes()).await.expect("write");
+        let resp = read_one_http_response(&mut stream).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "warmup: {resp}");
+
+        let build_exact_len_request = |target_bytes: usize| -> Vec<u8> {
+            let prefix = format!(
+                "GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nX-SynapseRead-Protocol: 1\r\nX-Pad: "
+            );
+            let suffix = "\r\n\r\n";
+            let pad_len = target_bytes
+                .checked_sub(prefix.len() + suffix.len())
+                .expect("target_bytes larger than prefix + suffix");
+            let mut req = Vec::with_capacity(target_bytes);
+            req.extend_from_slice(prefix.as_bytes());
+            req.resize(prefix.len() + pad_len, b'a');
+            req.extend_from_slice(suffix.as_bytes());
+            assert_eq!(req.len(), target_bytes);
+            req
+        };
+
+        // 2. Exactly 8 KiB (8192 bytes) on the reused connection -> 200 OK.
+        let exact_8k = build_exact_len_request(MAX_HEADER_BYTES);
+        stream
+            .write_all(&exact_8k)
+            .await
+            .expect("write exact 8 KiB");
+        let resp_8k = read_one_http_response(&mut stream).await;
+        assert!(
+            resp_8k.starts_with("HTTP/1.1 200"),
+            "exact 8 KiB header must succeed, got: {resp_8k}"
+        );
+        assert!(
+            resp_8k
+                .to_ascii_lowercase()
+                .contains("cache-control: no-store")
+        );
+
+        // 3. 8 KiB + 1 byte (8193 bytes) on the same reused connection -> 431.
+        let over_8k = build_exact_len_request(MAX_HEADER_BYTES + 1);
+        stream.write_all(&over_8k).await.expect("write 8 KiB + 1");
+        let mut resp_over = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut resp_over))
+            .await
+            .expect("431 response and close")
+            .expect("read");
+        let resp_over_str = String::from_utf8_lossy(&resp_over);
+        assert!(
+            resp_over_str.starts_with("HTTP/1.1 431"),
+            "8 KiB + 1 byte header must return 431, got: {resp_over_str}"
+        );
+        assert!(
+            !resp_over_str
+                .to_ascii_lowercase()
+                .contains("access-control-")
+        );
+
+        handle.stop();
+        assert_eq!(
+            handle.wait_stopped().await,
+            ListenerStopReason::StoppedByUser
+        );
+        assert_eq!(
+            handle.panicked_connection_count(),
+            0,
+            "malformed TCP streams must never panic any connection task"
+        );
     }
 
     // T-11: Deterministic fuzz/property test driving malformed raw TCP streams
