@@ -1,0 +1,34 @@
+[package]
+name = "synapse-lan"
+description = "Tauri-free session-scoped local LAN book sync for SynapseRead (ADR 0008)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Enables 127.0.0.1 loopback policy constructors for integration tests only.
+# Never enable this feature in production builds or Tauri IPC crates.
+test-loopback = []
+
+[dependencies]
+base64.workspace = true
+getrandom = "0.4"
+hyper = { version = "1.12", features = ["http1", "server", "client"] }
+hyper-util = { version = "0.1", features = ["http1", "tokio"] }
+if-addrs = "0.15"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+socket2 = "0.6"
+synapse-core = { path = "../synapse-core" }
+thiserror.workspace = true
+tokio = { version = "1", features = ["net", "time", "rt", "sync", "io-util", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[lints]
+workspace = true

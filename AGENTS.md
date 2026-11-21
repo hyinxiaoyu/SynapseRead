@@ -51,7 +51,7 @@ React components ──> useStudySyncStore ──> StudyBackend ──> Tauri co
 
 - **`crates/synapse-core`** holds all persistence and domain logic. It must not depend on Tauri,
   so it builds and tests anywhere.
-- **`crates/synapse-lan`** (planned per [ADR 0008](docs/adr/0008-lan-book-sync.md)) isolates
+- **`crates/synapse-lan`** ([ADR 0008](docs/adr/0008-lan-book-sync.md)) isolates
   session-scoped LAN book sync (address policy, pairing, HTTP/1.1 server/client, import
   orchestration). It must not depend on Tauri and inherits `unsafe` forbidden like all workspace
   crates.
@@ -149,7 +149,8 @@ beside the code in `#[cfg(test)]`, frontend as `*.test.ts(x)` beside the source.
   ([ADR 0004](docs/adr/0004-pdfjs-worker-csp.md)).
 - `crates/synapse-lan` ([ADR 0008](docs/adr/0008-lan-book-sync.md)) stays Tauri-free with
   `unsafe` forbidden, reuses the caller's Tokio runtime, enables only HTTP/1 features of
-  `hyper`/`hyper-util`, and pins existing `Cargo.lock` major versions where possible.
+  `hyper`/`hyper-util`, uses `if-addrs` for cross-platform IPv4 interface/netmask/flag
+  enumeration, and pins existing `Cargo.lock` major versions where possible.
 
 ## Git
 
