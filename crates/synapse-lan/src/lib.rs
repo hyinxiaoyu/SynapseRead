@@ -8,6 +8,7 @@
 
 pub mod address;
 pub mod bind;
+pub mod client;
 pub mod error;
 pub mod http;
 pub mod listener;
@@ -21,6 +22,14 @@ pub use address::{
     parse_lan_address, select_candidate_interfaces,
 };
 pub use bind::{BoundListener, DEFAULT_LAN_PORT, LAN_PORT_END, LAN_PORT_START, bind_auto};
+pub use client::{
+    CancelHandle, CancelToken, CatalogBook as RemoteCatalogBook,
+    CatalogResponse as RemoteCatalogResponse, DEFAULT_CONNECT_TIMEOUT, DEFAULT_INACTIVITY_TIMEOUT,
+    DEFAULT_MAX_IDLE_CONNECTIONS, HelloInfo, LanClient, LanClientConfig, MAX_BOOKMARKS_PER_BOOK,
+    MAX_BOOKMARKS_RESPONSE_BYTES, MAX_CATALOG_BOOKS, MAX_CATALOG_RESPONSE_BYTES,
+    MAX_CONTROL_RESPONSE_BYTES, MAX_POSITION_RESPONSE_BYTES, PairedClient, ParsedBookmark,
+    ParsedPosition, WireBookmark as RemoteBookmark,
+};
 pub use error::{LanError, LanResult};
 pub use http::{
     DEFAULT_BODY_READ_TIMEOUT, DEFAULT_HEADER_READ_TIMEOUT, ErrorResponseBody, HttpServerConfig,
