@@ -546,8 +546,13 @@ export function createStudySyncStore(backend: StudyBackend) {
 
     const openNativeDroppedDocuments = (dropped: readonly StudyDocument[], error?: unknown) => {
       const knownIds = new Set(get().documents.map((doc) => doc.id));
-      const hasKnownDocument = dropped.some((doc) => knownIds.has(doc.id));
-      if (!hasKnownDocument) {
+      const hasUnlockedKnownDocument = dropped.some(
+        (doc) => knownIds.has(doc.id) && !isDocumentLocked(doc.id),
+      );
+      if (!hasUnlockedKnownDocument) {
+        // Either all dropped docs are brand new, or every known doc is currently
+        // locked (so applyOpenedDocuments skips locked known docs without bumping
+        // any refresh sequence and without interfering with in-lock refreshes).
         applyOpenedDocuments(dropped, error);
         return;
       }
@@ -555,16 +560,25 @@ export function createStudySyncStore(backend: StudyBackend) {
       // move a known document to a new path. Read the authoritative DB rows
       // under both a lock-epoch snapshot and per-document sequence numbers so
       // out-of-order responses can never overwrite a newer path or synced state.
+      // Never bump sequence numbers for locked documents, or a drop arriving
+      // during a sync lock would invalidate the sync's own `refreshDocument`.
       const epochsAtStart = new Map(documentLockEpochs);
       const seqsAtStart = new Map<string, number>();
       for (const doc of dropped) {
-        seqsAtStart.set(doc.id, nextDocumentRefreshSeq(doc.id));
+        if (!isDocumentLocked(doc.id)) {
+          seqsAtStart.set(doc.id, nextDocumentRefreshSeq(doc.id));
+        }
       }
       void guarded(async () => {
         const allDocuments = await backend.listDocuments();
         const byId = new Map(allDocuments.map((doc) => [doc.id, doc]));
         const resolved = dropped
-          .filter((doc) => getDocumentRefreshSeq(doc.id) === seqsAtStart.get(doc.id))
+          .filter(
+            (doc) =>
+              !isDocumentLocked(doc.id) &&
+              seqsAtStart.has(doc.id) &&
+              getDocumentRefreshSeq(doc.id) === seqsAtStart.get(doc.id),
+          )
           .map((doc) => byId.get(doc.id) ?? doc);
         if (resolved.length === 0 && (error === undefined || error === null)) return;
         applyOpenedDocuments(resolved, error, epochsAtStart);

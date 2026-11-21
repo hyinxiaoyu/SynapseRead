@@ -2386,6 +2386,60 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     listSpy.mockRestore();
   });
 
+  it('does not let a native drop arriving during a document lock invalidate the sync refreshDocument', async () => {
+    let emitDrop: ((event: FileDropEvent) => void) | undefined;
+    const nativeBackend: StudyBackend = {
+      ...backend,
+      onFileDrop(listener) {
+        emitDrop = listener;
+        return () => undefined;
+      },
+    };
+    const nativeStore = createStudySyncStore(nativeBackend);
+    await nativeStore.getState().initialize();
+    await nativeStore.getState().openDocument(); // a.pdf
+    const docId = nativeStore.getState().activeDocumentId as string;
+    const staleSnapshot = { ...nativeStore.getState().documents.find((d) => d.id === docId)! };
+    nativeStore.getState().closeDocument(docId);
+
+    const syncedAnchor = {
+      format: 'pdf' as const,
+      pageIndex: 11,
+      rects: [{ x: 0, y: 0.45, width: 0.5, height: 0.05 }],
+    };
+
+    let resolveSyncRefresh!: (docs: StudyDocument[]) => void;
+    const realListDocuments = nativeBackend.listDocuments.bind(nativeBackend);
+    const listSpy = vi.spyOn(nativeBackend, 'listDocuments').mockImplementationOnce(
+      () =>
+        new Promise<StudyDocument[]>((resolve) => {
+          resolveSyncRefresh = resolve;
+        }),
+    );
+
+    const syncTask = nativeStore.getState().withDocumentLock(docId, async () => {
+      await nativeBackend.updateDocumentCursor(docId, syncedAnchor, 0.88);
+      await nativeStore.getState().refreshDocument(docId);
+    });
+    await Promise.resolve();
+
+    // A native drop for the locked document arrives while refreshDocument is in flight.
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    expect(nativeStore.getState().openDocumentIds).not.toContain(docId);
+
+    // Sync's own refreshDocument resolves and must still apply the synced progress.
+    resolveSyncRefresh(await realListDocuments());
+    await syncTask;
+
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(
+      syncedAnchor,
+    );
+    expect(nativeStore.getState().documents.find((d) => d.id === docId)?.lastProgress).toBe(0.88);
+    expect(nativeStore.getState().openDocumentIds).not.toContain(docId);
+
+    listSpy.mockRestore();
+  });
+
   it('refreshDocument upserts updated cursor, inserts newly imported docs, and clears missing status when filePath changes (T-32)', async () => {
     const docA = await openDocument();
     const docB = await openDocument();
