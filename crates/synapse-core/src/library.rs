@@ -40,17 +40,61 @@ pub struct ReconcileReport {
     pub removed_library_files: usize,
 }
 
+/// Platform file identity captured when creating a staged `.part` file so
+/// `finish()` and `cancel()`/`Drop` never operate on a file substituted
+/// mid-transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl FileIdentity {
+    #[cfg(unix)]
+    pub fn from_metadata(meta: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn matches(self, meta: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        meta.dev() == self.dev && meta.ino() == self.ino
+    }
+
+    #[cfg(not(unix))]
+    fn matches(self, _meta: &fs::Metadata) -> bool {
+        true
+    }
+}
+
 /// Sink used by [`StagedFile`] while streaming bytes to disk.
 ///
 /// Production code uses [`std::fs::File`]; tests can inject a writer that
 /// simulates `ENOSPC` / `EDQUOT` deterministically.
 pub trait StageWriter: Write {
     fn sync_file(&mut self) -> io::Result<()>;
+
+    fn file_identity(&self) -> Option<FileIdentity> {
+        None
+    }
 }
 
 impl StageWriter for File {
     fn sync_file(&mut self) -> io::Result<()> {
         self.sync_all()
+    }
+
+    #[cfg(unix)]
+    fn file_identity(&self) -> Option<FileIdentity> {
+        self.metadata()
+            .ok()
+            .map(|meta| FileIdentity::from_metadata(&meta))
     }
 }
 
@@ -127,11 +171,13 @@ impl ManagedLibrary {
             let _ = fs::remove_file(&part_path);
             map_storage_io_error(err)
         })?;
+        let file_identity = writer.file_identity();
 
         Ok(StagedFile {
             writer: Some(writer),
             part_path,
             data_dir: self.data_dir.clone(),
+            file_identity,
             format,
             extension: validated_ext,
             expected_hash: expected_hash.to_owned(),
@@ -245,6 +291,7 @@ pub struct StagedFile {
     writer: Option<Box<dyn StageWriter>>,
     part_path: PathBuf,
     data_dir: PathBuf,
+    file_identity: Option<FileIdentity>,
     format: DocumentFormat,
     extension: String,
     expected_hash: String,
@@ -330,6 +377,11 @@ impl StagedFile {
             return Err(map_storage_io_error(err));
         }
 
+        if let Err(err) = self.verify_part_identity(true) {
+            self.cleanup_part();
+            return Err(err);
+        }
+
         if let Err(err) = validate_magic_bytes(&self.part_path, self.format) {
             self.cleanup_part();
             return Err(err);
@@ -368,20 +420,71 @@ impl StagedFile {
             }
         }
 
+        if let Err(err) = self.verify_part_identity(true) {
+            self.cleanup_part();
+            return Err(err);
+        }
+
         if let Err(err) = replace_file(&self.part_path, &target) {
             self.cleanup_part();
             return Err(map_storage_io_error(err));
+        }
+
+        let target_meta = fs::symlink_metadata(&target).map_err(map_storage_io_error)?;
+        if target_meta.file_type().is_symlink()
+            || !target_meta.is_file()
+            || self
+                .file_identity
+                .is_some_and(|expected| !expected.matches(&target_meta))
+        {
+            return Err(CoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "published managed library file identity mismatch",
+            )));
         }
 
         self.finished = true;
         Ok(target)
     }
 
+    fn verify_part_identity(&self, require_declared_size: bool) -> CoreResult<()> {
+        let _ = verify_existing_safe_managed_dir(&self.data_dir, SYNC_STAGING_DIR)?;
+        let meta = fs::symlink_metadata(&self.part_path).map_err(|err| {
+            CoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("staged file is unavailable: {err}"),
+            ))
+        })?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(CoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged file must be a regular file",
+            )));
+        }
+        if require_declared_size && meta.len() != self.expected_len {
+            return Err(CoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged file length does not match declared size",
+            )));
+        }
+        if let Some(expected) = self.file_identity
+            && !expected.matches(&meta)
+        {
+            return Err(CoreError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "staged file identity changed mid-transfer",
+            )));
+        }
+        Ok(())
+    }
+
     fn cleanup_part(&mut self) {
         // Close the file handle before removing on Windows.
         self.writer.take();
         if !self.finished {
-            let _ = fs::remove_file(&self.part_path);
+            if self.verify_part_identity(false).is_ok() {
+                let _ = fs::remove_file(&self.part_path);
+            }
             self.finished = true;
         }
     }
@@ -391,6 +494,34 @@ impl Drop for StagedFile {
     fn drop(&mut self) {
         self.cleanup_part();
     }
+}
+
+/// Verifies an existing `<data_dir>/<subdir>` is a real (non-symlink) directory
+/// whose canonical path is strictly `<canonical_data_dir>/<subdir>`, without
+/// creating it if missing.
+fn verify_existing_safe_managed_dir(data_dir: &Path, subdir: &str) -> CoreResult<PathBuf> {
+    let candidate = data_dir.join(subdir);
+    let meta = fs::symlink_metadata(&candidate).map_err(|err| {
+        CoreError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("managed directory '{subdir}' is unavailable: {err}"),
+        ))
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(CoreError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("managed directory '{subdir}' must be a regular directory"),
+        )));
+    }
+    let canonical_data_dir = fs::canonicalize(data_dir).map_err(map_storage_io_error)?;
+    let canonical_candidate = fs::canonicalize(&candidate).map_err(map_storage_io_error)?;
+    if canonical_candidate != canonical_data_dir.join(subdir) {
+        return Err(CoreError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("managed directory '{subdir}' escapes the application data directory"),
+        )));
+    }
+    Ok(candidate)
 }
 
 /// Ensures `<data_dir>/<subdir>` exists as a real (non-symlink) directory whose
@@ -1512,5 +1643,121 @@ mod tests {
         assert_eq!(err.code(), "io");
         assert!(!part_path.exists());
         assert_eq!(fs::read(&external_file).unwrap(), sentinel);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finish_rejects_mid_transfer_replaced_sync_staging() {
+        let valid_pdf = b"%PDF-1.7\nauthentic book content\n";
+        let hash = sha256_hex(valid_pdf);
+        let imposter_pdf = b"%PDF-1.7\nimposter book content!\n";
+        assert_eq!(valid_pdf.len(), imposter_pdf.len());
+
+        // Case 1: sync-staging moved aside and replaced with a symlink to an external directory
+        // containing a same-named `.part` file.
+        {
+            let app_data = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let lib = ManagedLibrary::new(app_data.path());
+
+            let mut staged = lib
+                .begin_stage(DocumentFormat::Pdf, "pdf", &hash, valid_pdf.len() as u64)
+                .unwrap();
+            let part_name = staged.part_path().file_name().unwrap().to_os_string();
+            staged.write_chunk(valid_pdf).unwrap();
+
+            let external_part = external.path().join(&part_name);
+            fs::write(&external_part, imposter_pdf).unwrap();
+
+            let moved_staging = app_data.path().join("sync-staging-old");
+            fs::rename(lib.staging_dir(), &moved_staging).unwrap();
+            std::os::unix::fs::symlink(external.path(), lib.staging_dir()).unwrap();
+
+            let err = staged.finish().unwrap_err();
+            assert_eq!(err.code(), "io");
+            assert!(!lib.library_dir().join(format!("{hash}.pdf")).exists());
+            assert_eq!(fs::read(&external_part).unwrap(), imposter_pdf);
+        }
+
+        // Case 2: sync-staging moved aside and replaced with a different real directory
+        // containing a same-named `.part` file with identical byte length.
+        {
+            let app_data = tempfile::tempdir().unwrap();
+            let lib = ManagedLibrary::new(app_data.path());
+
+            let mut staged = lib
+                .begin_stage(DocumentFormat::Pdf, "pdf", &hash, valid_pdf.len() as u64)
+                .unwrap();
+            let part_name = staged.part_path().file_name().unwrap().to_os_string();
+            staged.write_chunk(valid_pdf).unwrap();
+
+            let moved_staging = app_data.path().join("sync-staging-old");
+            fs::rename(lib.staging_dir(), &moved_staging).unwrap();
+            fs::create_dir(lib.staging_dir()).unwrap();
+            let swapped_part = lib.staging_dir().join(&part_name);
+            fs::write(&swapped_part, imposter_pdf).unwrap();
+
+            let err = staged.finish().unwrap_err();
+            assert_eq!(err.code(), "io");
+            assert!(!lib.library_dir().join(format!("{hash}.pdf")).exists());
+            // Foreign file in the swapped directory must not be deleted either.
+            assert_eq!(fs::read(&swapped_part).unwrap(), imposter_pdf);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_does_not_delete_file_when_sync_staging_replaced_mid_transfer() {
+        let bytes = b"staged transfer payload";
+        let hash = sha256_hex(bytes);
+        let sentinel = b"EXTERNAL SENTINEL FILE";
+
+        // Case 1: explicit cancel()
+        {
+            let app_data = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let lib = ManagedLibrary::new(app_data.path());
+
+            let mut staged = lib
+                .begin_stage(DocumentFormat::Txt, "txt", &hash, bytes.len() as u64)
+                .unwrap();
+            let part_name = staged.part_path().file_name().unwrap().to_os_string();
+            staged.write_chunk(&bytes[..6]).unwrap();
+
+            let external_part = external.path().join(&part_name);
+            fs::write(&external_part, sentinel).unwrap();
+
+            fs::rename(lib.staging_dir(), app_data.path().join("sync-staging-old")).unwrap();
+            std::os::unix::fs::symlink(external.path(), lib.staging_dir()).unwrap();
+
+            staged.cancel();
+            assert!(external_part.exists());
+            assert_eq!(fs::read(&external_part).unwrap(), sentinel);
+        }
+
+        // Case 2: implicit Drop
+        {
+            let app_data = tempfile::tempdir().unwrap();
+            let external = tempfile::tempdir().unwrap();
+            let lib = ManagedLibrary::new(app_data.path());
+
+            let external_part = {
+                let mut staged = lib
+                    .begin_stage(DocumentFormat::Txt, "txt", &hash, bytes.len() as u64)
+                    .unwrap();
+                let part_name = staged.part_path().file_name().unwrap().to_os_string();
+                staged.write_chunk(&bytes[..6]).unwrap();
+
+                let ext_part = external.path().join(&part_name);
+                fs::write(&ext_part, sentinel).unwrap();
+
+                fs::rename(lib.staging_dir(), app_data.path().join("sync-staging-old")).unwrap();
+                std::os::unix::fs::symlink(external.path(), lib.staging_dir()).unwrap();
+                ext_part
+            };
+
+            assert!(external_part.exists());
+            assert_eq!(fs::read(&external_part).unwrap(), sentinel);
+        }
     }
 }
