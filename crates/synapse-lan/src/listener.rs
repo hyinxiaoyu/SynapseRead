@@ -8,6 +8,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
+use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::address::{
@@ -22,8 +23,10 @@ pub const DEFAULT_INTERFACE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub const DEFAULT_CODE_EXPIRY: Duration = Duration::from_secs(10 * 60);
 /// Default paired session idle timeout (ADR 0008: 10 minutes).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Hard upper bound on concurrent accepted TCP connections (ADR 0008: <= 4).
+pub const MAX_CONCURRENT_CONNECTIONS: usize = 4;
 /// Default maximum concurrent accepted TCP connections (ADR 0008: <= 4).
-pub const DEFAULT_MAX_CONNECTIONS: usize = 4;
+pub const DEFAULT_MAX_CONNECTIONS: usize = MAX_CONCURRENT_CONNECTIONS;
 
 const EVENT_CHANNEL_CAPACITY: usize = 32;
 
@@ -55,6 +58,20 @@ pub struct ListenerConfig {
     /// When `false`, the bound IP is checked against raw interface presence
     /// rather than LAN candidate rules (used only by loopback tests).
     pub enforce_candidate_interface: bool,
+}
+
+impl ListenerConfig {
+    /// Returns the effective concurrent connection cap clamped to ADR 0008's
+    /// `1..=MAX_CONCURRENT_CONNECTIONS` (`1..=4`) bound.
+    pub const fn effective_max_connections(&self) -> usize {
+        if self.max_connections < 1 {
+            1
+        } else if self.max_connections > MAX_CONCURRENT_CONNECTIONS {
+            MAX_CONCURRENT_CONNECTIONS
+        } else {
+            self.max_connections
+        }
+    }
 }
 
 impl Default for ListenerConfig {
@@ -119,11 +136,15 @@ pub enum ListenerEvent {
 /// Handler invoked for each accepted TCP stream that passes [`PeerPolicy`].
 ///
 /// Rejected peers are dropped before `handle` is ever called (`T-05`).
+/// When `shutdown` becomes `true` (or the sender is dropped), the listener is
+/// terminating and will also cancel the connection task before `wait_stopped()`
+/// returns.
 pub trait ConnectionHandler: Send + Sync + 'static {
     fn handle(
         &self,
         stream: TcpStream,
         peer_addr: SocketAddr,
+        shutdown: watch::Receiver<bool>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 }
 
@@ -140,6 +161,7 @@ impl ConnectionHandler for PlaceholderHttp1Handler {
         &self,
         stream: TcpStream,
         _peer_addr: SocketAddr,
+        mut shutdown: watch::Receiver<bool>,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
         Box::pin(async move {
             use hyper::service::service_fn;
@@ -157,14 +179,34 @@ impl ConnectionHandler for PlaceholderHttp1Handler {
                 Ok::<_, std::convert::Infallible>(response)
             });
 
-            let _ = hyper::server::conn::http1::Builder::new()
+            let conn = hyper::server::conn::http1::Builder::new()
                 .timer(TokioTimer::new())
                 .keep_alive(true)
                 .header_read_timeout(Duration::from_secs(10))
                 .max_buf_size(8 * 1024)
-                .serve_connection(io, service)
-                .await;
+                .serve_connection(io, service);
+            tokio::pin!(conn);
+
+            tokio::select! {
+                biased;
+                () = wait_for_shutdown(&mut shutdown) => {
+                    // Drop the connection immediately so idle keep-alive sockets
+                    // cannot serve another request after listener stop.
+                }
+                _ = &mut conn => {}
+            }
         })
+    }
+}
+
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    while shutdown.changed().await.is_ok() {
+        if *shutdown.borrow() {
+            return;
+        }
     }
 }
 
@@ -333,7 +375,9 @@ async fn run_listener_loop<H: ConnectionHandler>(
     blocked_peers: Arc<AtomicU64>,
 ) {
     let bound_ip = *bound.local_addr.ip();
-    let conn_semaphore = Arc::new(Semaphore::new(config.max_connections.max(1)));
+    let conn_semaphore = Arc::new(Semaphore::new(config.effective_max_connections()));
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut active_connections: JoinSet<()> = JoinSet::new();
 
     let mut phase = SessionPhase::Listening;
     let mut deadline = clock.now() + config.code_expiry;
@@ -391,6 +435,8 @@ async fn run_listener_loop<H: ConnectionHandler>(
                 }
             }
 
+            Some(_) = active_connections.join_next(), if !active_connections.is_empty() => {}
+
             accept_res = bound.listener.accept() => {
                 match accept_res {
                     Ok((stream, peer_addr)) => {
@@ -414,9 +460,16 @@ async fn run_listener_loop<H: ConnectionHandler>(
                         };
 
                         let handler = Arc::clone(&handler);
-                        tokio::spawn(async move {
+                        let mut conn_shutdown = shutdown_rx.clone();
+                        let handler_shutdown = shutdown_rx.clone();
+                        active_connections.spawn(async move {
                             let _permit = permit;
-                            handler.handle(stream, peer_addr).await;
+                            let fut = handler.handle(stream, peer_addr, handler_shutdown);
+                            tokio::select! {
+                                biased;
+                                () = wait_for_shutdown(&mut conn_shutdown) => {}
+                                () = fut => {}
+                            }
                         });
                     }
                     Err(_) => {
@@ -429,7 +482,15 @@ async fn run_listener_loop<H: ConnectionHandler>(
         }
     };
 
+    // Stop accepting new sockets, cancel every active connection (including
+    // idle HTTP/1.1 keep-alive connections), and drain all connection tasks
+    // before publishing the stop reason so `wait_stopped()` guarantees zero
+    // live sockets remain (T-10).
     drop(bound.listener);
+    let _ = shutdown_tx.send(true);
+    active_connections.abort_all();
+    while active_connections.join_next().await.is_some() {}
+
     let _ = stopped_tx.send(Some(stop_reason));
     let _ = events_tx.send(ListenerEvent::Stopped {
         reason: stop_reason,
@@ -509,6 +570,7 @@ mod tests {
             &self,
             mut stream: TcpStream,
             _peer_addr: SocketAddr,
+            _shutdown: watch::Receiver<bool>,
         ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
@@ -752,5 +814,279 @@ mod tests {
         // Advance 101s more (601s since last activity) -> stops with IdleTimeout.
         tokio::time::advance(Duration::from_secs(101)).await;
         assert_eq!(handle.wait_stopped().await, ListenerStopReason::IdleTimeout);
+    }
+
+    /// Reads one complete HTTP/1.1 response with a `Content-Length` header from
+    /// a keep-alive TCP stream without closing it.
+    async fn read_http1_response(stream: &mut TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 512];
+        loop {
+            let n = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut tmp))
+                .await
+                .expect("read response before timeout")
+                .expect("read response");
+            assert!(n > 0, "unexpected EOF while reading first HTTP response");
+            buf.extend_from_slice(&tmp[..n]);
+
+            if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers_str = String::from_utf8_lossy(&buf[..header_end]);
+                let content_len = headers_str
+                    .lines()
+                    .find_map(|line| {
+                        let (k, v) = line.split_once(':')?;
+                        if k.eq_ignore_ascii_case("content-length") {
+                            v.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                let total_needed = header_end + 4 + content_len;
+                if buf.len() >= total_needed {
+                    return String::from_utf8_lossy(&buf[..total_needed]).into_owned();
+                }
+            }
+        }
+    }
+
+    async fn assert_keep_alive_connection_closed(stream: &mut TcpStream, addr: SocketAddrV4) {
+        let req2 =
+            format!("GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nConnection: keep-alive\r\n\r\n");
+        // Either writing fails (broken pipe / reset) or reading returns EOF /
+        // error — it must NEVER return a second HTTP response.
+        if stream.write_all(req2.as_bytes()).await.is_ok() {
+            let mut buf = [0u8; 256];
+            match tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => {}
+                Ok(Ok(n)) => {
+                    let body = String::from_utf8_lossy(&buf[..n]);
+                    panic!("expected closed connection after stop, got response: {body}");
+                }
+                Err(_) => panic!("timed out waiting for closed keep-alive connection"),
+            }
+        }
+    }
+
+    // T-10 regression: Stop must terminate already-accepted keep-alive HTTP
+    // connections before `wait_stopped()` returns.
+    #[tokio::test]
+    async fn t10_stop_closes_active_keep_alive_connection_before_wait_stopped() {
+        let bound = bind_ephemeral_loopback();
+        let addr = bound.local_addr;
+
+        let provider = Arc::new(FakeInterfaceProvider::new(vec![loopback_raw_iface()]));
+        let mut handle = LanListener::start(
+            bound,
+            PeerPolicy::loopback_for_tests(),
+            provider,
+            Arc::new(TokioMonotonicClock),
+            ListenerConfig {
+                enforce_candidate_interface: false,
+                ..ListenerConfig::default()
+            },
+            Arc::new(PlaceholderHttp1Handler),
+        );
+
+        let mut client = TcpStream::connect(addr).await.expect("connect");
+        let req1 =
+            format!("GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nConnection: keep-alive\r\n\r\n");
+        client.write_all(req1.as_bytes()).await.expect("write req1");
+        let resp1 = read_http1_response(&mut client).await;
+        assert!(
+            resp1.starts_with("HTTP/1.1 503"),
+            "unexpected first response: {resp1}"
+        );
+
+        handle.stop();
+        assert_eq!(
+            handle.wait_stopped().await,
+            ListenerStopReason::StoppedByUser
+        );
+
+        assert_keep_alive_connection_closed(&mut client, addr).await;
+    }
+
+    // T-10 regression: Code expiry and NetworkChanged also terminate active
+    // keep-alive connections before `wait_stopped()` returns.
+    #[tokio::test]
+    async fn t10_timeout_and_network_change_close_active_keep_alive_connections() {
+        // Case 1: CodeExpired
+        {
+            let bound = bind_ephemeral_loopback();
+            let addr = bound.local_addr;
+            let provider = Arc::new(FakeInterfaceProvider::new(vec![loopback_raw_iface()]));
+            let mut handle = LanListener::start(
+                bound,
+                PeerPolicy::loopback_for_tests(),
+                provider,
+                Arc::new(TokioMonotonicClock),
+                ListenerConfig {
+                    code_expiry: Duration::from_millis(80),
+                    interface_poll_interval: Duration::from_secs(60),
+                    enforce_candidate_interface: false,
+                    ..ListenerConfig::default()
+                },
+                Arc::new(PlaceholderHttp1Handler),
+            );
+
+            let mut client = TcpStream::connect(addr).await.expect("connect");
+            let req1 =
+                format!("GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nConnection: keep-alive\r\n\r\n");
+            client.write_all(req1.as_bytes()).await.expect("write req1");
+            let resp1 = read_http1_response(&mut client).await;
+            assert!(resp1.starts_with("HTTP/1.1 503"));
+
+            assert_eq!(handle.wait_stopped().await, ListenerStopReason::CodeExpired);
+            assert_keep_alive_connection_closed(&mut client, addr).await;
+        }
+
+        // Case 2: NetworkChanged
+        {
+            let bound = bind_ephemeral_loopback();
+            let addr = bound.local_addr;
+            let provider = Arc::new(FakeInterfaceProvider::new(vec![loopback_raw_iface()]));
+            let mut handle = LanListener::start(
+                bound,
+                PeerPolicy::loopback_for_tests(),
+                Arc::clone(&provider) as Arc<dyn InterfaceProvider>,
+                Arc::new(TokioMonotonicClock),
+                ListenerConfig {
+                    interface_poll_interval: Duration::from_millis(40),
+                    enforce_candidate_interface: false,
+                    ..ListenerConfig::default()
+                },
+                Arc::new(PlaceholderHttp1Handler),
+            );
+
+            let mut client = TcpStream::connect(addr).await.expect("connect");
+            let req1 =
+                format!("GET /v1/hello HTTP/1.1\r\nHost: {addr}\r\nConnection: keep-alive\r\n\r\n");
+            client.write_all(req1.as_bytes()).await.expect("write req1");
+            let resp1 = read_http1_response(&mut client).await;
+            assert!(resp1.starts_with("HTTP/1.1 503"));
+
+            provider.set(vec![]);
+            assert_eq!(
+                handle.wait_stopped().await,
+                ListenerStopReason::NetworkChanged
+            );
+            assert_keep_alive_connection_closed(&mut client, addr).await;
+        }
+    }
+
+    struct BlockingHandler {
+        entered: Arc<AtomicU64>,
+    }
+
+    impl ConnectionHandler for BlockingHandler {
+        fn handle(
+            &self,
+            mut stream: TcpStream,
+            _peer_addr: SocketAddr,
+            mut shutdown: watch::Receiver<bool>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+            let entered = Arc::clone(&self.entered);
+            Box::pin(async move {
+                entered.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.write_all(b"H").await;
+                wait_for_shutdown(&mut shutdown).await;
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn max_connections_clamped_to_adr_0008_upper_bound() {
+        assert_eq!(
+            ListenerConfig {
+                max_connections: 0,
+                ..ListenerConfig::default()
+            }
+            .effective_max_connections(),
+            1
+        );
+        assert_eq!(
+            ListenerConfig {
+                max_connections: 2,
+                ..ListenerConfig::default()
+            }
+            .effective_max_connections(),
+            2
+        );
+        assert_eq!(
+            ListenerConfig {
+                max_connections: 4,
+                ..ListenerConfig::default()
+            }
+            .effective_max_connections(),
+            4
+        );
+        assert_eq!(
+            ListenerConfig {
+                max_connections: 16,
+                ..ListenerConfig::default()
+            }
+            .effective_max_connections(),
+            MAX_CONCURRENT_CONNECTIONS
+        );
+
+        // Even when a caller requests `max_connections: 16`, ADR 0008's cap of
+        // 4 concurrent connections is enforced on live TCP sockets.
+        let bound = bind_ephemeral_loopback();
+        let addr = bound.local_addr;
+        let entered = Arc::new(AtomicU64::new(0));
+        let provider = Arc::new(FakeInterfaceProvider::new(vec![loopback_raw_iface()]));
+        let mut handle = LanListener::start(
+            bound,
+            PeerPolicy::loopback_for_tests(),
+            provider,
+            Arc::new(TokioMonotonicClock),
+            ListenerConfig {
+                max_connections: 16,
+                enforce_candidate_interface: false,
+                ..ListenerConfig::default()
+            },
+            Arc::new(BlockingHandler {
+                entered: Arc::clone(&entered),
+            }),
+        );
+
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONCURRENT_CONNECTIONS {
+            let mut client = TcpStream::connect(addr).await.expect("connect held");
+            let mut b = [0u8; 1];
+            let n = tokio::time::timeout(Duration::from_secs(2), client.read(&mut b))
+                .await
+                .expect("handshake byte before timeout")
+                .expect("read byte");
+            assert_eq!(n, 1);
+            assert_eq!(&b, b"H");
+            held.push(client);
+        }
+        assert_eq!(
+            entered.load(Ordering::SeqCst),
+            MAX_CONCURRENT_CONNECTIONS as u64
+        );
+
+        // 5th concurrent connection must be dropped immediately without
+        // invoking the handler.
+        let mut fifth = TcpStream::connect(addr).await.expect("connect 5th");
+        let mut buf = [0u8; 8];
+        let n = tokio::time::timeout(Duration::from_secs(2), fifth.read(&mut buf))
+            .await
+            .expect("5th connection closes before timeout")
+            .unwrap_or(0);
+        assert_eq!(n, 0, "5th concurrent connection must be rejected");
+        assert_eq!(
+            entered.load(Ordering::SeqCst),
+            MAX_CONCURRENT_CONNECTIONS as u64
+        );
+
+        handle.stop();
+        assert_eq!(
+            handle.wait_stopped().await,
+            ListenerStopReason::StoppedByUser
+        );
+        drop(held);
     }
 }

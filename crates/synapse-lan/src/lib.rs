@@ -21,5 +21,6 @@ pub use error::{LanError, LanResult};
 pub use listener::{
     ConnectionHandler, DEFAULT_CODE_EXPIRY, DEFAULT_IDLE_TIMEOUT, DEFAULT_INTERFACE_POLL_INTERVAL,
     DEFAULT_MAX_CONNECTIONS, LanListener, LanListenerHandle, ListenerConfig, ListenerEvent,
-    ListenerStopReason, MonotonicClock, PlaceholderHttp1Handler, TokioMonotonicClock,
+    ListenerStopReason, MAX_CONCURRENT_CONNECTIONS, MonotonicClock, PlaceholderHttp1Handler,
+    TokioMonotonicClock,
 };
