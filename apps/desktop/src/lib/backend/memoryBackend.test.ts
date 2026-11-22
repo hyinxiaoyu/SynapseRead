@@ -896,4 +896,79 @@ describe('memory backend card delete and restore', () => {
     expect(afterOverride.lastProgress).toBe(0.2);
     expect(afterOverride.lastCursorAnchor).toEqual(remoteAnchor);
   });
+
+  it('reuses a concurrently registered healthy local file without rewriting filePath or creating a managed copy', async () => {
+    const bookBytes = new TextEncoder().encode('Concurrently registered local book bytes');
+    let releaseCommit!: () => void;
+    const commitBarrier = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    let enteredCommit!: () => void;
+    const commitEntered = new Promise<void>((resolve) => {
+      enteredCommit = resolve;
+    });
+
+    const backend = createMemoryBackend({
+      library: { '/local/book.txt': bookBytes },
+      lanPeer: {
+        pairingCode: '123456',
+        books: [
+          {
+            title: 'book',
+            format: 'txt',
+            extension: 'txt',
+            bytes: bookBytes,
+          },
+        ],
+        onBeforeBookStep: async (phase) => {
+          if (phase === 'commit') {
+            enteredCommit();
+            await commitBarrier;
+          }
+        },
+      },
+    });
+
+    const session = await backend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    const catalog = await backend.lanImportCatalog(session.sessionId);
+    expect(catalog[0]?.state).toBe('new');
+
+    const plan = await backend.lanImportPlan(
+      { sessionId: session.sessionId, bookIds: [catalog[0]!.bookId] },
+      () => undefined,
+    );
+
+    const execPromise = backend.lanImportExecute(
+      {
+        sessionId: session.sessionId,
+        planId: plan.planId,
+        decisions: plan.defaultDecisions,
+      },
+      () => undefined,
+    );
+
+    await commitEntered;
+    // Register the exact same file via native picker while the LAN import is paused.
+    const picked = (await backend.pickDocument())!;
+    expect(picked.filePath).toBe('/local/book.txt');
+    releaseCommit();
+
+    const report = await execPromise;
+    expect(report.books[0]?.documentId).toBe(picked.id);
+    expect(report.books[0]?.file).toEqual({ status: 'skipped' });
+
+    const docs = await backend.listDocuments();
+    expect(docs).toHaveLength(1);
+    expect(docs[0]?.id).toBe(picked.id);
+    expect(docs[0]?.filePath).toBe('/local/book.txt');
+
+    // Verify no extra managed `/library/...` copy was written.
+    const expectedManagedPath = `/library/${picked.fileHash.replace(/[^a-zA-Z0-9_-]/g, '_')}.txt`;
+    await expect(
+      backend.loadDocumentSource({ ...picked, filePath: expectedManagedPath }),
+    ).rejects.toMatchObject({ code: 'io' });
+  });
 });

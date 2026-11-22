@@ -869,43 +869,60 @@ export function createMemoryLanAdapter(
               }
               // Always re-read the live document AFTER the pre-commit await so:
               // 1. Two concurrent plans importing the same book never create duplicate records.
-              // 2. Repairing a missing file never overwrites a local reading position updated
-              //    while the file transfer was in flight (only `filePath` is updated).
+              // 2. A healthy local file registered concurrently keeps its original `filePath`,
+              //    writes no managed copy, and reports `file: skipped` (Rust `AlreadyPresent`).
+              // 3. Repairing a genuinely missing file never overwrites a local reading position
+              //    updated while the file transfer was in flight (only `filePath` is updated).
               const liveDoc =
                 (targetDoc ? host.documents.get(targetDoc.id) : undefined) ??
                 [...host.documents.values()].find((doc) => doc.fileHash === planned.peer.bookId) ??
                 null;
               targetDoc = liveDoc && liveDoc.fileHash === planned.peer.bookId ? liveDoc : null;
 
-              const originalExt =
-                targetDoc?.filePath.split('.').pop()?.toLowerCase() ?? planned.peer.extension;
-              const destPath = targetDoc?.filePath.startsWith('/library/')
-                ? targetDoc.filePath
-                : `/library/${planned.peer.bookId.replace(/[^a-zA-Z0-9_-]/g, '_')}.${originalExt}`;
-              host.files[destPath] = planned.peer.bytes;
+              let existingFileHealthy = false;
+              if (targetDoc && targetDoc.filePath in host.files) {
+                try {
+                  await host.readFile(targetDoc.filePath);
+                  existingFileHealthy = true;
+                } catch {
+                  existingFileHealthy = false;
+                }
+              }
 
-              if (targetDoc) {
-                const repaired: StudyDocument = {
-                  ...targetDoc,
-                  filePath: destPath,
-                };
-                host.documents.set(repaired.id, repaired);
-                targetDoc = repaired;
+              if (targetDoc && existingFileHealthy) {
+                fileOutcome = { status: 'skipped' };
               } else {
-                const created: StudyDocument = {
-                  id: crypto.randomUUID(),
-                  title: planned.peer.title,
-                  filePath: destPath,
-                  fileHash: planned.peer.bookId,
-                  format: planned.peer.format,
-                  encoding: 'utf-8',
-                  lastCursorAnchor: null,
-                  lastProgress: null,
-                  createdAt: host.monotonicNow(),
-                  lastOpenedAt: null,
-                };
-                host.documents.set(created.id, created);
-                targetDoc = created;
+                const originalExt =
+                  targetDoc?.filePath.split('.').pop()?.toLowerCase() ?? planned.peer.extension;
+                const destPath = targetDoc?.filePath.startsWith('/library/')
+                  ? targetDoc.filePath
+                  : `/library/${planned.peer.bookId.replace(/[^a-zA-Z0-9_-]/g, '_')}.${originalExt}`;
+                host.files[destPath] = planned.peer.bytes;
+
+                if (targetDoc) {
+                  const repaired: StudyDocument = {
+                    ...targetDoc,
+                    filePath: destPath,
+                  };
+                  host.documents.set(repaired.id, repaired);
+                  targetDoc = repaired;
+                } else {
+                  const created: StudyDocument = {
+                    id: crypto.randomUUID(),
+                    title: planned.peer.title,
+                    filePath: destPath,
+                    fileHash: planned.peer.bookId,
+                    format: planned.peer.format,
+                    encoding: 'utf-8',
+                    lastCursorAnchor: null,
+                    lastProgress: null,
+                    createdAt: host.monotonicNow(),
+                    lastOpenedAt: null,
+                  };
+                  host.documents.set(created.id, created);
+                  targetDoc = created;
+                }
+                fileOutcome = { status: 'applied' };
               }
               // Update plan state in-place so retrying the same planId never
               // creates duplicate records (mirrors Rust `ImportPlan`).
@@ -913,7 +930,6 @@ export function createMemoryLanAdapter(
               planned.summary.localTitle = targetDoc.title;
               planned.summary.state = 'alreadyPresent';
               planned.summary.needsFileDownload = false;
-              fileOutcome = { status: 'applied' };
             }
           }
 
