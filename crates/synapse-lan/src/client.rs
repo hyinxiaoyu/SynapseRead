@@ -17,7 +17,7 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use synapse_core::CoreError;
 use synapse_core::domain::{AnchorLocation, DocumentFormat};
-use synapse_core::library::{ManagedLibrary, StagedFile, is_disk_full_error};
+use synapse_core::library::{ManagedLibrary, PublishedFile, StagedFile, is_disk_full_error};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -978,10 +978,31 @@ impl PairedClient {
     pub async fn download_book_into_staged_reporting_created<F>(
         &self,
         sha256: &str,
+        staged: StagedFile,
+        cancel: &CancelToken,
+        on_progress: F,
+    ) -> LanResult<(PathBuf, bool)>
+    where
+        F: FnMut(u64, u64),
+    {
+        let published = self
+            .download_book_into_published(sha256, staged, cancel, on_progress)
+            .await?;
+        let created = published.created();
+        Ok((published.into_path(), created))
+    }
+
+    /// Streams `GET /v1/books/{sha256}/file` into `staged` and returns a
+    /// [`PublishedFile`] holding a shared cross-process coordination lease
+    /// across publish/reuse, DB commit, and optional unreferenced cleanup
+    /// (`T-26`).
+    pub async fn download_book_into_published<F>(
+        &self,
+        sha256: &str,
         mut staged: StagedFile,
         cancel: &CancelToken,
         mut on_progress: F,
-    ) -> LanResult<(PathBuf, bool)>
+    ) -> LanResult<PublishedFile>
     where
         F: FnMut(u64, u64),
     {
@@ -1137,7 +1158,7 @@ impl PairedClient {
         self.pool.checkin(sender, &parts.headers);
 
         staged
-            .finish_reporting_created()
+            .finish_published()
             .map_err(|err| map_core_error(err, expected_bytes, downloaded))
     }
 

@@ -277,7 +277,7 @@ impl Database {
         expected: &CursorSnapshot,
         next: &CursorSnapshot,
     ) -> CoreResult<ReplaceCursorResult> {
-        self.replace_cursor_if_inner(document_id, None, expected, next)
+        self.replace_cursor_if_inner(document_id, None, None, expected, next)
     }
 
     /// Like [`Self::replace_cursor_if`], but additionally verifies inside the
@@ -291,27 +291,49 @@ impl Database {
         expected: &CursorSnapshot,
         next: &CursorSnapshot,
     ) -> CoreResult<ReplaceCursorResult> {
-        self.replace_cursor_if_inner(document_id, Some(expected_file_hash), expected, next)
+        self.replace_cursor_if_inner(document_id, Some(expected_file_hash), None, expected, next)
+    }
+
+    /// Like [`Self::replace_cursor_if_for_hash`], additionally verifying inside
+    /// the same SQLite transaction that `documents.file_path` still matches the
+    /// exact verified `expected_file_path`.
+    pub fn replace_cursor_if_for_target(
+        &mut self,
+        document_id: &str,
+        expected_file_hash: &str,
+        expected_file_path: &str,
+        expected: &CursorSnapshot,
+        next: &CursorSnapshot,
+    ) -> CoreResult<ReplaceCursorResult> {
+        self.replace_cursor_if_inner(
+            document_id,
+            Some(expected_file_hash),
+            Some(expected_file_path),
+            expected,
+            next,
+        )
     }
 
     fn replace_cursor_if_inner(
         &mut self,
         document_id: &str,
         expected_file_hash: Option<&str>,
+        expected_file_path: Option<&str>,
         expected: &CursorSnapshot,
         next: &CursorSnapshot,
     ) -> CoreResult<ReplaceCursorResult> {
         let tx = self.conn.transaction()?;
-        let (file_hash, current): (String, CursorSnapshot) = tx
+        let (file_hash, file_path, current): (String, String, CursorSnapshot) = tx
             .query_row(
-                "SELECT file_hash, last_cursor_anchor, last_progress FROM documents WHERE id = ?1",
+                "SELECT file_hash, file_path, last_cursor_anchor, last_progress FROM documents WHERE id = ?1",
                 [document_id],
                 |row| {
                     Ok((
                         row.get(0)?,
+                        row.get(1)?,
                         CursorSnapshot {
-                            anchor: optional_json_column(row, 1)?,
-                            progress: row.get(2)?,
+                            anchor: optional_json_column(row, 2)?,
+                            progress: row.get(3)?,
                         },
                     ))
                 },
@@ -324,6 +346,13 @@ impl Database {
         {
             return Err(CoreError::LanHashMismatch(
                 "target document file hash changed before cursor update".into(),
+            ));
+        }
+        if let Some(required_path) = expected_file_path
+            && file_path != required_path
+        {
+            return Err(CoreError::LanHashMismatch(
+                "target document file path changed before cursor update".into(),
             ));
         }
 
@@ -1464,7 +1493,7 @@ impl Database {
         entries: &[ImportBookmarkEntry],
         limits: &ImportLimits,
     ) -> CoreResult<BookmarkImportReport> {
-        self.import_bookmarks_inner(document_id, None, entries, limits)
+        self.import_bookmarks_inner(document_id, None, None, entries, limits)
     }
 
     /// Like [`Self::import_bookmarks`], but additionally verifies inside the
@@ -1478,22 +1507,43 @@ impl Database {
         entries: &[ImportBookmarkEntry],
         limits: &ImportLimits,
     ) -> CoreResult<BookmarkImportReport> {
-        self.import_bookmarks_inner(document_id, Some(expected_file_hash), entries, limits)
+        self.import_bookmarks_inner(document_id, Some(expected_file_hash), None, entries, limits)
+    }
+
+    /// Like [`Self::import_bookmarks_for_hash`], additionally verifying inside
+    /// the same SQLite transaction that `documents.file_path` still matches the
+    /// exact verified `expected_file_path`.
+    pub fn import_bookmarks_for_target(
+        &mut self,
+        document_id: &str,
+        expected_file_hash: &str,
+        expected_file_path: &str,
+        entries: &[ImportBookmarkEntry],
+        limits: &ImportLimits,
+    ) -> CoreResult<BookmarkImportReport> {
+        self.import_bookmarks_inner(
+            document_id,
+            Some(expected_file_hash),
+            Some(expected_file_path),
+            entries,
+            limits,
+        )
     }
 
     fn import_bookmarks_inner(
         &mut self,
         document_id: &str,
         expected_file_hash: Option<&str>,
+        expected_file_path: Option<&str>,
         entries: &[ImportBookmarkEntry],
         limits: &ImportLimits,
     ) -> CoreResult<BookmarkImportReport> {
         let tx = self.conn.transaction()?;
-        let (doc_format, file_hash): (String, String) = tx
+        let (doc_format, file_hash, file_path): (String, String, String) = tx
             .query_row(
-                "SELECT format, file_hash FROM documents WHERE id = ?1",
+                "SELECT format, file_hash, file_path FROM documents WHERE id = ?1",
                 [document_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?
             .ok_or_else(|| not_found("document", document_id))?;
@@ -1503,6 +1553,13 @@ impl Database {
         {
             return Err(CoreError::LanHashMismatch(
                 "target document file hash changed before bookmark import".into(),
+            ));
+        }
+        if let Some(required_path) = expected_file_path
+            && file_path != required_path
+        {
+            return Err(CoreError::LanHashMismatch(
+                "target document file path changed before bookmark import".into(),
             ));
         }
 
@@ -1883,6 +1940,29 @@ fn is_existing_regular_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
+fn ensure_valid_import_target_file(path: &Path) -> CoreResult<()> {
+    let meta = std::fs::symlink_metadata(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("published import target is missing: {}", path.display()),
+            ))
+        } else {
+            CoreError::Io(err)
+        }
+    })?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "published import target must be a regular file: {}",
+                path.display()
+            ),
+        )));
+    }
+    Ok(())
+}
+
 fn import_document_in_conn(
     conn: &Connection,
     path: &Path,
@@ -1899,6 +1979,7 @@ fn import_document_in_conn(
         .optional()?
     {
         if !is_existing_regular_file(Path::new(&existing.file_path)) {
+            ensure_valid_import_target_file(path)?;
             let file_path = path.to_string_lossy();
             conn.execute(
                 "UPDATE documents SET file_path = ?2 WHERE id = ?1",
@@ -1910,6 +1991,7 @@ fn import_document_in_conn(
         return Ok(ImportDocumentResult::AlreadyPresent(existing));
     }
 
+    ensure_valid_import_target_file(path)?;
     insert_imported_document_row(conn, path, file_hash, sanitized_title, format)
 }
 

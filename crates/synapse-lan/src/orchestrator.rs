@@ -1724,21 +1724,16 @@ where
 
                 let progress_book_id = book_id.clone();
                 let download_res = client
-                    .download_book_into_staged_reporting_created(
-                        &book_id,
-                        staged,
-                        cancel,
-                        |downloaded, total| {
-                            on_progress(ImportProgress::FileTransfer {
-                                book_id: progress_book_id.clone(),
-                                downloaded_bytes: downloaded,
-                                total_bytes: total,
-                            });
-                        },
-                    )
+                    .download_book_into_published(&book_id, staged, cancel, |downloaded, total| {
+                        on_progress(ImportProgress::FileTransfer {
+                            book_id: progress_book_id.clone(),
+                            downloaded_bytes: downloaded,
+                            total_bytes: total,
+                        });
+                    })
                     .await;
 
-                let (published_path, published_created) = match download_res {
+                let published = match download_res {
                     Ok(published) => published,
                     Err(LanError::Cancelled) => {
                         let result = BookImportResult {
@@ -1789,44 +1784,80 @@ where
 
                 #[cfg(test)]
                 if let Some(hook) = &hooks.before_import_document {
-                    hook(&book_id, &published_path);
+                    hook(&book_id, published.path());
                 }
 
-                // Commit imported/repaired document row inside a short DB lock.
-                // If a concurrent local registration won (`AlreadyPresent`),
-                // preserve the existing path and remove our newly created
-                // managed copy only after confirming it is unreferenced (`T-26`).
+                // Commit imported/repaired document row inside a short DB lock
+                // while holding `published`'s cross-process shared lease.
+                //
+                // - If a concurrent local registration won (`AlreadyPresent`):
+                //   release our shared lease and remove the managed copy ONLY
+                //   if we created it, can acquire the exclusive coordination
+                //   lock (proving no other importer is reusing it in-flight),
+                //   and confirm no DB row references it (`T-26`). Then verify
+                //   the winning local copy's actual on-disk content outside
+                //   `Mutex<Database>` before allowing position/bookmark writes.
                 let db_clone = Arc::clone(db);
                 let hash_clone = book_id.clone();
                 let title_clone = planned.summary.title.clone();
-                let published_for_db = published_path.clone();
-                let import_res =
-                    tokio::task::spawn_blocking(move || -> LanResult<ImportDocumentResult> {
-                        let mut guard = db_clone.lock().map_err(|_| {
-                            LanError::Core(CoreError::Io(std::io::Error::other(
-                                "database lock poisoned",
-                            )))
-                        })?;
-                        let res = guard.import_document(
-                            &published_for_db,
-                            &hash_clone,
-                            &title_clone,
-                            book_format,
-                        )?;
-                        if published_created
-                            && matches!(res, ImportDocumentResult::AlreadyPresent(_))
-                        {
-                            cleanup_unreferenced_managed_copy(&guard, &published_for_db);
-                        }
-                        Ok(res)
-                    })
-                    .await
-                    .map_err(|err| {
-                        LanError::Core(CoreError::Io(std::io::Error::other(err.to_string())))
-                    });
+                let import_res = tokio::task::spawn_blocking(
+                    move || -> LanResult<(ImportDocumentResult, Option<DocumentSourceState>)> {
+                        let doc_res = {
+                            let mut guard = db_clone.lock().map_err(|_| {
+                                LanError::Core(CoreError::Io(std::io::Error::other(
+                                    "database lock poisoned",
+                                )))
+                            })?;
+                            match guard.import_document(
+                                published.path(),
+                                &hash_clone,
+                                &title_clone,
+                                book_format,
+                            ) {
+                                Ok(res) => {
+                                    if matches!(res, ImportDocumentResult::AlreadyPresent(_)) {
+                                        let _ = published.cleanup_if_unreferenced(|path| {
+                                            is_path_referenced_by_db(&guard, path)
+                                        });
+                                    } else {
+                                        drop(published);
+                                    }
+                                    res
+                                }
+                                Err(err) => {
+                                    let _ = published.cleanup_if_unreferenced(|path| {
+                                        is_path_referenced_by_db(&guard, path)
+                                    });
+                                    return Err(err.into());
+                                }
+                            }
+                        };
+
+                        // Unlocked content verification for post-publish
+                        // `AlreadyPresent` reuse (identical safety guarantee to
+                        // pre-transfer reuse).
+                        let verified_state =
+                            if let ImportDocumentResult::AlreadyPresent(ref existing_doc) = doc_res
+                            {
+                                let status = verify_document_file(existing_doc)?;
+                                Some(status.state)
+                            } else {
+                                None
+                            };
+
+                        Ok((doc_res, verified_state))
+                    },
+                )
+                .await
+                .map_err(|err| {
+                    LanError::Core(CoreError::Io(std::io::Error::other(err.to_string())))
+                });
 
                 match import_res {
-                    Ok(Ok(ImportDocumentResult::AlreadyPresent(existing_doc))) => {
+                    Ok(Ok((
+                        ImportDocumentResult::AlreadyPresent(existing_doc),
+                        Some(DocumentSourceState::Ok),
+                    ))) => {
                         target_doc = existing_doc;
                         file_outcome = ComponentOutcome::Skipped {
                             reason: Some("already present locally".into()),
@@ -1835,7 +1866,67 @@ where
                         planned.summary.state = BookSyncState::AlreadyPresent;
                         planned.summary.needs_file_download = false;
                     }
-                    Ok(Ok(doc_res)) => {
+                    Ok(Ok((
+                        ImportDocumentResult::AlreadyPresent(existing_doc),
+                        Some(DocumentSourceState::Changed),
+                    ))) => {
+                        planned.summary.local_document_id = Some(existing_doc.id.clone());
+                        planned.summary.state = BookSyncState::LocalFileChanged;
+                        planned.summary.eligible = false;
+                        planned.summary.needs_file_download = false;
+                        let reason = "local file changed on disk; book is ineligible".to_owned();
+                        let result = local_file_changed_result(
+                            book_id.clone(),
+                            Some(existing_doc.id),
+                            reason,
+                            decision,
+                        );
+                        on_progress(ImportProgress::BookCompleted {
+                            book_id,
+                            book_index,
+                            total_books,
+                            result: Box::new(result.clone()),
+                        });
+                        return (result, false, None);
+                    }
+                    Ok(Ok((
+                        ImportDocumentResult::AlreadyPresent(existing_doc),
+                        Some(DocumentSourceState::Missing) | None,
+                    ))) => {
+                        planned.summary.local_document_id = Some(existing_doc.id.clone());
+                        planned.summary.state = BookSyncState::MissingFile;
+                        planned.summary.needs_file_download = true;
+                        let reason = "local file is missing on disk".to_owned();
+                        let result = BookImportResult {
+                            book_id: book_id.clone(),
+                            document_id: Some(existing_doc.id),
+                            state: BookSyncState::MissingFile,
+                            file: ComponentOutcome::Failed {
+                                error: ImportErrorInfo::new("not_found", reason.clone()),
+                            },
+                            position: if decision.import_position {
+                                ComponentOutcome::Blocked {
+                                    reason: reason.clone(),
+                                }
+                            } else {
+                                ComponentOutcome::Skipped { reason: None }
+                            },
+                            bookmarks: if decision.import_bookmarks {
+                                ComponentOutcome::Blocked { reason }
+                            } else {
+                                ComponentOutcome::Skipped { reason: None }
+                            },
+                            bookmark_counts: BookmarkExecutionSummary::default(),
+                        };
+                        on_progress(ImportProgress::BookCompleted {
+                            book_id,
+                            book_index,
+                            total_books,
+                            result: Box::new(result.clone()),
+                        });
+                        return (result, false, None);
+                    }
+                    Ok(Ok((doc_res, _))) => {
                         target_doc = doc_res.document().clone();
                         file_commit_result = Some(doc_res);
                         file_outcome = ComponentOutcome::Applied;
@@ -1844,16 +1935,6 @@ where
                         planned.summary.needs_file_download = false;
                     }
                     Ok(Err(err)) | Err(err) => {
-                        if published_created {
-                            let db_cleanup = Arc::clone(db);
-                            let path_cleanup = published_path;
-                            let _ = tokio::task::spawn_blocking(move || {
-                                if let Ok(guard) = db_cleanup.lock() {
-                                    cleanup_unreferenced_managed_copy(&guard, &path_cleanup);
-                                }
-                            })
-                            .await;
-                        }
                         let err_info = ImportErrorInfo::from_lan_error(&err);
                         let result = failed_file_result(
                             book_id.clone(),
@@ -2039,15 +2120,17 @@ where
         let db_clone = Arc::clone(db);
         let doc_id = target_doc.id.clone();
         let expected_hash = book_id.clone();
+        let expected_path = target_doc.file_path.clone();
         let cas_res = tokio::task::spawn_blocking(move || -> LanResult<ReplaceCursorResult> {
             let mut guard = db_clone.lock().map_err(|_| {
                 LanError::Core(CoreError::Io(std::io::Error::other(
                     "database lock poisoned",
                 )))
             })?;
-            Ok(guard.replace_cursor_if_for_hash(
+            Ok(guard.replace_cursor_if_for_target(
                 &doc_id,
                 &expected_hash,
+                &expected_path,
                 &expected_for_cas,
                 &next_cursor,
             )?)
@@ -2125,6 +2208,7 @@ where
                 let db_clone = Arc::clone(db);
                 let doc_id = target_doc.id.clone();
                 let expected_hash = book_id.clone();
+                let expected_path = target_doc.file_path.clone();
                 let limits_clone = limits.clone();
                 let wire_skipped = if include_wire_skipped {
                     planned.wire_skipped_bookmarks
@@ -2138,9 +2222,10 @@ where
                             "database lock poisoned",
                         )))
                     })?;
-                    Ok(guard.import_bookmarks_for_hash(
+                    Ok(guard.import_bookmarks_for_target(
                         &doc_id,
                         &expected_hash,
+                        &expected_path,
                         &entries,
                         &limits_clone,
                     )?)
@@ -2303,25 +2388,22 @@ async fn find_and_verify_local_by_hash(
     .map_err(|err| LanError::Core(CoreError::Io(std::io::Error::other(err.to_string()))))?
 }
 
-/// Deletes a newly published managed library file ONLY after confirming that no
-/// row in `documents` currently references that canonicalized path (`T-26`).
-fn cleanup_unreferenced_managed_copy(db: &Database, published_path: &Path) {
+/// Returns `true` if any row in `documents` references `published_path`
+/// (comparing canonicalized paths so symlinks/aliases do not diverge).
+fn is_path_referenced_by_db(db: &Database, published_path: &Path) -> bool {
     let Ok(canonical_published) = std::fs::canonicalize(published_path) else {
-        return;
+        return true;
     };
     let Ok(docs) = db.list_documents() else {
-        return;
+        return true;
     };
-    let is_referenced = docs.iter().any(|doc| {
+    docs.iter().any(|doc| {
         let doc_path = Path::new(&doc.file_path);
         doc_path == published_path
             || std::fs::canonicalize(doc_path)
                 .ok()
                 .is_some_and(|canon| canon == canonical_published)
-    });
-    if !is_referenced {
-        let _ = std::fs::remove_file(published_path);
-    }
+    })
 }
 
 enum SelectedBookmarks {

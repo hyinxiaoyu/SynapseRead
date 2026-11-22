@@ -20,6 +20,7 @@ use crate::{CoreError, CoreResult};
 
 const SYNC_STAGING_DIR: &str = "sync-staging";
 const LIBRARY_DIR: &str = "library";
+const PUBLISH_LOCK_FILE: &str = ".library-publish.lock";
 
 const PDF_MAGIC: &[u8] = b"%PDF-";
 const ZIP_LOCAL_HEADER_SIG: &[u8] = b"PK\x03\x04";
@@ -301,6 +302,98 @@ pub struct StagedFile {
     finished: bool,
 }
 
+/// RAII lease over a published (or reused) managed library file.
+///
+/// Holds a shared cross-process OS lock on `<app-data>/.library-publish.lock`
+/// from publish/reuse through DB commit so no concurrent importer (in this
+/// process or another SynapseRead instance) can delete an in-flight target
+/// before it is committed to SQLite (`T-26`).
+#[derive(Debug)]
+pub struct PublishedFile {
+    path: PathBuf,
+    created: bool,
+    data_dir: PathBuf,
+    lease_lock: Option<File>,
+}
+
+impl PublishedFile {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn created(&self) -> bool {
+        self.created
+    }
+
+    pub fn into_path(mut self) -> PathBuf {
+        if let Some(lock) = self.lease_lock.take() {
+            let _ = lock.unlock();
+            drop(lock);
+        }
+        std::mem::take(&mut self.path)
+    }
+
+    /// Removes the managed file ONLY if:
+    /// 1. This operation actually created the file (`created == true`),
+    /// 2. We can acquire an exclusive cross-process lock on
+    ///    `<app-data>/.library-publish.lock` (proving zero other imports are
+    ///    currently in-flight between publish/reuse and DB commit), and
+    /// 3. `is_referenced(&self.path)` returns `false`.
+    ///
+    /// If another import holds a shared lease (`WouldBlock`), the file is
+    /// deliberately preserved so in-flight reuse cannot be broken; sole-
+    /// connection startup `reconcile` will clean up any later orphan.
+    pub fn cleanup_if_unreferenced(mut self, is_referenced: impl FnOnce(&Path) -> bool) -> bool {
+        if !self.created {
+            return false;
+        }
+        if let Some(lock) = self.lease_lock.take() {
+            let _ = lock.unlock();
+            drop(lock);
+        }
+        let Ok(lock_file) = open_publish_lock_file(&self.data_dir) else {
+            return false;
+        };
+        if lock_file.try_lock().is_err() {
+            // Another import (in-process or another instance) holds a shared
+            // lease; defer cleanup to sole-connection startup `reconcile`.
+            return false;
+        }
+        let removed = if !is_referenced(&self.path) {
+            match fs::remove_file(&self.path) {
+                Ok(()) => true,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        let _ = lock_file.unlock();
+        drop(lock_file);
+        removed
+    }
+}
+
+impl Drop for PublishedFile {
+    fn drop(&mut self) {
+        if let Some(lock) = self.lease_lock.take() {
+            let _ = lock.unlock();
+        }
+    }
+}
+
+fn open_publish_lock_file(data_dir: &Path) -> CoreResult<File> {
+    fs::create_dir_all(data_dir).map_err(map_storage_io_error)?;
+    let lock_path = data_dir.join(PUBLISH_LOCK_FILE);
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(map_storage_io_error)
+}
+
 impl StagedFile {
     pub fn written_bytes(&self) -> u64 {
         self.written_len
@@ -351,15 +444,22 @@ impl StagedFile {
     /// `.part` file, and atomically publishes it into
     /// `<app-data>/library/<sha256>.<ext>` (reusing an existing verified target).
     pub fn finish(self) -> CoreResult<PathBuf> {
-        self.finish_reporting_created().map(|(path, _)| path)
+        self.finish_published().map(PublishedFile::into_path)
     }
 
-    /// Like [`Self::finish`], but also returns `created = true` when this call
-    /// actually published a new managed file into `<app-data>/library/` (and
-    /// `created = false` when an existing verified file at the target path was
-    /// reused). Callers use this to clean up only copies they created when a
-    /// concurrent registration wins the DB commit (`T-26`).
-    pub fn finish_reporting_created(mut self) -> CoreResult<(PathBuf, bool)> {
+    /// Like [`Self::finish`], returning `(path, created)` where `created` is
+    /// `true` if this call published a new file rather than reusing an existing
+    /// verified target.
+    pub fn finish_reporting_created(self) -> CoreResult<(PathBuf, bool)> {
+        let published = self.finish_published()?;
+        let created = published.created();
+        Ok((published.into_path(), created))
+    }
+
+    /// Like [`Self::finish`], returning a [`PublishedFile`] holding a shared
+    /// cross-process coordination lease across publish/reuse, DB commit, and
+    /// optional unreferenced cleanup (`T-26`).
+    pub fn finish_published(mut self) -> CoreResult<PublishedFile> {
         if self.written_len != self.expected_len {
             self.cleanup_part();
             return Err(CoreError::LanSizeMismatch(format!(
@@ -409,6 +509,23 @@ impl StagedFile {
             }
         };
 
+        // Acquire a shared cross-process lease BEFORE checking or publishing
+        // `target` so no concurrent importer can delete `target` while we reuse
+        // or commit it (`T-26`).
+        let lease_lock = match open_publish_lock_file(&self.data_dir) {
+            Ok(file) => {
+                if let Err(err) = file.lock_shared() {
+                    self.cleanup_part();
+                    return Err(map_storage_io_error(err));
+                }
+                file
+            }
+            Err(err) => {
+                self.cleanup_part();
+                return Err(err);
+            }
+        };
+
         let target = library_dir.join(format!("{}.{}", self.expected_hash, self.extension));
 
         match fs::symlink_metadata(&target) {
@@ -424,7 +541,12 @@ impl StagedFile {
                     && validate_magic_bytes(&target, self.format).is_ok()
                 {
                     self.cleanup_part();
-                    return Ok((target, false));
+                    return Ok(PublishedFile {
+                        path: target,
+                        created: false,
+                        data_dir: self.data_dir.clone(),
+                        lease_lock: Some(lease_lock),
+                    });
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
@@ -458,7 +580,12 @@ impl StagedFile {
         }
 
         self.finished = true;
-        Ok((target, true))
+        Ok(PublishedFile {
+            path: target,
+            created: true,
+            data_dir: self.data_dir.clone(),
+            lease_lock: Some(lease_lock),
+        })
     }
 
     fn verify_part_identity(&self, require_declared_size: bool) -> CoreResult<()> {
