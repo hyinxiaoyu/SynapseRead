@@ -1798,11 +1798,12 @@ where
                 //   the winning local copy's actual on-disk content outside
                 //   `Mutex<Database>` before allowing position/bookmark writes.
                 let db_clone = Arc::clone(db);
+                let library_clone = library.clone();
                 let hash_clone = book_id.clone();
                 let title_clone = planned.summary.title.clone();
                 let import_res = tokio::task::spawn_blocking(
                     move || -> LanResult<(ImportDocumentResult, Option<DocumentSourceState>)> {
-                        let doc_res = {
+                        let first_attempt = {
                             let mut guard = db_clone.lock().map_err(|_| {
                                 LanError::Core(CoreError::Io(std::io::Error::other(
                                     "database lock poisoned",
@@ -1814,15 +1815,20 @@ where
                                 &title_clone,
                                 book_format,
                             ) {
-                                Ok(res) => {
-                                    if matches!(res, ImportDocumentResult::AlreadyPresent(_)) {
-                                        let _ = published.cleanup_if_unreferenced(|path| {
-                                            is_path_referenced_by_db(&guard, path)
-                                        });
-                                    } else {
-                                        drop(published);
-                                    }
-                                    res
+                                Ok(res) => Ok(res),
+                                Err(CoreError::UnsupportedFormat(_)) => {
+                                    // A missing local record with a different
+                                    // validated extension (e.g. `.md` / `.markdown`
+                                    // under `format: "txt"`) appeared after
+                                    // pre-publish extension selection. Read its
+                                    // required extension under the short lock,
+                                    // then re-publish outside `Mutex<Database>`.
+                                    let required_ext = missing_local_extension_locked(
+                                        &guard,
+                                        &hash_clone,
+                                        book_format,
+                                    )?;
+                                    Err(required_ext)
                                 }
                                 Err(err) => {
                                     let _ = published.cleanup_if_unreferenced(|path| {
@@ -1830,6 +1836,93 @@ where
                                     });
                                     return Err(err.into());
                                 }
+                            }
+                        };
+
+                        let doc_res = match first_attempt {
+                            Ok(res) => {
+                                if matches!(res, ImportDocumentResult::AlreadyPresent(_)) {
+                                    let guard = db_clone.lock().map_err(|_| {
+                                        LanError::Core(CoreError::Io(std::io::Error::other(
+                                            "database lock poisoned",
+                                        )))
+                                    })?;
+                                    let _ = published.cleanup_if_unreferenced(|path| {
+                                        is_path_referenced_by_db(&guard, path)
+                                    });
+                                } else {
+                                    drop(published);
+                                }
+                                res
+                            }
+                            Err(Some(required_ext)) => {
+                                // Republish verified bytes under `required_ext`
+                                // outside `Mutex<Database>` while `published`'s
+                                // shared lease protects the source file.
+                                let republished = match republish_with_extension(
+                                    &library_clone,
+                                    published.path(),
+                                    book_format,
+                                    &required_ext,
+                                    &hash_clone,
+                                ) {
+                                    Ok(repub) => repub,
+                                    Err(err) => {
+                                        if let Ok(guard) = db_clone.lock() {
+                                            let _ = published.cleanup_if_unreferenced(|path| {
+                                                is_path_referenced_by_db(&guard, path)
+                                            });
+                                        }
+                                        return Err(err);
+                                    }
+                                };
+
+                                let mut guard = db_clone.lock().map_err(|_| {
+                                    LanError::Core(CoreError::Io(std::io::Error::other(
+                                        "database lock poisoned",
+                                    )))
+                                })?;
+                                match guard.import_document(
+                                    republished.path(),
+                                    &hash_clone,
+                                    &title_clone,
+                                    book_format,
+                                ) {
+                                    Ok(res) => {
+                                        if matches!(res, ImportDocumentResult::AlreadyPresent(_)) {
+                                            let _ = republished.cleanup_if_unreferenced(|path| {
+                                                is_path_referenced_by_db(&guard, path)
+                                            });
+                                        } else {
+                                            drop(republished);
+                                        }
+                                        // Clean up the unused original extension
+                                        // copy now that `republished` is dropped.
+                                        let _ = published.cleanup_if_unreferenced(|path| {
+                                            is_path_referenced_by_db(&guard, path)
+                                        });
+                                        res
+                                    }
+                                    Err(err) => {
+                                        let _ = republished.cleanup_if_unreferenced(|path| {
+                                            is_path_referenced_by_db(&guard, path)
+                                        });
+                                        let _ = published.cleanup_if_unreferenced(|path| {
+                                            is_path_referenced_by_db(&guard, path)
+                                        });
+                                        return Err(err.into());
+                                    }
+                                }
+                            }
+                            Err(None) => {
+                                if let Ok(guard) = db_clone.lock() {
+                                    let _ = published.cleanup_if_unreferenced(|path| {
+                                        is_path_referenced_by_db(&guard, path)
+                                    });
+                                }
+                                return Err(LanError::Core(CoreError::UnsupportedFormat(
+                                    "document extension changed concurrently during repair".into(),
+                                )));
                             }
                         };
 
@@ -2404,6 +2497,61 @@ fn is_path_referenced_by_db(db: &Database, published_path: &Path) -> bool {
                 .ok()
                 .is_some_and(|canon| canon == canonical_published)
     })
+}
+
+fn missing_local_extension_locked(
+    db: &Database,
+    file_hash: &str,
+    format: DocumentFormat,
+) -> LanResult<Option<String>> {
+    let docs = db.list_documents()?;
+    let ext = docs
+        .into_iter()
+        .find(|doc| doc.file_hash == file_hash && !Path::new(&doc.file_path).is_file())
+        .and_then(|doc| {
+            Path::new(&doc.file_path)
+                .extension()
+                .and_then(|s| s.to_str())
+                .and_then(|s| validate_extension(format, s).ok())
+        });
+    Ok(ext)
+}
+
+fn republish_with_extension(
+    library: &ManagedLibrary,
+    source_path: &Path,
+    format: DocumentFormat,
+    required_ext: &str,
+    expected_hash: &str,
+) -> LanResult<synapse_core::library::PublishedFile> {
+    use std::io::Read as _;
+
+    let mut file =
+        std::fs::File::open(source_path).map_err(|err| LanError::Core(CoreError::Io(err)))?;
+    let expected_len = file
+        .metadata()
+        .map_err(|err| LanError::Core(CoreError::Io(err)))?
+        .len();
+    let mut staged = library
+        .begin_stage(format, required_ext, expected_hash, expected_len)
+        .map_err(|err| map_core_storage_error(err, expected_len, 0))?;
+    let mut buf = [0u8; 64 * 1024];
+    let mut copied = 0u64;
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|err| LanError::Core(CoreError::Io(err)))?;
+        if n == 0 {
+            break;
+        }
+        staged
+            .write_chunk(&buf[..n])
+            .map_err(|err| map_core_storage_error(err, expected_len, copied))?;
+        copied = copied.saturating_add(n as u64);
+    }
+    staged
+        .finish_published()
+        .map_err(|err| map_core_storage_error(err, expected_len, copied))
 }
 
 enum SelectedBookmarks {

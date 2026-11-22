@@ -120,6 +120,21 @@ impl ManagedLibrary {
         self.data_dir.join(SYNC_STAGING_DIR)
     }
 
+    /// Acquires a shared cross-process coordination lock on
+    /// `<app-data>/.library-publish.lock`.
+    ///
+    /// Every DB operation that can point a `documents` row at a file
+    /// (`register_document*`, `relink_document*`, and `StagedFile::finish_published`)
+    /// holds a shared lease on this lock, while `PublishedFile::cleanup_if_unreferenced`
+    /// requires a non-blocking exclusive lock across both the DB reference check
+    /// and `remove_file`. This guarantees cleanup can never delete a file that
+    /// another thread or SynapseRead instance is registering or reusing.
+    pub fn acquire_publish_shared_lock(&self) -> CoreResult<PublishSharedLease> {
+        let file = open_publish_lock_file(&self.data_dir)?;
+        file.lock_shared().map_err(map_storage_io_error)?;
+        Ok(PublishSharedLease(Some(file)))
+    }
+
     /// Computes the validated content-addressed target path
     /// `<app-data>/library/<sha256>.<ext>`.
     pub fn target_path(
@@ -300,6 +315,18 @@ pub struct StagedFile {
     written_len: u64,
     hasher: Sha256,
     finished: bool,
+}
+
+/// Shared cross-process coordination guard on `<app-data>/.library-publish.lock`.
+#[derive(Debug)]
+pub struct PublishSharedLease(Option<File>);
+
+impl Drop for PublishSharedLease {
+    fn drop(&mut self) {
+        if let Some(lock) = self.0.take() {
+            let _ = lock.unlock();
+        }
+    }
 }
 
 /// RAII lease over a published (or reused) managed library file.

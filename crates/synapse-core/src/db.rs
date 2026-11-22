@@ -23,7 +23,8 @@ use crate::domain::{
 };
 use crate::fs_reader::{UTF8_LABEL, hash_file};
 use crate::library::{
-    ManagedLibrary, validate_extension, validate_file_hash, validated_extension_for_export,
+    ManagedLibrary, PublishSharedLease, validate_extension, validate_file_hash,
+    validated_extension_for_export,
 };
 use crate::{CoreError, CoreResult};
 
@@ -182,22 +183,33 @@ impl Database {
 
     // ---- Documents -------------------------------------------------------
 
+    fn acquire_publish_shared_lock(&self) -> CoreResult<Option<PublishSharedLease>> {
+        self.library
+            .as_ref()
+            .map(ManagedLibrary::acquire_publish_shared_lock)
+            .transpose()
+    }
+
     /// Registers the file at `path`, or returns the existing record when this
     /// content is already known. A known file found at a new path has its
     /// stored path updated, keeping its annotations attached.
     pub fn register_document(&self, path: &Path) -> CoreResult<Document> {
         let file_hash = hash_document_for_registration(path)?;
+        let _publish_lease = self.acquire_publish_shared_lock()?;
+        ensure_existing_regular_file(path)?;
         upsert_document_with_hash(&self.conn, path, &file_hash)
     }
 
     /// Commits a document registration inside a transaction using a `file_hash`
-    /// computed outside the database lock, rechecking the file format under the
-    /// lock before writing.
+    /// computed outside the database lock, rechecking the file format and file
+    /// existence under the managed-library coordination lock before writing.
     pub fn register_document_with_hash(
         &mut self,
         path: &Path,
         file_hash: &str,
     ) -> CoreResult<Document> {
+        let _publish_lease = self.acquire_publish_shared_lock()?;
+        ensure_existing_regular_file(path)?;
         let tx = self.conn.transaction()?;
         let document = upsert_document_with_hash(&tx, path, file_hash)?;
         tx.commit()?;
@@ -411,18 +423,23 @@ impl Database {
     ) -> CoreResult<RelinkDocumentResult> {
         let existing = self.get_document(document_id)?;
         let new_hash = hash_document_for_relink(existing.format, new_path)?;
+        let _publish_lease = self.acquire_publish_shared_lock()?;
+        ensure_existing_regular_file(new_path)?;
         relink_document_in_conn(&self.conn, document_id, new_path, &new_hash)
     }
 
     /// Commits a document relink inside a transaction using a `new_hash` computed
     /// outside the database lock, rechecking the existing document, format
-    /// compatibility, and `file_hash` uniqueness under the lock before writing.
+    /// compatibility, file existence, and `file_hash` uniqueness under the
+    /// coordination lock before writing.
     pub fn relink_document_with_hash(
         &mut self,
         document_id: &str,
         new_path: &Path,
         new_hash: &str,
     ) -> CoreResult<RelinkDocumentResult> {
+        let _publish_lease = self.acquire_publish_shared_lock()?;
+        ensure_existing_regular_file(new_path)?;
         let tx = self.conn.transaction()?;
         let result = relink_document_in_conn(&tx, document_id, new_path, new_hash)?;
         tx.commit()?;
@@ -1940,6 +1957,26 @@ fn is_existing_regular_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
+fn ensure_existing_regular_file(path: &Path) -> CoreResult<()> {
+    let meta = std::fs::metadata(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("document file is missing: {}", path.display()),
+            ))
+        } else {
+            CoreError::Io(err)
+        }
+    })?;
+    if !meta.is_file() {
+        return Err(CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("document path is not a regular file: {}", path.display()),
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_valid_import_target_file(path: &Path) -> CoreResult<()> {
     let meta = std::fs::symlink_metadata(path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
@@ -1980,6 +2017,24 @@ fn import_document_in_conn(
     {
         if !is_existing_regular_file(Path::new(&existing.file_path)) {
             ensure_valid_import_target_file(path)?;
+            // Preserve the missing record's validated extension (critical for
+            // `.md`/`.markdown` under `format: "txt"`, `R2-01` / `R3-08`):
+            // refuse to repair a missing record with a mismatched extension.
+            let existing_ext = Path::new(&existing.file_path)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(|ext| validate_extension(existing.format, ext).ok());
+            let incoming_ext = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(|ext| validate_extension(format, ext).ok());
+            if let Some(required_ext) = existing_ext
+                && incoming_ext.as_deref() != Some(required_ext.as_str())
+            {
+                return Err(CoreError::UnsupportedFormat(format!(
+                    "cannot repair missing .{required_ext} document with mismatched extension"
+                )));
+            }
             let file_path = path.to_string_lossy();
             conn.execute(
                 "UPDATE documents SET file_path = ?2 WHERE id = ?1",
