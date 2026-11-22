@@ -18,8 +18,11 @@ tauri-build = { version = "2", features = [] }
 serde.workspace = true
 serde_json.workspace = true
 synapse-core = { path = "../../../crates/synapse-core" }
+synapse-lan = { path = "../../../crates/synapse-lan" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+tokio = { version = "1", features = ["sync", "time"] }
+uuid.workspace = true
 
 [dev-dependencies]
 # Only to check that every accelerator in the command contract parses: Tauri drops

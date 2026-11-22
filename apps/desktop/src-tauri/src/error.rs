@@ -1,5 +1,6 @@
 use serde::Serialize;
 use synapse_core::CoreError;
+use synapse_lan::LanError;
 
 /// Error shape received by the frontend: see `IpcError` in `types/domain.ts`.
 #[derive(Debug, Clone, Serialize)]
@@ -17,6 +18,15 @@ impl From<CoreError> for IpcError {
     }
 }
 
+impl From<LanError> for IpcError {
+    fn from(error: LanError) -> Self {
+        Self {
+            code: error.code(),
+            message: error.to_string(),
+        }
+    }
+}
+
 impl std::fmt::Display for IpcError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}: {}", self.code, self.message)
@@ -26,11 +36,15 @@ impl std::fmt::Display for IpcError {
 impl std::error::Error for IpcError {}
 
 impl IpcError {
-    pub fn internal(message: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
-            code: "internal",
+            code,
             message: message.into(),
         }
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new("internal", message)
     }
 }
 

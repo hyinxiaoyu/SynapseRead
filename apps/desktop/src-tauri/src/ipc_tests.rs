@@ -40,7 +40,11 @@ impl Harness {
 
     /// Opens the app over `dir`'s database, as a later launch would.
     fn in_dir(dir: tempfile::TempDir) -> Self {
-        let state = AppState::open(&dir.path().join("test.sqlite3")).unwrap();
+        Self::in_dir_with_lan(dir, crate::commands::lan::LanState::new())
+    }
+
+    fn in_dir_with_lan(dir: tempfile::TempDir, lan: crate::commands::lan::LanState) -> Self {
+        let state = AppState::open_with_lan(&dir.path().join("test.sqlite3"), lan).unwrap();
         let app = crate::with_commands(mock_builder())
             .manage(state)
             .manage(CloseFlushCoordinator::default())
@@ -1578,4 +1582,263 @@ fn verify_document_source_rechecks_after_concurrent_relink() {
     assert_eq!(attempts, 2);
     assert_eq!(status.state, DocumentSourceState::Ok);
     assert_eq!(status.current_file_hash, Some(relinked.document.file_hash));
+}
+
+// ---------------------------------------------------------------------------
+// LAN Book Sync IPC, Confirmation, Lifecycle & Info.plist Tests (#143)
+// ---------------------------------------------------------------------------
+
+struct StaticInterfaceProvider(Vec<synapse_lan::RawInterface>);
+
+impl synapse_lan::InterfaceProvider for StaticInterfaceProvider {
+    fn list_interfaces(&self) -> synapse_lan::LanResult<Vec<synapse_lan::RawInterface>> {
+        Ok(self.0.clone())
+    }
+}
+
+fn fake_lan_interface_provider() -> std::sync::Arc<dyn synapse_lan::InterfaceProvider> {
+    std::sync::Arc::new(StaticInterfaceProvider(vec![synapse_lan::RawInterface {
+        name: "en0".into(),
+        ip: std::net::Ipv4Addr::new(192, 168, 42, 10),
+        netmask: std::net::Ipv4Addr::new(255, 255, 255, 0),
+        prefix_len: 24,
+        is_up: true,
+        is_loopback: false,
+        is_broadcast: true,
+        is_point_to_point: false,
+    }]))
+}
+
+#[test]
+fn lan_share_start_declined_confirmation_starts_no_listener() {
+    use std::sync::{Arc, Mutex};
+
+    use crate::commands::lan::{LanState, ShareConfirmPrompt};
+
+    let captured_prompt: Arc<Mutex<Option<ShareConfirmPrompt>>> = Arc::new(Mutex::new(None));
+    let prompt_sink = Arc::clone(&captured_prompt);
+    let lan = LanState::with_overrides(
+        Some(Arc::new(move |prompt: &ShareConfirmPrompt| {
+            *prompt_sink.lock().unwrap() = Some(prompt.clone());
+            false
+        })),
+        fake_lan_interface_provider(),
+    );
+    let h = Harness::in_dir_with_lan(tempfile::tempdir().unwrap(), lan);
+    let doc = h.register("novel.txt", "chapter one");
+
+    let interfaces = h.ok("lan_list_interfaces", json!({}));
+    assert_eq!(interfaces.as_array().unwrap().len(), 1);
+    assert_eq!(interfaces[0]["name"], "en0");
+    assert_eq!(interfaces[0]["subnet"]["ip"], "192.168.42.10");
+
+    let started = h.ok(
+        "lan_share_start",
+        json!({
+            "input": {
+                "documentIds": [doc["id"]],
+                "positions": true,
+                "bookmarks": false,
+                "interfaceIp": null
+            }
+        }),
+    );
+    assert_eq!(
+        started,
+        Value::Null,
+        "declining native confirmation must return null and start no listener (T-12)"
+    );
+
+    let prompt = captured_prompt.lock().unwrap().clone().unwrap();
+    assert_eq!(prompt.book_count, 1);
+    assert!(prompt.positions);
+    assert!(!prompt.bookmarks);
+    assert!(prompt.message().contains("Transfers are not encrypted."));
+
+    let status = h.ok("lan_share_status", json!({}));
+    assert_eq!(status["status"]["state"], "off");
+    assert_eq!(status["address"], Value::Null);
+    assert_eq!(status["pairingCode"], Value::Null);
+}
+
+#[test]
+fn lan_ipc_rejects_loopback_hostnames_and_preserves_ipc_error_shape() {
+    let h = Harness::new();
+
+    // Production IPC must never allow loopback, hostnames, or public IPs (T-57).
+    for address in [
+        "127.0.0.1:49319",
+        "localhost:49319",
+        "example.com:49319",
+        "8.8.8.8:49319",
+    ] {
+        let err = h
+            .call(
+                "lan_import_connect",
+                json!({
+                    "input": {
+                        "address": address,
+                        "code": "123456",
+                        "operationId": "op-connect-1"
+                    }
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(err["code"], "lan_address_invalid", "address: {address}");
+        assert_eq!(
+            err.as_object().unwrap().len(),
+            2,
+            "IpcError must stay strictly {{ code, message }} (R3-07)"
+        );
+    }
+
+    // Malformed pairing codes are rejected before any network call.
+    let bad_code = h
+        .call(
+            "lan_import_connect",
+            json!({
+                "input": {
+                    "address": "192.168.1.50:49319",
+                    "code": "12ab56",
+                    "operationId": null
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(bad_code["code"], "lan_auth_invalid");
+    assert_eq!(bad_code.as_object().unwrap().len(), 2);
+
+    // Every LAN command exercises the exact camelCase IPC payload contract.
+    assert_eq!(
+        h.ok("lan_share_status", json!({}))["status"]["state"],
+        "off"
+    );
+    assert_eq!(
+        h.call("lan_share_regenerate_code", json!({})).unwrap_err()["code"],
+        "lan_auth_expired"
+    );
+    assert_eq!(h.ok("lan_share_stop", json!({}))["status"]["state"], "off");
+    assert_eq!(
+        h.ok("lan_share_disconnect_peer", json!({}))["status"]["state"],
+        "off"
+    );
+
+    assert_eq!(
+        h.call(
+            "lan_import_catalog",
+            json!({ "sessionId": "missing-session" })
+        )
+        .unwrap_err()["code"],
+        "lan_auth_expired"
+    );
+    assert_eq!(
+        h.call(
+            "lan_import_plan",
+            json!({
+                "input": {
+                    "sessionId": "missing-session",
+                    "bookIds": ["a".repeat(64)],
+                    "operationId": "op-plan-1"
+                },
+                "onProgress": "__CHANNEL__:1"
+            }),
+        )
+        .unwrap_err()["code"],
+        "lan_auth_expired"
+    );
+    assert_eq!(
+        h.call(
+            "lan_import_execute",
+            json!({
+                "input": {
+                    "sessionId": "missing-session",
+                    "planId": "missing-plan",
+                    "decisions": [],
+                    "operationId": "op-exec-1"
+                },
+                "onProgress": "__CHANNEL__:2"
+            }),
+        )
+        .unwrap_err()["code"],
+        "lan_auth_expired"
+    );
+    assert_eq!(
+        h.ok("lan_import_cancel", json!({ "operationId": "unknown-op" })),
+        false
+    );
+    assert_eq!(
+        h.ok(
+            "lan_import_disconnect",
+            json!({ "sessionId": "missing-session" })
+        ),
+        Value::Null
+    );
+}
+
+#[test]
+fn lan_shutdown_all_cancels_active_receiver_operations() {
+    let h = Harness::new();
+    let lan = &h.app.state::<AppState>().lan;
+
+    let token_a = lan.register_operation_for_tests("op-cancel-direct");
+    let token_b = lan.register_operation_for_tests("op-cancel-shutdown");
+    assert!(!token_a.is_cancelled());
+    assert!(!token_b.is_cancelled());
+
+    assert_eq!(
+        h.ok(
+            "lan_import_cancel",
+            json!({ "operationId": "op-cancel-direct" })
+        ),
+        true
+    );
+    assert!(token_a.is_cancelled());
+    assert!(!token_b.is_cancelled());
+
+    // Simulates CloseRequested / ExitRequested / RunEvent::Exit teardown (`R3-05`).
+    lan.shutdown_all();
+    assert!(token_b.is_cancelled());
+}
+
+#[test]
+fn startup_reconcile_runs_only_under_sole_connection_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.sqlite3");
+    let staging = dir.path().join("sync-staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    // First launch is sole connection -> cleans up stale `.part` file.
+    let stale_part = staging.join("stale.part");
+    std::fs::write(&stale_part, b"orphan").unwrap();
+    let first = AppState::open(&db_path).unwrap();
+    assert!(first.database().unwrap().is_sole_connection());
+    assert!(!stale_part.exists());
+
+    // While first instance is alive, another `.part` appears; second concurrent
+    // instance must NOT acquire sole-connection reconcile (`R3-01`, `T-19`).
+    let live_part = staging.join("in-progress.part");
+    std::fs::write(&live_part, b"active-download").unwrap();
+    let second = AppState::open(&db_path).unwrap();
+    assert!(!second.database().unwrap().is_sole_connection());
+    assert!(live_part.exists());
+
+    // Once both instances exit, the next sole launch reconciles the orphan.
+    drop(second);
+    drop(first);
+    let third = AppState::open(&db_path).unwrap();
+    assert!(third.database().unwrap().is_sole_connection());
+    assert!(!live_part.exists());
+}
+
+#[test]
+fn macos_info_plist_declares_local_network_usage_without_bonjour() {
+    let plist = include_str!("../Info.plist");
+    assert!(
+        plist.contains("<key>NSLocalNetworkUsageDescription</key>"),
+        "Info.plist must declare NSLocalNetworkUsageDescription (T-44, UA-6)"
+    );
+    assert!(
+        !plist.contains("NSBonjourServices"),
+        "V1 uses no mDNS/Bonjour discovery; Info.plist must not declare NSBonjourServices"
+    );
 }

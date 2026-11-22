@@ -78,7 +78,7 @@ impl FileIdentity {
 ///
 /// Production code uses [`std::fs::File`]; tests can inject a writer that
 /// simulates `ENOSPC` / `EDQUOT` deterministically.
-pub trait StageWriter: Write {
+pub trait StageWriter: Write + Send {
     fn sync_file(&mut self) -> io::Result<()>;
 
     fn file_identity(&self) -> Option<FileIdentity> {
@@ -1451,7 +1451,7 @@ mod tests {
         inner: File,
         fail_after: usize,
         written: usize,
-        err_factory: Box<dyn Fn() -> io::Error>,
+        err_factory: Box<dyn Fn() -> io::Error + Send>,
     }
 
     impl Write for FailingWriter {
@@ -1638,7 +1638,7 @@ mod tests {
         let bytes = b"some book payload bytes";
         let hash = sha256_hex(bytes);
 
-        let disk_full_errors: Vec<Box<dyn Fn() -> io::Error>> = vec![
+        let disk_full_errors: Vec<Box<dyn Fn() -> io::Error + Send>> = vec![
             Box::new(|| io::Error::new(io::ErrorKind::StorageFull, "no space left on device")),
             #[cfg(target_os = "macos")]
             Box::new(|| io::Error::from_raw_os_error(28)), // ENOSPC
