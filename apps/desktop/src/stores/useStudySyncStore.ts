@@ -552,15 +552,27 @@ export function createStudySyncStore(backend: StudyBackend) {
       });
     };
 
+    const sourceVerifySeqs = new Map<string, number>();
+    const nextSourceVerifySeq = (documentId: string): number => {
+      const next = (sourceVerifySeqs.get(documentId) ?? 0) + 1;
+      sourceVerifySeqs.set(documentId, next);
+      return next;
+    };
+
     const checkDocumentSource = async (
       documentId: string,
     ): Promise<DocumentSourceStatus | null> => {
       if (!get().documents.some((doc) => doc.id === documentId)) return null;
       const lockEpoch = getDocumentLockEpoch(documentId);
+      const verifySeq = nextSourceVerifySeq(documentId);
       let status: DocumentSourceStatus | null = null;
       await guarded(async () => {
         status = await backend.verifyDocumentSource(documentId);
-        if (isDocumentLocked(documentId) || getDocumentLockEpoch(documentId) !== lockEpoch) {
+        if (
+          isDocumentLocked(documentId) ||
+          getDocumentLockEpoch(documentId) !== lockEpoch ||
+          sourceVerifySeqs.get(documentId) !== verifySeq
+        ) {
           status = null;
           return;
         }
@@ -797,6 +809,7 @@ export function createStudySyncStore(backend: StudyBackend) {
 
     let lanImportEpoch = 0;
     let lanImportOpSeq = 0;
+    let lanImportCatalogSeq = 0;
     let activeImportSessionId: string | null = null;
 
     backend.onLanShareEvent((payload: LanShareEventPayload) => {
@@ -1979,6 +1992,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       async connectLanImport(address, code) {
         const epoch = (lanImportEpoch += 1);
         lanImportOpSeq += 1;
+        lanImportCatalogSeq += 1;
         const previousSessionId =
           activeImportSessionId ?? get().lanImport.session?.sessionId ?? null;
         activeImportSessionId = null;
@@ -2057,17 +2071,17 @@ export function createStudySyncStore(backend: StudyBackend) {
         const session = get().lanImport.session;
         if (!session) return [];
         const epoch = lanImportEpoch;
-        const opSeq = (lanImportOpSeq += 1);
+        const catalogSeq = (lanImportCatalogSeq += 1);
         try {
           const rawCatalog = await backend.lanImportCatalog(session.sessionId);
-          if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return [];
+          if (lanImportEpoch !== epoch || lanImportCatalogSeq !== catalogSeq) return [];
           const catalog = rawCatalog.filter(isCatalogBookClassification);
           set((state) => ({
             lanImport: { ...state.lanImport, catalog, error: null },
           }));
           return catalog;
         } catch (error) {
-          if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return [];
+          if (lanImportEpoch !== epoch || lanImportCatalogSeq !== catalogSeq) return [];
           set((state) => ({
             lanImport: { ...state.lanImport, error: toIpcError(error) },
           }));
@@ -2148,6 +2162,64 @@ export function createStudySyncStore(backend: StudyBackend) {
         }));
 
         const pendingRefreshes: Array<Promise<unknown>> = [];
+        const refreshedDocIds = new Set<string>();
+        const enqueueBookRefresh = (docId: string) => {
+          if (refreshedDocIds.has(docId)) return;
+          refreshedDocIds.add(docId);
+          const wasMissing = get().documentSourceStatuses[docId]?.state === 'missing';
+          const refreshBook = async () => {
+            await get().refreshDocument(docId);
+            await get().refreshBookmarks(docId);
+            // When a managed book is restored back to its original `<sha256>.<ext>`
+            // path (or Rust returns `AlreadyPresent`), `filePath` is unchanged so
+            // `refreshDocument` cannot see recovery by path diff alone: re-verify
+            // the source file under a per-document sequence + lock epoch guard so
+            // a stale response can never overwrite a newer status (`changed`, etc.).
+            if (wasMissing && get().documentSourceStatuses[docId]?.state === 'missing') {
+              const lockEpoch = getDocumentLockEpoch(docId);
+              const verifySeq = nextSourceVerifySeq(docId);
+              const beforeDoc = get().documents.find((doc) => doc.id === docId);
+              const expectedPath = beforeDoc?.filePath;
+              const expectedHash = beforeDoc?.fileHash;
+              const verified = await backend.verifyDocumentSource(docId).catch(() => null);
+              if (
+                verified &&
+                sourceVerifySeqs.get(docId) === verifySeq &&
+                getDocumentLockEpoch(docId) === lockEpoch
+              ) {
+                set((state) => {
+                  const currentDoc = state.documents.find((doc) => doc.id === docId);
+                  if (
+                    currentDoc === undefined ||
+                    currentDoc.filePath !== expectedPath ||
+                    currentDoc.fileHash !== expectedHash ||
+                    state.documentSourceStatuses[docId]?.state !== 'missing'
+                  ) {
+                    return state;
+                  }
+                  const recovered = verified.state === 'ok';
+                  return {
+                    documentSourceStatuses: {
+                      ...state.documentSourceStatuses,
+                      [docId]: verified,
+                    },
+                    ...(recovered
+                      ? {
+                          relinkedNonceByDocumentId: {
+                            ...state.relinkedNonceByDocumentId,
+                            [docId]: (state.relinkedNonceByDocumentId[docId] ?? 0) + 1,
+                          },
+                          selection: state.selection?.documentId === docId ? null : state.selection,
+                        }
+                      : {}),
+                  };
+                });
+              }
+            }
+          };
+          pendingRefreshes.push(refreshBook());
+        };
+
         try {
           const report = await backend.lanImportExecute(
             {
@@ -2166,51 +2238,24 @@ export function createStudySyncStore(backend: StudyBackend) {
               // Live per-book refresh using `#137` actions (`T-32`, `R2-02`, `R3-06`).
               // Committed books always refresh into the library even if Disconnect raced.
               if (progress.phase === 'bookCompleted' && progress.result.documentId !== null) {
-                const docId = progress.result.documentId;
-                const wasMissing = get().documentSourceStatuses[docId]?.state === 'missing';
-                const refreshBook = async () => {
-                  await get().refreshDocument(docId);
-                  await get().refreshBookmarks(docId);
-                  // When a managed book is restored back to its original `<sha256>.<ext>`
-                  // path (or Rust returns `AlreadyPresent`), `filePath` is unchanged so
-                  // `refreshDocument` cannot see recovery by path diff alone: re-verify
-                  // the source file and bump `relinkedNonceByDocumentId` when healthy.
-                  if (wasMissing && get().documentSourceStatuses[docId]?.state === 'missing') {
-                    const verified = await backend.verifyDocumentSource(docId).catch(() => null);
-                    if (verified) {
-                      set((state) => {
-                        const stillMissing =
-                          state.documentSourceStatuses[docId]?.state === 'missing';
-                        const recovered = stillMissing && verified.state === 'ok';
-                        return {
-                          documentSourceStatuses: {
-                            ...state.documentSourceStatuses,
-                            [docId]: verified,
-                          },
-                          ...(recovered
-                            ? {
-                                relinkedNonceByDocumentId: {
-                                  ...state.relinkedNonceByDocumentId,
-                                  [docId]: (state.relinkedNonceByDocumentId[docId] ?? 0) + 1,
-                                },
-                                selection:
-                                  state.selection?.documentId === docId ? null : state.selection,
-                              }
-                            : {}),
-                        };
-                      });
-                    }
-                  }
-                };
-                pendingRefreshes.push(refreshBook());
+                enqueueBookRefresh(progress.result.documentId);
               }
             },
           );
-          await Promise.allSettled(pendingRefreshes);
-          if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return null;
           if (!isLanImportExecutionReport(report)) {
+            await Promise.allSettled(pendingRefreshes);
+            if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return null;
             throw { code: 'internal', message: 'invalid LAN import execution report' };
           }
+          // Reconcile any committed books whose `bookCompleted` channel event arrived
+          // after `lanImportExecute` resolved or was absent, before publishing `results`.
+          for (const book of report.books) {
+            if (book.documentId !== null) {
+              enqueueBookRefresh(book.documentId);
+            }
+          }
+          await Promise.allSettled(pendingRefreshes);
+          if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return null;
           set((state) => ({
             lanImport: {
               ...state.lanImport,
@@ -2270,6 +2315,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         // operations before any await so late responses can never resurrect state.
         lanImportEpoch += 1;
         lanImportOpSeq += 1;
+        lanImportCatalogSeq += 1;
         const sessionId = activeImportSessionId ?? get().lanImport.session?.sessionId ?? null;
         const operationId = get().lanImport.activeOperationId;
         activeImportSessionId = null;

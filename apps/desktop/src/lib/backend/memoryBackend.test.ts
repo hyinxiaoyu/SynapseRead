@@ -637,5 +637,49 @@ describe('memory backend card delete and restore', () => {
     expect(cancelReport.books[0]?.file).toEqual({ status: 'applied' });
     expect(cancelReport.books[1]?.file).toEqual({ status: 'cancelled' });
     expect(await cancelBackend.listDocuments()).toHaveLength(1);
+
+    // 5. Cancelling during `fileTransfer` of book 2 aborts before commit: book 1
+    // stays committed, book 2 is not written, and report has `cancelled: true`.
+    const transferCancelBackend = createMemoryBackend({
+      library: {},
+      lanPeer: {
+        pairingCode: '123456',
+        books: [
+          { title: 'Transfer Book 1', format: 'txt', extension: 'txt', bytes: book1Bytes },
+          { title: 'Transfer Book 2', format: 'txt', extension: 'txt', bytes: book2Bytes },
+        ],
+      },
+    });
+    const tcSession = await transferCancelBackend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    const tcCatalog = await transferCancelBackend.lanImportCatalog(tcSession.sessionId);
+    const tcPlan = await transferCancelBackend.lanImportPlan(
+      { sessionId: tcSession.sessionId, bookIds: tcCatalog.map((b) => b.bookId) },
+      () => undefined,
+    );
+    const book2Id = tcCatalog[1]!.bookId;
+    let cancelReturned: boolean | null = null;
+    const tcReport = await transferCancelBackend.lanImportExecute(
+      {
+        sessionId: tcSession.sessionId,
+        planId: tcPlan.planId,
+        decisions: tcPlan.defaultDecisions,
+        operationId: 'op-cancel-during-transfer',
+      },
+      (progress) => {
+        if (progress.phase === 'fileTransfer' && progress.bookId === book2Id) {
+          void transferCancelBackend.lanImportCancel('op-cancel-during-transfer').then((res) => {
+            cancelReturned = res;
+          });
+        }
+      },
+    );
+    expect(cancelReturned).toBe(true);
+    expect(tcReport.cancelled).toBe(true);
+    expect(tcReport.books[0]?.file).toEqual({ status: 'applied' });
+    expect(tcReport.books[1]?.file).toEqual({ status: 'cancelled' });
+    expect(await transferCancelBackend.listDocuments()).toHaveLength(1);
   });
 });

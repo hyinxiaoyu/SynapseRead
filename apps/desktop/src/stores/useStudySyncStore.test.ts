@@ -2917,4 +2917,232 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     await execPromise;
     expect(s.getState().lanImport.phase).toBe('results');
   });
+
+  it('keeps planLanImport and executeLanImport alive when refreshLanImportCatalog runs concurrently', async () => {
+    const base = createMemoryBackend({ library: {} });
+    let resolvePlan!: (plan: Awaited<ReturnType<StudyBackend['lanImportPlan']>>) => void;
+    let resolveExecute!: (report: Awaited<ReturnType<StudyBackend['lanImportExecute']>>) => void;
+
+    const customBackend: StudyBackend = {
+      ...base,
+      lanImportConnect: async () => ({
+        sessionId: 'sess-1',
+        address: '192.168.1.25:49319',
+        idleTimeoutSeconds: 600,
+        permissions: { positions: true, bookmarks: true },
+      }),
+      lanImportCatalog: async () => [],
+      lanImportPlan: () =>
+        new Promise((resolve) => {
+          resolvePlan = resolve;
+        }),
+      lanImportExecute: () =>
+        new Promise((resolve) => {
+          resolveExecute = resolve;
+        }),
+    };
+
+    const s = createStudySyncStore(customBackend);
+    await s.getState().initialize();
+    await s.getState().connectLanImport('192.168.1.25:49319', '123456');
+
+    // Refresh catalog while planning is in flight.
+    const planPromise = s.getState().planLanImport(['a'.repeat(64)]);
+    await s.getState().refreshLanImportCatalog();
+    resolvePlan({
+      planId: 'plan-1',
+      summary: { books: [] },
+      defaultDecisions: [],
+    });
+    const plan = await planPromise;
+    expect(plan?.planId).toBe('plan-1');
+    expect(s.getState().lanImport.phase).toBe('preview');
+    expect(s.getState().lanImport.activeOperationId).toBeNull();
+
+    // Refresh catalog while executing is in flight.
+    const execPromise = s.getState().executeLanImport([]);
+    await s.getState().refreshLanImportCatalog();
+    resolveExecute({ books: [], cancelled: false });
+    const report = await execPromise;
+    expect(report?.cancelled).toBe(false);
+    expect(s.getState().lanImport.phase).toBe('results');
+    expect(s.getState().lanImport.activeOperationId).toBeNull();
+  });
+
+  it('refreshes newly imported books from report.books before publishing results when bookCompleted is late or absent', async () => {
+    const importedBytes = new TextEncoder().encode('Report-first synced book');
+    const base = createMemoryBackend({
+      library: { '/library/report-first.txt': importedBytes },
+    });
+    const importedDoc = (await base.pickDocument())!;
+    const progressSink: {
+      cb: ((p: Parameters<Parameters<StudyBackend['lanImportExecute']>[1]>[0]) => void) | null;
+    } = { cb: null };
+    const listDocsSpy = vi.spyOn(base, 'listDocuments');
+
+    const customBackend: StudyBackend = {
+      ...base,
+      lanImportConnect: async () => ({
+        sessionId: 'sess-1',
+        address: '192.168.1.25:49319',
+        idleTimeoutSeconds: 600,
+        permissions: { positions: true, bookmarks: true },
+      }),
+      lanImportCatalog: async () => [],
+      lanImportPlan: async () => ({
+        planId: 'plan-1',
+        summary: { books: [] },
+        defaultDecisions: [],
+      }),
+      lanImportExecute: async (_input, onProgress) => {
+        progressSink.cb = onProgress;
+        // Return report WITHOUT emitting `bookCompleted` first.
+        return {
+          books: [
+            {
+              bookId: importedDoc.fileHash,
+              documentId: importedDoc.id,
+              state: 'new',
+              file: { status: 'applied' },
+              position: { status: 'skipped' },
+              bookmarks: { status: 'skipped' },
+              bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+            },
+          ],
+          cancelled: false,
+        };
+      },
+    };
+
+    const s = createStudySyncStore(customBackend);
+    await s.getState().initialize();
+    // Clear store's documents so `importedDoc` must be refreshed by `executeLanImport`.
+    s.setState({ documents: [] });
+    listDocsSpy.mockClear();
+
+    await s.getState().connectLanImport('192.168.1.25:49319', '123456');
+    await s.getState().planLanImport([]);
+    await s.getState().executeLanImport([]);
+
+    expect(s.getState().lanImport.phase).toBe('results');
+    expect(s.getState().documents.some((d) => d.id === importedDoc.id)).toBe(true);
+    expect(listDocsSpy).toHaveBeenCalledTimes(1);
+
+    // Late `bookCompleted` for the same documentId is deduplicated and does not re-fetch.
+    progressSink.cb?.({
+      phase: 'bookCompleted',
+      bookId: importedDoc.fileHash,
+      bookIndex: 0,
+      totalBooks: 1,
+      result: {
+        bookId: importedDoc.fileHash,
+        documentId: importedDoc.id,
+        state: 'new',
+        file: { status: 'applied' },
+        position: { status: 'skipped' },
+        bookmarks: { status: 'skipped' },
+        bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+      },
+    });
+    expect(listDocsSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let a stale LAN recovery verification overwrite a newer changed status', async () => {
+    const bookBytes = new TextEncoder().encode('Original managed book');
+    const base = createMemoryBackend({
+      library: { '/library/managed.txt': bookBytes },
+    });
+    const doc = (await base.pickDocument())!;
+    let resolveSlowLanVerify!: (
+      status: Awaited<ReturnType<StudyBackend['verifyDocumentSource']>>,
+    ) => void;
+    let verifyCalls = 0;
+
+    const customBackend: StudyBackend = {
+      ...base,
+      verifyDocumentSource: async (documentId) => {
+        verifyCalls += 1;
+        if (verifyCalls === 1) {
+          // Slow LAN recovery verify returning stale `ok`.
+          return new Promise((resolve) => {
+            resolveSlowLanVerify = resolve;
+          });
+        }
+        // Newer normal verification reporting `changed`.
+        return {
+          documentId,
+          state: 'changed',
+          currentFileHash: 'different-hash',
+          fileSizeBytes: 99,
+        };
+      },
+      lanImportConnect: async () => ({
+        sessionId: 'sess-1',
+        address: '192.168.1.25:49319',
+        idleTimeoutSeconds: 600,
+        permissions: { positions: true, bookmarks: true },
+      }),
+      lanImportCatalog: async () => [],
+      lanImportPlan: async () => ({
+        planId: 'plan-1',
+        summary: { books: [] },
+        defaultDecisions: [],
+      }),
+      lanImportExecute: async (_input, onProgress) => {
+        onProgress({
+          phase: 'bookCompleted',
+          bookId: doc.fileHash,
+          bookIndex: 0,
+          totalBooks: 1,
+          result: {
+            bookId: doc.fileHash,
+            documentId: doc.id,
+            state: 'missingFile',
+            file: { status: 'applied' },
+            position: { status: 'skipped' },
+            bookmarks: { status: 'skipped' },
+            bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+          },
+        });
+        return { books: [], cancelled: false };
+      },
+    };
+
+    const s = createStudySyncStore(customBackend);
+    await s.getState().initialize();
+    s.setState((prev) => ({
+      documentSourceStatuses: {
+        ...prev.documentSourceStatuses,
+        [doc.id]: {
+          documentId: doc.id,
+          state: 'missing',
+          currentFileHash: null,
+          fileSizeBytes: null,
+        },
+      },
+    }));
+
+    await s.getState().connectLanImport('192.168.1.25:49319', '123456');
+    await s.getState().planLanImport([]);
+
+    const execPromise = s.getState().executeLanImport([]);
+    await vi.waitFor(() => {
+      expect(verifyCalls).toBe(1);
+    });
+
+    // Normal verification runs and updates state to `changed` while LAN verify is pending.
+    await s.getState().verifyDocumentSource(doc.id);
+    expect(s.getState().documentSourceStatuses[doc.id]?.state).toBe('changed');
+
+    // Now the stale LAN recovery verify resolves with `ok` — must NOT overwrite `changed`.
+    resolveSlowLanVerify({
+      documentId: doc.id,
+      state: 'ok',
+      currentFileHash: doc.fileHash,
+      fileSizeBytes: bookBytes.byteLength,
+    });
+    await execPromise;
+    expect(s.getState().documentSourceStatuses[doc.id]?.state).toBe('changed');
+    expect(s.getState().relinkedNonceByDocumentId[doc.id] ?? 0).toBe(0);
+  });
 });

@@ -75,8 +75,8 @@ export interface MemoryLanPeerOptions {
       IpcError
     >
   >;
-  /** Optional async hook called before each book in plan/execute (for deterministic cancellation tests). */
-  onBeforeBookStep?: (phase: 'plan' | 'execute', bookId: string) => Promise<void>;
+  /** Optional async hook called before each book in plan/execute/commit (for deterministic cancellation tests). */
+  onBeforeBookStep?: (phase: 'plan' | 'execute' | 'commit', bookId: string) => Promise<void>;
 }
 
 export interface MemoryLanHostContext {
@@ -827,6 +827,35 @@ export function createMemoryLanAdapter(
                 downloadedBytes: totalBytes,
                 totalBytes,
               });
+              // Yield so a synchronous `lanImportCancel` issued inside the
+              // `fileTransfer` progress listener (or an injected commit hook)
+              // is observed BEFORE publishing the file or mutating documents.
+              if (options.onBeforeBookStep) {
+                await options.onBeforeBookStep('commit', planned.peer.bookId);
+              } else {
+                await Promise.resolve();
+              }
+              if (op.state.cancelled) {
+                cancelled = true;
+                const result: LanBookImportResult = {
+                  bookId: planned.peer.bookId,
+                  documentId: planned.summary.localDocumentId,
+                  state: planned.summary.state,
+                  file: { status: 'cancelled' },
+                  position: { status: 'cancelled' },
+                  bookmarks: { status: 'cancelled' },
+                  bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+                };
+                results.push(result);
+                onProgress({
+                  phase: 'bookCompleted',
+                  bookId: planned.peer.bookId,
+                  bookIndex: idx,
+                  totalBooks: input.decisions.length,
+                  result,
+                });
+                continue;
+              }
               const originalExt =
                 targetDoc?.filePath.split('.').pop()?.toLowerCase() ?? planned.peer.extension;
               const destPath = targetDoc?.filePath.startsWith('/library/')
