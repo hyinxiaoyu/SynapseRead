@@ -2074,6 +2074,183 @@ fn lan_share_stop_reports_stopped_by_user_blocks_start_while_stopping_and_releas
 }
 
 #[test]
+fn lan_closing_rejects_late_share_start_and_import_connect_during_close_flush() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::commands::lan::{LanState, ShareConfirmPrompt};
+
+    let confirm_calls = Arc::new(AtomicUsize::new(0));
+    let confirm_calls_hook = Arc::clone(&confirm_calls);
+    let bind_calls = Arc::new(AtomicUsize::new(0));
+    let bind_calls_hook = Arc::clone(&bind_calls);
+
+    let lan = LanState::with_test_hooks(
+        Some(Arc::new(move |_prompt: &ShareConfirmPrompt| {
+            confirm_calls_hook.fetch_add(1, Ordering::SeqCst);
+            true
+        })),
+        fake_lan_interface_provider(),
+        Some(Arc::new(move |_ip| {
+            bind_calls_hook.fetch_add(1, Ordering::SeqCst);
+            Err(synapse_lan::LanError::BindFailed(
+                "must never bind once window is closing".into(),
+            ))
+        })),
+    );
+    let h = Harness::in_dir_with_lan(tempfile::tempdir().unwrap(), lan);
+    let doc = h.register("novel.txt", "chapter one");
+
+    // Simulate `WindowEvent::CloseRequested`: start close flush and latch LAN closing.
+    let coordinator = h.app.state::<CloseFlushCoordinator>();
+    assert!(matches!(
+        coordinator.begin_close(),
+        CloseDecision::StartFlush(_)
+    ));
+    h.app.state::<AppState>().lan.shutdown_all();
+
+    // Late `lan_share_start` during close-flush must fail immediately without
+    // opening the native confirmation dialog or binding any socket.
+    let start_err = h
+        .call(
+            "lan_share_start",
+            json!({
+                "input": {
+                    "documentIds": [doc["id"]],
+                    "positions": true,
+                    "bookmarks": true,
+                    "interfaceIp": null
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(start_err["code"], "lan_cancelled");
+    assert_eq!(confirm_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(bind_calls.load(Ordering::SeqCst), 0);
+
+    // Late `lan_import_connect` during close-flush must also fail immediately
+    // with `lan_cancelled` before attempting any TCP connect / pair.
+    let connect_err = h
+        .call(
+            "lan_import_connect",
+            json!({
+                "input": {
+                    "address": "192.168.42.99:49319",
+                    "code": "123456",
+                    "operationId": "late-connect-op"
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(connect_err["code"], "lan_cancelled");
+
+    // Cleanup commands (`lan_share_stop`, `lan_import_cancel`, `lan_import_disconnect`)
+    // remain callable during closing.
+    assert_eq!(h.ok("lan_share_stop", json!({}))["status"]["state"], "off");
+    assert_eq!(
+        h.ok(
+            "lan_import_cancel",
+            json!({ "operationId": "late-connect-op" })
+        ),
+        false
+    );
+    assert_eq!(
+        h.ok(
+            "lan_import_disconnect",
+            json!({ "sessionId": "any-session" })
+        ),
+        Value::Null
+    );
+}
+
+#[test]
+fn lan_per_book_commit_grants_book1_before_book2_and_keeps_part_out_of_scope() {
+    use synapse_core::domain::DocumentFormat;
+    use synapse_core::fs_reader::hash_file;
+
+    use crate::commands::lan::grant_committed_book;
+
+    let h = Harness::new();
+    let library = h
+        .app
+        .state::<AppState>()
+        .database()
+        .unwrap()
+        .managed_library()
+        .cloned()
+        .unwrap();
+
+    // Prepare two books' bytes and hashes.
+    let b1_src = h.dir.path().join("src1.txt");
+    let b2_src = h.dir.path().join("src2.txt");
+    std::fs::write(&b1_src, b"First synced book content").unwrap();
+    std::fs::write(&b2_src, b"Second synced book content").unwrap();
+    let h1 = hash_file(&b1_src).unwrap();
+    let h2 = hash_file(&b2_src).unwrap();
+
+    // Stage and publish Book 1, then commit it into SQLite.
+    let mut staged1 = library
+        .begin_stage(DocumentFormat::Txt, "txt", &h1, 25)
+        .unwrap();
+    let part1 = staged1.part_path().to_path_buf();
+    assert!(
+        !h.asset_allowed(&part1),
+        ".part file must never be in asset scope"
+    );
+    staged1.write_chunk(b"First synced book content").unwrap();
+    let published1 = staged1.finish().unwrap();
+
+    let import1 = h
+        .app
+        .state::<AppState>()
+        .database()
+        .unwrap()
+        .import_document(&published1, &h1, "Book One", DocumentFormat::Txt)
+        .unwrap();
+    let doc1 = import1.document().clone();
+
+    // Book 2 is still in-flight in `sync-staging/` as a `.part` file.
+    let mut staged2 = library
+        .begin_stage(DocumentFormat::Txt, "txt", &h2, 26)
+        .unwrap();
+    let part2 = staged2.part_path().to_path_buf();
+    staged2.write_chunk(b"Second synced").unwrap();
+
+    // Before commit callback runs, Book 1's published file is not yet granted.
+    assert!(!h.asset_allowed(&published1));
+
+    // Commit callback runs BEFORE `BookCompleted` emits (`R2-07`).
+    grant_committed_book(
+        h.app.handle(),
+        &synapse_lan::BookCommitEvent {
+            book_id: h1.clone(),
+            document: doc1,
+            file_result: Some(import1),
+            position_replaced: false,
+            inserted_bookmarks: Vec::new(),
+        },
+    );
+
+    // At the moment Book 1's `BookCompleted` is emitted (while Book 2 is still
+    // downloading into `part2`), Book 1 has exact-file grant and Book 2's `.part`
+    // remains outside the asset scope (`R2-07`, `S-11`).
+    assert!(
+        h.asset_allowed(&published1),
+        "Book 1 must be granted before BookCompleted while Book 2 is still in flight"
+    );
+    assert!(
+        !h.asset_allowed(&part2),
+        "Book 2's in-flight .part file must stay outside asset scope"
+    );
+    assert!(
+        !h.asset_allowed(&library.staging_dir()),
+        "sync-staging directory must never be in asset scope"
+    );
+
+    staged2.cancel();
+}
+
+#[test]
 fn startup_reconcile_runs_only_under_sole_connection_lock() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("test.sqlite3");

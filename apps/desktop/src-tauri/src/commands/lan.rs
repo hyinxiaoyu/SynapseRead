@@ -15,15 +15,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use synapse_core::domain::{Document, ImportLimits};
 use synapse_lan::{
-    AddressPolicy, BookImportDecision, BookImportResult, BookSyncState, BookmarkExecutionSummary,
-    BoundListener, CancelHandle, CancelToken, CatalogBookClassification, ComponentOutcome,
-    HttpServerConfig, ImportErrorInfo, ImportExecutionReport, ImportPlan, ImportPlanSummary,
-    ImportProgress, InterfaceProvider, LanClient, LanError, LanHttpHandler, LanInterface,
-    LanListener, LanListenerHandle, LanResult, ListenerConfig, ListenerEvent, ListenerStopReason,
-    OrchestratorConfig, PairedClient, PeerPolicy, PeerRejectReason, PlanProgress,
-    RemoteCatalogBook, SessionConfig, SessionManager, SessionStatus, SharePermissions,
-    SnapshotBook, SqliteSourceApiHandler, SystemInterfaceProvider, TokioMonotonicClock, bind_auto,
-    classify_catalog, execute_import, list_candidate_interfaces,
+    AddressPolicy, BookCommitEvent, BookImportDecision, BookImportResult, BookSyncState,
+    BookmarkExecutionSummary, BoundListener, CancelHandle, CancelToken, CatalogBookClassification,
+    ComponentOutcome, HttpServerConfig, ImportErrorInfo, ImportExecutionReport, ImportPlan,
+    ImportPlanSummary, ImportProgress, InterfaceProvider, LanClient, LanError, LanHttpHandler,
+    LanInterface, LanListener, LanListenerHandle, LanResult, ListenerConfig, ListenerEvent,
+    ListenerStopReason, OrchestratorConfig, PairedClient, PeerPolicy, PeerRejectReason,
+    PlanProgress, RemoteCatalogBook, SessionConfig, SessionManager, SessionStatus,
+    SharePermissions, SnapshotBook, SqliteSourceApiHandler, SystemInterfaceProvider,
+    TokioMonotonicClock, bind_auto, classify_catalog, execute_import, list_candidate_interfaces,
 };
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Runtime, State};
@@ -467,6 +467,10 @@ enum SharePhase {
 struct ShareRuntime {
     next_generation: u64,
     phase: SharePhase,
+    /// Latched `true` by `shutdown_all()` when window close or app exit begins,
+    /// preventing any late `lan_share_start` from opening a confirmation dialog
+    /// or binding a socket during close-flush.
+    closing: bool,
     last_stop_reason: Option<ListenerStopReason>,
     last_blocked_peer_count: u64,
     last_blocked_peer_ip: Option<String>,
@@ -508,6 +512,10 @@ struct ActiveOperation {
 #[derive(Default)]
 struct ReceiverRuntime {
     next_registration_id: u64,
+    /// Latched `true` by `shutdown_all()` when window close or app exit begins,
+    /// preventing any late `lan_import_*` operation from registering or starting
+    /// network I/O during close-flush.
+    closing: bool,
     sessions: HashMap<String, ReceiverSession>,
     operations: HashMap<String, ActiveOperation>,
 }
@@ -666,6 +674,7 @@ impl LanState {
     /// close and all app-exit hooks.
     pub fn shutdown_all(&self) {
         if let Ok(mut share) = self.share.lock() {
+            share.closing = true;
             match &mut share.phase {
                 SharePhase::Idle | SharePhase::Stopping { .. } => {}
                 SharePhase::Starting { invalidated, .. } => {
@@ -690,6 +699,7 @@ impl LanState {
         }
 
         if let Ok(mut receiver) = self.receiver.lock() {
+            receiver.closing = true;
             for op in receiver.operations.values() {
                 op.cancel.cancel();
             }
@@ -938,6 +948,9 @@ pub async fn lan_share_start<R: Runtime>(
     // can invalidate an in-flight confirmation.
     let generation = {
         let mut share = state.lan.lock_share()?;
+        if share.closing {
+            return Err(LanError::Cancelled.into());
+        }
         share.reap_if_stopped();
         if !matches!(share.phase, SharePhase::Idle) {
             return Err(LanError::SessionBusy.into());
@@ -1033,6 +1046,16 @@ pub async fn lan_share_start<R: Runtime>(
     // Close / Quit / Stop cannot race between confirmation and registration.
     let (events_rx, snapshot) = {
         let mut share = state.lan.lock_share()?;
+        if share.closing {
+            if matches!(
+                share.phase,
+                SharePhase::Starting { generation: g, .. } if g == generation
+            ) {
+                share.phase = SharePhase::Idle;
+            }
+            reservation.disarm();
+            return Err(LanError::Cancelled.into());
+        }
         match share.phase {
             SharePhase::Starting {
                 generation: current_gen,
@@ -1253,6 +1276,9 @@ pub async fn lan_import_connect(
     let client = LanClient::with_defaults(&input.address)?;
     let (guard, cancel) = {
         let mut receiver = state.lan.lock_receiver()?;
+        if receiver.closing {
+            return Err(LanError::Cancelled.into());
+        }
         receiver.register_operation(&state.lan, input.operation_id, None)
     };
 
@@ -1264,11 +1290,12 @@ pub async fn lan_import_connect(
     let permissions = paired.permissions();
     let session_id = Uuid::new_v4().to_string();
 
-    // Recheck cancellation & active registration under the same lock before
-    // publishing the new session so a concurrent shutdown/cancel cannot leak it.
+    // Recheck closing latch, cancellation & active registration under the same
+    // lock before publishing the new session so a concurrent shutdown/cancel
+    // cannot leak it.
     let published = {
         let mut receiver = state.lan.lock_receiver()?;
-        if cancel.is_cancelled() || !receiver.is_operation_active(&guard) {
+        if receiver.closing || cancel.is_cancelled() || !receiver.is_operation_active(&guard) {
             false
         } else {
             receiver.sessions.insert(
@@ -1308,10 +1335,13 @@ pub async fn lan_import_catalog(
     session_id: String,
     state: State<'_, AppState>,
 ) -> IpcResult<Vec<CatalogBookClassification>> {
-    // Atomically validate session, clone client, and register cancellation
-    // under one lock so disconnect/shutdown cannot slip in between.
+    // Atomically validate closing latch, session, clone client, and register
+    // cancellation under one lock so disconnect/shutdown cannot slip in between.
     let (client, _guard, cancel) = {
         let mut receiver = state.lan.lock_receiver()?;
+        if receiver.closing {
+            return Err(LanError::Cancelled.into());
+        }
         let client = receiver
             .sessions
             .get(&session_id)
@@ -1354,10 +1384,13 @@ pub async fn lan_import_plan(
     on_progress: Channel<PlanProgress>,
     state: State<'_, AppState>,
 ) -> IpcResult<LanImportPlanResult> {
-    // Atomically validate session, extract selected catalog books, and register
-    // cancellation under a single lock.
+    // Atomically validate closing latch, session, extract selected catalog
+    // books, and register cancellation under a single lock.
     let (client, selected_books, _guard, cancel) = {
         let mut receiver = state.lan.lock_receiver()?;
+        if receiver.closing {
+            return Err(LanError::Cancelled.into());
+        }
         let session = receiver
             .sessions
             .get(&input.session_id)
@@ -1436,10 +1469,13 @@ pub async fn lan_import_execute<R: Runtime>(
             .ok_or_else(|| IpcError::internal("managed library unavailable for in-memory db"))?
     };
 
-    // Atomically validate session, check out the plan, and register
-    // cancellation under one lock so disconnect/shutdown cannot slip in between.
+    // Atomically validate closing latch, session, check out the plan, and
+    // register cancellation under one lock so disconnect/shutdown cannot slip in between.
     let (client, mut plan_guard, _op_guard, cancel) = {
         let mut receiver = state.lan.lock_receiver()?;
+        if receiver.closing {
+            return Err(LanError::Cancelled.into());
+        }
         let (client, plan) = {
             let session = receiver
                 .sessions
@@ -1486,8 +1522,7 @@ pub async fn lan_import_execute<R: Runtime>(
         |commit| {
             // R2-07: grant exact-file asset scope BEFORE `BookCompleted` emits so
             // Continue reading works immediately while later books transfer.
-            let _ =
-                access::grant_documents(&app_for_commit, std::slice::from_ref(&commit.document));
+            grant_committed_book(&app_for_commit, &commit);
         },
         |progress| {
             let _ = on_progress.send(progress.into());
@@ -1500,6 +1535,12 @@ pub async fn lan_import_execute<R: Runtime>(
     drop(plan_guard);
 
     Ok(report.into())
+}
+
+/// Grants exact-file asset scope for a newly imported or repaired book before
+/// its `BookCompleted` progress event is delivered to the webview (`R2-07`).
+pub(crate) fn grant_committed_book<R: Runtime>(app: &AppHandle<R>, commit: &BookCommitEvent) {
+    let _ = access::grant_documents(app, std::slice::from_ref(&commit.document));
 }
 
 /// Cancels an active receiver `connect`, `plan_import`, or `execute_import`
