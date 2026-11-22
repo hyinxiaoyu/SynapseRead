@@ -16,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use synapse_core::domain::{Document, ImportLimits};
 use synapse_lan::{
     AddressPolicy, BookImportDecision, BookImportResult, BookSyncState, BookmarkExecutionSummary,
-    CancelHandle, CancelToken, CatalogBookClassification, ComponentOutcome, HttpServerConfig,
-    ImportErrorInfo, ImportExecutionReport, ImportPlan, ImportPlanSummary, ImportProgress,
-    InterfaceProvider, LanClient, LanError, LanHttpHandler, LanInterface, LanListener,
-    LanListenerHandle, ListenerConfig, ListenerEvent, ListenerStopReason, OrchestratorConfig,
-    PairedClient, PeerPolicy, PeerRejectReason, PlanProgress, RemoteCatalogBook, SessionConfig,
-    SessionManager, SessionStatus, SharePermissions, SnapshotBook, SqliteSourceApiHandler,
-    SystemInterfaceProvider, TokioMonotonicClock, bind_auto, classify_catalog, execute_import,
-    list_candidate_interfaces,
+    BoundListener, CancelHandle, CancelToken, CatalogBookClassification, ComponentOutcome,
+    HttpServerConfig, ImportErrorInfo, ImportExecutionReport, ImportPlan, ImportPlanSummary,
+    ImportProgress, InterfaceProvider, LanClient, LanError, LanHttpHandler, LanInterface,
+    LanListener, LanListenerHandle, LanResult, ListenerConfig, ListenerEvent, ListenerStopReason,
+    OrchestratorConfig, PairedClient, PeerPolicy, PeerRejectReason, PlanProgress,
+    RemoteCatalogBook, SessionConfig, SessionManager, SessionStatus, SharePermissions,
+    SnapshotBook, SqliteSourceApiHandler, SystemInterfaceProvider, TokioMonotonicClock, bind_auto,
+    classify_catalog, execute_import, list_candidate_interfaces,
 };
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Runtime, State};
@@ -81,6 +81,11 @@ impl ShareConfirmPrompt {
 /// Injectable confirmation hook for tests (`T-12`); production builds use
 /// `tauri-plugin-dialog`.
 pub type ShareConfirmer = Arc<dyn Fn(&ShareConfirmPrompt) -> bool + Send + Sync>;
+
+/// Test-only socket binder hook so `ipc_tests` can exercise real listener
+/// stop/rebind lifecycles on CI runners without a physical LAN IP.
+#[cfg(test)]
+pub type ShareBinder = Arc<dyn Fn(Ipv4Addr) -> LanResult<BoundListener> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // IPC DTOs (strictly camelCase, zero tokens, zero local/peer paths, zero anchors)
@@ -441,12 +446,50 @@ impl ActiveShare {
 }
 
 #[derive(Default)]
+enum SharePhase {
+    #[default]
+    Idle,
+    /// Exclusive reservation held while preparing and awaiting native OS confirmation.
+    /// Stop / Close / Quit flips `invalidated = true` so a late confirmation never binds.
+    Starting {
+        generation: u64,
+        invalidated: bool,
+    },
+    Active(Box<ActiveShare>),
+    /// Held while awaiting `LanListenerHandle::wait_stopped()` so a new share cannot
+    /// start until the old socket has exited and released its port.
+    Stopping {
+        generation: u64,
+    },
+}
+
+#[derive(Default)]
 struct ShareRuntime {
     next_generation: u64,
-    active: Option<ActiveShare>,
+    phase: SharePhase,
     last_stop_reason: Option<ListenerStopReason>,
     last_blocked_peer_count: u64,
     last_blocked_peer_ip: Option<String>,
+}
+
+impl ShareRuntime {
+    /// Transitions a naturally exited `Active` listener to `Idle` so callers
+    /// see an accurate state immediately.
+    fn reap_if_stopped(&mut self) {
+        let stopped_reason = match &self.phase {
+            SharePhase::Active(active) => active.handle.stop_reason(),
+            _ => None,
+        };
+        if let Some(reason) = stopped_reason
+            && let SharePhase::Active(active) = std::mem::replace(&mut self.phase, SharePhase::Idle)
+        {
+            self.last_stop_reason = Some(reason);
+            self.last_blocked_peer_count = active
+                .blocked_peer_count
+                .max(active.handle.blocked_peer_count());
+            self.last_blocked_peer_ip = active.last_blocked_peer_ip;
+        }
+    }
 }
 
 struct ReceiverSession {
@@ -457,14 +500,56 @@ struct ReceiverSession {
 }
 
 struct ActiveOperation {
+    registration_id: u64,
     session_id: Option<String>,
     cancel: CancelHandle,
 }
 
 #[derive(Default)]
 struct ReceiverRuntime {
+    next_registration_id: u64,
     sessions: HashMap<String, ReceiverSession>,
     operations: HashMap<String, ActiveOperation>,
+}
+
+impl ReceiverRuntime {
+    fn register_operation(
+        &mut self,
+        lan: &Arc<LanState>,
+        operation_id: Option<String>,
+        session_id: Option<String>,
+    ) -> (OperationGuard, CancelToken) {
+        let key = operation_id
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        self.next_registration_id = self.next_registration_id.wrapping_add(1);
+        let registration_id = self.next_registration_id;
+        let (handle, token) = CancelHandle::new();
+        if let Some(previous) = self.operations.insert(
+            key.clone(),
+            ActiveOperation {
+                registration_id,
+                session_id,
+                cancel: handle,
+            },
+        ) {
+            previous.cancel.cancel();
+        }
+        (
+            OperationGuard {
+                lan: Arc::clone(lan),
+                key,
+                registration_id,
+            },
+            token,
+        )
+    }
+
+    fn is_operation_active(&self, guard: &OperationGuard) -> bool {
+        self.operations
+            .get(&guard.key)
+            .is_some_and(|op| op.registration_id == guard.registration_id)
+    }
 }
 
 /// Manages active LAN sharing and receiver import state inside Rust `AppState`.
@@ -473,6 +558,8 @@ pub struct LanState {
     receiver: Mutex<ReceiverRuntime>,
     confirmer: Option<ShareConfirmer>,
     interface_provider: Arc<dyn InterfaceProvider>,
+    #[cfg(test)]
+    binder: Option<ShareBinder>,
 }
 
 impl Default for LanState {
@@ -488,6 +575,8 @@ impl LanState {
             receiver: Mutex::new(ReceiverRuntime::default()),
             confirmer: None,
             interface_provider: Arc::new(SystemInterfaceProvider),
+            #[cfg(test)]
+            binder: None,
         }
     }
 
@@ -496,11 +585,21 @@ impl LanState {
         confirmer: Option<ShareConfirmer>,
         interface_provider: Arc<dyn InterfaceProvider>,
     ) -> Self {
+        Self::with_test_hooks(confirmer, interface_provider, None)
+    }
+
+    #[cfg(test)]
+    pub fn with_test_hooks(
+        confirmer: Option<ShareConfirmer>,
+        interface_provider: Arc<dyn InterfaceProvider>,
+        binder: Option<ShareBinder>,
+    ) -> Self {
         Self {
             share: Mutex::new(ShareRuntime::default()),
             receiver: Mutex::new(ReceiverRuntime::default()),
             confirmer,
             interface_provider,
+            binder,
         }
     }
 
@@ -508,17 +607,33 @@ impl LanState {
     pub fn register_operation_for_tests(
         self: &Arc<Self>,
         operation_id: &str,
-    ) -> synapse_lan::CancelToken {
-        let (handle, token) = CancelHandle::new();
+    ) -> (OperationGuard, CancelToken) {
         let mut receiver = self.receiver.lock().unwrap();
-        receiver.operations.insert(
-            operation_id.to_owned(),
-            ActiveOperation {
-                session_id: None,
-                cancel: handle,
-            },
-        );
-        token
+        receiver.register_operation(self, Some(operation_id.to_owned()), None)
+    }
+
+    #[cfg(test)]
+    pub fn set_stopping_for_tests(&self) {
+        let mut share = self.share.lock().unwrap();
+        share.next_generation = share.next_generation.wrapping_add(1);
+        let generation = share.next_generation;
+        share.phase = SharePhase::Stopping { generation };
+    }
+
+    #[cfg(test)]
+    pub fn clear_stopping_for_tests(&self) {
+        let mut share = self.share.lock().unwrap();
+        if matches!(share.phase, SharePhase::Stopping { .. }) {
+            share.phase = SharePhase::Idle;
+        }
+    }
+
+    fn bind_listener(&self, ip: Ipv4Addr) -> LanResult<BoundListener> {
+        #[cfg(test)]
+        if let Some(binder) = &self.binder {
+            return binder(ip);
+        }
+        bind_auto(ip)
     }
 
     fn lock_share(&self) -> Result<std::sync::MutexGuard<'_, ShareRuntime>, IpcError> {
@@ -533,34 +648,6 @@ impl LanState {
             .map_err(|_| IpcError::internal("LAN receiver state lock poisoned"))
     }
 
-    fn register_operation(
-        self: &Arc<Self>,
-        operation_id: Option<String>,
-        session_id: Option<String>,
-    ) -> Result<(OperationGuard, CancelToken), IpcError> {
-        let key = operation_id
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let (handle, token) = CancelHandle::new();
-        let mut receiver = self.lock_receiver()?;
-        if let Some(previous) = receiver.operations.insert(
-            key.clone(),
-            ActiveOperation {
-                session_id,
-                cancel: handle,
-            },
-        ) {
-            previous.cancel.cancel();
-        }
-        Ok((
-            OperationGuard {
-                lan: Arc::clone(self),
-                key,
-            },
-            token,
-        ))
-    }
-
     pub fn cancel_operation(&self, operation_id: &str) -> bool {
         let Ok(receiver) = self.receiver.lock() else {
             return false;
@@ -573,21 +660,33 @@ impl LanState {
         }
     }
 
-    /// Synchronously stops any active sharing listener/session and cancels
-    /// every active receiver `connect`/`plan_import`/`execute_import` operation
+    /// Synchronously stops any active sharing listener/session, invalidates any
+    /// in-flight share confirmation, and cancels every active receiver operation
     /// (`R2-03`, `R3-05`, `T-10`). Idempotent and safe to call across window
     /// close and all app-exit hooks.
     pub fn shutdown_all(&self) {
-        if let Ok(mut share) = self.share.lock()
-            && let Some(active) = share.active.take()
-        {
-            share.last_stop_reason = Some(ListenerStopReason::Shutdown);
-            share.last_blocked_peer_count = active
-                .blocked_peer_count
-                .max(active.handle.blocked_peer_count());
-            share.last_blocked_peer_ip = active.last_blocked_peer_ip.clone();
-            active.session.revoke();
-            active.handle.shutdown();
+        if let Ok(mut share) = self.share.lock() {
+            match &mut share.phase {
+                SharePhase::Idle | SharePhase::Stopping { .. } => {}
+                SharePhase::Starting { invalidated, .. } => {
+                    *invalidated = true;
+                    share.last_stop_reason = Some(ListenerStopReason::Shutdown);
+                }
+                SharePhase::Active(_) => {
+                    if let SharePhase::Active(active) =
+                        std::mem::replace(&mut share.phase, SharePhase::Idle)
+                    {
+                        share.last_stop_reason = Some(ListenerStopReason::Shutdown);
+                        share.last_blocked_peer_count = active
+                            .blocked_peer_count
+                            .max(active.handle.blocked_peer_count());
+                        share.last_blocked_peer_ip = active.last_blocked_peer_ip.clone();
+                        // Send Shutdown to listener BEFORE revoking session so stop reason is Shutdown.
+                        active.handle.shutdown();
+                        active.session.revoke();
+                    }
+                }
+            }
         }
 
         if let Ok(mut receiver) = self.receiver.lock() {
@@ -601,29 +700,17 @@ impl LanState {
 
     fn share_snapshot(&self) -> IpcResult<LanShareSnapshot> {
         let mut share = self.lock_share()?;
-        if let Some(active) = share.active.as_mut() {
-            if let Some(reason) = active.handle.stop_reason() {
-                let blocked_count = active
-                    .blocked_peer_count
-                    .max(active.handle.blocked_peer_count());
-                let last_blocked_ip = active.last_blocked_peer_ip.clone();
-                share.active = None;
-                share.last_stop_reason = Some(reason);
-                share.last_blocked_peer_count = blocked_count;
-                share.last_blocked_peer_ip = last_blocked_ip.clone();
-                return Ok(LanShareSnapshot::off(
-                    Some(reason),
-                    blocked_count,
-                    last_blocked_ip,
-                ));
+        share.reap_if_stopped();
+        match &mut share.phase {
+            SharePhase::Active(active) => Ok(active.snapshot()),
+            SharePhase::Idle | SharePhase::Starting { .. } | SharePhase::Stopping { .. } => {
+                Ok(LanShareSnapshot::off(
+                    share.last_stop_reason,
+                    share.last_blocked_peer_count,
+                    share.last_blocked_peer_ip.clone(),
+                ))
             }
-            return Ok(active.snapshot());
         }
-        Ok(LanShareSnapshot::off(
-            share.last_stop_reason,
-            share.last_blocked_peer_count,
-            share.last_blocked_peer_ip.clone(),
-        ))
     }
 
     fn record_listener_event(
@@ -638,7 +725,9 @@ impl LanState {
                 reason,
                 total_blocked,
             } => {
-                let active = share.active.as_mut()?;
+                let SharePhase::Active(active) = &mut share.phase else {
+                    return None;
+                };
                 if active.generation != generation {
                     return None;
                 }
@@ -655,11 +744,18 @@ impl LanState {
                 })
             }
             ListenerEvent::Stopped { reason } => {
-                let active = share.active.as_ref()?;
-                if active.generation != generation {
+                let is_matching_active = matches!(
+                    &share.phase,
+                    SharePhase::Active(active) if active.generation == generation
+                );
+                if !is_matching_active {
                     return None;
                 }
-                let active = share.active.take()?;
+                let SharePhase::Active(active) =
+                    std::mem::replace(&mut share.phase, SharePhase::Idle)
+                else {
+                    return None;
+                };
                 let blocked_count = active
                     .blocked_peer_count
                     .max(active.handle.blocked_peer_count());
@@ -680,15 +776,83 @@ impl LanState {
     }
 }
 
-struct OperationGuard {
+/// RAII guard that releases a `SharePhase::Starting` reservation if
+/// `lan_share_start` returns early, is declined, or fails before transitioning
+/// to `Active`.
+struct StartReservationGuard {
+    lan: Arc<LanState>,
+    generation: u64,
+    armed: bool,
+}
+
+impl StartReservationGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(mut share) = self.lan.share.lock()
+            && matches!(
+                share.phase,
+                SharePhase::Starting { generation, .. } if generation == self.generation
+            )
+        {
+            share.phase = SharePhase::Idle;
+        }
+    }
+}
+
+/// RAII guard for a registered receiver operation. Checks `registration_id` on
+/// drop so a stale guard can never delete a newer operation reusing the same
+/// `operationId`.
+pub struct OperationGuard {
     lan: Arc<LanState>,
     key: String,
+    registration_id: u64,
 }
 
 impl Drop for OperationGuard {
     fn drop(&mut self) {
-        if let Ok(mut receiver) = self.lan.receiver.lock() {
+        if let Ok(mut receiver) = self.lan.receiver.lock()
+            && receiver
+                .operations
+                .get(&self.key)
+                .is_some_and(|op| op.registration_id == self.registration_id)
+        {
             receiver.operations.remove(&self.key);
+        }
+    }
+}
+
+/// RAII guard for a checked-out `ImportPlan` during `lan_import_execute`,
+/// guaranteeing `executing_plans` and `plans` are always restored even on early
+/// return or panic.
+struct PlanCheckoutGuard {
+    lan: Arc<LanState>,
+    session_id: String,
+    plan_id: String,
+    plan: Option<ImportPlan>,
+}
+
+impl PlanCheckoutGuard {
+    fn plan_mut(&mut self) -> Option<&mut ImportPlan> {
+        self.plan.as_mut()
+    }
+}
+
+impl Drop for PlanCheckoutGuard {
+    fn drop(&mut self) {
+        if let Some(plan) = self.plan.take()
+            && let Ok(mut receiver) = self.lan.receiver.lock()
+            && let Some(session) = receiver.sessions.get_mut(&self.session_id)
+        {
+            session.executing_plans.remove(&self.plan_id);
+            session.plans.insert(self.plan_id.clone(), plan);
         }
     }
 }
@@ -769,15 +933,28 @@ pub async fn lan_share_start<R: Runtime>(
         ));
     }
 
-    // Reject if a sharing session is already active.
-    {
-        let share = state.lan.lock_share()?;
-        if let Some(active) = &share.active
-            && active.handle.stop_reason().is_none()
-        {
+    // Reserve an exclusive `Starting` slot before any async work or dialog so
+    // concurrent Starts are serialized (`lan_session_busy`) and Stop/Close/Quit
+    // can invalidate an in-flight confirmation.
+    let generation = {
+        let mut share = state.lan.lock_share()?;
+        share.reap_if_stopped();
+        if !matches!(share.phase, SharePhase::Idle) {
             return Err(LanError::SessionBusy.into());
         }
-    }
+        share.next_generation = share.next_generation.wrapping_add(1);
+        let generation = share.next_generation;
+        share.phase = SharePhase::Starting {
+            generation,
+            invalidated: false,
+        };
+        generation
+    };
+    let mut reservation = StartReservationGuard {
+        lan: Arc::clone(&state.lan),
+        generation,
+        armed: true,
+    };
 
     // Deduplicate requested document IDs and capture `(document_id, file_hash)`
     // snapshot from SQLite (`R3-03`).
@@ -851,58 +1028,66 @@ pub async fn lan_share_start<R: Runtime>(
         return Ok(None);
     }
 
-    // Re-check that another concurrent start did not win while the dialog was open.
-    {
-        let share = state.lan.lock_share()?;
-        if let Some(active) = &share.active
-            && active.handle.stop_reason().is_none()
-        {
-            return Err(LanError::SessionBusy.into());
-        }
-    }
-
-    let peer_policy = PeerPolicy::for_subnet(selected.subnet)?;
-    let bound = bind_auto(selected.subnet.ip)?;
-    let bound_addr = bound.local_addr;
-
-    let clock = Arc::new(TokioMonotonicClock);
-    let session_config = SessionConfig::default();
-    let permissions = SharePermissions {
-        positions: input.positions,
-        bookmarks: input.bookmarks,
-    };
-    let shared_book_count = snapshot_books.len();
-    let (session, pairing_code) =
-        SessionManager::new(session_config, clock.clone(), permissions, snapshot_books)?;
-    let session = Arc::new(session);
-
-    let api = Arc::new(SqliteSourceApiHandler::new(state.database_arc()));
-    let handler = Arc::new(LanHttpHandler::new(
-        bound_addr,
-        Arc::clone(&session),
-        api,
-        HttpServerConfig::default(),
-    ));
-
-    let listener_config = ListenerConfig::default();
-    let handle = LanListener::start(
-        bound,
-        peer_policy,
-        Arc::clone(&state.lan.interface_provider),
-        clock,
-        listener_config,
-        handler,
-    );
-    session.attach_listener(handle.control());
-
-    let mut events_rx = handle.subscribe_events();
-    let code_expires_at_ms = epoch_ms_after(session_config.code_expiry);
-    let address = bound_addr.to_string();
-
-    let (generation, snapshot) = {
+    // Validate the `Starting` reservation, bind the socket, start the listener,
+    // and transition `Starting -> Active` atomically under the same lock so
+    // Close / Quit / Stop cannot race between confirmation and registration.
+    let (events_rx, snapshot) = {
         let mut share = state.lan.lock_share()?;
-        share.next_generation = share.next_generation.wrapping_add(1);
-        let generation = share.next_generation;
+        match share.phase {
+            SharePhase::Starting {
+                generation: current_gen,
+                invalidated: false,
+            } if current_gen == generation => {}
+            _ => {
+                if matches!(
+                    share.phase,
+                    SharePhase::Starting { generation: g, .. } if g == generation
+                ) {
+                    share.phase = SharePhase::Idle;
+                }
+                reservation.disarm();
+                return Err(LanError::Cancelled.into());
+            }
+        }
+
+        let peer_policy = PeerPolicy::for_subnet(selected.subnet)?;
+        let bound = state.lan.bind_listener(selected.subnet.ip)?;
+        let bound_addr = bound.local_addr;
+
+        let clock = Arc::new(TokioMonotonicClock);
+        let session_config = SessionConfig::default();
+        let permissions = SharePermissions {
+            positions: input.positions,
+            bookmarks: input.bookmarks,
+        };
+        let shared_book_count = snapshot_books.len();
+        let (session, pairing_code) =
+            SessionManager::new(session_config, clock.clone(), permissions, snapshot_books)?;
+        let session = Arc::new(session);
+
+        let api = Arc::new(SqliteSourceApiHandler::new(state.database_arc()));
+        let handler = Arc::new(LanHttpHandler::new(
+            bound_addr,
+            Arc::clone(&session),
+            api,
+            HttpServerConfig::default(),
+        ));
+
+        let listener_config = ListenerConfig::default();
+        let handle = LanListener::start(
+            bound,
+            peer_policy,
+            Arc::clone(&state.lan.interface_provider),
+            clock,
+            listener_config,
+            handler,
+        );
+        session.attach_listener(handle.control());
+
+        let events_rx = handle.subscribe_events();
+        let code_expires_at_ms = epoch_ms_after(session_config.code_expiry);
+        let address = bound_addr.to_string();
+
         share.last_stop_reason = None;
         share.last_blocked_peer_count = 0;
         share.last_blocked_peer_ip = None;
@@ -919,13 +1104,15 @@ pub async fn lan_share_start<R: Runtime>(
             last_blocked_peer_ip: None,
         };
         let snapshot = active.snapshot();
-        share.active = Some(active);
-        (generation, snapshot)
+        share.phase = SharePhase::Active(Box::new(active));
+        reservation.disarm();
+        (events_rx, snapshot)
     };
 
     // Forward listener diagnostics (`PeerBlocked`, `Stopped`) to the webview.
     let lan_for_events = Arc::clone(&state.lan);
     let app_for_events = app.clone();
+    let mut events_rx = events_rx;
     tauri::async_runtime::spawn(async move {
         loop {
             match events_rx.recv().await {
@@ -959,7 +1146,10 @@ pub fn lan_share_status(state: State<'_, AppState>) -> IpcResult<LanShareSnapsho
 #[tauri::command]
 pub fn lan_share_regenerate_code(state: State<'_, AppState>) -> IpcResult<LanShareSnapshot> {
     let mut share = state.lan.lock_share()?;
-    let active = share.active.as_mut().ok_or(LanError::AuthExpired)?;
+    share.reap_if_stopped();
+    let SharePhase::Active(active) = &mut share.phase else {
+        return Err(LanError::AuthExpired.into());
+    };
     let new_code = active.session.regenerate_code()?;
     active.pairing_code = Some(new_code.expose().to_owned());
     active.code_expires_at_ms = epoch_ms_after(SessionConfig::default().code_expiry);
@@ -984,15 +1174,41 @@ async fn stop_active_share(
 ) -> IpcResult<LanShareSnapshot> {
     let active = {
         let mut share = lan.lock_share()?;
-        share.active.take()
+        share.reap_if_stopped();
+        match &mut share.phase {
+            SharePhase::Starting { invalidated, .. } => {
+                *invalidated = true;
+                share.last_stop_reason = Some(fallback_reason);
+                return Ok(LanShareSnapshot::off(
+                    share.last_stop_reason,
+                    share.last_blocked_peer_count,
+                    share.last_blocked_peer_ip.clone(),
+                ));
+            }
+            SharePhase::Active(_) => {
+                let generation = match &share.phase {
+                    SharePhase::Active(a) => a.generation,
+                    _ => 0,
+                };
+                // Hold `Stopping` until `wait_stopped()` finishes so no concurrent
+                // Start can race before the listener releases its TCP port.
+                match std::mem::replace(&mut share.phase, SharePhase::Stopping { generation }) {
+                    SharePhase::Active(active) => Some(active),
+                    _ => None,
+                }
+            }
+            SharePhase::Idle | SharePhase::Stopping { .. } => None,
+        }
     };
 
     let Some(mut active) = active else {
         return lan.share_snapshot();
     };
 
-    active.session.revoke();
+    // Send `ControlCommand::Stop` to the listener FIRST so `wait_stopped()`
+    // reports `StoppedByUser` rather than `SessionEnded` from `session.revoke()`.
     active.handle.stop();
+    active.session.revoke();
     let reason = active.handle.wait_stopped().await;
     let final_reason = if matches!(reason, ListenerStopReason::Shutdown) {
         fallback_reason
@@ -1003,8 +1219,12 @@ async fn stop_active_share(
         .blocked_peer_count
         .max(active.handle.blocked_peer_count());
     let last_blocked_ip = active.last_blocked_peer_ip.clone();
+    let generation = active.generation;
 
     let mut share = lan.lock_share()?;
+    if matches!(share.phase, SharePhase::Stopping { generation: g } if g == generation) {
+        share.phase = SharePhase::Idle;
+    }
     share.last_stop_reason = Some(final_reason);
     share.last_blocked_peer_count = blocked_count;
     share.last_blocked_peer_ip = last_blocked_ip.clone();
@@ -1031,7 +1251,10 @@ pub async fn lan_import_connect(
     // Strictly uses production `AddressPolicy::LanOnly` — loopback is never
     // reachable through IPC (`T-57`).
     let client = LanClient::with_defaults(&input.address)?;
-    let (_guard, cancel) = state.lan.register_operation(input.operation_id, None)?;
+    let (guard, cancel) = {
+        let mut receiver = state.lan.lock_receiver()?;
+        receiver.register_operation(&state.lan, input.operation_id, None)
+    };
 
     let _hello = client.hello(&cancel).await?;
     let paired = client.pair(&input.code, &cancel).await?;
@@ -1041,17 +1264,33 @@ pub async fn lan_import_connect(
     let permissions = paired.permissions();
     let session_id = Uuid::new_v4().to_string();
 
-    {
+    // Recheck cancellation & active registration under the same lock before
+    // publishing the new session so a concurrent shutdown/cancel cannot leak it.
+    let published = {
         let mut receiver = state.lan.lock_receiver()?;
-        receiver.sessions.insert(
-            session_id.clone(),
-            ReceiverSession {
-                client: paired,
-                catalog_books: Vec::new(),
-                plans: HashMap::new(),
-                executing_plans: HashSet::new(),
-            },
-        );
+        if cancel.is_cancelled() || !receiver.is_operation_active(&guard) {
+            false
+        } else {
+            receiver.sessions.insert(
+                session_id.clone(),
+                ReceiverSession {
+                    client: paired.clone(),
+                    catalog_books: Vec::new(),
+                    plans: HashMap::new(),
+                    executing_plans: HashSet::new(),
+                },
+            );
+            true
+        }
+    };
+
+    if !published {
+        let _ = tokio::time::timeout(
+            DISCONNECT_SESSION_END_TIMEOUT,
+            paired.session_end(&CancelToken::never()),
+        )
+        .await;
+        return Err(LanError::Cancelled.into());
     }
 
     Ok(LanImportSessionInfo {
@@ -1069,18 +1308,20 @@ pub async fn lan_import_catalog(
     session_id: String,
     state: State<'_, AppState>,
 ) -> IpcResult<Vec<CatalogBookClassification>> {
-    let client = {
-        let receiver = state.lan.lock_receiver()?;
-        receiver
+    // Atomically validate session, clone client, and register cancellation
+    // under one lock so disconnect/shutdown cannot slip in between.
+    let (client, _guard, cancel) = {
+        let mut receiver = state.lan.lock_receiver()?;
+        let client = receiver
             .sessions
             .get(&session_id)
             .map(|s| s.client.clone())
-            .ok_or(LanError::AuthExpired)?
+            .ok_or(LanError::AuthExpired)?;
+        let (guard, cancel) =
+            receiver.register_operation(&state.lan, None, Some(session_id.clone()));
+        (client, guard, cancel)
     };
 
-    let (_guard, cancel) = state
-        .lan
-        .register_operation(None, Some(session_id.clone()))?;
     let catalog = client.catalog(&cancel).await?;
     let classified = classify_catalog(
         &state.database_arc(),
@@ -1091,9 +1332,14 @@ pub async fn lan_import_catalog(
 
     {
         let mut receiver = state.lan.lock_receiver()?;
-        if let Some(session) = receiver.sessions.get_mut(&session_id) {
-            session.catalog_books = catalog.books;
+        if cancel.is_cancelled() {
+            return Err(LanError::Cancelled.into());
         }
+        let session = receiver
+            .sessions
+            .get_mut(&session_id)
+            .ok_or(LanError::AuthExpired)?;
+        session.catalog_books = catalog.books;
     }
 
     Ok(classified)
@@ -1108,8 +1354,10 @@ pub async fn lan_import_plan(
     on_progress: Channel<PlanProgress>,
     state: State<'_, AppState>,
 ) -> IpcResult<LanImportPlanResult> {
-    let (client, selected_books) = {
-        let receiver = state.lan.lock_receiver()?;
+    // Atomically validate session, extract selected catalog books, and register
+    // cancellation under a single lock.
+    let (client, selected_books, _guard, cancel) = {
+        let mut receiver = state.lan.lock_receiver()?;
         let session = receiver
             .sessions
             .get(&input.session_id)
@@ -1125,12 +1373,14 @@ pub async fn lan_import_plan(
                 selected.push(book.clone());
             }
         }
-        (session.client.clone(), selected)
+        let client = session.client.clone();
+        let (guard, cancel) = receiver.register_operation(
+            &state.lan,
+            input.operation_id,
+            Some(input.session_id.clone()),
+        );
+        (client, selected, guard, cancel)
     };
-
-    let (_guard, cancel) = state
-        .lan
-        .register_operation(input.operation_id, Some(input.session_id.clone()))?;
 
     let plan = synapse_lan::plan_import(
         &client,
@@ -1150,6 +1400,9 @@ pub async fn lan_import_plan(
 
     {
         let mut receiver = state.lan.lock_receiver()?;
+        if cancel.is_cancelled() {
+            return Err(LanError::Cancelled.into());
+        }
         let session = receiver
             .sessions
             .get_mut(&input.session_id)
@@ -1174,23 +1427,8 @@ pub async fn lan_import_execute<R: Runtime>(
     on_progress: Channel<LanImportProgress>,
     state: State<'_, AppState>,
 ) -> IpcResult<LanImportExecutionReport> {
-    let (client, mut plan) = {
-        let mut receiver = state.lan.lock_receiver()?;
-        let session = receiver
-            .sessions
-            .get_mut(&input.session_id)
-            .ok_or(LanError::AuthExpired)?;
-        if session.executing_plans.contains(&input.plan_id) {
-            return Err(LanError::TransferBusy.into());
-        }
-        let plan = session
-            .plans
-            .remove(&input.plan_id)
-            .ok_or_else(|| IpcError::new("not_found", "import plan not found"))?;
-        session.executing_plans.insert(input.plan_id.clone());
-        (session.client.clone(), plan)
-    };
-
+    // Obtain managed library BEFORE checking out the plan so a missing library
+    // can never leave a plan checked out.
     let library = {
         let db = state.database()?;
         db.managed_library()
@@ -1198,9 +1436,42 @@ pub async fn lan_import_execute<R: Runtime>(
             .ok_or_else(|| IpcError::internal("managed library unavailable for in-memory db"))?
     };
 
-    let (_guard, cancel) = state
-        .lan
-        .register_operation(input.operation_id, Some(input.session_id.clone()))?;
+    // Atomically validate session, check out the plan, and register
+    // cancellation under one lock so disconnect/shutdown cannot slip in between.
+    let (client, mut plan_guard, _op_guard, cancel) = {
+        let mut receiver = state.lan.lock_receiver()?;
+        let (client, plan) = {
+            let session = receiver
+                .sessions
+                .get_mut(&input.session_id)
+                .ok_or(LanError::AuthExpired)?;
+            if session.executing_plans.contains(&input.plan_id) {
+                return Err(LanError::TransferBusy.into());
+            }
+            let plan = session
+                .plans
+                .remove(&input.plan_id)
+                .ok_or_else(|| IpcError::new("not_found", "import plan not found"))?;
+            session.executing_plans.insert(input.plan_id.clone());
+            (session.client.clone(), plan)
+        };
+        let (op_guard, cancel) = receiver.register_operation(
+            &state.lan,
+            input.operation_id,
+            Some(input.session_id.clone()),
+        );
+        let plan_guard = PlanCheckoutGuard {
+            lan: Arc::clone(&state.lan),
+            session_id: input.session_id.clone(),
+            plan_id: input.plan_id.clone(),
+            plan: Some(plan),
+        };
+        (client, plan_guard, op_guard, cancel)
+    };
+
+    let Some(plan) = plan_guard.plan_mut() else {
+        return Err(IpcError::internal("checked-out import plan missing"));
+    };
 
     let db_arc = state.database_arc();
     let app_for_commit = app.clone();
@@ -1208,7 +1479,7 @@ pub async fn lan_import_execute<R: Runtime>(
         &client,
         &db_arc,
         &library,
-        &mut plan,
+        plan,
         &input.decisions,
         &OrchestratorConfig::default(),
         &cancel,
@@ -1224,14 +1495,9 @@ pub async fn lan_import_execute<R: Runtime>(
     )
     .await;
 
-    // Return the updated plan (preserving any `conflict_cursor` snapshots for
-    // per-book conflict re-confirmation) if the session is still active.
-    if let Ok(mut receiver) = state.lan.receiver.lock()
-        && let Some(session) = receiver.sessions.get_mut(&input.session_id)
-    {
-        session.executing_plans.remove(&input.plan_id);
-        session.plans.insert(input.plan_id, plan);
-    }
+    // `plan_guard` Drop restores `plan` into `session.plans` (preserving any
+    // `conflict_cursor` snapshots) and clears `executing_plans` automatically.
+    drop(plan_guard);
 
     Ok(report.into())
 }

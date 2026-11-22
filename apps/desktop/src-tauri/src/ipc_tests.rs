@@ -1780,8 +1780,8 @@ fn lan_shutdown_all_cancels_active_receiver_operations() {
     let h = Harness::new();
     let lan = &h.app.state::<AppState>().lan;
 
-    let token_a = lan.register_operation_for_tests("op-cancel-direct");
-    let token_b = lan.register_operation_for_tests("op-cancel-shutdown");
+    let (_guard_a, token_a) = lan.register_operation_for_tests("op-cancel-direct");
+    let (_guard_b, token_b) = lan.register_operation_for_tests("op-cancel-shutdown");
     assert!(!token_a.is_cancelled());
     assert!(!token_b.is_cancelled());
 
@@ -1798,6 +1798,279 @@ fn lan_shutdown_all_cancels_active_receiver_operations() {
     // Simulates CloseRequested / ExitRequested / RunEvent::Exit teardown (`R3-05`).
     lan.shutdown_all();
     assert!(token_b.is_cancelled());
+}
+
+#[test]
+fn lan_reused_operation_id_old_guard_drop_does_not_clear_new_operation() {
+    let h = Harness::new();
+    let lan = &h.app.state::<AppState>().lan;
+
+    let (old_guard, old_token) = lan.register_operation_for_tests("shared-op-id");
+    let (_new_guard, new_token) = lan.register_operation_for_tests("shared-op-id");
+    assert!(
+        old_token.is_cancelled(),
+        "replacing an active operationId cancels the previous registration"
+    );
+    assert!(!new_token.is_cancelled());
+
+    // Dropping the stale guard must NOT delete the newer registration.
+    drop(old_guard);
+    assert_eq!(
+        h.ok(
+            "lan_import_cancel",
+            json!({ "operationId": "shared-op-id" })
+        ),
+        true
+    );
+    assert!(new_token.is_cancelled());
+}
+
+#[test]
+fn lan_share_start_invalidated_by_shutdown_during_confirmation_binds_no_listener() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    use crate::commands::lan::{LanState, ShareConfirmPrompt};
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let bind_calls = Arc::new(AtomicUsize::new(0));
+    let bind_calls_for_hook = Arc::clone(&bind_calls);
+
+    let lan = LanState::with_test_hooks(
+        Some(Arc::new(move |_prompt: &ShareConfirmPrompt| {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .expect("test should release blocked confirmer");
+            true
+        })),
+        fake_lan_interface_provider(),
+        Some(Arc::new(move |_ip| {
+            bind_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            Err(synapse_lan::LanError::BindFailed(
+                "binder must not be called after shutdown".into(),
+            ))
+        })),
+    );
+    let h = Harness::in_dir_with_lan(tempfile::tempdir().unwrap(), lan);
+    let doc = h.register("novel.txt", "chapter one");
+    let doc_id = doc["id"].as_str().unwrap().to_owned();
+
+    let window = h.window.clone();
+    let worker = std::thread::spawn(move || {
+        get_ipc_response(
+            &window,
+            InvokeRequest {
+                cmd: "lan_share_start".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: LOCAL_ORIGIN.parse().unwrap(),
+                body: InvokeBody::Json(json!({
+                    "input": {
+                        "documentIds": [doc_id],
+                        "positions": true,
+                        "bookmarks": true,
+                        "interfaceIp": null
+                    }
+                })),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|body| body.deserialize::<Value>().unwrap())
+    });
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("confirmer should be entered");
+
+    // Simulate window close / app quit while confirmation dialog is open.
+    h.app.state::<AppState>().lan.shutdown_all();
+    release_tx.send(()).unwrap();
+
+    let err = worker
+        .join()
+        .expect("start thread should not panic")
+        .unwrap_err();
+    assert_eq!(err["code"], "lan_cancelled");
+    assert_eq!(
+        bind_calls.load(Ordering::SeqCst),
+        0,
+        "bind_listener must not run once confirmation was invalidated by shutdown"
+    );
+    assert_eq!(
+        h.ok("lan_share_status", json!({}))["status"]["state"],
+        "off"
+    );
+}
+
+#[test]
+fn lan_share_start_rejects_concurrent_start_while_confirmation_is_pending() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    use crate::commands::lan::{LanState, ShareConfirmPrompt};
+
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let confirm_entries = Arc::new(AtomicUsize::new(0));
+    let confirm_entries_hook = Arc::clone(&confirm_entries);
+
+    let lan = LanState::with_overrides(
+        Some(Arc::new(move |_prompt: &ShareConfirmPrompt| {
+            confirm_entries_hook.fetch_add(1, Ordering::SeqCst);
+            let _ = entered_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5));
+            false
+        })),
+        fake_lan_interface_provider(),
+    );
+    let h = Harness::in_dir_with_lan(tempfile::tempdir().unwrap(), lan);
+    let doc = h.register("novel.txt", "chapter one");
+    let doc_id = doc["id"].as_str().unwrap().to_owned();
+
+    let window = h.window.clone();
+    let doc_id_clone = doc_id.clone();
+    let worker = std::thread::spawn(move || {
+        get_ipc_response(
+            &window,
+            InvokeRequest {
+                cmd: "lan_share_start".into(),
+                callback: CallbackFn(0),
+                error: CallbackFn(1),
+                url: LOCAL_ORIGIN.parse().unwrap(),
+                body: InvokeBody::Json(json!({
+                    "input": {
+                        "documentIds": [doc_id_clone],
+                        "positions": true,
+                        "bookmarks": false,
+                        "interfaceIp": null
+                    }
+                })),
+                headers: Default::default(),
+                invoke_key: INVOKE_KEY.to_string(),
+            },
+        )
+        .map(|body| body.deserialize::<Value>().unwrap())
+    });
+
+    entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first start should enter confirmation");
+
+    // Second concurrent Start must fail immediately without entering confirmer.
+    let second_err = h
+        .call(
+            "lan_share_start",
+            json!({
+                "input": {
+                    "documentIds": [doc_id],
+                    "positions": true,
+                    "bookmarks": false,
+                    "interfaceIp": null
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(second_err["code"], "lan_session_busy");
+
+    release_tx.send(()).unwrap();
+    let first_res = worker.join().unwrap().unwrap();
+    assert_eq!(first_res, Value::Null);
+    assert_eq!(
+        confirm_entries.load(Ordering::SeqCst),
+        1,
+        "only the first concurrent Start may enter native confirmation"
+    );
+}
+
+#[test]
+fn lan_share_stop_reports_stopped_by_user_blocks_start_while_stopping_and_releases_port() {
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+    use std::sync::Arc;
+
+    use crate::commands::lan::{LanState, ShareConfirmPrompt};
+
+    let lan = LanState::with_test_hooks(
+        Some(Arc::new(|_prompt: &ShareConfirmPrompt| true)),
+        fake_lan_interface_provider(),
+        Some(Arc::new(|_ip| {
+            let std_listener = std::net::TcpListener::bind(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::LOCALHOST,
+                0,
+            )))
+            .map_err(|err| synapse_lan::LanError::BindFailed(err.to_string()))?;
+            std_listener
+                .set_nonblocking(true)
+                .map_err(|err| synapse_lan::LanError::BindFailed(err.to_string()))?;
+            let SocketAddr::V4(local_addr) = std_listener
+                .local_addr()
+                .map_err(|err| synapse_lan::LanError::BindFailed(err.to_string()))?
+            else {
+                return Err(synapse_lan::LanError::BindFailed("expected ipv4".into()));
+            };
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .map_err(|err| synapse_lan::LanError::BindFailed(err.to_string()))?;
+            Ok(synapse_lan::BoundListener {
+                listener,
+                local_addr,
+            })
+        })),
+    );
+    let h = Harness::in_dir_with_lan(tempfile::tempdir().unwrap(), lan);
+    let doc = h.register("novel.txt", "chapter one");
+
+    let started = h.ok(
+        "lan_share_start",
+        json!({
+            "input": {
+                "documentIds": [doc["id"]],
+                "positions": true,
+                "bookmarks": true,
+                "interfaceIp": null
+            }
+        }),
+    );
+    assert_eq!(started["status"]["state"], "listening");
+    let bound_addr: SocketAddrV4 = started["address"].as_str().unwrap().parse().unwrap();
+
+    // Stop must report `stoppedByUser` (not `sessionEnded`) and release the socket.
+    let stopped = h.ok("lan_share_stop", json!({}));
+    assert_eq!(stopped["status"]["state"], "off");
+    assert_eq!(stopped["lastStopReason"], "stoppedByUser");
+
+    // Port must be immediately rebindable once `lan_share_stop` returns.
+    let rebound = std::net::TcpListener::bind(SocketAddr::V4(bound_addr))
+        .expect("port should be released after lan_share_stop returns");
+    drop(rebound);
+
+    // While in `Stopping` phase, a new `lan_share_start` must be rejected with `lan_session_busy`.
+    h.app.state::<AppState>().lan.set_stopping_for_tests();
+    let during_stop = h
+        .call(
+            "lan_share_start",
+            json!({
+                "input": {
+                    "documentIds": [doc["id"]],
+                    "positions": true,
+                    "bookmarks": true,
+                    "interfaceIp": null
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(during_stop["code"], "lan_session_busy");
+    h.app.state::<AppState>().lan.clear_stopping_for_tests();
 }
 
 #[test]
