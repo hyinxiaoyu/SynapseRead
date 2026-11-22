@@ -370,31 +370,50 @@ impl PublishedFile {
     /// If another import holds a shared lease (`WouldBlock`), the file is
     /// deliberately preserved so in-flight reuse cannot be broken; sole-
     /// connection startup `reconcile` will clean up any later orphan.
-    pub fn cleanup_if_unreferenced(mut self, is_referenced: impl FnOnce(&Path) -> bool) -> bool {
-        if !self.created {
-            return false;
+    pub fn cleanup_if_unreferenced(self, is_referenced: impl FnOnce(&Path) -> bool) -> bool {
+        let mut is_referenced = Some(is_referenced);
+        Self::cleanup_many_if_unreferenced([self], |path| {
+            is_referenced.take().is_none_or(|f| f(path))
+        }) > 0
+    }
+
+    /// Releases ALL shared leases held by `files` first, then acquires a single
+    /// non-blocking exclusive cross-process lock on
+    /// `<app-data>/.library-publish.lock` and deletes every `created == true`
+    /// file for which `is_referenced(path)` returns `false`.
+    ///
+    /// Using this helper when one operation holds multiple [`PublishedFile`]s
+    /// (for example, an initial `.txt` publish plus a republished `.md` copy)
+    /// prevents the operation's own second shared lease from blocking cleanup.
+    pub fn cleanup_many_if_unreferenced(
+        files: impl IntoIterator<Item = Self>,
+        mut is_referenced: impl FnMut(&Path) -> bool,
+    ) -> usize {
+        let mut files: Vec<Self> = files.into_iter().collect();
+        for file in &mut files {
+            if let Some(lock) = file.lease_lock.take() {
+                let _ = lock.unlock();
+                drop(lock);
+            }
         }
-        if let Some(lock) = self.lease_lock.take() {
-            let _ = lock.unlock();
-            drop(lock);
-        }
-        let Ok(lock_file) = open_publish_lock_file(&self.data_dir) else {
-            return false;
+        let candidates: Vec<Self> = files.into_iter().filter(|f| f.created).collect();
+        let Some(first) = candidates.first() else {
+            return 0;
+        };
+        let Ok(lock_file) = open_publish_lock_file(&first.data_dir) else {
+            return 0;
         };
         if lock_file.try_lock().is_err() {
-            // Another import (in-process or another instance) holds a shared
-            // lease; defer cleanup to sole-connection startup `reconcile`.
-            return false;
+            // Another operation or instance still holds a shared lease; defer
+            // cleanup to sole-connection startup `reconcile`.
+            return 0;
         }
-        let removed = if !is_referenced(&self.path) {
-            match fs::remove_file(&self.path) {
-                Ok(()) => true,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => false,
-                Err(_) => false,
+        let mut removed = 0usize;
+        for file in &candidates {
+            if !is_referenced(&file.path) && matches!(fs::remove_file(&file.path), Ok(())) {
+                removed += 1;
             }
-        } else {
-            false
-        };
+        }
         let _ = lock_file.unlock();
         drop(lock_file);
         removed

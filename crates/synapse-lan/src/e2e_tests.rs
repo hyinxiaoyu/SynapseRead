@@ -4058,3 +4058,144 @@ async fn e2e_cancel_before_and_during_markdown_republish_preserves_committed_and
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 26. P2 regression: cancelling AFTER `.md` republish completes and WHILE
+//     waiting on `Mutex<Database>` must NOT commit the repair, and must
+//     release BOTH `.txt` and `.md` shared publish leases before cleanup so
+//     neither `.txt` nor `.md` is left behind in `library/`.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_cancel_while_waiting_for_db_lock_after_republish_cleans_both_copies_and_skips_commit()
+{
+    let source = PeerNode::new("repub-lock-cancel-src");
+    let receiver = PeerNode::new("repub-lock-cancel-dst");
+
+    let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "book.txt");
+    let txt_bytes = std::fs::read(&src_txt).expect("read txt");
+    let txt_doc = source.register(&src_txt);
+
+    let server = RunningSource::start(
+        Arc::clone(&source.db),
+        SharePermissions {
+            positions: false,
+            bookmarks: false,
+        },
+        vec![SnapshotBook {
+            document_id: txt_doc.id.clone(),
+            snapshot_file_hash: txt_doc.file_hash.clone(),
+        }],
+        None,
+    );
+    let paired = server.pair_receiver().await;
+    let plan_cancel = CancelToken::never();
+    let catalog = paired.catalog(&plan_cancel).await.expect("catalog");
+
+    let mut plan = plan_import(
+        &paired,
+        &receiver.db,
+        &catalog.books,
+        &OrchestratorConfig::default(),
+        &plan_cancel,
+        |_| {},
+    )
+    .await
+    .expect("plan");
+
+    let (cancel_handle, cancel_token) = CancelHandle::new();
+    let missing_md_path = receiver.files_dir.join("locked-missing.md");
+    let missing_md_id_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+    let db_for_before = Arc::clone(&receiver.db);
+    let md_path_for_before = missing_md_path.clone();
+    let bytes_for_before = txt_bytes.clone();
+    let id_slot_for_before = Arc::clone(&missing_md_id_slot);
+
+    let db_for_lock_race = Arc::clone(&receiver.db);
+    let lib_for_lock_race = receiver.library.clone();
+    let cancel_for_lock_race = cancel_handle.clone();
+
+    let hooks = ExecuteTestHooks {
+        before_import_document: Some(Arc::new(move |_book_id, _published_txt| {
+            std::fs::write(&md_path_for_before, &bytes_for_before).expect("write md");
+            let md_doc = db_for_before
+                .lock()
+                .expect("lock")
+                .register_document(&md_path_for_before)
+                .expect("register md");
+            std::fs::remove_file(&md_path_for_before).expect("delete md");
+            *id_slot_for_before.lock().expect("lock") = Some(md_doc.id);
+        })),
+        after_republish_before_lock: Some(Arc::new(move |_book_id, republished_md_path| {
+            // Confirm BOTH `.txt` and republished `.md` exist right before
+            // the commit thread attempts to acquire `Mutex<Database>`.
+            assert!(republished_md_path.is_file());
+            assert_eq!(
+                republished_md_path.extension().and_then(|s| s.to_str()),
+                Some("md")
+            );
+            assert_eq!(count_library_entries(&lib_for_lock_race), 2);
+
+            // Hold `Mutex<Database>` on a background thread BEFORE returning
+            // from this hook so the commit thread blocks on `db_clone.lock()`,
+            // then trigger cancellation while the commit thread is blocked
+            // waiting for the lock.
+            let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+            let db_holder = Arc::clone(&db_for_lock_race);
+            let cancel_holder = cancel_for_lock_race.clone();
+            std::thread::spawn(move || {
+                let _guard = db_holder.lock().expect("lock holder");
+                let _ = locked_tx.send(());
+                std::thread::sleep(Duration::from_millis(50));
+                cancel_holder.cancel();
+                std::thread::sleep(Duration::from_millis(20));
+            });
+            locked_rx.recv().expect("holder acquired DB lock");
+        })),
+        ..ExecuteTestHooks::default()
+    };
+
+    let decisions = plan.default_decisions();
+    let report = execute_import_with_test_hooks(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan,
+        &decisions,
+        &OrchestratorConfig::default(),
+        &cancel_token,
+        &DefaultStageFactory,
+        &hooks,
+        |_| {},
+        |_| {},
+    )
+    .await;
+
+    assert!(report.cancelled);
+    assert_eq!(report.books.len(), 1);
+    assert_eq!(report.books[0].file, ComponentOutcome::Cancelled);
+
+    let missing_md_id = missing_md_id_slot
+        .lock()
+        .expect("lock")
+        .take()
+        .expect("missing md id");
+    {
+        let db = receiver.db.lock().expect("lock");
+        let untouched = db.get_document(&missing_md_id).expect("missing md");
+        assert_eq!(
+            PathBuf::from(&untouched.file_path),
+            missing_md_path,
+            "missing .md record must not be modified when cancelled while waiting on DB lock"
+        );
+        assert!(!Path::new(&untouched.file_path).exists());
+    }
+
+    assert_eq!(
+        count_library_entries(&receiver.library),
+        0,
+        "BOTH .txt and republished .md copies must be cleaned up when cancelled after republish"
+    );
+    assert_eq!(count_staging_entries(&receiver.library), 0);
+}
