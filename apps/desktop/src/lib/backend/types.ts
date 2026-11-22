@@ -4,6 +4,7 @@ import type {
   AnnotationPatch,
   Bookmark,
   CardPatch,
+  CatalogBookClassification,
   CreateAnnotationInput,
   CreateBookmarkInput,
   CreatedExcerpt,
@@ -12,11 +13,23 @@ import type {
   DocumentContentReader,
   DocumentSourceStatus,
   IpcError,
+  LanImportConnectInput,
+  LanImportExecuteInput,
+  LanImportExecutionReport,
+  LanImportPlanInput,
+  LanImportPlanResult,
+  LanImportProgress,
+  LanImportSessionInfo,
+  LanInterface,
+  LanShareEventPayload,
+  LanShareSnapshot,
+  LanShareStartInput,
   MindMapEdge,
   NodeLayoutPatch,
   NoteCard,
   NotebookGraph,
   PdfLayout,
+  PlanProgress,
   ReadingPreferences,
   RelinkDocumentResult,
   RestoredAnnotation,
@@ -148,4 +161,28 @@ export interface StudyBackend extends DocumentContentReader {
   onFullscreenChange(listener: (fullscreen: boolean) => void): () => void;
   /** Runs an async flush hook when the native window or app is about to close (#117). */
   onBeforeClose(listener: () => Promise<void>): () => void;
+
+  // ---- LAN Book Sync (ADR 0008, #143, #144) -------------------------------
+
+  lanListInterfaces(): Promise<LanInterface[]>;
+  /** Starts sharing after native OS confirmation; returns `null` if declined. */
+  lanShareStart(input: LanShareStartInput): Promise<LanShareSnapshot | null>;
+  lanShareStatus(): Promise<LanShareSnapshot>;
+  lanShareRegenerateCode(): Promise<LanShareSnapshot>;
+  lanShareStop(): Promise<LanShareSnapshot>;
+  lanShareDisconnectPeer(): Promise<LanShareSnapshot>;
+  onLanShareEvent(listener: (payload: LanShareEventPayload) => void): () => void;
+
+  lanImportConnect(input: LanImportConnectInput): Promise<LanImportSessionInfo>;
+  lanImportCatalog(sessionId: string): Promise<CatalogBookClassification[]>;
+  lanImportPlan(
+    input: LanImportPlanInput,
+    onProgress: (progress: PlanProgress) => void,
+  ): Promise<LanImportPlanResult>;
+  lanImportExecute(
+    input: LanImportExecuteInput,
+    onProgress: (progress: LanImportProgress) => void,
+  ): Promise<LanImportExecutionReport>;
+  lanImportCancel(operationId: string): Promise<boolean>;
+  lanImportDisconnect(sessionId: string): Promise<void>;
 }

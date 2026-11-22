@@ -1,5 +1,13 @@
+import {
+  createMemoryLanAdapter,
+  type MemoryLanPeerBook,
+  type MemoryLanPeerBookmark,
+  type MemoryLanPeerOptions,
+} from '@/lib/backend/memoryLanPeer';
 import { DEFAULT_CHUNK_BYTES, streamUtf8Lossy } from '@/lib/backend/memoryTextStream';
 import type { StudyBackend } from '@/lib/backend/types';
+
+export type { MemoryLanPeerBook, MemoryLanPeerBookmark, MemoryLanPeerOptions };
 import { formatForPath } from '@/lib/documentFormats';
 import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
 import sampleCodeEpubUrl from '../../../../../fixtures/documents/sample-code.epub?url&no-inline';
@@ -89,6 +97,8 @@ export interface MemoryBackendOptions {
   library?: Record<string, MemoryFile>;
   /** Text stream chunk size, so tests can vary where chunks split. */
   chunkBytes?: number;
+  /** Optional deterministic fake LAN peer configuration for tests and `pnpm dev:web`. */
+  lanPeer?: MemoryLanPeerOptions;
 }
 
 const fail = (code: string, message: string): IpcError => ({ code, message });
@@ -121,6 +131,7 @@ const now = () => new Date().toISOString();
 export function createMemoryBackend({
   library = PREVIEW_LIBRARY,
   chunkBytes = DEFAULT_CHUNK_BYTES,
+  lanPeer,
 }: MemoryBackendOptions = {}): StudyBackend {
   const files: Record<string, MemoryFile> = { ...library };
   const paths = Object.keys(files);
@@ -1066,5 +1077,18 @@ export function createMemoryBackend({
       if (signal?.aborted) return 0;
       return streamUtf8Lossy(bytes, chunkBytes, onChunk, signal);
     },
+
+    ...createMemoryLanAdapter(
+      {
+        files,
+        documents,
+        bookmarks,
+        hashBytes,
+        readFile,
+        monotonicNow,
+        fail,
+      },
+      lanPeer,
+    ),
   };
 }

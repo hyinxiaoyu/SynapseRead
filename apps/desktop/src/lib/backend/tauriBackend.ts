@@ -7,13 +7,22 @@ import { detectPlatform } from '@/lib/platform';
 import type {
   Annotation,
   Bookmark,
+  CatalogBookClassification,
   CreatedExcerpt,
   DeletedCard,
   DocumentSourceStatus,
+  LanImportExecutionReport,
+  LanImportPlanResult,
+  LanImportProgress,
+  LanImportSessionInfo,
+  LanInterface,
+  LanShareEventPayload,
+  LanShareSnapshot,
   MindMapEdge,
   NoteCard,
   NotebookGraph,
   PdfLayout,
+  PlanProgress,
   ReadingPreferences,
   RelinkDocumentResult,
   RestoredAnnotation,
@@ -26,6 +35,7 @@ import type {
 
 const DOCUMENTS_DROPPED_EVENT = 'synapse://documents-dropped';
 const BEFORE_CLOSE_EVENT = 'synapse://before-close';
+const LAN_SHARE_EVENT = 'synapse://lan-share-event';
 const MENU_COMMAND_EVENT = 'menu-command';
 
 /**
@@ -202,5 +212,70 @@ export function createTauriBackend(): StudyBackend {
         signal?.removeEventListener('abort', onAbort);
       });
     },
+
+    // ---- LAN Book Sync (1:1 audited against `apps/desktop/src-tauri/src/ipc_tests.rs`) ----
+
+    lanListInterfaces: () => invoke<LanInterface[]>('lan_list_interfaces'),
+    lanShareStart: (input) =>
+      invoke<LanShareSnapshot | null>('lan_share_start', {
+        input: {
+          documentIds: input.documentIds,
+          positions: input.positions,
+          bookmarks: input.bookmarks,
+          interfaceIp: input.interfaceIp ?? null,
+        },
+      }),
+    lanShareStatus: () => invoke<LanShareSnapshot>('lan_share_status'),
+    lanShareRegenerateCode: () => invoke<LanShareSnapshot>('lan_share_regenerate_code'),
+    lanShareStop: () => invoke<LanShareSnapshot>('lan_share_stop'),
+    lanShareDisconnectPeer: () => invoke<LanShareSnapshot>('lan_share_disconnect_peer'),
+    onLanShareEvent: (listener) =>
+      subscribe((isLive) =>
+        listen<LanShareEventPayload>(LAN_SHARE_EVENT, (event) => {
+          if (isLive()) listener(event.payload);
+        }),
+      ),
+
+    lanImportConnect: (input) =>
+      invoke<LanImportSessionInfo>('lan_import_connect', {
+        input: {
+          address: input.address,
+          code: input.code,
+          operationId: input.operationId ?? null,
+        },
+      }),
+    lanImportCatalog: (sessionId) =>
+      invoke<CatalogBookClassification[]>('lan_import_catalog', { sessionId }),
+    lanImportPlan(input, onProgress) {
+      const channel = new Channel<PlanProgress>();
+      channel.onmessage = (progress) => {
+        onProgress(progress);
+      };
+      return invoke<LanImportPlanResult>('lan_import_plan', {
+        input: {
+          sessionId: input.sessionId,
+          bookIds: input.bookIds,
+          operationId: input.operationId ?? null,
+        },
+        onProgress: channel,
+      });
+    },
+    lanImportExecute(input, onProgress) {
+      const channel = new Channel<LanImportProgress>();
+      channel.onmessage = (progress) => {
+        onProgress(progress);
+      };
+      return invoke<LanImportExecutionReport>('lan_import_execute', {
+        input: {
+          sessionId: input.sessionId,
+          planId: input.planId,
+          decisions: input.decisions,
+          operationId: input.operationId ?? null,
+        },
+        onProgress: channel,
+      });
+    },
+    lanImportCancel: (operationId) => invoke<boolean>('lan_import_cancel', { operationId }),
+    lanImportDisconnect: (sessionId) => invoke('lan_import_disconnect', { sessionId }),
   };
 }

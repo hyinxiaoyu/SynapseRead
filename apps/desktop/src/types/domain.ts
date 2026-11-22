@@ -620,3 +620,467 @@ export function isAnchorLocation(value: unknown): value is AnchorLocation {
       return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// LAN Book Sync IPC Contract (ADR 0008, #143, #144)
+// ---------------------------------------------------------------------------
+
+/** Stable machine-readable `lan_*` error codes defined by ADR 0008. */
+export const LAN_ERROR_CODES = [
+  'lan_address_invalid',
+  'lan_address_unavailable',
+  'lan_bind_failed',
+  'lan_ports_exhausted',
+  'lan_network_changed',
+  'lan_unreachable',
+  'lan_protocol_incompatible',
+  'lan_source_stopped',
+  'lan_auth_invalid',
+  'lan_auth_expired',
+  'lan_attempts_exceeded',
+  'lan_session_busy',
+  'lan_scope_denied',
+  'lan_transfer_busy',
+  'lan_source_changed',
+  'lan_size_mismatch',
+  'lan_hash_mismatch',
+  'lan_payload_too_large',
+  'lan_disk_full',
+  'lan_cancelled',
+  'lan_position_conflict',
+] as const;
+
+export type LanErrorCode = (typeof LAN_ERROR_CODES)[number];
+
+const LAN_ERROR_CODE_SET: ReadonlySet<string> = new Set(LAN_ERROR_CODES);
+
+export function isLanErrorCode(code: string): code is LanErrorCode {
+  return LAN_ERROR_CODE_SET.has(code);
+}
+
+export interface Ipv4Subnet {
+  ip: string;
+  netmask: string;
+  prefixLen: number;
+}
+
+export interface LanInterface {
+  name: string;
+  subnet: Ipv4Subnet;
+}
+
+export interface SharePermissions {
+  positions: boolean;
+  bookmarks: boolean;
+}
+
+export type ListenerStopReason =
+  'stoppedByUser' | 'sessionEnded' | 'shutdown' | 'networkChanged' | 'codeExpired' | 'idleTimeout';
+
+export type PeerRejectReason = 'nonIpv4' | 'nonLanIp' | 'outsideSubnet';
+
+export type LanShareStatus =
+  | { state: 'off' }
+  | { state: 'listening'; failedAttempts: number; maxFailedAttempts: number }
+  | { state: 'codeLocked' }
+  | { state: 'paired'; peerIp: string };
+
+export interface LanShareSnapshot {
+  status: LanShareStatus;
+  address: string | null;
+  interfaceName: string | null;
+  pairingCode: string | null;
+  codeExpiresAtMs: number | null;
+  permissions: SharePermissions | null;
+  sharedBookCount: number;
+  blockedPeerCount: number;
+  lastBlockedPeerIp: string | null;
+  lastStopReason: ListenerStopReason | null;
+  lastStopErrorCode: string | null;
+}
+
+export const INITIAL_LAN_SHARE_SNAPSHOT: LanShareSnapshot = {
+  status: { state: 'off' },
+  address: null,
+  interfaceName: null,
+  pairingCode: null,
+  codeExpiresAtMs: null,
+  permissions: null,
+  sharedBookCount: 0,
+  blockedPeerCount: 0,
+  lastBlockedPeerIp: null,
+  lastStopReason: null,
+  lastStopErrorCode: null,
+};
+
+export interface LanShareStartInput {
+  documentIds: string[];
+  positions: boolean;
+  bookmarks: boolean;
+  interfaceIp?: string | null;
+}
+
+export type LanShareEventKind =
+  | {
+      kind: 'peerBlocked';
+      peerIp: string;
+      reason: PeerRejectReason;
+      totalBlocked: number;
+    }
+  | {
+      kind: 'stopped';
+      reason: ListenerStopReason;
+      errorCode: string | null;
+    };
+
+export interface LanShareEventPayload {
+  event: LanShareEventKind;
+  snapshot: LanShareSnapshot;
+}
+
+export type BookSyncState =
+  | 'new'
+  | 'alreadyPresent'
+  | 'missingFile'
+  | 'localFileChanged'
+  | 'sameTitleDifferentVersion'
+  | 'sourceUnavailable'
+  | 'formatMismatch';
+
+export interface CatalogBookClassification {
+  bookId: string;
+  title: string;
+  format: DocumentFormat | null;
+  rawFormat: string;
+  extension: string;
+  sizeBytes: number;
+  fileAvailable: boolean;
+  hasPosition: boolean | null;
+  bookmarkCount: number | null;
+  state: BookSyncState;
+  eligible: boolean;
+  needsFileDownload: boolean;
+  localDocumentId: string | null;
+  localTitle: string | null;
+}
+
+export interface LanImportConnectInput {
+  address: string;
+  code: string;
+  operationId?: string | null;
+}
+
+export interface LanImportSessionInfo {
+  sessionId: string;
+  address: string;
+  idleTimeoutSeconds: number;
+  permissions: SharePermissions;
+}
+
+export interface PlanProgress {
+  completedBooks: number;
+  totalBooks: number;
+  bookId: string;
+}
+
+export interface ImportErrorInfo {
+  code: string;
+  message: string;
+}
+
+export interface PositionPlanSummary {
+  remoteAvailable: boolean;
+  remoteProgress: number | null;
+  localHasPosition: boolean;
+  localProgress: number | null;
+  differs: boolean;
+  skippedReason?: string;
+  defaultAdopt: boolean;
+}
+
+export type BookmarkPlanSkipReason =
+  | { kind: 'invalidAnchor' }
+  | { kind: 'formatMismatch' }
+  | { kind: 'anchorLimitExceeded' }
+  | { kind: 'bookmarkCapExceeded' }
+  | { kind: 'unsupportedAnchor'; reason: string };
+
+export type PlannedBookmarkStatus =
+  | { status: 'new' }
+  | { status: 'existing' }
+  | { status: 'skipped'; reason: BookmarkPlanSkipReason };
+
+export interface PlannedBookmarkPreview {
+  index: number;
+  label: string | null;
+  createdAt: string | null;
+  status: PlannedBookmarkStatus;
+}
+
+export interface BookmarkPlanSummary {
+  newCount: number;
+  existingCount: number;
+  skippedCount: number;
+  entries: PlannedBookmarkPreview[];
+  defaultImport: boolean;
+}
+
+export interface BookPlanSummary {
+  bookId: string;
+  title: string;
+  format: DocumentFormat | null;
+  extension: string;
+  sizeBytes: number;
+  state: BookSyncState;
+  eligible: boolean;
+  needsFileDownload: boolean;
+  localDocumentId: string | null;
+  localTitle: string | null;
+  position: PositionPlanSummary;
+  bookmarks: BookmarkPlanSummary;
+  planError?: ImportErrorInfo;
+}
+
+export interface ImportPlanSummary {
+  books: BookPlanSummary[];
+}
+
+export interface BookImportDecision {
+  bookId: string;
+  importFile: boolean;
+  importPosition: boolean;
+  importBookmarks: boolean;
+  selectedBookmarkIndices?: number[];
+  overridePositionConflict?: boolean;
+}
+
+export interface LanImportPlanInput {
+  sessionId: string;
+  bookIds: string[];
+  operationId?: string | null;
+}
+
+export interface LanImportPlanResult {
+  planId: string;
+  summary: ImportPlanSummary;
+  defaultDecisions: BookImportDecision[];
+}
+
+export type LanComponentOutcome =
+  | { status: 'applied' }
+  | { status: 'skipped'; reason?: string }
+  | { status: 'blocked'; reason: string }
+  | {
+      status: 'conflict';
+      code: string;
+      hasCurrentPosition: boolean;
+      currentProgress: number | null;
+    }
+  | { status: 'failed'; error: ImportErrorInfo }
+  | { status: 'cancelled' };
+
+export interface BookmarkExecutionSummary {
+  inserted: number;
+  existing: number;
+  skipped: number;
+}
+
+export interface LanBookImportResult {
+  bookId: string;
+  documentId: string | null;
+  state: BookSyncState;
+  file: LanComponentOutcome;
+  position: LanComponentOutcome;
+  bookmarks: LanComponentOutcome;
+  bookmarkCounts: BookmarkExecutionSummary;
+}
+
+export type LanImportProgress =
+  | {
+      phase: 'bookStarted';
+      bookId: string;
+      bookIndex: number;
+      totalBooks: number;
+    }
+  | {
+      phase: 'fileTransfer';
+      bookId: string;
+      downloadedBytes: number;
+      totalBytes: number;
+    }
+  | {
+      phase: 'bookCompleted';
+      bookId: string;
+      bookIndex: number;
+      totalBooks: number;
+      result: LanBookImportResult;
+    };
+
+export interface LanImportExecuteInput {
+  sessionId: string;
+  planId: string;
+  decisions: BookImportDecision[];
+  operationId?: string | null;
+}
+
+export interface LanImportExecutionReport {
+  books: LanBookImportResult[];
+  cancelled: boolean;
+  sessionError?: ImportErrorInfo;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Type Guards for Untrusted LAN Sync Payloads (#144)
+// ---------------------------------------------------------------------------
+
+const BOOK_SYNC_STATES: ReadonlySet<string> = new Set<BookSyncState>([
+  'new',
+  'alreadyPresent',
+  'missingFile',
+  'localFileChanged',
+  'sameTitleDifferentVersion',
+  'sourceUnavailable',
+  'formatMismatch',
+]);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const isNullableString = (value: unknown): value is string | null =>
+  value === null || typeof value === 'string';
+
+const isNullableNumber = (value: unknown): value is number | null =>
+  value === null || isFiniteNumber(value);
+
+export function isLanShareSnapshot(value: unknown): value is LanShareSnapshot {
+  if (!isRecord(value) || !isRecord(value.status)) return false;
+  const state = value.status.state;
+  if (state !== 'off' && state !== 'listening' && state !== 'codeLocked' && state !== 'paired') {
+    return false;
+  }
+  if (
+    state === 'listening' &&
+    (!isFiniteNumber(value.status.failedAttempts) ||
+      !isFiniteNumber(value.status.maxFailedAttempts))
+  ) {
+    return false;
+  }
+  if (state === 'paired' && typeof value.status.peerIp !== 'string') {
+    return false;
+  }
+  return (
+    isNullableString(value.address) &&
+    isNullableString(value.interfaceName) &&
+    isNullableString(value.pairingCode) &&
+    isNullableNumber(value.codeExpiresAtMs) &&
+    isFiniteNumber(value.sharedBookCount) &&
+    isFiniteNumber(value.blockedPeerCount) &&
+    isNullableString(value.lastBlockedPeerIp)
+  );
+}
+
+export function isCatalogBookClassification(value: unknown): value is CatalogBookClassification {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.bookId === 'string' &&
+    typeof value.title === 'string' &&
+    typeof value.rawFormat === 'string' &&
+    typeof value.extension === 'string' &&
+    isFiniteNumber(value.sizeBytes) &&
+    typeof value.fileAvailable === 'boolean' &&
+    typeof value.state === 'string' &&
+    BOOK_SYNC_STATES.has(value.state) &&
+    typeof value.eligible === 'boolean' &&
+    typeof value.needsFileDownload === 'boolean' &&
+    isNullableString(value.localDocumentId) &&
+    isNullableString(value.localTitle)
+  );
+}
+
+export function isLanImportPlanResult(value: unknown): value is LanImportPlanResult {
+  if (!isRecord(value) || typeof value.planId !== 'string') return false;
+  if (!isRecord(value.summary) || !Array.isArray(value.summary.books)) return false;
+  if (!Array.isArray(value.defaultDecisions)) return false;
+  return value.summary.books.every(
+    (book) =>
+      isRecord(book) &&
+      typeof book.bookId === 'string' &&
+      typeof book.title === 'string' &&
+      typeof book.state === 'string' &&
+      BOOK_SYNC_STATES.has(book.state) &&
+      isRecord(book.position) &&
+      isRecord(book.bookmarks),
+  );
+}
+
+export function isLanComponentOutcome(value: unknown): value is LanComponentOutcome {
+  if (!isRecord(value) || typeof value.status !== 'string') return false;
+  switch (value.status) {
+    case 'applied':
+    case 'skipped':
+    case 'cancelled':
+      return true;
+    case 'blocked':
+      return typeof value.reason === 'string';
+    case 'conflict':
+      return (
+        typeof value.code === 'string' &&
+        typeof value.hasCurrentPosition === 'boolean' &&
+        isNullableNumber(value.currentProgress)
+      );
+    case 'failed':
+      return (
+        isRecord(value.error) &&
+        typeof value.error.code === 'string' &&
+        typeof value.error.message === 'string'
+      );
+    default:
+      return false;
+  }
+}
+
+export function isLanBookImportResult(value: unknown): value is LanBookImportResult {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.bookId === 'string' &&
+    isNullableString(value.documentId) &&
+    typeof value.state === 'string' &&
+    BOOK_SYNC_STATES.has(value.state) &&
+    isLanComponentOutcome(value.file) &&
+    isLanComponentOutcome(value.position) &&
+    isLanComponentOutcome(value.bookmarks) &&
+    isRecord(value.bookmarkCounts) &&
+    isFiniteNumber(value.bookmarkCounts.inserted) &&
+    isFiniteNumber(value.bookmarkCounts.existing) &&
+    isFiniteNumber(value.bookmarkCounts.skipped)
+  );
+}
+
+export function isLanImportProgress(value: unknown): value is LanImportProgress {
+  if (!isRecord(value) || typeof value.phase !== 'string' || typeof value.bookId !== 'string') {
+    return false;
+  }
+  switch (value.phase) {
+    case 'bookStarted':
+      return isFiniteNumber(value.bookIndex) && isFiniteNumber(value.totalBooks);
+    case 'fileTransfer':
+      return isFiniteNumber(value.downloadedBytes) && isFiniteNumber(value.totalBytes);
+    case 'bookCompleted':
+      return (
+        isFiniteNumber(value.bookIndex) &&
+        isFiniteNumber(value.totalBooks) &&
+        isLanBookImportResult(value.result)
+      );
+    default:
+      return false;
+  }
+}
+
+export function isLanImportExecutionReport(value: unknown): value is LanImportExecutionReport {
+  if (!isRecord(value)) return false;
+  return (
+    Array.isArray(value.books) &&
+    value.books.every(isLanBookImportResult) &&
+    typeof value.cancelled === 'boolean'
+  );
+}

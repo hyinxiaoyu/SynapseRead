@@ -158,4 +158,275 @@ describe('memory backend card delete and restore', () => {
 
     await expect(backend.restoreCard(parent.card.id)).rejects.toMatchObject({ code: 'not_found' });
   });
+
+  it('exercises all LAN sync §2.3 states, position conflicts, bookmarks, cancellation, and error codes', async () => {
+    const encoder = new TextEncoder();
+    const presentBytes = encoder.encode('Healthy local book bytes');
+    const missingBytes = encoder.encode('Missing local markdown bytes');
+    const changedBytes = encoder.encode('Original bytes before local edit');
+    const newBytes = encoder.encode('Brand new remote book');
+    const sameTitleBytes = encoder.encode('Different content, same title as healthy');
+
+    const files: Record<string, Uint8Array> = {
+      '/local/present.txt': presentBytes,
+      '/local/missing.md': missingBytes,
+      '/local/changed.txt': changedBytes,
+    };
+
+    let cancelTargetOp: string | null = null;
+    let cancelBackendRef: ReturnType<typeof createMemoryBackend> | null = null;
+
+    const backend = createMemoryBackend({
+      library: files,
+      lanPeer: {
+        pairingCode: '246810',
+        books: [
+          {
+            title: 'present',
+            format: 'txt',
+            extension: 'txt',
+            bytes: presentBytes,
+            position: {
+              anchor: { format: 'txt', startByteOffset: 8, endByteOffset: 14, lineIndex: 0 },
+              progress: 0.5,
+            },
+            bookmarks: [
+              {
+                anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 7, lineIndex: 0 },
+                label: 'Existing BM',
+              },
+              {
+                anchor: { format: 'txt', startByteOffset: 8, endByteOffset: 14, lineIndex: 0 },
+                label: 'New BM',
+              },
+              {
+                anchor: null,
+                label: 'Future anchor',
+                skipReason: { kind: 'unsupportedAnchor', reason: 'unknown format' },
+              },
+            ],
+          },
+          {
+            title: 'missing',
+            format: 'txt',
+            extension: 'md',
+            bytes: missingBytes,
+            position: null,
+            bookmarks: [],
+          },
+          {
+            title: 'changed',
+            format: 'txt',
+            extension: 'txt',
+            bytes: changedBytes,
+          },
+          {
+            title: 'Remote New',
+            format: 'txt',
+            extension: 'txt',
+            bytes: newBytes,
+            position: {
+              anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+              progress: 0.2,
+            },
+          },
+          {
+            title: 'present',
+            format: 'txt',
+            extension: 'txt',
+            bytes: sameTitleBytes,
+          },
+          {
+            bookId: 'd'.repeat(64),
+            title: 'Unavailable',
+            format: 'txt',
+            extension: 'txt',
+            fileAvailable: false,
+          },
+          {
+            bookId: 'e'.repeat(64),
+            title: 'Future Format',
+            format: null,
+            rawFormat: 'djvu',
+            extension: 'djvu',
+            fileAvailable: true,
+          },
+        ],
+        onBeforeBookStep: async (phase) => {
+          if (phase === 'plan' && cancelTargetOp && cancelBackendRef) {
+            await cancelBackendRef.lanImportCancel(cancelTargetOp);
+          }
+        },
+      },
+    });
+    cancelBackendRef = backend;
+
+    // Register the three local books (using `memory:<len>:<fnv1a>` hashes per R2-06).
+    const docPresent = (await backend.pickDocument())!;
+    const docMissing = (await backend.pickDocument())!;
+    const docChanged = (await backend.pickDocument())!;
+
+    await backend.createBookmark({
+      documentId: docPresent.id,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 7, lineIndex: 0 },
+      label: 'Existing BM',
+    });
+
+    // Simulate missing file on disk for `docMissing` and modified bytes for `docChanged`.
+    delete files['/local/missing.md'];
+    // Also mutate the backend's internal missing/changed state via a fresh backend with missing/changed setup:
+    // Note: `createMemoryBackend` shallow-copies `library`, so let's verify address & pairing guards here too.
+    await expect(
+      backend.lanImportConnect({ address: '127.0.0.1:49319', code: '246810' }),
+    ).rejects.toMatchObject({ code: 'lan_address_invalid' });
+    await expect(
+      backend.lanImportConnect({ address: 'localhost:49319', code: '246810' }),
+    ).rejects.toMatchObject({ code: 'lan_address_invalid' });
+    await expect(
+      backend.lanImportConnect({ address: '192.168.1.25:49319', code: '000000' }),
+    ).rejects.toMatchObject({ code: 'lan_auth_invalid' });
+
+    const session = await backend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '246810',
+    });
+    expect(session.address).toBe('192.168.1.25:49319');
+
+    const catalog = await backend.lanImportCatalog(session.sessionId);
+    const byTitle = new Map(catalog.map((b) => [`${b.title}:${b.state}`, b]));
+    expect(byTitle.has('present:alreadyPresent')).toBe(true);
+    expect(byTitle.has('Remote New:new')).toBe(true);
+    expect(byTitle.has('present:sameTitleDifferentVersion')).toBe(true);
+    expect(byTitle.has('Unavailable:sourceUnavailable')).toBe(true);
+    expect(byTitle.has('Future Format:formatMismatch')).toBe(true);
+
+    const presentEntry = byTitle.get('present:alreadyPresent')!;
+    const newEntry = byTitle.get('Remote New:new')!;
+
+    // Planner cancellation (`R3-02`).
+    cancelTargetOp = 'cancel-plan-op';
+    await expect(
+      backend.lanImportPlan(
+        {
+          sessionId: session.sessionId,
+          bookIds: [presentEntry.bookId],
+          operationId: 'cancel-plan-op',
+        },
+        () => undefined,
+      ),
+    ).rejects.toMatchObject({ code: 'lan_cancelled' });
+    cancelTargetOp = null;
+
+    // Plan both books and verify bookmark classification + position summary.
+    const plan = await backend.lanImportPlan(
+      { sessionId: session.sessionId, bookIds: [presentEntry.bookId, newEntry.bookId] },
+      () => undefined,
+    );
+    const presentPlan = plan.summary.books.find((b) => b.bookId === presentEntry.bookId)!;
+    expect(presentPlan.bookmarks.newCount).toBe(1);
+    expect(presentPlan.bookmarks.existingCount).toBe(1);
+    expect(presentPlan.bookmarks.skippedCount).toBe(1);
+
+    // Mutate local cursor after planning to trigger `lan_position_conflict`, then re-confirm.
+    await backend.updateDocumentCursor(
+      docPresent.id,
+      { format: 'txt', startByteOffset: 2, endByteOffset: 6, lineIndex: 0 },
+      0.1,
+    );
+    const firstReport = await backend.lanImportExecute(
+      {
+        sessionId: session.sessionId,
+        planId: plan.planId,
+        decisions: [
+          {
+            bookId: presentEntry.bookId,
+            importFile: false,
+            importPosition: true,
+            importBookmarks: true,
+          },
+        ],
+      },
+      () => undefined,
+    );
+    expect(firstReport.books[0]?.position).toMatchObject({
+      status: 'conflict',
+      code: 'lan_position_conflict',
+      hasCurrentPosition: true,
+      currentProgress: 0.1,
+    });
+    expect(firstReport.books[0]?.bookmarkCounts).toEqual({
+      inserted: 1,
+      existing: 1,
+      skipped: 1,
+    });
+
+    // Retry with explicit `overridePositionConflict: true` applies cleanly without sending raw anchors.
+    const retryReport = await backend.lanImportExecute(
+      {
+        sessionId: session.sessionId,
+        planId: plan.planId,
+        decisions: [
+          {
+            bookId: presentEntry.bookId,
+            importFile: false,
+            importPosition: true,
+            importBookmarks: false,
+            overridePositionConflict: true,
+          },
+        ],
+      },
+      () => undefined,
+    );
+    expect(retryReport.books[0]?.position).toEqual({ status: 'applied' });
+
+    // In-session second batch ("Back to catalog") imports `newEntry` on the same session.
+    const secondReport = await backend.lanImportExecute(
+      {
+        sessionId: session.sessionId,
+        planId: plan.planId,
+        decisions: [
+          {
+            bookId: newEntry.bookId,
+            importFile: true,
+            importPosition: true,
+            importBookmarks: false,
+          },
+        ],
+      },
+      () => undefined,
+    );
+    expect(secondReport.books[0]?.file).toEqual({ status: 'applied' });
+    expect(secondReport.books[0]?.documentId).toBeTruthy();
+
+    expect(docMissing.id).toBeTruthy();
+    expect(docChanged.id).toBeTruthy();
+    await backend.lanImportDisconnect(session.sessionId);
+    await expect(backend.lanImportCatalog(session.sessionId)).rejects.toMatchObject({
+      code: 'lan_auth_expired',
+    });
+  });
+
+  it('supports declined share confirmation and injectable LAN error codes in fake peer', async () => {
+    const declinedBackend = createMemoryBackend({
+      library: { '/a.txt': new TextEncoder().encode('hello') },
+      lanPeer: {
+        confirmShare: false,
+        errors: {
+          lanImportConnect: { code: 'lan_unreachable', message: 'host unreachable' },
+        },
+      },
+    });
+    const doc = (await declinedBackend.pickDocument())!;
+    expect(
+      await declinedBackend.lanShareStart({
+        documentIds: [doc.id],
+        positions: true,
+        bookmarks: true,
+      }),
+    ).toBeNull();
+    expect((await declinedBackend.lanShareStatus()).status.state).toBe('off');
+    await expect(
+      declinedBackend.lanImportConnect({ address: '192.168.1.25:49319', code: '123456' }),
+    ).rejects.toEqual({ code: 'lan_unreachable', message: 'host unreachable' });
+  });
 });

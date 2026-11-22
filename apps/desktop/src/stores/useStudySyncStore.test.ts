@@ -2656,4 +2656,108 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(aBookmarks[0]?.label).toBe('Synced A');
     expect(bBookmarks.map((b) => b.id)).toEqual([keepBId]);
   });
+
+  it('manages LAN sharing lifecycle and applies live share events', async () => {
+    const docId = await openDocument();
+    const interfaces = await state().loadLanInterfaces();
+    expect(interfaces.length).toBeGreaterThan(0);
+
+    const started = await state().startLanShare({
+      documentIds: [docId],
+      positions: true,
+      bookmarks: true,
+    });
+    expect(started?.status.state).toBe('listening');
+    expect(started?.pairingCode).toMatch(/^\d{6}$/);
+    const firstCode = started?.pairingCode;
+
+    const regenerated = await state().regenerateLanShareCode();
+    expect(regenerated?.pairingCode).toMatch(/^\d{6}$/);
+    expect(regenerated?.pairingCode).not.toBe(firstCode);
+
+    await state().stopLanShare();
+    expect(state().lanShare.snapshot.status.state).toBe('off');
+    expect(state().lanShare.snapshot.lastStopReason).toBe('stoppedByUser');
+  });
+
+  it('refreshes documents, source statuses, and bookmarks per completed book during LAN import (T-32)', async () => {
+    const remoteBytes = new TextEncoder().encode('Imported remote chapter text');
+    const customBackend = createMemoryBackend({
+      library: { '/local.txt': new TextEncoder().encode('Local book') },
+      lanPeer: {
+        pairingCode: '123456',
+        books: [
+          {
+            title: 'Remote Synced Book',
+            format: 'txt',
+            extension: 'txt',
+            bytes: remoteBytes,
+            position: {
+              anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 8, lineIndex: 0 },
+              progress: 0.4,
+            },
+            bookmarks: [
+              {
+                anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 8, lineIndex: 0 },
+                label: 'Opening',
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const customStore = createStudySyncStore(customBackend);
+    await customStore.getState().initialize();
+
+    const session = await customStore.getState().connectLanImport('192.168.1.25:49319', '123456');
+    expect(session).not.toBeNull();
+    expect(customStore.getState().lanImport.phase).toBe('catalog');
+    expect(customStore.getState().lanImport.catalog).toHaveLength(1);
+
+    const remoteBookId = customStore.getState().lanImport.catalog[0]!.bookId;
+    const plan = await customStore.getState().planLanImport([remoteBookId]);
+    expect(plan).not.toBeNull();
+    expect(customStore.getState().lanImport.phase).toBe('preview');
+
+    const report = await customStore.getState().executeLanImport(plan!.defaultDecisions);
+    expect(report?.books[0]?.file).toEqual({ status: 'applied' });
+    expect(customStore.getState().lanImport.phase).toBe('results');
+
+    const importedDocId = report!.books[0]!.documentId!;
+    // Store refreshed documents and bookmarks live without app restart (`T-32`).
+    expect(customStore.getState().documents.some((d) => d.id === importedDocId)).toBe(true);
+    expect(
+      customStore
+        .getState()
+        .bookmarks.some((b) => b.documentId === importedDocId && b.label === 'Opening'),
+    ).toBe(true);
+
+    // Back to catalog keeps paired session alive (`R3-09`); disconnect ends it.
+    await customStore.getState().backToLanImportCatalog();
+    expect(customStore.getState().lanImport.phase).toBe('catalog');
+    expect(customStore.getState().lanImport.session).not.toBeNull();
+
+    await customStore.getState().disconnectLanImport();
+    expect(customStore.getState().lanImport.phase).toBe('idle');
+    expect(customStore.getState().lanImport.session).toBeNull();
+  });
+
+  it('preserves strict IpcError { code, message } on LAN import errors (R3-07)', async () => {
+    const failingBackend = createMemoryBackend({
+      lanPeer: {
+        errors: {
+          lanImportConnect: { code: 'lan_unreachable', message: 'connection refused' },
+        },
+      },
+    });
+    const failingStore = createStudySyncStore(failingBackend);
+    await failingStore.getState().initialize();
+
+    const session = await failingStore.getState().connectLanImport('192.168.1.25:49319', '123456');
+    expect(session).toBeNull();
+    expect(failingStore.getState().lanImport.error).toEqual({
+      code: 'lan_unreachable',
+      message: 'connection refused',
+    });
+  });
 });
