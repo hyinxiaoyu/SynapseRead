@@ -2760,4 +2760,161 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
       message: 'connection refused',
     });
   });
+
+  it('prevents stale catalog/plan/execute responses from resurrecting a disconnected or replaced session while still refreshing committed books', async () => {
+    const base = createMemoryBackend({ library: {} });
+    let resolveSlowCatalog!: (books: Awaited<ReturnType<StudyBackend['lanImportCatalog']>>) => void;
+    const disconnectedSessions: string[] = [];
+
+    const slowCatalogBackend: StudyBackend = {
+      ...base,
+      lanImportConnect: vi
+        .fn<StudyBackend['lanImportConnect']>()
+        .mockResolvedValueOnce({
+          sessionId: 'session-old',
+          address: '192.168.1.25:49319',
+          idleTimeoutSeconds: 600,
+          permissions: { positions: true, bookmarks: true },
+        })
+        .mockResolvedValueOnce({
+          sessionId: 'session-new',
+          address: '192.168.1.30:49319',
+          idleTimeoutSeconds: 600,
+          permissions: { positions: true, bookmarks: true },
+        }),
+      lanImportCatalog: vi
+        .fn<StudyBackend['lanImportCatalog']>()
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveSlowCatalog = resolve;
+            }),
+        )
+        .mockResolvedValueOnce([]),
+      lanImportDisconnect: vi.fn<StudyBackend['lanImportDisconnect']>(async (sessionId) => {
+        disconnectedSessions.push(sessionId);
+      }),
+    };
+
+    const s = createStudySyncStore(slowCatalogBackend);
+    await s.getState().initialize();
+
+    const oldConnectPromise = s.getState().connectLanImport('192.168.1.25:49319', '123456');
+    // Wait a microtask for `lanImportConnect` to resolve and `lanImportCatalog` to start.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Disconnect while catalog is still in flight: must disconnect `session-old` and return to `idle`.
+    await s.getState().disconnectLanImport();
+    expect(disconnectedSessions).toEqual(['session-old']);
+    expect(s.getState().lanImport.phase).toBe('idle');
+    expect(s.getState().lanImport.session).toBeNull();
+
+    // Immediately reconnect to a new session before the old catalog resolves.
+    const newSession = await s.getState().connectLanImport('192.168.1.30:49319', '654321');
+    expect(newSession?.sessionId).toBe('session-new');
+    expect(s.getState().lanImport.session?.sessionId).toBe('session-new');
+
+    // Now the stale catalog from `session-old` resolves — it must NOT overwrite `session-new`.
+    resolveSlowCatalog([
+      {
+        bookId: 'a'.repeat(64),
+        title: 'Stale Book',
+        format: 'txt',
+        rawFormat: 'txt',
+        extension: 'txt',
+        sizeBytes: 10,
+        fileAvailable: true,
+        hasPosition: false,
+        bookmarkCount: 0,
+        state: 'new',
+        eligible: true,
+        needsFileDownload: true,
+        localDocumentId: null,
+        localTitle: null,
+      },
+    ]);
+    expect(await oldConnectPromise).toBeNull();
+    expect(s.getState().lanImport.session?.sessionId).toBe('session-new');
+    expect(s.getState().lanImport.catalog).toEqual([]);
+  });
+
+  it('recovers a missing managed document restored to the exact same filePath before book 2 finishes (T-32)', async () => {
+    const book1Bytes = new TextEncoder().encode('Managed book restored to same path');
+    const base = createMemoryBackend({
+      library: { '/library/same-path.txt': book1Bytes },
+    });
+    const doc1 = (await base.pickDocument())!;
+    let releaseBook2!: () => void;
+
+    const customBackend: StudyBackend = {
+      ...base,
+      lanImportConnect: async () => ({
+        sessionId: 'sess-1',
+        address: '192.168.1.25:49319',
+        idleTimeoutSeconds: 600,
+        permissions: { positions: true, bookmarks: true },
+      }),
+      lanImportCatalog: async () => [],
+      lanImportPlan: async () => ({
+        planId: 'plan-1',
+        summary: { books: [] },
+        defaultDecisions: [],
+      }),
+      lanImportExecute: async (_input, onProgress) => {
+        // Book 1 completes with the exact same `documentId` and `filePath`, and
+        // even with `file.status === 'skipped'` (Rust `AlreadyPresent` branch).
+        onProgress({
+          phase: 'bookCompleted',
+          bookId: doc1.fileHash,
+          bookIndex: 0,
+          totalBooks: 2,
+          result: {
+            bookId: doc1.fileHash,
+            documentId: doc1.id,
+            state: 'missingFile',
+            file: { status: 'skipped' },
+            position: { status: 'skipped' },
+            bookmarks: { status: 'skipped' },
+            bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+          },
+        });
+        // Book 2 stays in flight while we assert Book 1 already recovered.
+        await new Promise<void>((resolve) => {
+          releaseBook2 = resolve;
+        });
+        return { books: [], cancelled: false };
+      },
+    };
+
+    const s = createStudySyncStore(customBackend);
+    await s.getState().initialize();
+    // Simulate `doc1` currently showing SourceRecoveryDialog (`missing`) at `/library/same-path.txt`.
+    s.setState((prev) => ({
+      documentSourceStatuses: {
+        ...prev.documentSourceStatuses,
+        [doc1.id]: {
+          documentId: doc1.id,
+          state: 'missing',
+          currentFileHash: null,
+          fileSizeBytes: null,
+        },
+      },
+    }));
+
+    await s.getState().connectLanImport('192.168.1.25:49319', '123456');
+    await s.getState().planLanImport([]);
+
+    const execPromise = s.getState().executeLanImport([]);
+    // Wait for Book 1's per-book refresh + verifyDocumentSource while Book 2 is still running.
+    await vi.waitFor(() => {
+      expect(s.getState().documentSourceStatuses[doc1.id]?.state).toBe('ok');
+    });
+    expect(s.getState().relinkedNonceByDocumentId[doc1.id]).toBe(1);
+    expect(s.getState().lanImport.phase).toBe('importing');
+
+    releaseBook2();
+    await execPromise;
+    expect(s.getState().lanImport.phase).toBe('results');
+  });
 });

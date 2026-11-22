@@ -677,7 +677,7 @@ export interface SharePermissions {
 export type ListenerStopReason =
   'stoppedByUser' | 'sessionEnded' | 'shutdown' | 'networkChanged' | 'codeExpired' | 'idleTimeout';
 
-export type PeerRejectReason = 'nonIpv4' | 'nonLanIp' | 'outsideSubnet';
+export type PeerRejectReason = 'nonIpv4' | 'nonPrivateAddress' | 'outOfSubnet';
 
 export type LanShareStatus =
   | { state: 'off' }
@@ -943,6 +943,23 @@ const BOOK_SYNC_STATES: ReadonlySet<string> = new Set<BookSyncState>([
   'formatMismatch',
 ]);
 
+const DOCUMENT_FORMATS: ReadonlySet<string> = new Set<DocumentFormat>(['pdf', 'epub', 'txt', 'md']);
+
+const LISTENER_STOP_REASONS: ReadonlySet<string> = new Set<ListenerStopReason>([
+  'stoppedByUser',
+  'sessionEnded',
+  'shutdown',
+  'networkChanged',
+  'codeExpired',
+  'idleTimeout',
+]);
+
+const PEER_REJECT_REASONS: ReadonlySet<string> = new Set<PeerRejectReason>([
+  'nonIpv4',
+  'nonPrivateAddress',
+  'outOfSubnet',
+]);
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null;
 
@@ -951,6 +968,30 @@ const isNullableString = (value: unknown): value is string | null =>
 
 const isNullableNumber = (value: unknown): value is number | null =>
   value === null || isFiniteNumber(value);
+
+const isNullableBoolean = (value: unknown): value is boolean | null =>
+  value === null || typeof value === 'boolean';
+
+export function isSharePermissions(value: unknown): value is SharePermissions {
+  if (!isRecord(value)) return false;
+  return typeof value.positions === 'boolean' && typeof value.bookmarks === 'boolean';
+}
+
+export function isImportErrorInfo(value: unknown): value is ImportErrorInfo {
+  if (!isRecord(value)) return false;
+  return typeof value.code === 'string' && typeof value.message === 'string';
+}
+
+export function isLanInterface(value: unknown): value is LanInterface {
+  if (!isRecord(value) || typeof value.name !== 'string' || !isRecord(value.subnet)) {
+    return false;
+  }
+  return (
+    typeof value.subnet.ip === 'string' &&
+    typeof value.subnet.netmask === 'string' &&
+    isFiniteNumber(value.subnet.prefixLen)
+  );
+}
 
 export function isLanShareSnapshot(value: unknown): value is LanShareSnapshot {
   if (!isRecord(value) || !isRecord(value.status)) return false;
@@ -968,6 +1009,15 @@ export function isLanShareSnapshot(value: unknown): value is LanShareSnapshot {
   if (state === 'paired' && typeof value.status.peerIp !== 'string') {
     return false;
   }
+  if (value.permissions !== null && !isSharePermissions(value.permissions)) {
+    return false;
+  }
+  if (
+    value.lastStopReason !== null &&
+    (typeof value.lastStopReason !== 'string' || !LISTENER_STOP_REASONS.has(value.lastStopReason))
+  ) {
+    return false;
+  }
   return (
     isNullableString(value.address) &&
     isNullableString(value.interfaceName) &&
@@ -975,12 +1025,61 @@ export function isLanShareSnapshot(value: unknown): value is LanShareSnapshot {
     isNullableNumber(value.codeExpiresAtMs) &&
     isFiniteNumber(value.sharedBookCount) &&
     isFiniteNumber(value.blockedPeerCount) &&
-    isNullableString(value.lastBlockedPeerIp)
+    isNullableString(value.lastBlockedPeerIp) &&
+    isNullableString(value.lastStopErrorCode)
+  );
+}
+
+export function isLanShareEventPayload(value: unknown): value is LanShareEventPayload {
+  if (!isRecord(value) || !isRecord(value.event) || !isLanShareSnapshot(value.snapshot)) {
+    return false;
+  }
+  switch (value.event.kind) {
+    case 'peerBlocked':
+      return (
+        typeof value.event.peerIp === 'string' &&
+        typeof value.event.reason === 'string' &&
+        PEER_REJECT_REASONS.has(value.event.reason) &&
+        isFiniteNumber(value.event.totalBlocked)
+      );
+    case 'stopped':
+      return (
+        typeof value.event.reason === 'string' &&
+        LISTENER_STOP_REASONS.has(value.event.reason) &&
+        isNullableString(value.event.errorCode)
+      );
+    default:
+      return false;
+  }
+}
+
+export function isLanImportSessionInfo(value: unknown): value is LanImportSessionInfo {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.sessionId === 'string' &&
+    typeof value.address === 'string' &&
+    isFiniteNumber(value.idleTimeoutSeconds) &&
+    isSharePermissions(value.permissions)
+  );
+}
+
+export function isPlanProgress(value: unknown): value is PlanProgress {
+  if (!isRecord(value)) return false;
+  return (
+    isFiniteNumber(value.completedBooks) &&
+    isFiniteNumber(value.totalBooks) &&
+    typeof value.bookId === 'string'
   );
 }
 
 export function isCatalogBookClassification(value: unknown): value is CatalogBookClassification {
   if (!isRecord(value)) return false;
+  if (
+    value.format !== null &&
+    (typeof value.format !== 'string' || !DOCUMENT_FORMATS.has(value.format))
+  ) {
+    return false;
+  }
   return (
     typeof value.bookId === 'string' &&
     typeof value.title === 'string' &&
@@ -988,6 +1087,8 @@ export function isCatalogBookClassification(value: unknown): value is CatalogBoo
     typeof value.extension === 'string' &&
     isFiniteNumber(value.sizeBytes) &&
     typeof value.fileAvailable === 'boolean' &&
+    isNullableBoolean(value.hasPosition) &&
+    isNullableNumber(value.bookmarkCount) &&
     typeof value.state === 'string' &&
     BOOK_SYNC_STATES.has(value.state) &&
     typeof value.eligible === 'boolean' &&
@@ -997,19 +1098,124 @@ export function isCatalogBookClassification(value: unknown): value is CatalogBoo
   );
 }
 
+export function isPositionPlanSummary(value: unknown): value is PositionPlanSummary {
+  if (!isRecord(value)) return false;
+  if (value.skippedReason !== undefined && typeof value.skippedReason !== 'string') {
+    return false;
+  }
+  return (
+    typeof value.remoteAvailable === 'boolean' &&
+    isNullableNumber(value.remoteProgress) &&
+    typeof value.localHasPosition === 'boolean' &&
+    isNullableNumber(value.localProgress) &&
+    typeof value.differs === 'boolean' &&
+    typeof value.defaultAdopt === 'boolean'
+  );
+}
+
+export function isBookmarkPlanSkipReason(value: unknown): value is BookmarkPlanSkipReason {
+  if (!isRecord(value) || typeof value.kind !== 'string') return false;
+  switch (value.kind) {
+    case 'invalidAnchor':
+    case 'formatMismatch':
+    case 'anchorLimitExceeded':
+    case 'bookmarkCapExceeded':
+      return true;
+    case 'unsupportedAnchor':
+      return typeof value.reason === 'string';
+    default:
+      return false;
+  }
+}
+
+export function isPlannedBookmarkPreview(value: unknown): value is PlannedBookmarkPreview {
+  if (!isRecord(value) || !isRecord(value.status)) return false;
+  if (
+    !isFiniteNumber(value.index) ||
+    !isNullableString(value.label) ||
+    !isNullableString(value.createdAt)
+  ) {
+    return false;
+  }
+  switch (value.status.status) {
+    case 'new':
+    case 'existing':
+      return true;
+    case 'skipped':
+      return isBookmarkPlanSkipReason(value.status.reason);
+    default:
+      return false;
+  }
+}
+
+export function isBookmarkPlanSummary(value: unknown): value is BookmarkPlanSummary {
+  if (!isRecord(value) || !Array.isArray(value.entries)) return false;
+  return (
+    isFiniteNumber(value.newCount) &&
+    isFiniteNumber(value.existingCount) &&
+    isFiniteNumber(value.skippedCount) &&
+    value.entries.every(isPlannedBookmarkPreview) &&
+    typeof value.defaultImport === 'boolean'
+  );
+}
+
+export function isBookPlanSummary(value: unknown): value is BookPlanSummary {
+  if (!isRecord(value)) return false;
+  if (
+    value.format !== null &&
+    (typeof value.format !== 'string' || !DOCUMENT_FORMATS.has(value.format))
+  ) {
+    return false;
+  }
+  if (value.planError !== undefined && !isImportErrorInfo(value.planError)) {
+    return false;
+  }
+  return (
+    typeof value.bookId === 'string' &&
+    typeof value.title === 'string' &&
+    typeof value.extension === 'string' &&
+    isFiniteNumber(value.sizeBytes) &&
+    typeof value.state === 'string' &&
+    BOOK_SYNC_STATES.has(value.state) &&
+    typeof value.eligible === 'boolean' &&
+    typeof value.needsFileDownload === 'boolean' &&
+    isNullableString(value.localDocumentId) &&
+    isNullableString(value.localTitle) &&
+    isPositionPlanSummary(value.position) &&
+    isBookmarkPlanSummary(value.bookmarks)
+  );
+}
+
+export function isBookImportDecision(value: unknown): value is BookImportDecision {
+  if (!isRecord(value)) return false;
+  if (
+    value.selectedBookmarkIndices !== undefined &&
+    (!Array.isArray(value.selectedBookmarkIndices) ||
+      !value.selectedBookmarkIndices.every(isFiniteNumber))
+  ) {
+    return false;
+  }
+  if (
+    value.overridePositionConflict !== undefined &&
+    typeof value.overridePositionConflict !== 'boolean'
+  ) {
+    return false;
+  }
+  return (
+    typeof value.bookId === 'string' &&
+    typeof value.importFile === 'boolean' &&
+    typeof value.importPosition === 'boolean' &&
+    typeof value.importBookmarks === 'boolean'
+  );
+}
+
 export function isLanImportPlanResult(value: unknown): value is LanImportPlanResult {
   if (!isRecord(value) || typeof value.planId !== 'string') return false;
   if (!isRecord(value.summary) || !Array.isArray(value.summary.books)) return false;
   if (!Array.isArray(value.defaultDecisions)) return false;
-  return value.summary.books.every(
-    (book) =>
-      isRecord(book) &&
-      typeof book.bookId === 'string' &&
-      typeof book.title === 'string' &&
-      typeof book.state === 'string' &&
-      BOOK_SYNC_STATES.has(book.state) &&
-      isRecord(book.position) &&
-      isRecord(book.bookmarks),
+  return (
+    value.summary.books.every(isBookPlanSummary) &&
+    value.defaultDecisions.every(isBookImportDecision)
   );
 }
 
@@ -1017,9 +1223,10 @@ export function isLanComponentOutcome(value: unknown): value is LanComponentOutc
   if (!isRecord(value) || typeof value.status !== 'string') return false;
   switch (value.status) {
     case 'applied':
-    case 'skipped':
     case 'cancelled':
       return true;
+    case 'skipped':
+      return value.reason === undefined || typeof value.reason === 'string';
     case 'blocked':
       return typeof value.reason === 'string';
     case 'conflict':
@@ -1029,11 +1236,7 @@ export function isLanComponentOutcome(value: unknown): value is LanComponentOutc
         isNullableNumber(value.currentProgress)
       );
     case 'failed':
-      return (
-        isRecord(value.error) &&
-        typeof value.error.code === 'string' &&
-        typeof value.error.message === 'string'
-      );
+      return isImportErrorInfo(value.error);
     default:
       return false;
   }
@@ -1078,6 +1281,9 @@ export function isLanImportProgress(value: unknown): value is LanImportProgress 
 
 export function isLanImportExecutionReport(value: unknown): value is LanImportExecutionReport {
   if (!isRecord(value)) return false;
+  if (value.sessionError !== undefined && !isImportErrorInfo(value.sessionError)) {
+    return false;
+  }
   return (
     Array.isArray(value.books) &&
     value.books.every(isLanBookImportResult) &&

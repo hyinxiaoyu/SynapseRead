@@ -239,6 +239,8 @@ interface InternalPlannedBook {
   summary: BookPlanSummary;
   expectedCursor: InternalCursorSnapshot;
   conflictCursor: InternalCursorSnapshot | null;
+  /** Plan-approved remote position (`null` when `positions` permission is off or ineligible). */
+  plannedPosition: { anchor: AnchorLocation; progress: number | null } | null;
   importableBookmarks: Map<number, MemoryLanPeerBookmark>;
 }
 
@@ -271,7 +273,7 @@ export function createMemoryLanAdapter(
 
   let failedPairAttempts = 0;
   const sessions = new Map<string, InternalReceiverSession>();
-  const activeOps = new Map<string, { cancelled: boolean }>();
+  const activeOps = new Map<string, { sessionId: string | null; cancelled: boolean }>();
 
   const emitShareEvent = (payload: LanShareEventPayload) => {
     for (const listener of shareListeners) {
@@ -360,11 +362,12 @@ export function createMemoryLanAdapter(
 
   const registerOp = (
     operationId?: string | null,
-  ): { key: string; state: { cancelled: boolean } } => {
+    sessionId: string | null = null,
+  ): { key: string; state: { sessionId: string | null; cancelled: boolean } } => {
     const key = operationId && operationId.trim().length > 0 ? operationId : crypto.randomUUID();
     const prev = activeOps.get(key);
     if (prev) prev.cancelled = true;
-    const state = { cancelled: false };
+    const state = { sessionId, cancelled: false };
     activeOps.set(key, state);
     return { key, state };
   };
@@ -482,7 +485,7 @@ export function createMemoryLanAdapter(
       if (!normalized) {
         throw host.fail('lan_address_invalid', `invalid LAN address: ${input.address}`);
       }
-      const op = registerOp(input.operationId);
+      const op = registerOp(input.operationId, null);
       try {
         if (op.state.cancelled) throw host.fail('lan_cancelled', 'LAN operation cancelled');
         if (failedPairAttempts >= MAX_FAILED_ATTEMPTS) {
@@ -552,7 +555,7 @@ export function createMemoryLanAdapter(
       if (options.errors?.lanImportPlan) throw options.errors.lanImportPlan;
       const session = sessions.get(input.sessionId);
       if (!session) throw host.fail('lan_auth_expired', 'receiver session expired');
-      const op = registerOp(input.operationId);
+      const op = registerOp(input.operationId, input.sessionId);
 
       try {
         const seen = new Set<string>();
@@ -693,6 +696,7 @@ export function createMemoryLanAdapter(
             summary,
             expectedCursor,
             conflictCursor: null,
+            plannedPosition: remotePos,
             importableBookmarks,
           });
 
@@ -736,7 +740,7 @@ export function createMemoryLanAdapter(
       const plan = session.plans.get(input.planId);
       if (!plan) throw host.fail('not_found', 'import plan not found');
 
-      const op = registerOp(input.operationId);
+      const op = registerOp(input.operationId, input.sessionId);
       const results: LanBookImportResult[] = [];
       let cancelled = false;
 
@@ -805,6 +809,7 @@ export function createMemoryLanAdapter(
           let targetDoc: StudyDocument | null = planned.summary.localDocumentId
             ? (host.documents.get(planned.summary.localDocumentId) ?? null)
             : null;
+          const fileRequiredButSkipped = planned.summary.needsFileDownload && !decision.importFile;
 
           if (decision.importFile && planned.summary.needsFileDownload) {
             if (planned.peer.fileError) {
@@ -824,7 +829,9 @@ export function createMemoryLanAdapter(
               });
               const originalExt =
                 targetDoc?.filePath.split('.').pop()?.toLowerCase() ?? planned.peer.extension;
-              const destPath = `/library/${planned.peer.bookId.replace(/[^a-zA-Z0-9_-]/g, '_')}.${originalExt}`;
+              const destPath = targetDoc?.filePath.startsWith('/library/')
+                ? targetDoc.filePath
+                : `/library/${planned.peer.bookId.replace(/[^a-zA-Z0-9_-]/g, '_')}.${originalExt}`;
               host.files[destPath] = planned.peer.bytes;
 
               if (targetDoc) {
@@ -850,15 +857,22 @@ export function createMemoryLanAdapter(
                 host.documents.set(created.id, created);
                 targetDoc = created;
               }
+              // Update plan state in-place so retrying the same planId never
+              // creates duplicate records (mirrors Rust `ImportPlan`).
+              planned.summary.localDocumentId = targetDoc.id;
+              planned.summary.localTitle = targetDoc.title;
+              planned.summary.state = 'alreadyPresent';
+              planned.summary.needsFileDownload = false;
               fileOutcome = { status: 'applied' };
             }
           }
 
           let positionOutcome: LanComponentOutcome = { status: 'skipped' };
           if (
+            !fileRequiredButSkipped &&
             decision.importPosition &&
             targetDoc &&
-            planned.peer.position &&
+            planned.plannedPosition &&
             fileOutcome.status !== 'failed'
           ) {
             const currentCursor: InternalCursorSnapshot = {
@@ -881,8 +895,8 @@ export function createMemoryLanAdapter(
             } else {
               const updated: StudyDocument = {
                 ...targetDoc,
-                lastCursorAnchor: planned.peer.position.anchor,
-                lastProgress: planned.peer.position.progress,
+                lastCursorAnchor: planned.plannedPosition.anchor,
+                lastProgress: planned.plannedPosition.progress,
               };
               host.documents.set(updated.id, updated);
               targetDoc = updated;
@@ -900,7 +914,12 @@ export function createMemoryLanAdapter(
           let existing = planned.summary.bookmarks.existingCount;
           const skipped = planned.summary.bookmarks.skippedCount;
 
-          if (decision.importBookmarks && targetDoc && fileOutcome.status !== 'failed') {
+          if (
+            !fileRequiredButSkipped &&
+            decision.importBookmarks &&
+            targetDoc &&
+            fileOutcome.status !== 'failed'
+          ) {
             const allowedIndices = decision.selectedBookmarkIndices
               ? new Set(decision.selectedBookmarkIndices)
               : null;
@@ -965,6 +984,11 @@ export function createMemoryLanAdapter(
     },
 
     async lanImportDisconnect(sessionId: string): Promise<void> {
+      for (const op of activeOps.values()) {
+        if (op.sessionId === sessionId) {
+          op.cancelled = true;
+        }
+      }
       sessions.delete(sessionId);
     },
   };

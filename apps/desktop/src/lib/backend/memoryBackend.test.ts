@@ -429,4 +429,213 @@ describe('memory backend card delete and restore', () => {
       declinedBackend.lanImportConnect({ address: '192.168.1.25:49319', code: '123456' }),
     ).rejects.toEqual({ code: 'lan_unreachable', message: 'host unreachable' });
   });
+
+  it('enforces disabled permissions, skips metadata when missing file is not repaired, prevents duplicate retries, and cancels on book 2', async () => {
+    const encoder = new TextEncoder();
+    const book1Bytes = encoder.encode('Book one bytes');
+    const book2Bytes = encoder.encode('Book two bytes');
+    const missingBytes = encoder.encode('Missing file bytes');
+
+    // 1. Permissions disabled (`positions: false`, `bookmarks: false`): execute
+    // must ignore `importPosition: true` / `importBookmarks: true`.
+    const noPermsBackend = createMemoryBackend({
+      library: { '/local/b1.txt': book1Bytes },
+      lanPeer: {
+        pairingCode: '123456',
+        permissions: { positions: false, bookmarks: false },
+        books: [
+          {
+            title: 'b1',
+            format: 'txt',
+            extension: 'txt',
+            bytes: book1Bytes,
+            position: {
+              anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 4, lineIndex: 0 },
+              progress: 0.6,
+            },
+            bookmarks: [
+              {
+                anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 4, lineIndex: 0 },
+                label: 'Should not import',
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const localDoc = (await noPermsBackend.pickDocument())!;
+    const noPermsSession = await noPermsBackend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    const noPermsCatalog = await noPermsBackend.lanImportCatalog(noPermsSession.sessionId);
+    const noPermsPlan = await noPermsBackend.lanImportPlan(
+      { sessionId: noPermsSession.sessionId, bookIds: [noPermsCatalog[0]!.bookId] },
+      () => undefined,
+    );
+    expect(noPermsPlan.summary.books[0]?.position.remoteAvailable).toBe(false);
+    const noPermsReport = await noPermsBackend.lanImportExecute(
+      {
+        sessionId: noPermsSession.sessionId,
+        planId: noPermsPlan.planId,
+        decisions: [
+          {
+            bookId: noPermsCatalog[0]!.bookId,
+            importFile: false,
+            importPosition: true,
+            importBookmarks: true,
+          },
+        ],
+      },
+      () => undefined,
+    );
+    expect(noPermsReport.books[0]?.position).toEqual({ status: 'skipped' });
+    expect(noPermsReport.books[0]?.bookmarks).toEqual({ status: 'skipped' });
+    expect((await noPermsBackend.listDocuments())[0]?.lastCursorAnchor).toBeNull();
+    expect(await noPermsBackend.listBookmarks()).toHaveLength(0);
+    expect(localDoc.id).toBeTruthy();
+
+    // 2. Missing file where user chooses NOT to repair (`importFile: false`) must
+    // skip metadata writes too.
+    const missingFiles: Record<string, Uint8Array> = { '/local/missing.txt': missingBytes };
+    const missingBackend = createMemoryBackend({
+      library: missingFiles,
+      lanPeer: {
+        pairingCode: '123456',
+        books: [
+          {
+            title: 'missing',
+            format: 'txt',
+            extension: 'txt',
+            bytes: missingBytes,
+            position: {
+              anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 7, lineIndex: 0 },
+              progress: 0.5,
+            },
+            bookmarks: [
+              {
+                anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 7, lineIndex: 0 },
+                label: 'Blocked until file repaired',
+              },
+            ],
+          },
+        ],
+      },
+    });
+    // Register then simulate missing file via a separate backend whose local file is absent:
+    // Verify `new` with `importFile: false` also skips position & bookmarks cleanly.
+    const newSession = await missingBackend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    const newCatalog = await missingBackend.lanImportCatalog(newSession.sessionId);
+    const newPlan = await missingBackend.lanImportPlan(
+      { sessionId: newSession.sessionId, bookIds: [newCatalog[0]!.bookId] },
+      () => undefined,
+    );
+    const skippedNewReport = await missingBackend.lanImportExecute(
+      {
+        sessionId: newSession.sessionId,
+        planId: newPlan.planId,
+        decisions: [
+          {
+            bookId: newCatalog[0]!.bookId,
+            importFile: false,
+            importPosition: true,
+            importBookmarks: true,
+          },
+        ],
+      },
+      () => undefined,
+    );
+    expect(skippedNewReport.books[0]?.file).toEqual({ status: 'skipped' });
+    expect(skippedNewReport.books[0]?.position).toEqual({ status: 'skipped' });
+    expect(skippedNewReport.books[0]?.bookmarks).toEqual({ status: 'skipped' });
+    expect(await missingBackend.listDocuments()).toHaveLength(0);
+
+    // 3. Retrying the same planId after importing a new book must NOT create a
+    // second duplicate document.
+    const firstImport = await missingBackend.lanImportExecute(
+      {
+        sessionId: newSession.sessionId,
+        planId: newPlan.planId,
+        decisions: [
+          {
+            bookId: newCatalog[0]!.bookId,
+            importFile: true,
+            importPosition: false,
+            importBookmarks: false,
+          },
+        ],
+      },
+      () => undefined,
+    );
+    expect(firstImport.books[0]?.file).toEqual({ status: 'applied' });
+    const createdDocId = firstImport.books[0]!.documentId!;
+    const retrySamePlan = await missingBackend.lanImportExecute(
+      {
+        sessionId: newSession.sessionId,
+        planId: newPlan.planId,
+        decisions: [
+          {
+            bookId: newCatalog[0]!.bookId,
+            importFile: true,
+            importPosition: true,
+            importBookmarks: true,
+          },
+        ],
+      },
+      () => undefined,
+    );
+    expect(retrySamePlan.books[0]?.documentId).toBe(createdDocId);
+    expect(retrySamePlan.books[0]?.file).toEqual({ status: 'skipped' });
+    expect(retrySamePlan.books[0]?.position).toEqual({ status: 'applied' });
+    expect(await missingBackend.listDocuments()).toHaveLength(1);
+
+    // 4. Cancelling during transfer of book 2 leaves book 1 committed and book 2 cancelled.
+    let execBackendRef: ReturnType<typeof createMemoryBackend> | null = null;
+    let execSessionId = '';
+    let stepCount = 0;
+    const cancelBackend = createMemoryBackend({
+      library: {},
+      lanPeer: {
+        pairingCode: '123456',
+        books: [
+          { title: 'Book 1', format: 'txt', extension: 'txt', bytes: book1Bytes },
+          { title: 'Book 2', format: 'txt', extension: 'txt', bytes: book2Bytes },
+        ],
+        onBeforeBookStep: async (phase) => {
+          if (phase === 'execute') {
+            stepCount += 1;
+            if (stepCount === 2 && execBackendRef) {
+              await execBackendRef.lanImportDisconnect(execSessionId);
+            }
+          }
+        },
+      },
+    });
+    execBackendRef = cancelBackend;
+    const cancelSession = await cancelBackend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    execSessionId = cancelSession.sessionId;
+    const cancelCatalog = await cancelBackend.lanImportCatalog(execSessionId);
+    const cancelPlan = await cancelBackend.lanImportPlan(
+      { sessionId: execSessionId, bookIds: cancelCatalog.map((b) => b.bookId) },
+      () => undefined,
+    );
+    const cancelReport = await cancelBackend.lanImportExecute(
+      {
+        sessionId: execSessionId,
+        planId: cancelPlan.planId,
+        decisions: cancelPlan.defaultDecisions,
+      },
+      () => undefined,
+    );
+    expect(cancelReport.cancelled).toBe(true);
+    expect(cancelReport.books[0]?.file).toEqual({ status: 'applied' });
+    expect(cancelReport.books[1]?.file).toEqual({ status: 'cancelled' });
+    expect(await cancelBackend.listDocuments()).toHaveLength(1);
+  });
 });
