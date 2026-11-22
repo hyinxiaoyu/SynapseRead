@@ -879,17 +879,94 @@ export function createMemoryLanAdapter(
                 null;
               targetDoc = liveDoc && liveDoc.fileHash === planned.peer.bookId ? liveDoc : null;
 
-              let existingFileHealthy = false;
-              if (targetDoc && targetDoc.filePath in host.files) {
-                try {
-                  await host.readFile(targetDoc.filePath);
-                  existingFileHealthy = true;
-                } catch {
-                  existingFileHealthy = false;
+              let existingFileState: 'none' | 'healthy' | 'missing' | 'changed' = 'none';
+              if (targetDoc) {
+                const checkedDocId = targetDoc.id;
+                const checkedPath = targetDoc.filePath;
+                const checkedHash = targetDoc.fileHash;
+                if (!(checkedPath in host.files)) {
+                  existingFileState = 'missing';
+                } else {
+                  let readBytes: Uint8Array | null = null;
+                  try {
+                    readBytes = await host.readFile(checkedPath);
+                  } catch {
+                    readBytes = null;
+                  }
+                  // Recheck cancellation immediately after async `readFile` on both
+                  // success and failure paths before any file or metadata mutation.
+                  if (op.state.cancelled) {
+                    cancelled = true;
+                    const result: LanBookImportResult = {
+                      bookId: planned.peer.bookId,
+                      documentId: planned.summary.localDocumentId,
+                      state: planned.summary.state,
+                      file: { status: 'cancelled' },
+                      position: { status: 'cancelled' },
+                      bookmarks: { status: 'cancelled' },
+                      bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+                    };
+                    results.push(result);
+                    onProgress({
+                      phase: 'bookCompleted',
+                      bookId: planned.peer.bookId,
+                      bookIndex: idx,
+                      totalBooks: input.decisions.length,
+                      result,
+                    });
+                    continue;
+                  }
+                  const afterReadDoc = host.documents.get(checkedDocId) ?? null;
+                  if (
+                    afterReadDoc &&
+                    afterReadDoc.filePath === checkedPath &&
+                    afterReadDoc.fileHash === checkedHash
+                  ) {
+                    targetDoc = afterReadDoc;
+                    if (readBytes === null) {
+                      existingFileState = 'missing';
+                    } else {
+                      existingFileState =
+                        host.hashBytes(readBytes) === checkedHash ? 'healthy' : 'changed';
+                    }
+                  } else {
+                    const fallback =
+                      [...host.documents.values()].find(
+                        (doc) => doc.fileHash === planned.peer.bookId,
+                      ) ?? null;
+                    targetDoc = fallback;
+                    existingFileState = targetDoc ? 'missing' : 'none';
+                  }
                 }
               }
 
-              if (targetDoc && existingFileHealthy) {
+              if (targetDoc && existingFileState === 'changed') {
+                planned.summary.localDocumentId = targetDoc.id;
+                planned.summary.localTitle = targetDoc.title;
+                planned.summary.state = 'localFileChanged';
+                planned.summary.eligible = false;
+                planned.summary.needsFileDownload = false;
+                const result: LanBookImportResult = {
+                  bookId: planned.peer.bookId,
+                  documentId: targetDoc.id,
+                  state: 'localFileChanged',
+                  file: { status: 'blocked', reason: 'localFileChanged' },
+                  position: { status: 'skipped' },
+                  bookmarks: { status: 'skipped' },
+                  bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+                };
+                results.push(result);
+                onProgress({
+                  phase: 'bookCompleted',
+                  bookId: planned.peer.bookId,
+                  bookIndex: idx,
+                  totalBooks: input.decisions.length,
+                  result,
+                });
+                continue;
+              }
+
+              if (targetDoc && existingFileState === 'healthy') {
                 fileOutcome = { status: 'skipped' };
               } else {
                 const originalExt =

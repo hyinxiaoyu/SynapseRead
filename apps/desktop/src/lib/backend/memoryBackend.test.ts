@@ -971,4 +971,189 @@ describe('memory backend card delete and restore', () => {
       backend.loadDocumentSource({ ...picked, filePath: expectedManagedPath }),
     ).rejects.toMatchObject({ code: 'io' });
   });
+
+  it('aborts without mutating files or metadata when cancelled during commit-time readFile (both success and ENOENT)', async () => {
+    const bookBytes = new TextEncoder().encode('Book content for cancel-during-readFile');
+    const remoteAnchor = {
+      format: 'txt' as const,
+      startByteOffset: 0,
+      endByteOffset: 4,
+      lineIndex: 0,
+    };
+
+    for (const shouldReject of [false, true]) {
+      let fileMissing = false;
+      let pauseNextRead = false;
+      let enteredRead!: () => void;
+      const readEntered = new Promise<void>((resolve) => {
+        enteredRead = resolve;
+      });
+      let releaseRead!: () => void;
+      const readReleased = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+
+      const backend = createMemoryBackend({
+        library: {
+          '/local/book.txt': async () => {
+            if (pauseNextRead) {
+              pauseNextRead = false;
+              enteredRead();
+              await readReleased;
+              if (shouldReject) throw new Error('ENOENT');
+              return bookBytes;
+            }
+            if (fileMissing) throw new Error('ENOENT');
+            return bookBytes;
+          },
+        },
+        lanPeer: {
+          pairingCode: '123456',
+          books: [
+            {
+              title: 'book',
+              format: 'txt',
+              extension: 'txt',
+              bytes: bookBytes,
+              position: { anchor: remoteAnchor, progress: 0.4 },
+              bookmarks: [{ anchor: remoteAnchor, label: 'Should not write' }],
+            },
+          ],
+          onBeforeBookStep: async (phase) => {
+            if (phase === 'commit') {
+              pauseNextRead = true;
+            }
+          },
+        },
+      });
+
+      const doc = (await backend.pickDocument())!;
+      fileMissing = true;
+      const session = await backend.lanImportConnect({
+        address: '192.168.1.25:49319',
+        code: '123456',
+      });
+      const catalog = await backend.lanImportCatalog(session.sessionId);
+      expect(catalog[0]?.state).toBe('missingFile');
+
+      const plan = await backend.lanImportPlan(
+        { sessionId: session.sessionId, bookIds: [catalog[0]!.bookId] },
+        () => undefined,
+      );
+
+      const execPromise = backend.lanImportExecute(
+        {
+          sessionId: session.sessionId,
+          planId: plan.planId,
+          decisions: [
+            {
+              bookId: catalog[0]!.bookId,
+              importFile: true,
+              importPosition: true,
+              importBookmarks: true,
+            },
+          ],
+          operationId: 'op-cancel-during-read',
+        },
+        () => undefined,
+      );
+
+      await readEntered;
+      expect(await backend.lanImportCancel('op-cancel-during-read')).toBe(true);
+      releaseRead();
+
+      const report = await execPromise;
+      expect(report.cancelled).toBe(true);
+      expect(report.books[0]?.file).toEqual({ status: 'cancelled' });
+      expect(report.books[0]?.position).toEqual({ status: 'cancelled' });
+      expect(report.books[0]?.bookmarks).toEqual({ status: 'cancelled' });
+
+      const afterDoc = (await backend.listDocuments()).find((d) => d.id === doc.id)!;
+      expect(afterDoc.filePath).toBe('/local/book.txt');
+      expect(afterDoc.lastCursorAnchor).toBeNull();
+      expect(afterDoc.lastProgress).toBeNull();
+      expect(await backend.listBookmarks()).toHaveLength(0);
+    }
+  });
+
+  it('blocks file, position, and bookmarks with localFileChanged when commit-time readFile returns modified bytes', async () => {
+    const originalBytes = new TextEncoder().encode('Original book bytes');
+    const modifiedBytes = new TextEncoder().encode('Locally modified book bytes');
+    const remoteAnchor = {
+      format: 'txt' as const,
+      startByteOffset: 0,
+      endByteOffset: 8,
+      lineIndex: 0,
+    };
+    let diskState: 'original' | 'missing' | 'modified' = 'original';
+
+    const backend = createMemoryBackend({
+      library: {
+        '/local/book.txt': async () => {
+          if (diskState === 'missing') throw new Error('ENOENT');
+          return diskState === 'original' ? originalBytes : modifiedBytes;
+        },
+      },
+      lanPeer: {
+        pairingCode: '123456',
+        books: [
+          {
+            title: 'book',
+            format: 'txt',
+            extension: 'txt',
+            bytes: originalBytes,
+            position: { anchor: remoteAnchor, progress: 0.7 },
+            bookmarks: [{ anchor: remoteAnchor, label: 'Blocked BM' }],
+          },
+        ],
+        onBeforeBookStep: async (phase) => {
+          if (phase === 'commit') {
+            // File reappears with modified bytes right before commit verification.
+            diskState = 'modified';
+          }
+        },
+      },
+    });
+
+    const doc = (await backend.pickDocument())!;
+    diskState = 'missing';
+    const session = await backend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    const catalog = await backend.lanImportCatalog(session.sessionId);
+    expect(catalog[0]?.state).toBe('missingFile');
+
+    const plan = await backend.lanImportPlan(
+      { sessionId: session.sessionId, bookIds: [catalog[0]!.bookId] },
+      () => undefined,
+    );
+
+    const report = await backend.lanImportExecute(
+      {
+        sessionId: session.sessionId,
+        planId: plan.planId,
+        decisions: [
+          {
+            bookId: catalog[0]!.bookId,
+            importFile: true,
+            importPosition: true,
+            importBookmarks: true,
+          },
+        ],
+      },
+      () => undefined,
+    );
+
+    expect(report.books[0]?.state).toBe('localFileChanged');
+    expect(report.books[0]?.file).toEqual({ status: 'blocked', reason: 'localFileChanged' });
+    expect(report.books[0]?.position).toEqual({ status: 'skipped' });
+    expect(report.books[0]?.bookmarks).toEqual({ status: 'skipped' });
+
+    const afterDoc = (await backend.listDocuments()).find((d) => d.id === doc.id)!;
+    expect(afterDoc.filePath).toBe('/local/book.txt');
+    expect(afterDoc.lastCursorAnchor).toBeNull();
+    expect(afterDoc.lastProgress).toBeNull();
+    expect(await backend.listBookmarks()).toHaveLength(0);
+  });
 });
