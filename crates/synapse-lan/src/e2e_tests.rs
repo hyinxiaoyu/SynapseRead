@@ -3597,3 +3597,269 @@ async fn e2e_interleaved_two_imports_protect_reused_managed_file_and_reject_miss
         .expect_err("import_document must reject missing target on repair");
     assert_eq!(err_repair.code(), "io");
 }
+
+// ---------------------------------------------------------------------------
+// 23. P1 regression: two independent SQLite connections on the same DB
+//     coordinating `PublishedFile::cleanup_if_unreferenced` vs normal
+//     `Database::register_document` must NEVER leave a dangling DB path:
+//     - If cleanup wins exclusive lock, concurrent `register_document` blocks
+//       until unlink completes and then returns an error with 0 dangling rows.
+//     - If registration is in-flight, cleanup backs off and the registered
+//       file remains readable on disk.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn e2e_cleanup_and_second_connection_register_coordinate_without_dangling_paths() {
+    let dir = TempDir::new("two-conn-coord");
+    let db_path = dir.path().join("synapse.sqlite");
+    let conn_a = Database::open(&db_path).expect("open conn A");
+    let conn_b = Database::open(&db_path).expect("open conn B");
+    let library = ManagedLibrary::new(dir.path());
+
+    let payload = b"Two-connection coordination test payload for managed library.\n";
+    let hash = sha256_hex(payload);
+
+    // --- Order 1: cleanup acquires exclusive lock first; conn_b tries to
+    //     register the same path between reference check and unlink ---
+    let mut staged1 = library
+        .begin_stage(DocumentFormat::Txt, "txt", &hash, payload.len() as u64)
+        .expect("stage 1");
+    staged1.write_chunk(payload).expect("write 1");
+    let published1 = staged1.finish_published().expect("publish 1");
+    let path1 = published1.path().to_path_buf();
+    assert!(path1.is_file());
+
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let db_path_for_b = db_path.clone();
+    let path1_for_b = path1.clone();
+    let b_handle_slot: Mutex<Option<std::thread::JoinHandle<synapse_core::CoreResult<Document>>>> =
+        Mutex::new(None);
+
+    let removed = published1.cleanup_if_unreferenced(|checked_path| {
+        // Confirm conn_a sees no DB reference.
+        assert!(conn_a.list_documents().expect("list A").is_empty());
+
+        // Spawn conn_b attempting to register `checked_path` right between A's
+        // reference check and A's `remove_file`. Because `register_document`
+        // acquires `.library-publish.lock` shared, it MUST block until A
+        // finishes unlinking and drops the exclusive lock.
+        let p = path1_for_b.clone();
+        let db_p = db_path_for_b.clone();
+        let handle = std::thread::spawn(move || {
+            let conn_b_thread = Database::open(&db_p).expect("open conn B thread");
+            let _ = started_tx.send(());
+            conn_b_thread.register_document(&p)
+        });
+        *b_handle_slot.lock().expect("lock") = Some(handle);
+        started_rx.recv().expect("thread B started");
+        // Give thread B time to reach the shared lock before A unlinks.
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(checked_path, path1.as_path());
+        false
+    });
+
+    assert!(removed, "cleanup must remove unreferenced file");
+    assert!(!path1.exists(), "cleaned file must no longer exist on disk");
+
+    let reg_res = b_handle_slot
+        .lock()
+        .expect("lock")
+        .take()
+        .expect("handle")
+        .join()
+        .expect("join B");
+    assert!(
+        reg_res.is_err(),
+        "register_document after cleanup must fail rather than creating a dangling row"
+    );
+    assert!(
+        conn_b.list_documents().expect("list B").is_empty(),
+        "DB must contain zero dangling document rows"
+    );
+
+    // --- Order 2: conn_b is registering in-flight (holds shared lock) while
+    //     cleanup attempts to delete -> cleanup backs off, registration
+    //     succeeds, and the file stays readable on disk ---
+    let mut staged2 = library
+        .begin_stage(DocumentFormat::Txt, "txt", &hash, payload.len() as u64)
+        .expect("stage 2");
+    staged2.write_chunk(payload).expect("write 2");
+    let published2 = staged2.finish_published().expect("publish 2");
+    let path2 = published2.path().to_path_buf();
+
+    let b_lease = library
+        .acquire_publish_shared_lock()
+        .expect("acquire shared lease for B");
+    let removed2 = published2.cleanup_if_unreferenced(|_| false);
+    assert!(
+        !removed2,
+        "cleanup must NOT delete while another connection holds a shared publish lease"
+    );
+    assert!(path2.is_file(), "file must remain intact on disk");
+    drop(b_lease);
+
+    let registered = conn_b
+        .register_document(&path2)
+        .expect("conn_b register must succeed");
+    assert_eq!(
+        std::fs::canonicalize(&registered.file_path).expect("canon"),
+        std::fs::canonicalize(&path2).expect("canon")
+    );
+    assert_eq!(
+        std::fs::read(&registered.file_path).expect("read registered"),
+        payload,
+        "registered managed file must remain readable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 24. P2 regression: concurrent missing `.md` / `.markdown` record appearing
+//     after a `.txt` source book is published must be repaired with its
+//     original `.md` / `.markdown` extension, preserving document ID and all
+//     study data (bookmarks, annotations/cards).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_concurrent_missing_markdown_records_preserve_md_and_markdown_extensions() {
+    for ext in ["md", "markdown"] {
+        let source = PeerNode::new(&format!("conc-md-src-{ext}"));
+        let receiver = PeerNode::new(&format!("conc-md-dst-{ext}"));
+
+        // Source stores the book with `.txt` extension under `format: "txt"`.
+        let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "notes.txt");
+        let expected_bytes = std::fs::read(&src_txt).expect("read bytes");
+        let src_doc = source.register(&src_txt);
+
+        let server = RunningSource::start(
+            Arc::clone(&source.db),
+            SharePermissions {
+                positions: false,
+                bookmarks: false,
+            },
+            vec![SnapshotBook {
+                document_id: src_doc.id.clone(),
+                snapshot_file_hash: src_doc.file_hash.clone(),
+            }],
+            None,
+        );
+        let paired = server.pair_receiver().await;
+        let cancel = CancelToken::never();
+        let catalog = paired.catalog(&cancel).await.expect("catalog");
+
+        // Receiver has empty DB at preview time, so executor downloads and
+        // publishes `<library>/<sha256>.txt`.
+        let mut plan = plan_import(
+            &paired,
+            &receiver.db,
+            &catalog.books,
+            &OrchestratorConfig::default(),
+            &cancel,
+            |_| {},
+        )
+        .await
+        .expect("plan");
+        assert_eq!(plan.summary().books[0].state, BookSyncState::New);
+
+        let original_id_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let original_id_for_hook = Arc::clone(&original_id_slot);
+        let db_for_hook = Arc::clone(&receiver.db);
+        let md_path = receiver.files_dir.join(format!("study-guide.{ext}"));
+        let bytes_for_hook = expected_bytes.clone();
+
+        let hooks = ExecuteTestHooks {
+            before_import_document: Some(Arc::new(move |_book_id, published_txt_path| {
+                // Confirm executor initially published `.txt`.
+                assert_eq!(
+                    published_txt_path.extension().and_then(|s| s.to_str()),
+                    Some("txt")
+                );
+
+                // Concurrently create a local `.md`/`.markdown` record with
+                // study data (bookmark + excerpt card), then remove its file
+                // on disk so it becomes a missing Markdown record right before
+                // `import_document` runs.
+                std::fs::write(&md_path, &bytes_for_hook).expect("write md copy");
+                let mut db = db_for_hook.lock().expect("lock");
+                let md_doc = db.register_document(&md_path).expect("register md");
+                let nb = db.create_notebook("MD Notes").expect("notebook");
+                db.create_bookmark(&CreateBookmarkInput {
+                    document_id: md_doc.id.clone(),
+                    anchor: txt_anchor(0, 10, 0),
+                    label: Some("Keep MD Bookmark".into()),
+                })
+                .expect("bookmark");
+                db.create_excerpt(&CreateExcerptInput {
+                    notebook_id: nb.id,
+                    document_id: md_doc.id.clone(),
+                    anchor: txt_anchor(0, 15, 0),
+                    excerpt_text: Some("Keep MD Excerpt".into()),
+                    excerpt_image_png: None,
+                    color: "#fde68a".into(),
+                    pos_x: 0.0,
+                    pos_y: 0.0,
+                    parent_node_id: None,
+                })
+                .expect("excerpt");
+                std::fs::remove_file(&md_path).expect("delete md to make it missing");
+                *original_id_for_hook.lock().expect("lock") = Some(md_doc.id);
+            })),
+            ..ExecuteTestHooks::default()
+        };
+
+        let decisions = plan.default_decisions();
+        let report = execute_import_with_test_hooks(
+            &paired,
+            &receiver.db,
+            &receiver.library,
+            &mut plan,
+            &decisions,
+            &OrchestratorConfig::default(),
+            &cancel,
+            &DefaultStageFactory,
+            &hooks,
+            |_| {},
+            |_| {},
+        )
+        .await;
+
+        assert_eq!(
+            report.books[0].file,
+            ComponentOutcome::Applied,
+            "missing .{ext} record must be repaired cleanly"
+        );
+        let original_id = original_id_slot
+            .lock()
+            .expect("lock")
+            .take()
+            .expect("original id");
+        assert_eq!(
+            report.books[0].document_id.as_deref(),
+            Some(original_id.as_str()),
+            "repaired .{ext} record must preserve original document ID"
+        );
+
+        let db = receiver.db.lock().expect("lock");
+        let docs = db.list_documents().expect("docs");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].id, original_id);
+        assert_eq!(
+            Path::new(&docs[0].file_path)
+                .extension()
+                .and_then(|s| s.to_str()),
+            Some(ext),
+            "repaired path must preserve .{ext} extension for Markdown detection"
+        );
+        assert_eq!(
+            std::fs::read(&docs[0].file_path).expect("read repaired"),
+            expected_bytes
+        );
+        assert_eq!(db.list_bookmarks().expect("bms").len(), 1);
+        let nbs = db.list_notebooks().expect("nbs");
+        let graph = db.load_notebook_graph(&nbs[0].id).expect("graph");
+        assert_eq!(graph.cards.len(), 1);
+
+        // Unused `.txt` copy must have been cleaned up, leaving only `.<ext>`.
+        assert_eq!(count_library_entries(&receiver.library), 1);
+        assert_eq!(count_staging_entries(&receiver.library), 0);
+    }
+}
