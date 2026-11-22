@@ -3284,3 +3284,316 @@ async fn e2e_t26_concurrent_local_registration_before_transfer_and_around_publis
         assert_eq!(count_staging_entries(&receiver.library), 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 21. P1 regression: post-publish `AlreadyPresent` must verify actual on-disk
+//     content of the winning local copy outside Mutex<Database>; if modified,
+//     return LocalFileChanged, block position & bookmarks, and never overwrite
+//     the local file.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_post_publish_already_present_modified_on_disk_blocks_metadata_and_preserves_local_file()
+ {
+    let source = PeerNode::new("post-pub-mod-src");
+    let receiver = PeerNode::new("post-pub-mod-dst");
+
+    let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "post-pub-book.txt");
+    let src_doc = source.register(&src_txt);
+
+    {
+        let mut db = source.db.lock().expect("lock");
+        db.update_document_cursor(&src_doc.id, &txt_anchor(20, 40, 1), Some(0.85))
+            .expect("remote cursor");
+        db.create_bookmark(&CreateBookmarkInput {
+            document_id: src_doc.id.clone(),
+            anchor: txt_anchor(30, 45, 2),
+            label: Some("Remote Bookmark".into()),
+        })
+        .expect("remote bookmark");
+    }
+
+    let server = RunningSource::start(
+        Arc::clone(&source.db),
+        SharePermissions {
+            positions: true,
+            bookmarks: true,
+        },
+        vec![SnapshotBook {
+            document_id: src_doc.id.clone(),
+            snapshot_file_hash: src_doc.file_hash.clone(),
+        }],
+        None,
+    );
+    let paired = server.pair_receiver().await;
+    let cancel = CancelToken::never();
+    let catalog = paired.catalog(&cancel).await.expect("catalog");
+
+    let mut plan = plan_import(
+        &paired,
+        &receiver.db,
+        &catalog.books,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("plan");
+    assert_eq!(plan.summary().books[0].state, BookSyncState::New);
+
+    let external_copy = copy_fixture_to(&receiver.files_dir, "sample.txt", "external-mod.txt");
+    let modified_contents = b"USER EDITED LOCAL COPY AFTER REGISTRATION\n";
+
+    let db_hook = Arc::clone(&receiver.db);
+    let ext_for_hook = external_copy.clone();
+    let hooks = ExecuteTestHooks {
+        before_import_document: Some(Arc::new(move |_book_id, _published_path| {
+            // Register identical-hash external copy, then immediately mutate it
+            // on disk so DB hash still matches while disk content diverges.
+            db_hook
+                .lock()
+                .expect("lock")
+                .register_document(&ext_for_hook)
+                .expect("register external copy");
+            std::fs::write(&ext_for_hook, modified_contents).expect("modify external copy on disk");
+        })),
+        ..ExecuteTestHooks::default()
+    };
+
+    let decisions = vec![BookImportDecision {
+        book_id: src_doc.file_hash.clone(),
+        import_file: true,
+        import_position: true,
+        import_bookmarks: true,
+        selected_bookmark_indices: None,
+        override_position_conflict: false,
+    }];
+
+    let report = execute_import_with_test_hooks(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan,
+        &decisions,
+        &OrchestratorConfig::default(),
+        &cancel,
+        &DefaultStageFactory,
+        &hooks,
+        |_| {},
+        |_| {},
+    )
+    .await;
+
+    let res = &report.books[0];
+    assert_eq!(res.state, BookSyncState::LocalFileChanged);
+    assert!(matches!(
+        &res.file,
+        ComponentOutcome::Failed { error } if error.code == "lan_local_file_changed"
+    ));
+    assert!(matches!(res.position, ComponentOutcome::Blocked { .. }));
+    assert!(matches!(res.bookmarks, ComponentOutcome::Blocked { .. }));
+
+    {
+        let db = receiver.db.lock().expect("lock");
+        let docs = db.list_documents().expect("docs");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(
+            docs[0].last_progress, None,
+            "remote position must not be written to a modified local copy"
+        );
+        assert!(
+            db.list_bookmarks().expect("bms").is_empty(),
+            "remote bookmarks must not be written to a modified local copy"
+        );
+    }
+
+    assert_eq!(
+        std::fs::read(&external_copy).expect("read external copy"),
+        modified_contents,
+        "local modified file must never be overwritten"
+    );
+    assert_eq!(count_library_entries(&receiver.library), 0);
+    assert_eq!(count_staging_entries(&receiver.library), 0);
+}
+
+// ---------------------------------------------------------------------------
+// 22. P1 regression: two interleaved imports sharing a managed library target
+//     must coordinate via the cross-process publish lease so importer A cannot
+//     delete a file reused in-flight by importer B, and `import_document` must
+//     reject missing/invalidated published paths.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_interleaved_two_imports_protect_reused_managed_file_and_reject_missing_target() {
+    let source = PeerNode::new("interleave-src");
+    let receiver = PeerNode::new("interleave-dst");
+
+    let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "shared-book.txt");
+    let expected_bytes = std::fs::read(&src_txt).expect("read fixture bytes");
+    let src_doc = source.register(&src_txt);
+
+    let server = RunningSource::start(
+        Arc::clone(&source.db),
+        SharePermissions {
+            positions: false,
+            bookmarks: false,
+        },
+        vec![SnapshotBook {
+            document_id: src_doc.id.clone(),
+            snapshot_file_hash: src_doc.file_hash.clone(),
+        }],
+        None,
+    );
+    let paired = server.pair_receiver().await;
+    let cancel = CancelToken::never();
+    let catalog = paired.catalog(&cancel).await.expect("catalog");
+
+    let mut plan_a = plan_import(
+        &paired,
+        &receiver.db,
+        &catalog.books,
+        &OrchestratorConfig::default(),
+        &cancel,
+        |_| {},
+    )
+    .await
+    .expect("plan A");
+
+    let external_copy = copy_fixture_to(&receiver.files_dir, "sample.txt", "external-win.txt");
+
+    // Hold importer B's in-flight `PublishedFile` lease across importer A's
+    // commit and cleanup attempt.
+    let published_b_slot: Arc<Mutex<Option<synapse_core::library::PublishedFile>>> =
+        Arc::new(Mutex::new(None));
+    let published_b_for_hook = Arc::clone(&published_b_slot);
+    let library_for_b = ManagedLibrary::new(receiver._dir.path());
+    let db_for_hook = Arc::clone(&receiver.db);
+    let ext_for_hook = external_copy.clone();
+    let bytes_for_b = expected_bytes.clone();
+    let hash_for_b = src_doc.file_hash.clone();
+
+    let hooks = ExecuteTestHooks {
+        before_import_document: Some(Arc::new(move |_book_id, published_a_path| {
+            // 1. Importer B finishes staging and reuses the exact managed path
+            //    that importer A just published, acquiring its own shared lease.
+            let mut staged_b = library_for_b
+                .begin_stage(
+                    DocumentFormat::Txt,
+                    "txt",
+                    &hash_for_b,
+                    bytes_for_b.len() as u64,
+                )
+                .expect("stage B");
+            staged_b.write_chunk(&bytes_for_b).expect("write B");
+            let published_b = staged_b.finish_published().expect("publish B");
+            assert!(
+                !published_b.created(),
+                "importer B must reuse importer A's published managed file"
+            );
+            assert_eq!(published_b.path(), published_a_path);
+            *published_b_for_hook.lock().expect("lock") = Some(published_b);
+
+            // 2. External copy wins registration before importer A commits.
+            db_for_hook
+                .lock()
+                .expect("lock")
+                .register_document(&ext_for_hook)
+                .expect("register external copy");
+        })),
+        ..ExecuteTestHooks::default()
+    };
+
+    let decisions_a = plan_a.default_decisions();
+    let report_a = execute_import_with_test_hooks(
+        &paired,
+        &receiver.db,
+        &receiver.library,
+        &mut plan_a,
+        &decisions_a,
+        &OrchestratorConfig::default(),
+        &cancel,
+        &DefaultStageFactory,
+        &hooks,
+        |_| {},
+        |_| {},
+    )
+    .await;
+
+    // Importer A saw AlreadyPresent(external_copy) and preserved the external
+    // path, AND could NOT delete the managed file because importer B holds an
+    // active shared publish lease.
+    assert!(matches!(
+        report_a.books[0].file,
+        ComponentOutcome::Skipped { .. }
+    ));
+    let published_b = published_b_slot
+        .lock()
+        .expect("lock")
+        .take()
+        .expect("importer B lease");
+    assert!(
+        published_b.path().is_file(),
+        "in-flight reused managed file must NOT be deleted while importer B holds a lease"
+    );
+    assert_eq!(
+        std::fs::read(&external_copy).expect("read external"),
+        expected_bytes,
+        "external file must remain intact"
+    );
+
+    // External copy now disappears; importer B commits and repairs the record
+    // pointing to its protected, readable managed file.
+    std::fs::remove_file(&external_copy).expect("remove external copy");
+    let repaired = receiver
+        .db
+        .lock()
+        .expect("lock")
+        .import_document(
+            published_b.path(),
+            &src_doc.file_hash,
+            "Shared Book",
+            DocumentFormat::Txt,
+        )
+        .expect("importer B repair must succeed");
+    assert!(matches!(repaired, ImportDocumentResult::Repaired(_)));
+    let repaired_path = PathBuf::from(&repaired.document().file_path);
+    assert!(
+        repaired_path.is_file(),
+        "committed repaired document must point to a readable file"
+    );
+    assert_eq!(
+        std::fs::read(&repaired_path).expect("read repaired"),
+        expected_bytes
+    );
+    drop(published_b);
+
+    // Also verify `import_document` rejects a missing/invalidated published
+    // path for both new creation and missing-file repair.
+    let missing_target = receiver.library.library_dir().join("nonexistent.txt");
+    let err_create = receiver
+        .db
+        .lock()
+        .expect("lock")
+        .import_document(
+            &missing_target,
+            &"f".repeat(64),
+            "Missing New",
+            DocumentFormat::Txt,
+        )
+        .expect_err("import_document must reject missing target on create");
+    assert_eq!(err_create.code(), "io");
+
+    std::fs::remove_file(&repaired_path).expect("remove repaired file");
+    let err_repair = receiver
+        .db
+        .lock()
+        .expect("lock")
+        .import_document(
+            &missing_target,
+            &src_doc.file_hash,
+            "Missing Repair",
+            DocumentFormat::Txt,
+        )
+        .expect_err("import_document must reject missing target on repair");
+    assert_eq!(err_repair.code(), "io");
+}
