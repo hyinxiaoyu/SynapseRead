@@ -1327,6 +1327,8 @@ pub(crate) type BeforeImportDocumentHook = Arc<dyn Fn(&str, &Path) + Send + Sync
 pub(crate) type BeforeMetadataWritesHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 #[cfg(test)]
 pub(crate) type OnRepublishChunkHook = Arc<dyn Fn(&str, u64) + Send + Sync>;
+#[cfg(test)]
+pub(crate) type AfterRepublishBeforeLockHook = Arc<dyn Fn(&str, &Path) + Send + Sync>;
 
 /// Test-only deterministic synchronization hooks for exercising race windows
 /// between pre-checks, staging, DB commits, and metadata writes.
@@ -1337,6 +1339,7 @@ pub(crate) struct ExecuteTestHooks {
     pub before_import_document: Option<BeforeImportDocumentHook>,
     pub before_metadata_writes: Option<BeforeMetadataWritesHook>,
     pub on_republish_chunk: Option<OnRepublishChunkHook>,
+    pub after_republish_before_lock: Option<AfterRepublishBeforeLockHook>,
     pub republish_chunk_size: Option<usize>,
 }
 
@@ -1809,24 +1812,23 @@ where
                 #[cfg(test)]
                 let on_republish_chunk = hooks.on_republish_chunk.clone();
                 #[cfg(test)]
+                let after_republish_before_lock = hooks.after_republish_before_lock.clone();
+                #[cfg(test)]
                 let republish_chunk_size = hooks.republish_chunk_size;
                 let import_res = tokio::task::spawn_blocking(
                     move || -> LanResult<(ImportDocumentResult, Option<DocumentSourceState>)> {
-                        if cancel_for_commit.is_cancelled() {
-                            if let Ok(guard) = db_clone.lock() {
-                                let _ = published.cleanup_if_unreferenced(|path| {
-                                    is_path_referenced_by_db(&guard, path)
-                                });
-                            }
-                            return Err(LanError::Cancelled);
-                        }
-
                         let first_attempt = {
                             let mut guard = db_clone.lock().map_err(|_| {
                                 LanError::Core(CoreError::Io(std::io::Error::other(
                                     "database lock poisoned",
                                 )))
                             })?;
+                            if cancel_for_commit.is_cancelled() {
+                                let _ = published.cleanup_if_unreferenced(|path| {
+                                    is_path_referenced_by_db(&guard, path)
+                                });
+                                return Err(LanError::Cancelled);
+                            }
                             match guard.import_document(
                                 published.path(),
                                 &hash_clone,
@@ -1909,16 +1911,9 @@ where
                                     }
                                 };
 
-                                if cancel_for_commit.is_cancelled() {
-                                    if let Ok(guard) = db_clone.lock() {
-                                        let _ = republished.cleanup_if_unreferenced(|path| {
-                                            is_path_referenced_by_db(&guard, path)
-                                        });
-                                        let _ = published.cleanup_if_unreferenced(|path| {
-                                            is_path_referenced_by_db(&guard, path)
-                                        });
-                                    }
-                                    return Err(LanError::Cancelled);
+                                #[cfg(test)]
+                                if let Some(hook) = &after_republish_before_lock {
+                                    hook(&hash_clone, republished.path());
                                 }
 
                                 let mut guard = db_clone.lock().map_err(|_| {
@@ -1926,6 +1921,20 @@ where
                                         "database lock poisoned",
                                     )))
                                 })?;
+                                // Re-check cancellation AFTER acquiring the DB
+                                // lock and BEFORE writing so a cancel arriving
+                                // while blocked on `db_clone.lock()` never
+                                // commits. Release BOTH shared leases together
+                                // before exclusive cleanup so `.txt` does not
+                                // self-block cleaning up `.md`.
+                                if cancel_for_commit.is_cancelled() {
+                                    let _ = synapse_core::library::PublishedFile::cleanup_many_if_unreferenced(
+                                        [republished, published],
+                                        |path| is_path_referenced_by_db(&guard, path),
+                                    );
+                                    return Err(LanError::Cancelled);
+                                }
+
                                 match guard.import_document(
                                     republished.path(),
                                     &hash_clone,
@@ -1934,26 +1943,26 @@ where
                                 ) {
                                     Ok(res) => {
                                         if matches!(res, ImportDocumentResult::AlreadyPresent(_)) {
-                                            let _ = republished.cleanup_if_unreferenced(|path| {
-                                                is_path_referenced_by_db(&guard, path)
-                                            });
+                                            let _ = synapse_core::library::PublishedFile::cleanup_many_if_unreferenced(
+                                                [republished, published],
+                                                |path| is_path_referenced_by_db(&guard, path),
+                                            );
                                         } else {
                                             drop(republished);
+                                            // Clean up the unused original
+                                            // extension copy now that
+                                            // `republished` is dropped.
+                                            let _ = published.cleanup_if_unreferenced(|path| {
+                                                is_path_referenced_by_db(&guard, path)
+                                            });
                                         }
-                                        // Clean up the unused original extension
-                                        // copy now that `republished` is dropped.
-                                        let _ = published.cleanup_if_unreferenced(|path| {
-                                            is_path_referenced_by_db(&guard, path)
-                                        });
                                         res
                                     }
                                     Err(err) => {
-                                        let _ = republished.cleanup_if_unreferenced(|path| {
-                                            is_path_referenced_by_db(&guard, path)
-                                        });
-                                        let _ = published.cleanup_if_unreferenced(|path| {
-                                            is_path_referenced_by_db(&guard, path)
-                                        });
+                                        let _ = synapse_core::library::PublishedFile::cleanup_many_if_unreferenced(
+                                            [republished, published],
+                                            |path| is_path_referenced_by_db(&guard, path),
+                                        );
                                         return Err(err.into());
                                     }
                                 }
