@@ -329,11 +329,16 @@ export function createMemoryLanAdapter(
           localDoc: localByHash,
         };
       }
-      if (verifyHash) {
+      try {
         const localBytes = await host.readFile(localByHash.filePath);
-        if (host.hashBytes(localBytes) !== localByHash.fileHash) {
+        if (verifyHash && host.hashBytes(localBytes) !== localByHash.fileHash) {
           return { state: 'localFileChanged', localDoc: localByHash };
         }
+      } catch {
+        return {
+          state: peer.fileAvailable ? 'missingFile' : 'sourceUnavailable',
+          localDoc: localByHash,
+        };
       }
       return { state: 'alreadyPresent', localDoc: localByHash };
     }
@@ -862,15 +867,16 @@ export function createMemoryLanAdapter(
                 });
                 continue;
               }
-              // Re-check existing documents by fileHash AFTER the pre-commit await
-              // so two concurrent plans importing the same book never create
-              // duplicate records (mirrors Rust `file_hash` UNIQUE resolution).
-              if (!targetDoc) {
-                targetDoc =
-                  [...host.documents.values()].find(
-                    (doc) => doc.fileHash === planned.peer.bookId,
-                  ) ?? null;
-              }
+              // Always re-read the live document AFTER the pre-commit await so:
+              // 1. Two concurrent plans importing the same book never create duplicate records.
+              // 2. Repairing a missing file never overwrites a local reading position updated
+              //    while the file transfer was in flight (only `filePath` is updated).
+              const liveDoc =
+                (targetDoc ? host.documents.get(targetDoc.id) : undefined) ??
+                [...host.documents.values()].find((doc) => doc.fileHash === planned.peer.bookId) ??
+                null;
+              targetDoc = liveDoc && liveDoc.fileHash === planned.peer.bookId ? liveDoc : null;
+
               const originalExt =
                 targetDoc?.filePath.split('.').pop()?.toLowerCase() ?? planned.peer.extension;
               const destPath = targetDoc?.filePath.startsWith('/library/')
@@ -881,7 +887,7 @@ export function createMemoryLanAdapter(
               if (targetDoc) {
                 const repaired: StudyDocument = {
                   ...targetDoc,
-                  filePath: targetDoc.filePath in host.files ? targetDoc.filePath : destPath,
+                  filePath: destPath,
                 };
                 host.documents.set(repaired.id, repaired);
                 targetDoc = repaired;

@@ -755,4 +755,145 @@ describe('memory backend card delete and restore', () => {
     expect(repB.books[0]?.documentId).toBe(repA.books[0]?.documentId);
     expect(await concurrentBackend.listDocuments()).toHaveLength(1);
   });
+
+  it('preserves concurrent local reading position updates during missing-file repair for both importPosition false and true', async () => {
+    const encoder = new TextEncoder();
+    const bookBytes = encoder.encode('Missing managed book content for repair test');
+    const localAnchor = {
+      format: 'txt' as const,
+      startByteOffset: 8,
+      endByteOffset: 15,
+      lineIndex: 0,
+    };
+    const remoteAnchor = {
+      format: 'txt' as const,
+      startByteOffset: 0,
+      endByteOffset: 7,
+      lineIndex: 0,
+    };
+
+    const runScenario = async (importPosition: boolean) => {
+      let fileMissing = false;
+      let releaseRepair!: () => void;
+      const repairPaused = new Promise<void>((resolve) => {
+        releaseRepair = resolve;
+      });
+      let enteredCommit!: () => void;
+      const commitEntered = new Promise<void>((resolve) => {
+        enteredCommit = resolve;
+      });
+
+      const backend = createMemoryBackend({
+        library: {
+          '/local/missing-book.txt': async () => {
+            if (fileMissing) throw new Error('ENOENT');
+            return bookBytes;
+          },
+        },
+        lanPeer: {
+          pairingCode: '123456',
+          books: [
+            {
+              title: 'missing-book',
+              format: 'txt',
+              extension: 'txt',
+              bytes: bookBytes,
+              position: { anchor: remoteAnchor, progress: 0.2 },
+            },
+          ],
+          onBeforeBookStep: async (phase) => {
+            if (phase === 'commit') {
+              enteredCommit();
+              await repairPaused;
+            }
+          },
+        },
+      });
+
+      const doc = (await backend.pickDocument())!;
+      fileMissing = true;
+      expect((await backend.verifyDocumentSource(doc.id)).state).toBe('missing');
+
+      const session = await backend.lanImportConnect({
+        address: '192.168.1.25:49319',
+        code: '123456',
+      });
+      const catalog = await backend.lanImportCatalog(session.sessionId);
+      expect(catalog[0]?.state).toBe('missingFile');
+
+      const plan = await backend.lanImportPlan(
+        { sessionId: session.sessionId, bookIds: [catalog[0]!.bookId] },
+        () => undefined,
+      );
+
+      const execPromise = backend.lanImportExecute(
+        {
+          sessionId: session.sessionId,
+          planId: plan.planId,
+          decisions: [
+            {
+              bookId: catalog[0]!.bookId,
+              importFile: true,
+              importPosition,
+              importBookmarks: false,
+            },
+          ],
+        },
+        () => undefined,
+      );
+
+      await commitEntered;
+      // Local reading position updates while file repair is in flight.
+      await backend.updateDocumentCursor(doc.id, localAnchor, 0.5);
+      releaseRepair();
+
+      const report = await execPromise;
+      const updatedDoc = (await backend.listDocuments()).find((d) => d.id === doc.id)!;
+      return { backend, session, plan, catalog, doc, report, updatedDoc };
+    };
+
+    // Case 1: importPosition = false -> file repaired, concurrent local progress 0.5 preserved.
+    const keepLocal = await runScenario(false);
+    expect(keepLocal.report.books[0]?.file).toEqual({ status: 'applied' });
+    expect(keepLocal.report.books[0]?.position).toEqual({ status: 'skipped' });
+    expect(keepLocal.updatedDoc.lastProgress).toBe(0.5);
+    expect(keepLocal.updatedDoc.lastCursorAnchor).toEqual(localAnchor);
+
+    // Case 2: importPosition = true -> file repaired, local progress 0.5 preserved and
+    // `lan_position_conflict` returned until user explicitly re-confirms.
+    const conflictCase = await runScenario(true);
+    expect(conflictCase.report.books[0]?.file).toEqual({ status: 'applied' });
+    expect(conflictCase.report.books[0]?.position).toEqual({
+      status: 'conflict',
+      code: 'lan_position_conflict',
+      hasCurrentPosition: true,
+      currentProgress: 0.5,
+    });
+    expect(conflictCase.updatedDoc.lastProgress).toBe(0.5);
+    expect(conflictCase.updatedDoc.lastCursorAnchor).toEqual(localAnchor);
+
+    // User re-confirms with `overridePositionConflict: true` -> remote position applies cleanly.
+    const overrideReport = await conflictCase.backend.lanImportExecute(
+      {
+        sessionId: conflictCase.session.sessionId,
+        planId: conflictCase.plan.planId,
+        decisions: [
+          {
+            bookId: conflictCase.catalog[0]!.bookId,
+            importFile: false,
+            importPosition: true,
+            importBookmarks: false,
+            overridePositionConflict: true,
+          },
+        ],
+      },
+      () => undefined,
+    );
+    expect(overrideReport.books[0]?.position).toEqual({ status: 'applied' });
+    const afterOverride = (await conflictCase.backend.listDocuments()).find(
+      (d) => d.id === conflictCase.doc.id,
+    )!;
+    expect(afterOverride.lastProgress).toBe(0.2);
+    expect(afterOverride.lastCursorAnchor).toEqual(remoteAnchor);
+  });
 });
