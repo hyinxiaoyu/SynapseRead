@@ -1325,6 +1325,8 @@ pub(crate) type BeforeFileDownloadHook = Arc<dyn Fn(&str) + Send + Sync>;
 pub(crate) type BeforeImportDocumentHook = Arc<dyn Fn(&str, &Path) + Send + Sync>;
 #[cfg(test)]
 pub(crate) type BeforeMetadataWritesHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
+#[cfg(test)]
+pub(crate) type OnRepublishChunkHook = Arc<dyn Fn(&str, u64) + Send + Sync>;
 
 /// Test-only deterministic synchronization hooks for exercising race windows
 /// between pre-checks, staging, DB commits, and metadata writes.
@@ -1334,6 +1336,8 @@ pub(crate) struct ExecuteTestHooks {
     pub before_file_download: Option<BeforeFileDownloadHook>,
     pub before_import_document: Option<BeforeImportDocumentHook>,
     pub before_metadata_writes: Option<BeforeMetadataWritesHook>,
+    pub on_republish_chunk: Option<OnRepublishChunkHook>,
+    pub republish_chunk_size: Option<usize>,
 }
 
 /// Same as [`execute_import`] with an injectable [`StageFactory`] for
@@ -1801,8 +1805,22 @@ where
                 let library_clone = library.clone();
                 let hash_clone = book_id.clone();
                 let title_clone = planned.summary.title.clone();
+                let cancel_for_commit = cancel.clone();
+                #[cfg(test)]
+                let on_republish_chunk = hooks.on_republish_chunk.clone();
+                #[cfg(test)]
+                let republish_chunk_size = hooks.republish_chunk_size;
                 let import_res = tokio::task::spawn_blocking(
                     move || -> LanResult<(ImportDocumentResult, Option<DocumentSourceState>)> {
+                        if cancel_for_commit.is_cancelled() {
+                            if let Ok(guard) = db_clone.lock() {
+                                let _ = published.cleanup_if_unreferenced(|path| {
+                                    is_path_referenced_by_db(&guard, path)
+                                });
+                            }
+                            return Err(LanError::Cancelled);
+                        }
+
                         let first_attempt = {
                             let mut guard = db_clone.lock().map_err(|_| {
                                 LanError::Core(CoreError::Io(std::io::Error::other(
@@ -1856,6 +1874,15 @@ where
                                 res
                             }
                             Err(Some(required_ext)) => {
+                                if cancel_for_commit.is_cancelled() {
+                                    if let Ok(guard) = db_clone.lock() {
+                                        let _ = published.cleanup_if_unreferenced(|path| {
+                                            is_path_referenced_by_db(&guard, path)
+                                        });
+                                    }
+                                    return Err(LanError::Cancelled);
+                                }
+
                                 // Republish verified bytes under `required_ext`
                                 // outside `Mutex<Database>` while `published`'s
                                 // shared lease protects the source file.
@@ -1865,6 +1892,11 @@ where
                                     book_format,
                                     &required_ext,
                                     &hash_clone,
+                                    &cancel_for_commit,
+                                    #[cfg(test)]
+                                    on_republish_chunk.as_ref(),
+                                    #[cfg(test)]
+                                    republish_chunk_size,
                                 ) {
                                     Ok(repub) => repub,
                                     Err(err) => {
@@ -1876,6 +1908,18 @@ where
                                         return Err(err);
                                     }
                                 };
+
+                                if cancel_for_commit.is_cancelled() {
+                                    if let Ok(guard) = db_clone.lock() {
+                                        let _ = republished.cleanup_if_unreferenced(|path| {
+                                            is_path_referenced_by_db(&guard, path)
+                                        });
+                                        let _ = published.cleanup_if_unreferenced(|path| {
+                                            is_path_referenced_by_db(&guard, path)
+                                        });
+                                    }
+                                    return Err(LanError::Cancelled);
+                                }
 
                                 let mut guard = db_clone.lock().map_err(|_| {
                                     LanError::Core(CoreError::Io(std::io::Error::other(
@@ -2026,6 +2070,32 @@ where
                         planned.summary.local_document_id = Some(target_doc.id.clone());
                         planned.summary.state = BookSyncState::AlreadyPresent;
                         planned.summary.needs_file_download = false;
+                    }
+                    Ok(Err(LanError::Cancelled)) => {
+                        let result = BookImportResult {
+                            book_id: book_id.clone(),
+                            document_id: planned.summary.local_document_id.clone(),
+                            state: planned.summary.state,
+                            file: ComponentOutcome::Cancelled,
+                            position: if decision.import_position {
+                                ComponentOutcome::Cancelled
+                            } else {
+                                ComponentOutcome::Skipped { reason: None }
+                            },
+                            bookmarks: if decision.import_bookmarks {
+                                ComponentOutcome::Cancelled
+                            } else {
+                                ComponentOutcome::Skipped { reason: None }
+                            },
+                            bookmark_counts: BookmarkExecutionSummary::default(),
+                        };
+                        on_progress(ImportProgress::BookCompleted {
+                            book_id,
+                            book_index,
+                            total_books,
+                            result: Box::new(result.clone()),
+                        });
+                        return (result, true, None);
                     }
                     Ok(Err(err)) | Err(err) => {
                         let err_info = ImportErrorInfo::from_lan_error(&err);
@@ -2517,14 +2587,22 @@ fn missing_local_extension_locked(
     Ok(ext)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn republish_with_extension(
     library: &ManagedLibrary,
     source_path: &Path,
     format: DocumentFormat,
     required_ext: &str,
     expected_hash: &str,
+    cancel: &CancelToken,
+    #[cfg(test)] on_chunk: Option<&OnRepublishChunkHook>,
+    #[cfg(test)] chunk_size_override: Option<usize>,
 ) -> LanResult<synapse_core::library::PublishedFile> {
     use std::io::Read as _;
+
+    if cancel.is_cancelled() {
+        return Err(LanError::Cancelled);
+    }
 
     let mut file =
         std::fs::File::open(source_path).map_err(|err| LanError::Core(CoreError::Io(err)))?;
@@ -2535,19 +2613,45 @@ fn republish_with_extension(
     let mut staged = library
         .begin_stage(format, required_ext, expected_hash, expected_len)
         .map_err(|err| map_core_storage_error(err, expected_len, 0))?;
-    let mut buf = [0u8; 64 * 1024];
+
+    #[cfg(test)]
+    let buf_len = chunk_size_override.unwrap_or(64 * 1024).max(1);
+    #[cfg(not(test))]
+    let buf_len = 64 * 1024;
+    let mut buf = vec![0u8; buf_len];
     let mut copied = 0u64;
     loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|err| LanError::Core(CoreError::Io(err)))?;
+        if cancel.is_cancelled() {
+            staged.cancel();
+            return Err(LanError::Cancelled);
+        }
+        let n = match file.read(&mut buf) {
+            Ok(n) => n,
+            Err(err) => {
+                staged.cancel();
+                return Err(LanError::Core(CoreError::Io(err)));
+            }
+        };
         if n == 0 {
             break;
         }
-        staged
-            .write_chunk(&buf[..n])
-            .map_err(|err| map_core_storage_error(err, expected_len, copied))?;
+        if let Err(err) = staged.write_chunk(&buf[..n]) {
+            staged.cancel();
+            return Err(map_core_storage_error(err, expected_len, copied));
+        }
         copied = copied.saturating_add(n as u64);
+        #[cfg(test)]
+        if let Some(hook) = on_chunk {
+            hook(expected_hash, copied);
+        }
+        if cancel.is_cancelled() {
+            staged.cancel();
+            return Err(LanError::Cancelled);
+        }
+    }
+    if cancel.is_cancelled() {
+        staged.cancel();
+        return Err(LanError::Cancelled);
     }
     staged
         .finish_published()

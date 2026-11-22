@@ -3863,3 +3863,198 @@ async fn e2e_concurrent_missing_markdown_records_preserve_md_and_markdown_extens
         assert_eq!(count_staging_entries(&receiver.library), 0);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 25. P2 regression: cancelling BEFORE or DURING concurrent Markdown
+//     extension republish must abort cleanly with `file = Cancelled` and
+//     `report.cancelled = true`, remove unfinished `.part` files and unused
+//     published copies, preserve the original missing `.md` record untouched,
+//     and keep already-committed books in the batch intact (#148).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn e2e_cancel_before_and_during_markdown_republish_preserves_committed_and_missing_records() {
+    for cancel_during_copy in [false, true] {
+        let mode = if cancel_during_copy {
+            "mid-copy"
+        } else {
+            "before-copy"
+        };
+        let source = PeerNode::new(&format!("repub-cancel-src-{mode}"));
+        let receiver = PeerNode::new(&format!("repub-cancel-dst-{mode}"));
+
+        let src_pdf = copy_fixture_to(&source.files_dir, "sample.pdf", "book1.pdf");
+        let src_txt = copy_fixture_to(&source.files_dir, "sample.txt", "book2.txt");
+        let txt_bytes = std::fs::read(&src_txt).expect("read txt");
+        let pdf_doc = source.register(&src_pdf);
+        let txt_doc = source.register(&src_txt);
+
+        let server = RunningSource::start(
+            Arc::clone(&source.db),
+            SharePermissions {
+                positions: false,
+                bookmarks: false,
+            },
+            vec![
+                SnapshotBook {
+                    document_id: pdf_doc.id.clone(),
+                    snapshot_file_hash: pdf_doc.file_hash.clone(),
+                },
+                SnapshotBook {
+                    document_id: txt_doc.id.clone(),
+                    snapshot_file_hash: txt_doc.file_hash.clone(),
+                },
+            ],
+            None,
+        );
+        let paired = server.pair_receiver().await;
+        let plan_cancel = CancelToken::never();
+        let catalog = paired.catalog(&plan_cancel).await.expect("catalog");
+
+        // Order explicitly: Book 1 (PDF) commits first, Book 2 (TXT -> concurrent
+        // missing .md) triggers cancellation in the republish path.
+        let ordered_books = vec![
+            catalog
+                .books
+                .iter()
+                .find(|b| b.id == pdf_doc.file_hash)
+                .expect("pdf in catalog")
+                .clone(),
+            catalog
+                .books
+                .iter()
+                .find(|b| b.id == txt_doc.file_hash)
+                .expect("txt in catalog")
+                .clone(),
+        ];
+
+        let mut plan = plan_import(
+            &paired,
+            &receiver.db,
+            &ordered_books,
+            &OrchestratorConfig::default(),
+            &plan_cancel,
+            |_| {},
+        )
+        .await
+        .expect("plan");
+
+        let (cancel_handle, cancel_token) = CancelHandle::new();
+        let missing_md_path = receiver.files_dir.join("concurrent-missing.md");
+        let missing_md_id_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+
+        let txt_hash = txt_doc.file_hash.clone();
+        let db_for_hook = Arc::clone(&receiver.db);
+        let md_path_for_hook = missing_md_path.clone();
+        let bytes_for_hook = txt_bytes.clone();
+        let id_slot_for_hook = Arc::clone(&missing_md_id_slot);
+        let cancel_before_copy = cancel_handle.clone();
+
+        let on_republish_chunk = if cancel_during_copy {
+            let cancel_mid_copy = cancel_handle.clone();
+            let txt_hash_mid = txt_doc.file_hash.clone();
+            Some(Arc::new(move |book_hash: &str, copied: u64| {
+                if book_hash == txt_hash_mid && copied > 0 {
+                    cancel_mid_copy.cancel();
+                }
+            }) as crate::orchestrator::OnRepublishChunkHook)
+        } else {
+            None
+        };
+
+        let hooks = ExecuteTestHooks {
+            before_import_document: Some(Arc::new(move |book_id, _published_path| {
+                if book_id != txt_hash {
+                    return;
+                }
+                // Create a missing `.md` record right before Book 2's commit.
+                std::fs::write(&md_path_for_hook, &bytes_for_hook).expect("write md");
+                let md_doc = db_for_hook
+                    .lock()
+                    .expect("lock")
+                    .register_document(&md_path_for_hook)
+                    .expect("register md");
+                std::fs::remove_file(&md_path_for_hook).expect("delete md");
+                *id_slot_for_hook.lock().expect("lock") = Some(md_doc.id);
+
+                if !cancel_during_copy {
+                    cancel_before_copy.cancel();
+                }
+            })),
+            on_republish_chunk,
+            republish_chunk_size: Some(256),
+            ..ExecuteTestHooks::default()
+        };
+
+        let decisions = plan.default_decisions();
+        let report = execute_import_with_test_hooks(
+            &paired,
+            &receiver.db,
+            &receiver.library,
+            &mut plan,
+            &decisions,
+            &OrchestratorConfig::default(),
+            &cancel_token,
+            &DefaultStageFactory,
+            &hooks,
+            |_| {},
+            |_| {},
+        )
+        .await;
+
+        assert!(
+            report.cancelled,
+            "batch must report cancelled=true in mode={mode}"
+        );
+        assert_eq!(report.books.len(), 2);
+        assert_eq!(
+            report.books[0].file,
+            ComponentOutcome::Applied,
+            "already-committed Book 1 must remain Applied in mode={mode}"
+        );
+        assert_eq!(
+            report.books[1].file,
+            ComponentOutcome::Cancelled,
+            "Book 2 must report Cancelled in mode={mode}"
+        );
+
+        let missing_md_id = missing_md_id_slot
+            .lock()
+            .expect("lock")
+            .take()
+            .expect("missing md id");
+
+        {
+            let db = receiver.db.lock().expect("lock");
+            // Book 1 stayed committed with a readable managed PDF file.
+            let committed_pdf = db
+                .list_documents()
+                .expect("docs")
+                .into_iter()
+                .find(|d| d.file_hash == pdf_doc.file_hash)
+                .expect("Book 1 committed");
+            assert!(Path::new(&committed_pdf.file_path).is_file());
+
+            // Book 2's original missing `.md` record remained completely untouched.
+            let untouched_md = db.get_document(&missing_md_id).expect("missing md record");
+            assert_eq!(
+                PathBuf::from(&untouched_md.file_path),
+                missing_md_path,
+                "original missing .md record path must remain untouched in mode={mode}"
+            );
+            assert!(!Path::new(&untouched_md.file_path).exists());
+        }
+
+        // Only Book 1's managed PDF remains in `library/`; zero `.part` files remain.
+        assert_eq!(
+            count_library_entries(&receiver.library),
+            1,
+            "unused .txt/.md copies for cancelled Book 2 must be cleaned up in mode={mode}"
+        );
+        assert_eq!(
+            count_staging_entries(&receiver.library),
+            0,
+            "unfinished .part staging files must be removed in mode={mode}"
+        );
+    }
+}
