@@ -3145,4 +3145,69 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(s.getState().documentSourceStatuses[doc.id]?.state).toBe('changed');
     expect(s.getState().relinkedNonceByDocumentId[doc.id] ?? 0).toBe(0);
   });
+
+  it('ignores overlapping executeLanImport/planLanImport/backToLanImportCatalog calls while an import is active so cancel and final results stay intact', async () => {
+    const base = createMemoryBackend({ library: {} });
+    let resolveExecute!: (report: Awaited<ReturnType<StudyBackend['lanImportExecute']>>) => void;
+    const executeSpy = vi.fn<StudyBackend['lanImportExecute']>(
+      () =>
+        new Promise((resolve) => {
+          resolveExecute = resolve;
+        }),
+    );
+    const planSpy = vi.fn<StudyBackend['lanImportPlan']>(async () => ({
+      planId: 'plan-1',
+      summary: { books: [] },
+      defaultDecisions: [],
+    }));
+    const cancelledOpIds: string[] = [];
+
+    const customBackend: StudyBackend = {
+      ...base,
+      lanImportConnect: async () => ({
+        sessionId: 'sess-1',
+        address: '192.168.1.25:49319',
+        idleTimeoutSeconds: 600,
+        permissions: { positions: true, bookmarks: true },
+      }),
+      lanImportCatalog: async () => [],
+      lanImportPlan: planSpy,
+      lanImportExecute: executeSpy,
+      lanImportCancel: async (opId) => {
+        cancelledOpIds.push(opId);
+        return true;
+      },
+    };
+
+    const s = createStudySyncStore(customBackend);
+    await s.getState().initialize();
+    await s.getState().connectLanImport('192.168.1.25:49319', '123456');
+    await s.getState().planLanImport([]);
+    planSpy.mockClear();
+
+    const firstExec = s.getState().executeLanImport([]);
+    const firstOpId = s.getState().lanImport.activeOperationId;
+    expect(firstOpId).toBeTruthy();
+    expect(s.getState().lanImport.phase).toBe('importing');
+
+    // Duplicate execute, plan, and back-to-catalog while importing are all ignored synchronously.
+    expect(await s.getState().executeLanImport([])).toBeNull();
+    expect(await s.getState().planLanImport([])).toBeNull();
+    await s.getState().backToLanImportCatalog();
+
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(planSpy).toHaveBeenCalledTimes(0);
+    expect(s.getState().lanImport.phase).toBe('importing');
+    expect(s.getState().lanImport.activeOperationId).toBe(firstOpId);
+
+    // Cancel still targets the first active operation, and releasing it finishes cleanly in `results`.
+    expect(await s.getState().cancelLanImportOperation()).toBe(true);
+    expect(cancelledOpIds).toEqual([firstOpId]);
+
+    resolveExecute({ books: [], cancelled: true });
+    const report = await firstExec;
+    expect(report).toEqual({ books: [], cancelled: true });
+    expect(s.getState().lanImport.phase).toBe('results');
+    expect(s.getState().lanImport.activeOperationId).toBeNull();
+  });
 });

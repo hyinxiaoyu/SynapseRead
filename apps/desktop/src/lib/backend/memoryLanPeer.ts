@@ -253,6 +253,7 @@ interface InternalReceiverSession {
   permissions: SharePermissions;
   catalog: ResolvedPeerBook[];
   plans: Map<string, InternalPlan>;
+  executingPlans: Set<string>;
 }
 
 export function createMemoryLanAdapter(
@@ -505,6 +506,7 @@ export function createMemoryLanAdapter(
           permissions: { ...peerPermissions },
           catalog: [],
           plans: new Map(),
+          executingPlans: new Set(),
         });
         return {
           sessionId,
@@ -737,9 +739,13 @@ export function createMemoryLanAdapter(
       if (options.errors?.lanImportExecute) throw options.errors.lanImportExecute;
       const session = sessions.get(input.sessionId);
       if (!session) throw host.fail('lan_auth_expired', 'receiver session expired');
+      if (session.executingPlans.has(input.planId)) {
+        throw host.fail('lan_transfer_busy', 'import plan is already executing');
+      }
       const plan = session.plans.get(input.planId);
       if (!plan) throw host.fail('not_found', 'import plan not found');
 
+      session.executingPlans.add(input.planId);
       const op = registerOp(input.operationId, input.sessionId);
       const results: LanBookImportResult[] = [];
       let cancelled = false;
@@ -856,6 +862,15 @@ export function createMemoryLanAdapter(
                 });
                 continue;
               }
+              // Re-check existing documents by fileHash AFTER the pre-commit await
+              // so two concurrent plans importing the same book never create
+              // duplicate records (mirrors Rust `file_hash` UNIQUE resolution).
+              if (!targetDoc) {
+                targetDoc =
+                  [...host.documents.values()].find(
+                    (doc) => doc.fileHash === planned.peer.bookId,
+                  ) ?? null;
+              }
               const originalExt =
                 targetDoc?.filePath.split('.').pop()?.toLowerCase() ?? planned.peer.extension;
               const destPath = targetDoc?.filePath.startsWith('/library/')
@@ -866,7 +881,7 @@ export function createMemoryLanAdapter(
               if (targetDoc) {
                 const repaired: StudyDocument = {
                   ...targetDoc,
-                  filePath: destPath,
+                  filePath: targetDoc.filePath in host.files ? targetDoc.filePath : destPath,
                 };
                 host.documents.set(repaired.id, repaired);
                 targetDoc = repaired;
@@ -1001,6 +1016,7 @@ export function createMemoryLanAdapter(
 
         return { books: results, cancelled };
       } finally {
+        session.executingPlans.delete(input.planId);
         activeOps.delete(op.key);
       }
     },

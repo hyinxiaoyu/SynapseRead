@@ -2090,8 +2090,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async planLanImport(bookIds) {
-        const session = get().lanImport.session;
-        if (!session) return null;
+        const { session, phase } = get().lanImport;
+        if (!session || phase === 'importing') return null;
         const epoch = lanImportEpoch;
         const opSeq = (lanImportOpSeq += 1);
         const operationId = crypto.randomUUID();
@@ -2145,8 +2145,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async executeLanImport(decisions) {
-        const { session, plan } = get().lanImport;
-        if (!session || !plan) return null;
+        const { session, plan, phase } = get().lanImport;
+        if (!session || !plan || phase === 'importing') return null;
         const epoch = lanImportEpoch;
         const opSeq = (lanImportOpSeq += 1);
         const operationId = crypto.randomUUID();
@@ -2292,8 +2292,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async backToLanImportCatalog() {
-        const session = get().lanImport.session;
-        if (!session) return;
+        const { session, phase } = get().lanImport;
+        if (!session || phase === 'importing') return;
         lanImportOpSeq += 1;
         set((state) => ({
           lanImport: {

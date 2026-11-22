@@ -681,5 +681,78 @@ describe('memory backend card delete and restore', () => {
     expect(tcReport.books[0]?.file).toEqual({ status: 'applied' });
     expect(tcReport.books[1]?.file).toEqual({ status: 'cancelled' });
     expect(await transferCancelBackend.listDocuments()).toHaveLength(1);
+
+    // 6. Concurrent execution on the same planId rejects with `lan_transfer_busy`,
+    // and two different planIds importing the same book concurrently create only ONE document ID.
+    let releaseCommitBarrier!: () => void;
+    const commitBarrier = new Promise<void>((resolve) => {
+      releaseCommitBarrier = resolve;
+    });
+    let commitWaiters = 0;
+    const concurrentBackend = createMemoryBackend({
+      library: {},
+      lanPeer: {
+        pairingCode: '123456',
+        books: [{ title: 'Shared Book', format: 'txt', extension: 'txt', bytes: book1Bytes }],
+        onBeforeBookStep: async (phase) => {
+          if (phase === 'commit') {
+            commitWaiters += 1;
+            await commitBarrier;
+          }
+        },
+      },
+    });
+    const cSession = await concurrentBackend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    const cCatalog = await concurrentBackend.lanImportCatalog(cSession.sessionId);
+    const planA = await concurrentBackend.lanImportPlan(
+      { sessionId: cSession.sessionId, bookIds: [cCatalog[0]!.bookId] },
+      () => undefined,
+    );
+    const planB = await concurrentBackend.lanImportPlan(
+      { sessionId: cSession.sessionId, bookIds: [cCatalog[0]!.bookId] },
+      () => undefined,
+    );
+
+    const execA = concurrentBackend.lanImportExecute(
+      {
+        sessionId: cSession.sessionId,
+        planId: planA.planId,
+        decisions: planA.defaultDecisions,
+      },
+      () => undefined,
+    );
+    // Same planId re-entry must fail immediately with `lan_transfer_busy`.
+    await expect(
+      concurrentBackend.lanImportExecute(
+        {
+          sessionId: cSession.sessionId,
+          planId: planA.planId,
+          decisions: planA.defaultDecisions,
+        },
+        () => undefined,
+      ),
+    ).rejects.toMatchObject({ code: 'lan_transfer_busy' });
+
+    // Different planId importing the exact same book concurrently must converge on ONE document ID.
+    const execB = concurrentBackend.lanImportExecute(
+      {
+        sessionId: cSession.sessionId,
+        planId: planB.planId,
+        decisions: planB.defaultDecisions,
+      },
+      () => undefined,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(commitWaiters).toBe(2);
+    releaseCommitBarrier();
+
+    const [repA, repB] = await Promise.all([execA, execB]);
+    expect(repA.books[0]?.documentId).toBeTruthy();
+    expect(repB.books[0]?.documentId).toBe(repA.books[0]?.documentId);
+    expect(await concurrentBackend.listDocuments()).toHaveLength(1);
   });
 });
