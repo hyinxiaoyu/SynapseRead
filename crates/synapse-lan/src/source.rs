@@ -682,6 +682,16 @@ fn stream_verified_file(
                 total_sent = next_total;
                 transfer_guard.record_activity();
                 file_bytes_sent.fetch_add(n as u64, Ordering::Release);
+                if total_sent == prepared.len {
+                    // Release our Arc<TransferGuard> BEFORE enqueuing the final
+                    // chunk so `ChannelBody` holds the sole remaining reference
+                    // and drops it synchronously once the response finishes,
+                    // preventing a spurious `429 lan_transfer_busy` on an
+                    // immediate sequential keep-alive request.
+                    drop(transfer_guard);
+                    let _ = tx.blocking_send(Ok(Frame::data(Bytes::from(chunk))));
+                    return;
+                }
                 if tx
                     .blocking_send(Ok(Frame::data(Bytes::from(chunk))))
                     .is_err()
