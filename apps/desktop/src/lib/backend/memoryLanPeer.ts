@@ -876,13 +876,13 @@ export function createMemoryLanAdapter(
                 'none' | 'healthy' | 'missing' | 'changed' | 'cancelled' | 'unstable' = 'none';
 
               for (let attempt = 0; attempt < MAX_COMMIT_VERIFY_ATTEMPTS; attempt += 1) {
-                const liveDoc =
-                  (targetDoc ? host.documents.get(targetDoc.id) : undefined) ??
+                const byId = targetDoc ? host.documents.get(targetDoc.id) : undefined;
+                targetDoc =
+                  (byId && byId.fileHash === planned.peer.bookId ? byId : null) ??
                   [...host.documents.values()].find(
                     (doc) => doc.fileHash === planned.peer.bookId,
                   ) ??
                   null;
-                targetDoc = liveDoc && liveDoc.fileHash === planned.peer.bookId ? liveDoc : null;
 
                 if (!targetDoc) {
                   existingFileState = 'none';

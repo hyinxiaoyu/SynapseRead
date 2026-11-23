@@ -1249,4 +1249,93 @@ describe('memory backend card delete and restore', () => {
       backend.loadDocumentSource({ ...doc, filePath: expectedManagedPath }),
     ).rejects.toMatchObject({ code: 'io' });
   });
+
+  it('falls back to fileHash lookup when old document ID is relinked to different content and original content is re-registered', async () => {
+    const originalBytes = new TextEncoder().encode('Original content for hash fallback');
+    const differentBytes = new TextEncoder().encode('Completely different replacement content');
+    let originalMissing = false;
+    let enteredCommit!: () => void;
+    const commitEntered = new Promise<void>((resolve) => {
+      enteredCommit = resolve;
+    });
+    let releaseCommit!: () => void;
+    const commitReleased = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+
+    const backend = createMemoryBackend({
+      library: {
+        '/local/original.txt': async () => {
+          if (originalMissing) throw new Error('ENOENT');
+          return originalBytes;
+        },
+        '/local/different.txt': differentBytes,
+        '/local/reregistered.txt': originalBytes,
+      },
+      lanPeer: {
+        pairingCode: '123456',
+        books: [
+          {
+            title: 'original',
+            format: 'txt',
+            extension: 'txt',
+            bytes: originalBytes,
+          },
+        ],
+        onBeforeBookStep: async (phase) => {
+          if (phase === 'commit') {
+            enteredCommit();
+            await commitReleased;
+          }
+        },
+      },
+    });
+
+    // Pick `/local/original.txt` (index 0), then mark it missing.
+    const oldDoc = (await backend.pickDocument())!;
+    const originalHash = oldDoc.fileHash;
+    originalMissing = true;
+
+    const session = await backend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    const catalog = await backend.lanImportCatalog(session.sessionId);
+    expect(catalog[0]?.state).toBe('missingFile');
+
+    const plan = await backend.lanImportPlan(
+      { sessionId: session.sessionId, bookIds: [catalog[0]!.bookId] },
+      () => undefined,
+    );
+
+    const execPromise = backend.lanImportExecute(
+      {
+        sessionId: session.sessionId,
+        planId: plan.planId,
+        decisions: plan.defaultDecisions,
+      },
+      () => undefined,
+    );
+
+    await commitEntered;
+    // Relink `oldDoc` to `/local/different.txt` (index 1, different hash), then
+    // pick `/local/reregistered.txt` (index 2, same hash as `originalBytes`).
+    const relinked = (await backend.relinkDocument(oldDoc.id))!;
+    expect(relinked.document.fileHash).not.toBe(originalHash);
+    const newlyPicked = (await backend.pickDocument())!;
+    expect(newlyPicked.fileHash).toBe(originalHash);
+    expect(newlyPicked.filePath).toBe('/local/reregistered.txt');
+    releaseCommit();
+
+    const report = await execPromise;
+    expect(report.books[0]?.documentId).toBe(newlyPicked.id);
+    expect(report.books[0]?.file).toEqual({ status: 'skipped' });
+
+    const docsWithOriginalHash = (await backend.listDocuments()).filter(
+      (d) => d.fileHash === originalHash,
+    );
+    expect(docsWithOriginalHash).toHaveLength(1);
+    expect(docsWithOriginalHash[0]?.id).toBe(newlyPicked.id);
+    expect(docsWithOriginalHash[0]?.filePath).toBe('/local/reregistered.txt');
+  });
 });
