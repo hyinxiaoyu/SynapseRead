@@ -272,12 +272,142 @@ describe('importDecisions', () => {
           },
         ],
       },
-      'conflictOverride',
+      [override],
     );
     const updatedOk = merged.books.find((b) => b.bookId === 'b-ok');
     expect(updatedOk?.file.status).toBe('applied');
     expect(updatedOk?.bookmarks.status).toBe('applied');
     expect(updatedOk?.bookmarkCounts.inserted).toBe(2);
     expect(updatedOk?.position.status).toBe('applied');
+  });
+
+  it('preserves position conflict and counts when retrying only failed bookmarks (#169)', () => {
+    const initialDecisions = [
+      { bookId: 'b-1', importFile: false, importPosition: true, importBookmarks: true },
+    ];
+    const initialReport: LanImportExecutionReport = {
+      cancelled: false,
+      books: [
+        {
+          bookId: 'b-1',
+          documentId: 'doc-1',
+          state: 'alreadyPresent',
+          file: { status: 'skipped', reason: 'alreadyPresent' },
+          position: {
+            status: 'conflict',
+            code: 'lan_position_conflict',
+            hasCurrentPosition: true,
+            currentProgress: 0.55,
+          },
+          bookmarks: {
+            status: 'failed',
+            error: { code: 'lan_disk_full', message: 'disk full' },
+          },
+          bookmarkCounts: { inserted: 0, existing: 1, skipped: 0 },
+        },
+      ],
+    };
+
+    const retryDecisions = buildRetryFailedDecisions(initialReport, initialDecisions);
+    expect(retryDecisions).toEqual([
+      {
+        bookId: 'b-1',
+        importFile: false,
+        importPosition: false,
+        importBookmarks: true,
+        overridePositionConflict: false,
+      },
+    ]);
+
+    const afterBookmarkRetry = mergeExecutionReports(
+      initialReport,
+      {
+        cancelled: false,
+        books: [
+          {
+            bookId: 'b-1',
+            documentId: 'doc-1',
+            state: 'alreadyPresent',
+            file: { status: 'skipped', reason: 'alreadyPresent' },
+            position: { status: 'skipped' },
+            bookmarks: { status: 'applied' },
+            bookmarkCounts: { inserted: 2, existing: 1, skipped: 0 },
+          },
+        ],
+      },
+      retryDecisions,
+    );
+
+    expect(afterBookmarkRetry.books[0]?.position).toEqual({
+      status: 'conflict',
+      code: 'lan_position_conflict',
+      hasCurrentPosition: true,
+      currentProgress: 0.55,
+    });
+    expect(afterBookmarkRetry.books[0]?.bookmarks).toEqual({ status: 'applied' });
+    expect(afterBookmarkRetry.books[0]?.bookmarkCounts).toEqual({
+      inserted: 2,
+      existing: 1,
+      skipped: 0,
+    });
+
+    // Explicit position re-confirmation hits a second cursor change, then settles.
+    const override = buildConflictOverrideDecision('b-1');
+    const afterSecondConflict = mergeExecutionReports(
+      afterBookmarkRetry,
+      {
+        cancelled: false,
+        books: [
+          {
+            bookId: 'b-1',
+            documentId: 'doc-1',
+            state: 'alreadyPresent',
+            file: { status: 'skipped' },
+            position: {
+              status: 'conflict',
+              code: 'lan_position_conflict',
+              hasCurrentPosition: true,
+              currentProgress: 0.85,
+            },
+            bookmarks: { status: 'skipped' },
+            bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+          },
+        ],
+      },
+      [override],
+    );
+    expect(afterSecondConflict.books[0]?.position).toEqual({
+      status: 'conflict',
+      code: 'lan_position_conflict',
+      hasCurrentPosition: true,
+      currentProgress: 0.85,
+    });
+    expect(afterSecondConflict.books[0]?.bookmarks).toEqual({ status: 'applied' });
+    expect(afterSecondConflict.books[0]?.bookmarkCounts).toEqual({
+      inserted: 2,
+      existing: 1,
+      skipped: 0,
+    });
+
+    const finalMerged = mergeExecutionReports(
+      afterSecondConflict,
+      {
+        cancelled: false,
+        books: [
+          {
+            bookId: 'b-1',
+            documentId: 'doc-1',
+            state: 'alreadyPresent',
+            file: { status: 'skipped' },
+            position: { status: 'applied' },
+            bookmarks: { status: 'skipped' },
+            bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+          },
+        ],
+      },
+      [override],
+    );
+    expect(finalMerged.books[0]?.position).toEqual({ status: 'applied' });
+    expect(finalMerged.books[0]?.bookmarks).toEqual({ status: 'applied' });
   });
 });

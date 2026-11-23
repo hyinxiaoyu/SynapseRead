@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   buildConflictOverrideDecision,
@@ -35,12 +35,31 @@ import type {
   LanImportPlanResult,
 } from '@/types/domain';
 
-export function LanImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function LanImportDialog({
+  open,
+  onClose,
+  onCloseFlushBusyChange,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCloseFlushBusyChange?: (busy: boolean) => void;
+}) {
   if (!open) return null;
-  return <LanImportDialogBody onClose={onClose} />;
+  return (
+    <LanImportDialogBody
+      onClose={onClose}
+      {...(onCloseFlushBusyChange ? { onCloseFlushBusyChange } : {})}
+    />
+  );
 }
 
-function LanImportDialogBody({ onClose }: { onClose: () => void }) {
+function LanImportDialogBody({
+  onClose,
+  onCloseFlushBusyChange,
+}: {
+  onClose: () => void;
+  onCloseFlushBusyChange?: (busy: boolean) => void;
+}) {
   const lanImport = useStudySyncStore((state) => state.lanImport);
   const planLanImport = useStudySyncStore((state) => state.planLanImport);
   const executeLanImport = useStudySyncStore((state) => state.executeLanImport);
@@ -73,6 +92,14 @@ function LanImportDialogBody({ onClose }: { onClose: () => void }) {
   const [isPreparingCloseFlush, setIsPreparingCloseFlush] = useState(false);
   const [lastSubmittedDecisions, setLastSubmittedDecisions] = useState<BookImportDecision[]>([]);
   const [mergedReport, setMergedReport] = useState<LanImportExecutionReport | null>(null);
+  const closingRef = useRef(false);
+
+  useEffect(() => {
+    onCloseFlushBusyChange?.(isPreparingCloseFlush);
+    return () => {
+      onCloseFlushBusyChange?.(false);
+    };
+  }, [isPreparingCloseFlush, onCloseFlushBusyChange]);
 
   const currentSessionId = lanImport.session?.sessionId ?? null;
   const eligibleCatalogIds = useMemo(
@@ -114,7 +141,8 @@ function LanImportDialogBody({ onClose }: { onClose: () => void }) {
   })();
 
   const handleClose = useCallback(() => {
-    if (isBusyTransfer) return;
+    if (isBusyTransfer || closingRef.current) return;
+    closingRef.current = true;
     if (effectiveStep === 'connect') {
       connectController.cancel();
     }
@@ -210,7 +238,7 @@ function LanImportDialogBody({ onClose }: { onClose: () => void }) {
         const nextReport = await executeLanImport(decisionsToRun);
         if (nextReport !== null) {
           setMergedReport((prev) =>
-            mergeExecutionReports(options.resetPrevious ? null : prev, nextReport, options.mode),
+            mergeExecutionReports(options.resetPrevious ? null : prev, nextReport, decisionsToRun),
           );
         }
       } finally {
@@ -231,19 +259,23 @@ function LanImportDialogBody({ onClose }: { onClose: () => void }) {
 
   const handleContinueReading = useCallback(
     (documentId: string) => {
+      if (isBusyTransfer || closingRef.current) return;
+      closingRef.current = true;
       void disconnectLanImport().finally(() => {
         onClose();
         void reopenRecentDocument(documentId);
       });
     },
-    [disconnectLanImport, onClose, reopenRecentDocument],
+    [disconnectLanImport, isBusyTransfer, onClose, reopenRecentDocument],
   );
 
   const handleDone = useCallback(() => {
+    if (isBusyTransfer || closingRef.current) return;
+    closingRef.current = true;
     void disconnectLanImport().finally(() => {
       onClose();
     });
-  }, [disconnectLanImport, onClose]);
+  }, [disconnectLanImport, isBusyTransfer, onClose]);
 
   const stepDescription = (() => {
     switch (effectiveStep) {

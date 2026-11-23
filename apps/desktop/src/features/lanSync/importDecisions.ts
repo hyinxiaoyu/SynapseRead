@@ -319,43 +319,34 @@ export function buildConflictOverrideDecision(bookId: string): BookImportDecisio
 export function mergeExecutionReports(
   previous: LanImportExecutionReport | null,
   next: LanImportExecutionReport,
-  mode: 'batch' | 'conflictOverride',
+  submittedDecisions: readonly BookImportDecision[],
 ): LanImportExecutionReport {
   if (!previous) return next;
+  const submittedByBookId = new Map(
+    submittedDecisions.map((decision) => [decision.bookId, decision]),
+  );
   const merged = new Map(previous.books.map((book) => [book.bookId, book]));
   for (const updated of next.books) {
     const existing = merged.get(updated.bookId);
-    if (existing && mode === 'conflictOverride') {
-      merged.set(updated.bookId, {
-        ...existing,
-        documentId: updated.documentId ?? existing.documentId,
-        state: updated.state,
-        position: updated.position,
-      });
-    } else if (existing) {
-      merged.set(updated.bookId, {
-        ...updated,
-        documentId: updated.documentId ?? existing.documentId,
-        file:
-          updated.file.status === 'skipped' && existing.file.status === 'applied'
-            ? existing.file
-            : updated.file,
-        position:
-          updated.position.status === 'skipped' && existing.position.status === 'applied'
-            ? existing.position
-            : updated.position,
-        bookmarks:
-          updated.bookmarks.status === 'skipped' && existing.bookmarks.status === 'applied'
-            ? existing.bookmarks
-            : updated.bookmarks,
-        bookmarkCounts:
-          updated.bookmarks.status === 'skipped' && existing.bookmarks.status === 'applied'
-            ? existing.bookmarkCounts
-            : updated.bookmarkCounts,
-      });
-    } else {
+    if (!existing) {
       merged.set(updated.bookId, updated);
+      continue;
     }
+
+    const decision = submittedByBookId.get(updated.bookId);
+    const requestedFile = decision?.importFile === true;
+    const requestedPosition = decision?.importPosition === true;
+    const requestedBookmarks = decision?.importBookmarks === true;
+
+    merged.set(updated.bookId, {
+      ...existing,
+      documentId: updated.documentId ?? existing.documentId,
+      state: updated.state,
+      file: requestedFile ? updated.file : existing.file,
+      position: requestedPosition ? updated.position : existing.position,
+      bookmarks: requestedBookmarks ? updated.bookmarks : existing.bookmarks,
+      bookmarkCounts: requestedBookmarks ? updated.bookmarkCounts : existing.bookmarkCounts,
+    });
   }
   const report: LanImportExecutionReport = {
     books: [...merged.values()],

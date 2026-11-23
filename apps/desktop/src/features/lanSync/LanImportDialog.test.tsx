@@ -7,7 +7,12 @@ import type { MemoryLanPeerBook } from '@/lib/backend/memoryLanPeer';
 import type { StudyBackend } from '@/lib/backend/types';
 import * as platformModule from '@/lib/platform';
 import { createStudySyncStore, useStudySyncStore } from '@/stores/useStudySyncStore';
-import type { Bookmark, LanImportPlanResult, StudyDocument } from '@/types/domain';
+import type {
+  BookImportDecision,
+  Bookmark,
+  LanImportPlanResult,
+  StudyDocument,
+} from '@/types/domain';
 
 const initialStoreState = useStudySyncStore.getState();
 const encode = (text: string) => new TextEncoder().encode(text);
@@ -927,5 +932,240 @@ describe('LanImportDialog', () => {
       expect(disconnectSpy).toHaveBeenCalledWith('sess-done');
       expect(onClose).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('preserves position conflict across bookmark-only retry, re-checks CAS on override, and saves final position (#169)', async () => {
+    const bookBytes = encode('Shared Novel With Concurrent Position Edits');
+    const syncedAnchor = {
+      format: 'txt' as const,
+      startByteOffset: 15,
+      endByteOffset: 15,
+      lineIndex: 2,
+    };
+    const peerBooks: MemoryLanPeerBook[] = [];
+    const backend = createMemoryBackend({
+      lanPeer: { books: peerBooks },
+    });
+    const dropped = await backend.dropFiles([
+      new File([bookBytes], 'shared-novel.txt', { type: 'text/plain' }),
+    ]);
+    const localDoc = dropped.documents[0]!;
+    await backend.updateDocumentCursor(
+      localDoc.id,
+      { format: 'txt', startByteOffset: 2, endByteOffset: 2, lineIndex: 0 },
+      0.2,
+    );
+    const initialDoc: StudyDocument = {
+      ...localDoc,
+      lastCursorAnchor: { format: 'txt', startByteOffset: 2, endByteOffset: 2, lineIndex: 0 },
+      lastProgress: 0.2,
+    };
+    peerBooks.push({
+      bookId: localDoc.fileHash,
+      title: 'Shared Novel With Concurrent Position Edits',
+      format: 'txt',
+      extension: 'txt',
+      bytes: bookBytes,
+      fileAvailable: true,
+      position: { anchor: syncedAnchor, progress: 0.9 },
+      bookmarks: [
+        {
+          anchor: { format: 'txt', startByteOffset: 5, endByteOffset: 8, lineIndex: 0 },
+          label: 'Important Passage',
+        },
+      ],
+    });
+
+    const recordedDecisions: BookImportDecision[][] = [];
+    let attempt = 0;
+    const executeSpy = vi.spyOn(backend, 'lanImportExecute').mockImplementation(async (input) => {
+      recordedDecisions.push(input.decisions.map((d) => ({ ...d })));
+      attempt += 1;
+
+      // Batch 1: position returns CAS conflict (61%), bookmarks write fails.
+      if (attempt === 1) {
+        return {
+          books: [
+            {
+              bookId: localDoc.fileHash,
+              documentId: localDoc.id,
+              state: 'alreadyPresent',
+              file: { status: 'skipped', reason: 'alreadyPresent' },
+              position: {
+                status: 'conflict',
+                code: 'lan_position_conflict',
+                hasCurrentPosition: true,
+                currentProgress: 0.61,
+              },
+              bookmarks: {
+                status: 'failed',
+                error: { code: 'lan_disk_full', message: 'no space left' },
+              },
+              bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+            },
+          ],
+          cancelled: false,
+        };
+      }
+
+      // Batch 2 (Retry failed items): only bookmarks requested -> backend skips position, applies bookmark.
+      if (attempt === 2) {
+        return {
+          books: [
+            {
+              bookId: localDoc.fileHash,
+              documentId: localDoc.id,
+              state: 'alreadyPresent',
+              file: { status: 'skipped', reason: 'alreadyPresent' },
+              position: { status: 'skipped' },
+              bookmarks: { status: 'applied' },
+              bookmarkCounts: { inserted: 1, existing: 0, skipped: 0 },
+            },
+          ],
+          cancelled: false,
+        };
+      }
+
+      // Batch 3 (First explicit position override): cursor moved again -> second CAS conflict (84%).
+      if (attempt === 3) {
+        return {
+          books: [
+            {
+              bookId: localDoc.fileHash,
+              documentId: localDoc.id,
+              state: 'alreadyPresent',
+              file: { status: 'skipped', reason: 'alreadyPresent' },
+              position: {
+                status: 'conflict',
+                code: 'lan_position_conflict',
+                hasCurrentPosition: true,
+                currentProgress: 0.84,
+              },
+              bookmarks: { status: 'skipped' },
+              bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+            },
+          ],
+          cancelled: false,
+        };
+      }
+
+      // Batch 4 (Second explicit position override): applies synced position into backend DB cleanly.
+      await backend.updateDocumentCursor(localDoc.id, syncedAnchor, 0.9);
+      return {
+        books: [
+          {
+            bookId: localDoc.fileHash,
+            documentId: localDoc.id,
+            state: 'alreadyPresent',
+            file: { status: 'skipped', reason: 'alreadyPresent' },
+            position: { status: 'applied' },
+            bookmarks: { status: 'skipped' },
+            bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+          },
+        ],
+        cancelled: false,
+      };
+    });
+
+    const store = bindTestStore(backend, [initialDoc]);
+    render(<LanImportDialog open onClose={() => undefined} />);
+
+    await act(async () => {
+      await store.getState().connectLanImport('192.168.1.42', '123456');
+    });
+    fireEvent.click(screen.getByTestId(`lan-import-catalog-checkbox-${localDoc.fileHash}`));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('lan-import-review'));
+    });
+
+    // Opt in to source position (bookmarks are already checked by default).
+    fireEvent.click(await screen.findByTestId(`lan-import-position-checkbox-${localDoc.fileHash}`));
+    fireEvent.click(screen.getByTestId('lan-import-start-execute'));
+
+    // Step 1 result: conflict (61%) AND failed bookmarks + Retry failed items visible.
+    expect(await screen.findByTestId(`lan-import-conflict-${localDoc.fileHash}`)).toHaveTextContent(
+      '61%',
+    );
+    expect(screen.getByTestId(`lan-import-conflict-override-${localDoc.fileHash}`)).toBeEnabled();
+    expect(screen.getByTestId('lan-import-retry-failed')).toBeEnabled();
+
+    // Step 2: Retry ONLY failed bookmarks -> conflict (61%) MUST stay visible alongside Imported (+1)!
+    fireEvent.click(screen.getByTestId('lan-import-retry-failed'));
+    await waitFor(() => {
+      expect(executeSpy).toHaveBeenCalledTimes(2);
+    });
+    const rowAfterRetry = screen.getByTestId('lan-import-result-row');
+    expect(rowAfterRetry).toHaveTextContent('Bookmarks: Imported (+1)');
+    expect(screen.getByTestId(`lan-import-conflict-${localDoc.fileHash}`)).toHaveTextContent('61%');
+    expect(screen.getByTestId(`lan-import-conflict-override-${localDoc.fileHash}`)).toBeEnabled();
+    expect(screen.queryByTestId('lan-import-retry-failed')).not.toBeInTheDocument();
+
+    // Step 3: Explicit confirm hits a fresh conflict (84%) because local moved again.
+    fireEvent.click(screen.getByTestId(`lan-import-conflict-override-${localDoc.fileHash}`));
+    await waitFor(() => {
+      expect(executeSpy).toHaveBeenCalledTimes(3);
+      expect(screen.getByTestId(`lan-import-conflict-${localDoc.fileHash}`)).toHaveTextContent(
+        '84%',
+      );
+    });
+    expect(screen.getByTestId('lan-import-result-row')).toHaveTextContent(
+      'Bookmarks: Imported (+1)',
+    );
+
+    // Step 4: Confirm again -> Position: Applied, Bookmarks preserved, backend cursor saved!
+    fireEvent.click(screen.getByTestId(`lan-import-conflict-override-${localDoc.fileHash}`));
+    await waitFor(() => {
+      expect(executeSpy).toHaveBeenCalledTimes(4);
+      expect(
+        screen.queryByTestId(`lan-import-conflict-${localDoc.fileHash}`),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByTestId('lan-import-result-row')).toHaveTextContent('Position: Applied');
+    expect(screen.getByTestId('lan-import-result-row')).toHaveTextContent(
+      'Bookmarks: Imported (+1)',
+    );
+
+    expect(recordedDecisions).toEqual([
+      [
+        {
+          bookId: localDoc.fileHash,
+          importFile: false,
+          importPosition: true,
+          importBookmarks: true,
+          overridePositionConflict: false,
+        },
+      ],
+      [
+        {
+          bookId: localDoc.fileHash,
+          importFile: false,
+          importPosition: false,
+          importBookmarks: true,
+          overridePositionConflict: false,
+        },
+      ],
+      [
+        {
+          bookId: localDoc.fileHash,
+          importFile: false,
+          importPosition: true,
+          importBookmarks: false,
+          overridePositionConflict: true,
+        },
+      ],
+      [
+        {
+          bookId: localDoc.fileHash,
+          importFile: false,
+          importPosition: true,
+          importBookmarks: false,
+          overridePositionConflict: true,
+        },
+      ],
+    ]);
+
+    const finalDoc = store.getState().documents.find((doc) => doc.id === localDoc.id);
+    expect(finalDoc?.lastCursorAnchor).toEqual(syncedAnchor);
+    expect(finalDoc?.lastProgress).toBe(0.9);
   });
 });
