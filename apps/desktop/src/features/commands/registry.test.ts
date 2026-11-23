@@ -15,10 +15,13 @@ import {
 } from '@/features/commands/commands';
 import {
   commandState,
+  commandStatesChanged,
   dispatchCommandKeydown,
   forgetRecentCommandRuns,
+  hasOpenModalDialog,
   isBrowserOnlyShortcut,
   onCommandRun,
+  onCommandStatesChange,
   registerCommands,
   runCommand,
 } from '@/features/commands/registry';
@@ -634,5 +637,161 @@ describe('keyboard scope (#123)', () => {
     document.body.dispatchEvent(key({ key: 'Backspace', code: 'Backspace', bubbles: true }));
     expect(deleteCard).not.toHaveBeenCalled();
     expect(commandState('edit.deleteCard').enabled).toBe(true);
+  });
+});
+
+describe('modal dialog shortcut isolation (R3-04, T-56)', () => {
+  it('blocks background modified shortcuts while keeping text-editing keys inside modal inputs', () => {
+    const closeTab = vi.fn();
+    const openFile = vi.fn();
+    const toggleBookmark = vi.fn();
+    const toggleImmersive = vi.fn();
+    const undoDelete = vi.fn();
+    const find = vi.fn();
+    register(() => ({
+      'file.closeTab': { run: closeTab },
+      'file.open': { run: openFile },
+      'bookmarks.toggle': { run: toggleBookmark },
+      'view.immersive': { run: toggleImmersive },
+      'edit.undoDelete': { run: undoDelete },
+      'edit.find': { run: find },
+    }));
+
+    expect(hasOpenModalDialog()).toBe(false);
+
+    document.body.innerHTML = `
+      <div role="dialog" aria-modal="true">
+        <button id="modal-btn" type="button">Action</button>
+        <input id="modal-input" data-command-scope="search" />
+      </div>`;
+    expect(hasOpenModalDialog()).toBe(true);
+
+    const button = document.getElementById('modal-btn')!;
+    const input = document.getElementById('modal-input')!;
+
+    // On default non-mac platform (`ctrlKey`) and macOS (`metaKey`), background
+    // modified shortcuts never fire or fall through to the webview.
+    for (const init of [
+      { key: 'w', code: 'KeyW', ctrlKey: true },
+      { key: 'o', code: 'KeyO', ctrlKey: true },
+      { key: 'd', code: 'KeyD', ctrlKey: true },
+      { key: 'F', code: 'KeyF', ctrlKey: true, shiftKey: true },
+      { key: 'f', code: 'KeyF', ctrlKey: true },
+    ]) {
+      const btnEvent = key({ ...init, bubbles: true });
+      button.dispatchEvent(btnEvent);
+      expect(btnEvent.defaultPrevented, `button ${init.key}`).toBe(true);
+
+      const inputEvent = key({ ...init, bubbles: true });
+      input.dispatchEvent(inputEvent);
+      expect(inputEvent.defaultPrevented, `input ${init.key}`).toBe(true);
+    }
+
+    const platformSpy = vi.spyOn(navigator, 'platform', 'get').mockReturnValue('MacIntel');
+    try {
+      for (const init of [
+        { key: 'w', code: 'KeyW', metaKey: true },
+        { key: 'o', code: 'KeyO', metaKey: true },
+        { key: 'd', code: 'KeyD', metaKey: true },
+        { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true },
+        { key: 'f', code: 'KeyF', metaKey: true },
+      ]) {
+        const btnEvent = key({ ...init, bubbles: true });
+        button.dispatchEvent(btnEvent);
+        expect(btnEvent.defaultPrevented, `mac button ${init.key}`).toBe(true);
+
+        const inputEvent = key({ ...init, bubbles: true });
+        input.dispatchEvent(inputEvent);
+        expect(inputEvent.defaultPrevented, `mac input ${init.key}`).toBe(true);
+      }
+    } finally {
+      platformSpy.mockRestore();
+    }
+
+    expect(closeTab).not.toHaveBeenCalled();
+    expect(openFile).not.toHaveBeenCalled();
+    expect(toggleBookmark).not.toHaveBeenCalled();
+    expect(toggleImmersive).not.toHaveBeenCalled();
+    expect(find).not.toHaveBeenCalled();
+
+    // Native editing & clipboard keys stay intact inside modal inputs.
+    for (const init of [
+      { key: 'c', code: 'KeyC', metaKey: true },
+      { key: 'v', code: 'KeyV', metaKey: true },
+      { key: 'x', code: 'KeyX', metaKey: true },
+      { key: 'a', code: 'KeyA', metaKey: true },
+      { key: 'z', code: 'KeyZ', metaKey: true },
+      { key: 'z', code: 'KeyZ', ctrlKey: true },
+    ]) {
+      const event = key({ ...init, bubbles: true });
+      input.dispatchEvent(event);
+      expect(event.defaultPrevented, `editing ${init.key}`).toBe(false);
+    }
+    expect(undoDelete).not.toHaveBeenCalled();
+
+    // Even when a non-input button is focused, ⌘Z does not run background undoDelete.
+    button.dispatchEvent(key({ key: 'z', code: 'KeyZ', metaKey: true, bubbles: true }));
+    expect(undoDelete).not.toHaveBeenCalled();
+
+    // Once the modal unmounts, background shortcuts work again.
+    document.body.innerHTML = '';
+    expect(hasOpenModalDialog()).toBe(false);
+    window.dispatchEvent(key({ key: 'd', code: 'KeyD', metaKey: true }));
+    expect(toggleBookmark).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects native menu/toolbar runs synchronously and syncs disabled states while a modal is open (#168)', async () => {
+    const closeTab = vi.fn();
+    const openFile = vi.fn();
+    const toggleBookmark = vi.fn();
+    const toggleImmersive = vi.fn();
+    register(() => ({
+      'file.closeTab': { run: closeTab },
+      'file.open': { run: openFile },
+      'bookmarks.toggle': { run: toggleBookmark },
+      'view.immersive': { run: toggleImmersive },
+    }));
+
+    const stateChanges = vi.fn();
+    cleanups.push(onCommandStatesChange(stateChanges));
+
+    expect(commandState('file.closeTab').enabled).toBe(true);
+    expect(commandState('file.open').enabled).toBe(true);
+    expect(commandState('bookmarks.toggle').enabled).toBe(true);
+    expect(commandState('view.immersive').enabled).toBe(true);
+
+    document.body.innerHTML = '<div role="dialog" aria-modal="true"><button>Done</button></div>';
+    commandStatesChanged();
+
+    expect(stateChanges).toHaveBeenCalled();
+    expect(commandState('file.closeTab').enabled).toBe(false);
+    expect(commandState('file.open').enabled).toBe(false);
+    expect(commandState('bookmarks.toggle').enabled).toBe(false);
+    expect(commandState('view.immersive').enabled).toBe(false);
+
+    for (const id of [
+      'file.closeTab',
+      'file.open',
+      'bookmarks.toggle',
+      'view.immersive',
+    ] as const) {
+      expect(runCommand(id, 'menu')).toBe(false);
+      expect(runCommand(id, 'toolbar')).toBe(false);
+    }
+    expect(closeTab).not.toHaveBeenCalled();
+    expect(openFile).not.toHaveBeenCalled();
+    expect(toggleBookmark).not.toHaveBeenCalled();
+    expect(toggleImmersive).not.toHaveBeenCalled();
+
+    // Removing the modal via DOM mutation notifies subscribers via MutationObserver too.
+    stateChanges.mockClear();
+    document.body.innerHTML = '';
+    await Promise.resolve();
+    expect(stateChanges).toHaveBeenCalled();
+    expect(commandState('file.closeTab').enabled).toBe(true);
+
+    forgetRecentCommandRuns();
+    expect(runCommand('file.closeTab', 'menu')).toBe(true);
+    expect(closeTab).toHaveBeenCalledTimes(1);
   });
 });

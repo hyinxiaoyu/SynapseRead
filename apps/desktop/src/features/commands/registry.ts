@@ -70,8 +70,36 @@ function resolve(id: CommandId): CommandHandler | null {
   return null;
 }
 
+let lastModalOpen: boolean | null = null;
+let modalObserver: MutationObserver | null = null;
+
 function notifyStateListeners() {
+  lastModalOpen = hasOpenModalDialog();
   for (const listener of stateListeners) listener();
+}
+
+function syncModalObserver() {
+  if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
+  const needsObserver = stateListeners.size > 0;
+  if (needsObserver && !modalObserver) {
+    lastModalOpen = hasOpenModalDialog();
+    modalObserver = new MutationObserver(() => {
+      const nextModalOpen = hasOpenModalDialog();
+      if (nextModalOpen !== lastModalOpen) {
+        notifyStateListeners();
+      }
+    });
+    modalObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['role', 'aria-modal'],
+    });
+  } else if (!needsObserver && modalObserver) {
+    modalObserver.disconnect();
+    modalObserver = null;
+    lastModalOpen = null;
+  }
 }
 
 export function registerCommands(read: () => CommandHandlers): () => void {
@@ -93,9 +121,10 @@ export function commandStatesChanged() {
 
 export function commandState(id: CommandId): CommandState {
   const handler = resolve(id);
+  const blocked = hasOpenModalDialog();
   return {
     id,
-    enabled: handler !== null && handler.enabled !== false,
+    enabled: !blocked && handler !== null && handler.enabled !== false,
     title: handler?.title ?? commandDefinition(id).title,
   };
 }
@@ -106,7 +135,11 @@ export function commandStates(): CommandState[] {
 
 export function onCommandStatesChange(listener: () => void): () => void {
   stateListeners.add(listener);
-  return () => stateListeners.delete(listener);
+  syncModalObserver();
+  return () => {
+    stateListeners.delete(listener);
+    syncModalObserver();
+  };
 }
 
 /** Observes every command that runs, whatever triggered it. */
@@ -122,6 +155,9 @@ export function forgetRecentCommandRuns() {
 
 /** Runs a command if something currently handles it; reports whether it ran. */
 export function runCommand(id: CommandId, source: CommandSource): boolean {
+  // Reject all background commands synchronously across keyboard, native menu, and
+  // toolbar routes while a modal dialog is open (`#168`: menu state IPC lags).
+  if (hasOpenModalDialog()) return false;
   const handler = resolve(id);
   if (!handler || handler.enabled === false) return false;
   const now = performance.now();
@@ -174,7 +210,18 @@ function isSearchField(target: EventTarget | null): boolean {
   return element?.dataset?.commandScope === 'search';
 }
 
+export function hasOpenModalDialog(): boolean {
+  return (
+    typeof document !== 'undefined' &&
+    document.querySelector('[role="dialog"][aria-modal="true"]') !== null
+  );
+}
+
 function blocksShortcut(event: KeyboardEvent, definition: CommandDefinition): boolean {
+  // While any modal dialog is open, block all background app commands (including
+  // modified shortcuts like ⌘W, ⌘O, ⌘D, and ⇧⌘F), while letting the dialog's
+  // own inputs and controls keep editing/clipboard keys (`R3-04`, `T-56`).
+  if (hasOpenModalDialog()) return true;
   const { target } = event;
   if (isEditableShortcutTarget(target)) {
     return !(definition.allowInSearch && isSearchField(target));
@@ -309,10 +356,18 @@ function dispatchToCommand(event: KeyboardEvent): KeydownResult {
     );
     if (binding === undefined) continue;
     if (blocksShortcut(event, definition)) {
-      // The field owns the key, but it still must not reach the webview: `Ctrl+R`
-      // and `Ctrl+F` would reload the app or open Edge's Find bar over the note
-      // being edited. Editing and clipboard keys stay the field's.
-      if (isBrowserAction(event, platform)) event.preventDefault();
+      // The field or modal owns the key, but background app/browser actions still
+      // must not fall through to the webview (`Ctrl+R` reload, `Ctrl+F` Find bar).
+      // Editing and clipboard keys (`TEXT_FIELD_SHORTCUTS`) stay native.
+      if (
+        isBrowserAction(event, platform) ||
+        (hasOpenModalDialog() &&
+          !isEditableShortcutTarget(event.target) &&
+          isModified(event) &&
+          !TEXT_FIELD_SHORTCUTS.some((shortcut) => shortcutMatches(event, shortcut)))
+      ) {
+        event.preventDefault();
+      }
       return 'passed';
     }
     const handler = resolve(id);

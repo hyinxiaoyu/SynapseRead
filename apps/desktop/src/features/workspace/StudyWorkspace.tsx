@@ -15,6 +15,8 @@ import {
 } from '@/features/commands/registry';
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
+import { LanShareDialog } from '@/features/lanSync/LanShareDialog';
+import { LanShareIndicator } from '@/features/lanSync/LanShareIndicator';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
 import { useCardDeletedNotice } from '@/features/mindmap/useCardDeletedNotice';
 import { ReaderNotice } from '@/features/reader/ReaderNotice';
@@ -106,6 +108,8 @@ export function StudyWorkspace() {
   const onMenuCommand = useStudySyncStore((state) => state.onMenuCommand);
   const setMenuItemStates = useStudySyncStore((state) => state.setMenuItemStates);
   const onBeforeClose = useStudySyncStore((state) => state.onBeforeClose);
+  const lanShareSnapshot = useStudySyncStore((state) => state.lanShare.snapshot);
+  const refreshLanShareStatus = useStudySyncStore((state) => state.refreshLanShareStatus);
 
   const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
@@ -122,6 +126,7 @@ export function StudyWorkspace() {
   const [htmlDragging, setHtmlDragging] = useState(false);
   const [slots, setSlots] = useState<ToolbarSlots>(EMPTY_SLOTS);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
   /** The panes focus mode collapsed, to reopen when it ends. */
   const [panesBeforeImmersive, setPanesBeforeImmersive] = useState<{
     mindMap: boolean;
@@ -134,6 +139,15 @@ export function StudyWorkspace() {
 
   // Flush unsaved Inspector edits before the native window closes or quits (#117).
   useEffect(() => onBeforeClose(flushBeforeClose), [onBeforeClose]);
+
+  const isSharingActive = lanShareSnapshot.status.state !== 'off';
+  useEffect(() => {
+    if (!isSharingActive || shareDialogOpen) return;
+    const poll = window.setInterval(() => {
+      void refreshLanShareStatus();
+    }, 3000);
+    return () => window.clearInterval(poll);
+  }, [isSharingActive, refreshLanShareStatus, shareDialogOpen]);
 
   const ready = status === 'ready';
 
@@ -322,6 +336,8 @@ export function StudyWorkspace() {
   );
 
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
+  const openShareDialog = useCallback(() => setShareDialogOpen(true), []);
+  const closeShareDialog = useCallback(() => setShareDialogOpen(false), []);
 
   const workspaceCommands: CommandHandlers = {
     'window.mindMap': {
@@ -453,6 +469,11 @@ export function StudyWorkspace() {
           onSlotsChange={setSlots}
           workspaceControls={
             <>
+              <LanShareIndicator
+                snapshot={lanShareSnapshot}
+                variant="toolbar"
+                onClick={openShareDialog}
+              />
               {backendKind === 'memory' && (
                 <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground @max-6xl/toolbar:hidden">
                   Preview: nothing is saved
@@ -564,6 +585,14 @@ export function StudyWorkspace() {
             </div>
           )}
         </div>
+        {immersive && isSharingActive && (
+          <LanShareIndicator
+            snapshot={lanShareSnapshot}
+            variant="floating"
+            onClick={openShareDialog}
+          />
+        )}
+        <LanShareDialog open={shareDialogOpen} onClose={closeShareDialog} />
         {shortcutsOpen && <KeyboardShortcutsDialog onClose={closeShortcuts} />}
         <p
           ref={excerptStatusRef}
