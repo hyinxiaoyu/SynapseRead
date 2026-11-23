@@ -17,6 +17,7 @@ import { commandTooltip } from '@/features/commands/commands';
 import { isEditableShortcutTarget, useCommands } from '@/features/commands/registry';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { requestActivePageFocus } from '@/features/reader/focusPage';
+import { describeResumeLocation } from '@/features/reader/resumeLocation';
 import { ReaderPopoverLayer, ReaderPopoverSlotProvider } from '@/features/reader/ReaderNotice';
 import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
@@ -35,28 +36,13 @@ import {
   type AnchorLocation,
   type Annotation,
   type AnnotationPatch,
-  defaultBookmarkLabel,
   type DocumentSourceStatus,
   type DocumentViewerProps,
   type PdfLayout,
   type StudyDocument,
 } from '@/types/domain';
 
-export function describeResumeLocation(document: StudyDocument): string {
-  const anchor = document.lastCursorAnchor;
-  if (!anchor) return 'Start reading';
-  const progress = document.lastProgress;
-  const percent =
-    typeof progress === 'number' && Number.isFinite(progress)
-      ? `${Math.round(Math.min(Math.max(progress, 0), 1) * 100)}%`
-      : null;
-  // An EPUB position is a chapter file name, which means nothing to a reader, so
-  // it says only how far in the reader is, once the book's text has been measured.
-  if (anchor.format === 'epub')
-    return percent ? `Continue reading · ${percent}` : 'Continue reading';
-  const place = defaultBookmarkLabel(anchor);
-  return `Continue reading · ${percent ? `${place} · ${percent}` : place}`;
-}
+export { describeResumeLocation };
 
 interface TabErrorBoundaryProps {
   document: StudyDocument;

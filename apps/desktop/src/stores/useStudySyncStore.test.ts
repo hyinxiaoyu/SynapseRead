@@ -3210,4 +3210,75 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(s.getState().lanImport.phase).toBe('results');
     expect(s.getState().lanImport.activeOperationId).toBeNull();
   });
+
+  it('coalesces concurrent disconnectLanImport calls, blocks connectLanImport during disconnecting, and drops late connects (#169)', async () => {
+    const base = createMemoryBackend({ library: {} });
+    let releaseDisconnect!: () => void;
+    let resolveLateConnect!: (
+      session: Awaited<ReturnType<StudyBackend['lanImportConnect']>>,
+    ) => void;
+    const disconnectedSessions: string[] = [];
+
+    const backend: StudyBackend = {
+      ...base,
+      lanImportConnect: vi
+        .fn<StudyBackend['lanImportConnect']>()
+        .mockResolvedValueOnce({
+          sessionId: 'sess-active',
+          address: '192.168.1.25:49319',
+          idleTimeoutSeconds: 600,
+          permissions: { positions: true, bookmarks: true },
+        })
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              resolveLateConnect = resolve;
+            }),
+        ),
+      lanImportCatalog: vi.fn<StudyBackend['lanImportCatalog']>().mockResolvedValue([]),
+      lanImportDisconnect: vi.fn<StudyBackend['lanImportDisconnect']>(async (sessionId) => {
+        disconnectedSessions.push(sessionId);
+        if (sessionId === 'sess-active') {
+          await new Promise<void>((resolve) => {
+            releaseDisconnect = resolve;
+          });
+        }
+      }),
+    };
+
+    const s = createStudySyncStore(backend);
+    await s.getState().initialize();
+    await s.getState().connectLanImport('192.168.1.25:49319', '123456');
+
+    const d1 = s.getState().disconnectLanImport();
+    const d2 = s.getState().disconnectLanImport();
+    expect(s.getState().lanImport.phase).toBe('disconnecting');
+    expect(s.getState().lanImport.session).toBeNull();
+    expect(disconnectedSessions).toEqual(['sess-active']);
+
+    // Connect attempts during `disconnecting` are rejected synchronously.
+    expect(await s.getState().connectLanImport('192.168.1.99:49319', '654321')).toBeNull();
+    expect(backend.lanImportConnect).toHaveBeenCalledTimes(1);
+
+    releaseDisconnect();
+    await Promise.all([d1, d2]);
+    expect(s.getState().lanImport.phase).toBe('idle');
+    expect(disconnectedSessions).toEqual(['sess-active']);
+
+    // Now start a new connect, cancel/disconnect before it resolves, then let it resolve late.
+    const inflightConnect = s.getState().connectLanImport('192.168.1.25:49319', '123456');
+    const teardown = s.getState().disconnectLanImport();
+    resolveLateConnect({
+      sessionId: 'sess-late',
+      address: '192.168.1.25:49319',
+      idleTimeoutSeconds: 600,
+      permissions: { positions: true, bookmarks: true },
+    });
+    expect(await inflightConnect).toBeNull();
+    await teardown;
+
+    expect(disconnectedSessions).toEqual(['sess-active', 'sess-late']);
+    expect(s.getState().lanImport.session).toBeNull();
+    expect(s.getState().lanImport.phase).toBe('idle');
+  });
 });

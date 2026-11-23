@@ -76,7 +76,14 @@ export interface LanShareSliceState {
 }
 
 export type LanImportPhase =
-  'idle' | 'connecting' | 'catalog' | 'planning' | 'preview' | 'importing' | 'results';
+  | 'idle'
+  | 'connecting'
+  | 'disconnecting'
+  | 'catalog'
+  | 'planning'
+  | 'preview'
+  | 'importing'
+  | 'results';
 
 export interface LanImportSliceState {
   phase: LanImportPhase;
@@ -811,6 +818,7 @@ export function createStudySyncStore(backend: StudyBackend) {
     let lanImportOpSeq = 0;
     let lanImportCatalogSeq = 0;
     let activeImportSessionId: string | null = null;
+    let activeDisconnectPromise: Promise<void> | null = null;
 
     backend.onLanShareEvent((payload: LanShareEventPayload) => {
       if (!isLanShareSnapshot(payload.snapshot)) return;
@@ -1990,6 +1998,9 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async connectLanImport(address, code) {
+        if (activeDisconnectPromise !== null || get().lanImport.phase === 'disconnecting') {
+          return null;
+        }
         const epoch = (lanImportEpoch += 1);
         lanImportOpSeq += 1;
         lanImportCatalogSeq += 1;
@@ -2311,6 +2322,9 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async disconnectLanImport() {
+        if (activeDisconnectPromise !== null) {
+          return activeDisconnectPromise;
+        }
         // Synchronously invalidate all in-flight connect/catalog/plan/execute
         // operations before any await so late responses can never resurrect state.
         lanImportEpoch += 1;
@@ -2319,15 +2333,38 @@ export function createStudySyncStore(backend: StudyBackend) {
         const sessionId = activeImportSessionId ?? get().lanImport.session?.sessionId ?? null;
         const operationId = get().lanImport.activeOperationId;
         activeImportSessionId = null;
+
+        if (!operationId && !sessionId) {
+          set({
+            lanImport: { ...INITIAL_LAN_IMPORT_SLICE },
+          });
+          return;
+        }
+
         set({
-          lanImport: { ...INITIAL_LAN_IMPORT_SLICE },
+          lanImport: {
+            ...INITIAL_LAN_IMPORT_SLICE,
+            phase: 'disconnecting',
+          },
         });
-        if (operationId) {
-          await backend.lanImportCancel(operationId).catch(() => false);
-        }
-        if (sessionId) {
-          await backend.lanImportDisconnect(sessionId).catch(() => undefined);
-        }
+
+        activeDisconnectPromise = (async () => {
+          try {
+            if (operationId) {
+              await backend.lanImportCancel(operationId).catch(() => false);
+            }
+            if (sessionId) {
+              await backend.lanImportDisconnect(sessionId).catch(() => undefined);
+            }
+          } finally {
+            activeDisconnectPromise = null;
+            set({
+              lanImport: { ...INITIAL_LAN_IMPORT_SLICE },
+            });
+          }
+        })();
+
+        return activeDisconnectPromise;
       },
 
       clearLanImportError() {
