@@ -2292,3 +2292,20 @@ fn macos_info_plist_declares_local_network_usage_without_bonjour() {
         "V1 uses no mDNS/Bonjour discovery; Info.plist must not declare NSBonjourServices"
     );
 }
+
+#[test]
+fn macos_bundle_config_enforces_hardened_runtime_without_personal_identity() {
+    let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+    let bundle = &config["bundle"];
+    assert_eq!(bundle["targets"], json!(["app", "dmg"]));
+    let macos = &bundle["macOS"];
+    assert_eq!(macos["hardenedRuntime"], Value::Bool(true));
+    assert!(
+        matches!(macos.get("signingIdentity"), None | Some(Value::Null)),
+        "signingIdentity must come from APPLE_SIGNING_IDENTITY or APPLE_CERTIFICATE, not a hardcoded personal identity"
+    );
+    assert!(
+        matches!(macos.get("entitlements"), None | Some(Value::Null)),
+        "hardenedRuntime should run without custom exception entitlements unless proven necessary"
+    );
+}

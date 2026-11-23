@@ -31,6 +31,7 @@ apps/desktop/src-tauri/gen/schemas/
 *.pem
 *.p12
 *.key
+*.p8
 
 # macOS signing and bundle artifacts
 *.dmg
