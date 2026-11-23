@@ -17,7 +17,7 @@ export interface LanImportConnectController {
   handleAddressChange: (next: string) => void;
   handleCodeChange: (next: string) => void;
   submit: () => Promise<void>;
-  cancel: () => void;
+  cancel: (options?: { cancelBackend?: boolean }) => void;
 }
 
 export function useLanImportConnect(): LanImportConnectController {
@@ -36,6 +36,7 @@ export function useLanImportConnect(): LanImportConnectController {
   const retryTimerRef = useRef<number | undefined>(undefined);
   const retryResolveRef = useRef<(() => void) | null>(null);
   const cancelledRef = useRef(false);
+  const submittingRef = useRef(false);
   const mountedRef = useRef(true);
 
   const settlePendingRetryWait = useCallback(() => {
@@ -77,15 +78,26 @@ export function useLanImportConnect(): LanImportConnectController {
     [clearLanImportError, error],
   );
 
-  const cancel = useCallback(() => {
-    cancelledRef.current = true;
-    settlePendingRetryWait();
-    setIsAutoRetrying(false);
-    setIsSubmitting(false);
-    void cancelLanImportOperation();
-  }, [cancelLanImportOperation, settlePendingRetryWait]);
+  const cancel = useCallback(
+    (options?: { cancelBackend?: boolean }) => {
+      cancelledRef.current = true;
+      submittingRef.current = false;
+      settlePendingRetryWait();
+      setIsAutoRetrying(false);
+      setIsSubmitting(false);
+      if (options?.cancelBackend ?? true) {
+        void cancelLanImportOperation();
+      }
+    },
+    [cancelLanImportOperation, settlePendingRetryWait],
+  );
 
   const submit = useCallback(async () => {
+    const storePhase = useStudySyncStore.getState().lanImport.phase;
+    if (submittingRef.current || storePhase === 'connecting' || storePhase === 'disconnecting') {
+      return;
+    }
+
     const trimmedAddress = address.trim();
     const cleanedCode = code.replace(/\s+/g, '');
 
@@ -101,6 +113,7 @@ export function useLanImportConnect(): LanImportConnectController {
       return;
     }
 
+    submittingRef.current = true;
     setValidationError(null);
     clearLanImportError();
     settlePendingRetryWait();
@@ -145,13 +158,15 @@ export function useLanImportConnect(): LanImportConnectController {
         }, AUTO_RETRY_DELAY_MS);
       });
     } finally {
+      submittingRef.current = false;
       if (mountedRef.current) {
         setIsSubmitting(false);
       }
     }
   }, [address, clearLanImportError, code, connectLanImport, settlePendingRetryWait]);
 
-  const isBusy = phase === 'connecting' || isSubmitting || isAutoRetrying;
+  const isDisconnecting = phase === 'disconnecting';
+  const isBusy = phase === 'connecting' || isDisconnecting || isSubmitting || isAutoRetrying;
 
   return {
     address,
@@ -331,23 +346,31 @@ export function LanImportConnectFooter({
   controller: LanImportConnectController;
   onClose: () => void;
 }) {
+  const isDisconnecting = useStudySyncStore((state) => state.lanImport.phase === 'disconnecting');
+
   return (
     <>
       <span className="text-xs text-muted-foreground">
-        {controller.isBusy
-          ? controller.isAutoRetrying
-            ? 'Retrying connection…'
-            : 'Pairing with source device…'
-          : 'Enter the address and code shown on the sharing device.'}
+        {isDisconnecting
+          ? 'Disconnecting from source device…'
+          : controller.isBusy
+            ? controller.isAutoRetrying
+              ? 'Retrying connection…'
+              : 'Pairing with source device…'
+            : 'Enter the address and code shown on the sharing device.'}
       </span>
       <div className="flex items-center gap-2">
-        {controller.isBusy ? (
+        {isDisconnecting ? (
+          <Button type="button" variant="outline" size="sm" disabled>
+            Disconnecting…
+          </Button>
+        ) : controller.isBusy ? (
           <Button
             type="button"
             variant="outline"
             size="sm"
             data-testid="lan-import-connect-cancel"
-            onClick={controller.cancel}
+            onClick={() => controller.cancel()}
           >
             Cancel
           </Button>
@@ -366,6 +389,7 @@ export function LanImportConnectFooter({
               type="button"
               size="sm"
               data-testid="lan-import-connect-submit"
+              disabled={controller.isBusy}
               onClick={() => void controller.submit()}
             >
               Connect

@@ -79,11 +79,13 @@ export function LanImportCatalogStep({
   onToggleBook,
   onSelectAllEligible,
   onClearSelection,
+  onDisconnect,
 }: {
   selectedBookIds: ReadonlySet<string>;
   onToggleBook: (bookId: string) => void;
   onSelectAllEligible: (eligibleBookIds: readonly string[]) => void;
   onClearSelection: () => void;
+  onDisconnect?: () => void;
 }) {
   const phase = useStudySyncStore((state) => state.lanImport.phase);
   const session = useStudySyncStore((state) => state.lanImport.session);
@@ -99,6 +101,8 @@ export function LanImportCatalogStep({
   const [refreshing, setRefreshing] = useState(false);
 
   const isPlanning = phase === 'planning';
+  const isDisconnecting = phase === 'disconnecting';
+  const triggerDisconnect = onDisconnect ?? (() => void disconnectLanImport());
 
   const filteredCatalog = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -166,7 +170,7 @@ export function LanImportCatalogStep({
               variant="outline"
               size="sm"
               data-testid="lan-import-catalog-refresh"
-              disabled={isPlanning || refreshing}
+              disabled={isPlanning || isDisconnecting || refreshing}
               onClick={() => void handleRefresh()}
             >
               <RefreshCw className={cn('size-3.5', refreshing && 'animate-spin')} />
@@ -177,8 +181,8 @@ export function LanImportCatalogStep({
               variant="outline"
               size="sm"
               data-testid="lan-import-disconnect"
-              disabled={isPlanning}
-              onClick={() => void disconnectLanImport()}
+              disabled={isPlanning || isDisconnecting}
+              onClick={triggerDisconnect}
             >
               <Unplug className="size-3.5" />
               Disconnect
@@ -251,7 +255,8 @@ export function LanImportCatalogStep({
                 variant="outline"
                 size="sm"
                 data-testid="lan-import-catalog-reconnect"
-                onClick={() => void disconnectLanImport()}
+                disabled={isDisconnecting}
+                onClick={triggerDisconnect}
               >
                 Reconnect
               </Button>

@@ -1,6 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { createRef } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { LanImportConnectStep, useLanImportConnect } from '@/features/lanSync/LanImportConnectStep';
 import { LanImportDialog } from '@/features/lanSync/LanImportDialog';
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import type { MemoryLanPeerBook } from '@/lib/backend/memoryLanPeer';
@@ -1167,5 +1169,387 @@ describe('LanImportDialog', () => {
     const finalDoc = store.getState().documents.find((doc) => doc.id === localDoc.id);
     expect(finalDoc?.lastCursorAnchor).toEqual(syncedAnchor);
     expect(finalDoc?.lastProgress).toBe(0.9);
+  });
+
+  it('keeps Catalog Close in an explicit Disconnecting stage until disconnect settles and rejects second connection or Enter/Retry (#169)', async () => {
+    let releaseDisconnect!: () => void;
+    const disconnectGate = new Promise<void>((resolve) => {
+      releaseDisconnect = resolve;
+    });
+
+    const backend = createMemoryBackend();
+    const connectSpy = vi.spyOn(backend, 'lanImportConnect').mockResolvedValue({
+      sessionId: 'sess-old',
+      address: '192.168.1.42:49319',
+      idleTimeoutSeconds: 600,
+      permissions: { positions: true, bookmarks: true },
+    });
+    vi.spyOn(backend, 'lanImportCatalog').mockResolvedValue([]);
+    const disconnectSpy = vi
+      .spyOn(backend, 'lanImportDisconnect')
+      .mockImplementation(() => disconnectGate);
+
+    const store = bindTestStore(backend);
+    const onClose = vi.fn();
+
+    render(<LanImportDialog open onClose={onClose} />);
+    fireEvent.change(screen.getByTestId('lan-import-address-input'), {
+      target: { value: '192.168.1.42' },
+    });
+    fireEvent.change(screen.getByTestId('lan-import-code-input'), {
+      target: { value: '123456' },
+    });
+    fireEvent.click(screen.getByTestId('lan-import-connect-submit'));
+    await screen.findByTestId('lan-import-catalog-list');
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+
+    // Click Close in Catalog while disconnect Promise is pending.
+    const dialog = screen.getByTestId('lan-import-dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+
+    expect(await screen.findByTestId('lan-import-disconnecting')).toHaveTextContent(
+      'Disconnecting…',
+    );
+    expect(store.getState().lanImport.phase).toBe('disconnecting');
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    expect(disconnectSpy).toHaveBeenCalledWith('sess-old');
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Attempts to close again, press Enter/Escape, click backdrop, or invoke connect/retry are blocked.
+    const headerClose = screen.getByRole('button', { name: 'Close Import from Another Device' });
+    expect(headerClose).toBeDisabled();
+    fireEvent.click(headerClose);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.mouseDown(screen.getByTestId('lan-import-dialog-backdrop'));
+    fireEvent.keyDown(dialog, { key: 'Enter', code: 'Enter' });
+    expect(screen.queryByTestId('lan-import-connect-submit')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('lan-import-connect-retry')).not.toBeInTheDocument();
+    expect(await store.getState().connectLanImport('192.168.1.99:49319', '654321')).toBeNull();
+
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseDisconnect();
+      await disconnectGate;
+    });
+
+    await waitFor(() => {
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+    expect(connectSpy).toHaveBeenCalledTimes(1);
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    expect(store.getState().lanImport.session).toBeNull();
+    expect(store.getState().lanImport.phase).toBe('idle');
+  });
+
+  it('waits for disconnect before closing on Done/Continue reading or unlocking Connect on Preview Disconnect & Results Reconnect (#169)', async () => {
+    let releaseDisconnect!: () => void;
+    const disconnectGate = () =>
+      new Promise<void>((resolve) => {
+        releaseDisconnect = resolve;
+      });
+
+    const backend = createMemoryBackend();
+    const connectSpy = vi.spyOn(backend, 'lanImportConnect').mockResolvedValue({
+      sessionId: 'sess-flow',
+      address: '192.168.1.42:49319',
+      idleTimeoutSeconds: 600,
+      permissions: { positions: true, bookmarks: true },
+    });
+    const disconnectSpy = vi
+      .spyOn(backend, 'lanImportDisconnect')
+      .mockImplementation(disconnectGate);
+
+    const importedDoc = makeDoc({ id: 'doc-continue', title: 'Imported Chronicle' });
+    const store = bindTestStore(backend, [importedDoc]);
+    const reopenSpy = vi.fn(async () => undefined);
+    store.setState({ reopenRecentDocument: reopenSpy });
+    useStudySyncStore.setState({ reopenRecentDocument: reopenSpy });
+
+    // A. Results -> Continue reading waits for disconnect before closing and opening document.
+    store.setState({
+      lanImport: {
+        phase: 'results',
+        session: {
+          sessionId: 'sess-flow',
+          address: '192.168.1.42:49319',
+          idleTimeoutSeconds: 600,
+          permissions: { positions: true, bookmarks: true },
+        },
+        catalog: [
+          {
+            bookId: importedDoc.fileHash,
+            title: importedDoc.title,
+            format: 'txt',
+            rawFormat: 'txt',
+            extension: 'txt',
+            sizeBytes: 12,
+            fileAvailable: true,
+            hasPosition: false,
+            bookmarkCount: 0,
+            state: 'alreadyPresent',
+            eligible: true,
+            needsFileDownload: false,
+            localDocumentId: importedDoc.id,
+            localTitle: importedDoc.title,
+          },
+        ],
+        plan: null,
+        planProgress: null,
+        executionProgress: null,
+        executionReport: {
+          books: [
+            {
+              bookId: importedDoc.fileHash,
+              documentId: importedDoc.id,
+              state: 'new',
+              file: { status: 'applied' },
+              position: { status: 'skipped' },
+              bookmarks: { status: 'skipped' },
+              bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+            },
+          ],
+          cancelled: false,
+        },
+        activeOperationId: null,
+        error: null,
+      },
+    });
+    const onCloseContinue = vi.fn();
+    const viewA = render(<LanImportDialog open onClose={onCloseContinue} />);
+
+    fireEvent.click(screen.getByTestId(`lan-import-continue-${importedDoc.fileHash}`));
+    fireEvent.click(screen.getByTestId('lan-import-dialog'));
+    fireEvent.keyDown(screen.getByTestId('lan-import-dialog'), { key: 'Enter', code: 'Enter' });
+    expect(await screen.findByTestId('lan-import-disconnecting')).toBeInTheDocument();
+    expect(onCloseContinue).not.toHaveBeenCalled();
+    expect(reopenSpy).not.toHaveBeenCalled();
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      releaseDisconnect();
+    });
+    await waitFor(() => {
+      expect(onCloseContinue).toHaveBeenCalledTimes(1);
+      expect(reopenSpy).toHaveBeenCalledWith(importedDoc.id);
+    });
+    expect(store.getState().lanImport.session).toBeNull();
+    viewA.unmount();
+
+    // B. Preview -> Disconnect stays in dialog under Disconnecting… until disconnect finishes,
+    // refusing connect attempts until Connect unlocks again.
+    disconnectSpy.mockClear();
+    connectSpy.mockClear();
+    store.setState({
+      lanImport: {
+        phase: 'preview',
+        session: {
+          sessionId: 'sess-preview',
+          address: '192.168.1.42:49319',
+          idleTimeoutSeconds: 600,
+          permissions: { positions: true, bookmarks: true },
+        },
+        catalog: [],
+        plan: { planId: 'plan-1', summary: { books: [] }, defaultDecisions: [] },
+        planProgress: null,
+        executionProgress: null,
+        executionReport: null,
+        activeOperationId: null,
+        error: null,
+      },
+    });
+    const onClosePreview = vi.fn();
+    const viewB = render(<LanImportDialog open onClose={onClosePreview} />);
+
+    fireEvent.click(screen.getByTestId('lan-import-preview-disconnect'));
+    expect(await screen.findByTestId('lan-import-disconnecting')).toBeInTheDocument();
+    expect(screen.queryByTestId('lan-import-connect-submit')).not.toBeInTheDocument();
+    expect(await store.getState().connectLanImport('192.168.1.42:49319', '123456')).toBeNull();
+    expect(connectSpy).toHaveBeenCalledTimes(0);
+
+    await act(async () => {
+      releaseDisconnect();
+    });
+    expect(await screen.findByTestId('lan-import-connect-submit')).toBeEnabled();
+    expect(onClosePreview).not.toHaveBeenCalled();
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    viewB.unmount();
+
+    // C. Results -> Reconnect and Results -> Done both wait for disconnect to finish.
+    disconnectSpy.mockClear();
+    store.setState({
+      lanImport: {
+        phase: 'results',
+        session: {
+          sessionId: 'sess-reconnect',
+          address: '192.168.1.42:49319',
+          idleTimeoutSeconds: 600,
+          permissions: { positions: true, bookmarks: true },
+        },
+        catalog: [],
+        plan: null,
+        planProgress: null,
+        executionProgress: null,
+        executionReport: {
+          books: [],
+          cancelled: false,
+          sessionError: { code: 'lan_source_stopped', message: 'stopped' },
+        },
+        activeOperationId: null,
+        error: null,
+      },
+    });
+    const onCloseResults = vi.fn();
+    const viewC = render(<LanImportDialog open onClose={onCloseResults} />);
+    fireEvent.click(screen.getByTestId('lan-import-reconnect'));
+    expect(await screen.findByTestId('lan-import-disconnecting')).toBeInTheDocument();
+    await act(async () => {
+      releaseDisconnect();
+    });
+    expect(await screen.findByTestId('lan-import-connect-submit')).toBeEnabled();
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    expect(onCloseResults).not.toHaveBeenCalled();
+    viewC.unmount();
+
+    // Now test Results -> Done waits cleanly.
+    disconnectSpy.mockClear();
+    const onCloseDone = vi.fn();
+    store.setState({
+      lanImport: {
+        phase: 'results',
+        session: {
+          sessionId: 'sess-done-wait',
+          address: '192.168.1.42:49319',
+          idleTimeoutSeconds: 600,
+          permissions: { positions: true, bookmarks: true },
+        },
+        catalog: [],
+        plan: null,
+        planProgress: null,
+        executionProgress: null,
+        executionReport: {
+          books: [],
+          cancelled: false,
+        },
+        activeOperationId: null,
+        error: null,
+      },
+    });
+    const viewD = render(<LanImportDialog open onClose={onCloseDone} />);
+    fireEvent.click(screen.getByTestId('lan-import-done'));
+    expect(await screen.findByTestId('lan-import-disconnecting')).toBeInTheDocument();
+    expect(onCloseDone).not.toHaveBeenCalled();
+    await act(async () => {
+      releaseDisconnect();
+    });
+    await waitFor(() => {
+      expect(onCloseDone).toHaveBeenCalledTimes(1);
+    });
+    expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    viewD.unmount();
+  });
+
+  it('disables Connect, Retry, and Enter submit during disconnecting and prevents late connect resolution from restoring a session (#169)', async () => {
+    // 1. Disconnecting phase disables Connect, Retry, and Enter form submission on Connect step.
+    const backend = createMemoryBackend();
+    const connectSpy = vi.spyOn(backend, 'lanImportConnect');
+    const store = bindTestStore(backend);
+    store.setState({
+      lanImport: {
+        phase: 'disconnecting',
+        session: null,
+        catalog: [],
+        plan: null,
+        planProgress: null,
+        executionProgress: null,
+        executionReport: null,
+        activeOperationId: null,
+        error: { code: 'lan_auth_invalid', message: 'Wrong code' },
+      },
+    });
+
+    function ConnectStepHarness() {
+      const controller = useLanImportConnect();
+      const inputRef = createRef<HTMLInputElement>();
+      return <LanImportConnectStep controller={controller} addressInputRef={inputRef} />;
+    }
+
+    const harnessView = render(<ConnectStepHarness />);
+    expect(screen.getByTestId('lan-import-address-input')).toBeDisabled();
+    expect(screen.getByTestId('lan-import-code-input')).toBeDisabled();
+    const retryBtn = screen.getByTestId('lan-import-connect-retry');
+    expect(retryBtn).toBeDisabled();
+    fireEvent.click(retryBtn);
+    fireEvent.submit(document.getElementById('lan-import-connect-form') as HTMLFormElement);
+    expect(connectSpy).not.toHaveBeenCalled();
+    harnessView.unmount();
+
+    // 2. Late old `lanImportConnect` resolving during/after `disconnectLanImport` never leaves a stale session.
+    let resolveLateConnect!: (session: {
+      sessionId: string;
+      address: string;
+      idleTimeoutSeconds: number;
+      permissions: { positions: boolean; bookmarks: boolean };
+    }) => void;
+    let releaseCancel!: (value: boolean) => void;
+    connectSpy.mockReset();
+    connectSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveLateConnect = resolve;
+        }),
+    );
+    const cancelSpy = vi.spyOn(backend, 'lanImportCancel').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseCancel = resolve;
+        }),
+    );
+    const disconnectSpy = vi.spyOn(backend, 'lanImportDisconnect').mockResolvedValue(undefined);
+
+    const lateStore = bindTestStore(backend);
+    const onClose = vi.fn();
+    render(<LanImportDialog open onClose={onClose} />);
+
+    fireEvent.change(screen.getByTestId('lan-import-address-input'), {
+      target: { value: '192.168.1.42' },
+    });
+    fireEvent.change(screen.getByTestId('lan-import-code-input'), {
+      target: { value: '123456' },
+    });
+    fireEvent.click(screen.getByTestId('lan-import-connect-submit'));
+    await waitFor(() => {
+      expect(connectSpy).toHaveBeenCalledTimes(1);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close Import from Another Device' }));
+    expect(await screen.findByTestId('lan-import-disconnecting')).toBeInTheDocument();
+    expect(cancelSpy).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Late connect resolves while still disconnecting: must proactively disconnect orphan, keep disconnecting, then close to idle.
+    await act(async () => {
+      resolveLateConnect({
+        sessionId: 'sess-late-orphan',
+        address: '192.168.1.42:49319',
+        idleTimeoutSeconds: 600,
+        permissions: { positions: true, bookmarks: true },
+      });
+    });
+    expect(disconnectSpy).toHaveBeenCalledWith('sess-late-orphan');
+    expect(lateStore.getState().lanImport.session).toBeNull();
+    expect(lateStore.getState().lanImport.phase).toBe('disconnecting');
+
+    await act(async () => {
+      releaseCancel(true);
+    });
+    await waitFor(() => {
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+    expect(lateStore.getState().lanImport.session).toBeNull();
+    expect(lateStore.getState().lanImport.phase).toBe('idle');
+    expect(connectSpy).toHaveBeenCalledTimes(1);
   });
 });

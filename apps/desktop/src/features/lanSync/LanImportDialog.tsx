@@ -1,4 +1,7 @@
+import { Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { Button } from '@/components/ui/button';
 
 import {
   buildConflictOverrideDecision,
@@ -90,9 +93,19 @@ function LanImportDialogBody({
   }));
 
   const [isPreparingCloseFlush, setIsPreparingCloseFlush] = useState(false);
+  const [isDisconnectingLocal, setIsDisconnectingLocal] = useState(false);
   const [lastSubmittedDecisions, setLastSubmittedDecisions] = useState<BookImportDecision[]>([]);
   const [mergedReport, setMergedReport] = useState<LanImportExecutionReport | null>(null);
   const closingRef = useRef(false);
+  const disconnectingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     onCloseFlushBusyChange?.(isPreparingCloseFlush);
@@ -129,10 +142,13 @@ function LanImportDialogBody({
 
   const isBusyTransfer =
     lanImport.phase === 'planning' || lanImport.phase === 'importing' || isPreparingCloseFlush;
+  const isDisconnecting = isDisconnectingLocal || lanImport.phase === 'disconnecting';
 
   const activeReport = mergedReport ?? lanImport.executionReport;
 
-  const effectiveStep: 'connect' | 'catalog' | 'preview' | 'importing' | 'results' = (() => {
+  const effectiveStep:
+    'connect' | 'disconnecting' | 'catalog' | 'preview' | 'importing' | 'results' = (() => {
+    if (isDisconnecting) return 'disconnecting';
     if (isPreparingCloseFlush || lanImport.phase === 'importing') return 'importing';
     if (lanImport.phase === 'results' && activeReport !== null) return 'results';
     if (lanImport.phase === 'preview' && lanImport.plan !== null) return 'preview';
@@ -140,16 +156,66 @@ function LanImportDialogBody({
     return 'connect';
   })();
 
+  const beginDisconnect = useCallback(
+    (options: {
+      closeDialog: boolean;
+      openDocumentId?: string;
+      clearReport?: boolean;
+      cancelPendingConnect?: boolean;
+    }) => {
+      if (isBusyTransfer || disconnectingRef.current || closingRef.current) return;
+      if (options.clearReport) {
+        setMergedReport(null);
+        setLastSubmittedDecisions([]);
+      }
+      if (options.cancelPendingConnect) {
+        // `disconnectLanImport()` below cancels the active backend operation once.
+        connectController.cancel({ cancelBackend: false });
+      }
+
+      const { lanImport: currentImport } = useStudySyncStore.getState();
+      const needsAsyncTeardown =
+        currentImport.session !== null || currentImport.activeOperationId !== null;
+
+      // Avoid flashing "Disconnecting…" when closing an unpaired, idle form.
+      if (options.closeDialog && !needsAsyncTeardown && !options.openDocumentId) {
+        closingRef.current = true;
+        void disconnectLanImport();
+        onClose();
+        return;
+      }
+
+      disconnectingRef.current = true;
+      if (options.closeDialog) {
+        closingRef.current = true;
+      }
+      setIsDisconnectingLocal(true);
+
+      void disconnectLanImport().finally(() => {
+        disconnectingRef.current = false;
+        if (!mountedRef.current) return;
+        setIsDisconnectingLocal(false);
+        if (options.closeDialog) {
+          onClose();
+          if (options.openDocumentId) {
+            void reopenRecentDocument(options.openDocumentId);
+          }
+        }
+      });
+    },
+    [connectController, disconnectLanImport, isBusyTransfer, onClose, reopenRecentDocument],
+  );
+
   const handleClose = useCallback(() => {
-    if (isBusyTransfer || closingRef.current) return;
-    closingRef.current = true;
-    if (effectiveStep === 'connect') {
-      connectController.cancel();
-    }
-    void disconnectLanImport().finally(() => {
-      onClose();
+    beginDisconnect({
+      closeDialog: true,
+      cancelPendingConnect: effectiveStep === 'connect',
     });
-  }, [connectController, disconnectLanImport, effectiveStep, isBusyTransfer, onClose]);
+  }, [beginDisconnect, effectiveStep]);
+
+  const handleInDialogDisconnect = useCallback(() => {
+    beginDisconnect({ closeDialog: false });
+  }, [beginDisconnect]);
 
   const handleToggleCatalogBook = useCallback(
     (bookId: string) => {
@@ -205,7 +271,14 @@ function LanImportDialogBody({
       decisionsToRun: BookImportDecision[],
       options: { resetPrevious: boolean; mode: 'batch' | 'conflictOverride' },
     ) => {
-      if (decisionsToRun.length === 0) return;
+      if (
+        decisionsToRun.length === 0 ||
+        disconnectingRef.current ||
+        closingRef.current ||
+        useStudySyncStore.getState().lanImport.phase === 'disconnecting'
+      ) {
+        return;
+      }
       if (options.resetPrevious) {
         setMergedReport(null);
       }
@@ -252,35 +325,35 @@ function LanImportDialogBody({
   );
 
   const handleBackToCatalog = useCallback(() => {
+    if (isBusyTransfer || isDisconnecting || disconnectingRef.current || closingRef.current) {
+      return;
+    }
     setMergedReport(null);
     setLastSubmittedDecisions([]);
     void backToLanImportCatalog();
-  }, [backToLanImportCatalog]);
+  }, [backToLanImportCatalog, isBusyTransfer, isDisconnecting]);
 
   const handleContinueReading = useCallback(
     (documentId: string) => {
-      if (isBusyTransfer || closingRef.current) return;
-      closingRef.current = true;
-      void disconnectLanImport().finally(() => {
-        onClose();
-        void reopenRecentDocument(documentId);
-      });
+      beginDisconnect({ closeDialog: true, openDocumentId: documentId });
     },
-    [disconnectLanImport, isBusyTransfer, onClose, reopenRecentDocument],
+    [beginDisconnect],
   );
 
   const handleDone = useCallback(() => {
-    if (isBusyTransfer || closingRef.current) return;
-    closingRef.current = true;
-    void disconnectLanImport().finally(() => {
-      onClose();
-    });
-  }, [disconnectLanImport, isBusyTransfer, onClose]);
+    beginDisconnect({ closeDialog: true });
+  }, [beginDisconnect]);
+
+  const handleResultsReconnect = useCallback(() => {
+    beginDisconnect({ closeDialog: false, clearReport: true });
+  }, [beginDisconnect]);
 
   const stepDescription = (() => {
     switch (effectiveStep) {
       case 'connect':
         return 'Connect to another SynapseRead desktop app sharing on the same local network.';
+      case 'disconnecting':
+        return 'Ending the pairing session with the source device.';
       case 'catalog':
         return 'Choose which shared books to inspect before importing.';
       case 'preview':
@@ -296,13 +369,25 @@ function LanImportDialogBody({
     switch (effectiveStep) {
       case 'connect':
         return <LanImportConnectFooter controller={connectController} onClose={handleClose} />;
+      case 'disconnecting':
+        return (
+          <>
+            <span className="text-xs text-muted-foreground">Disconnecting from source device…</span>
+            <Button type="button" variant="outline" size="sm" disabled>
+              Disconnecting…
+            </Button>
+          </>
+        );
       case 'catalog':
         return (
           <LanImportCatalogFooter
             selectedCount={selectedBookIds.size}
             eligibleCount={eligibleCatalogIds.size}
             isPlanning={lanImport.phase === 'planning'}
-            onReview={() => void planLanImport([...selectedBookIds])}
+            onReview={() => {
+              if (disconnectingRef.current || closingRef.current) return;
+              void planLanImport([...selectedBookIds]);
+            }}
             onCloseAndDisconnect={handleClose}
           />
         );
@@ -312,11 +397,11 @@ function LanImportDialogBody({
             <LanImportPreviewFooter
               plan={lanImport.plan}
               decisionsMap={effectiveDecisionsMap}
-              isBusy={isBusyTransfer}
+              isBusy={isBusyTransfer || isDisconnecting}
               onBackToCatalog={handleBackToCatalog}
-              onDisconnect={() => void disconnectLanImport()}
+              onDisconnect={handleInDialogDisconnect}
               onStartImport={() => {
-                if (!lanImport.plan) return;
+                if (!lanImport.plan || disconnectingRef.current || closingRef.current) return;
                 const decisions = buildImportDecisions(lanImport.plan, effectiveDecisionsMap);
                 void runImportBatch(decisions, { resetPrevious: true, mode: 'batch' });
               }}
@@ -336,16 +421,12 @@ function LanImportDialogBody({
             <LanImportResultsFooter
               report={activeReport}
               lastSubmittedDecisions={lastSubmittedDecisions}
-              isBusy={isBusyTransfer}
+              isBusy={isBusyTransfer || isDisconnecting}
               onRetryFailed={(retryDecisions) =>
                 void runImportBatch(retryDecisions, { resetPrevious: false, mode: 'batch' })
               }
               onBackToCatalog={handleBackToCatalog}
-              onReconnect={() => {
-                setMergedReport(null);
-                setLastSubmittedDecisions([]);
-                void disconnectLanImport();
-              }}
+              onReconnect={handleResultsReconnect}
               onDone={handleDone}
             />
           )
@@ -360,8 +441,12 @@ function LanImportDialogBody({
       description={stepDescription}
       testId="lan-import-dialog"
       size="lg"
-      dismissible={!isBusyTransfer}
-      dismissBlockedHint="Cancel the active transfer before closing."
+      dismissible={!isBusyTransfer && !isDisconnecting}
+      dismissBlockedHint={
+        isDisconnecting
+          ? 'Disconnecting from source device…'
+          : 'Cancel the active transfer before closing.'
+      }
       {...(effectiveStep === 'connect' ? { initialFocusRef: addressInputRef } : {})}
       onClose={handleClose}
       footer={footer}
@@ -369,12 +454,23 @@ function LanImportDialogBody({
       {effectiveStep === 'connect' && (
         <LanImportConnectStep controller={connectController} addressInputRef={addressInputRef} />
       )}
+      {effectiveStep === 'disconnecting' && (
+        <div
+          role="status"
+          data-testid="lan-import-disconnecting"
+          className="flex items-center gap-2 rounded-md border bg-muted/40 px-4 py-3 text-sm text-foreground"
+        >
+          <Loader2 className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+          <span>Disconnecting…</span>
+        </div>
+      )}
       {effectiveStep === 'catalog' && (
         <LanImportCatalogStep
           selectedBookIds={selectedBookIds}
           onToggleBook={handleToggleCatalogBook}
           onSelectAllEligible={handleSelectAllEligible}
           onClearSelection={handleClearCatalogSelection}
+          onDisconnect={handleInDialogDisconnect}
         />
       )}
       {effectiveStep === 'preview' && lanImport.plan && (
