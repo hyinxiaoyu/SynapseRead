@@ -6,6 +6,7 @@ import { dispatchEscape } from '@/features/commands/escape';
 import { forgetRecentCommandRuns } from '@/features/commands/registry';
 import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
 import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
+import { AUTO_HIDE_DELAY_MS } from '@/features/workspace/UnifiedToolbar';
 import type { MenuItemState } from '@/lib/backend/types';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import {
@@ -13,6 +14,7 @@ import {
   DEFAULT_WORKSPACE_PANE_LAYOUT,
   type DocumentFormat,
   type DocumentViewerProps,
+  INITIAL_LAN_SHARE_SNAPSHOT,
 } from '@/types/domain';
 
 import { StudyWorkspace } from './StudyWorkspace';
@@ -1030,6 +1032,69 @@ describe('StudyWorkspace', () => {
         'aria-pressed',
         'true',
       );
+    });
+  });
+
+  describe('LAN sharing indicator (R2-06, R3-04)', () => {
+    it('stays visible on empty state, open books, and after the toolbar auto-hides in Focus Mode', async () => {
+      await renderReady();
+      expect(screen.queryByTestId('lan-share-indicator')).not.toBeInTheDocument();
+
+      const listeningSnapshot = {
+        ...INITIAL_LAN_SHARE_SNAPSHOT,
+        status: { state: 'listening' as const, failedAttempts: 0, maxFailedAttempts: 5 },
+        address: '192.168.1.42:49319',
+        interfaceName: 'en0',
+        pairingCode: '482913',
+        codeExpiresAtMs: Date.now() + 600_000,
+        permissions: { positions: true, bookmarks: true },
+        sharedBookCount: 1,
+      };
+      act(() => {
+        useStudySyncStore.setState((state) => ({
+          lanShare: {
+            ...state.lanShare,
+            snapshot: listeningSnapshot,
+          },
+          refreshLanShareStatus: vi.fn(async () => listeningSnapshot),
+        }));
+      });
+
+      // Visible on empty state inside UnifiedToolbar workspaceControls.
+      const toolbarIndicator = screen.getByTestId('lan-share-indicator');
+      expect(screen.getByTestId('unified-toolbar')).toContainElement(toolbarIndicator);
+      expect(toolbarIndicator).toHaveTextContent('Sharing');
+
+      // Also stays visible when a book is open (`R2-06`).
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      expect(await screen.findByRole('tab')).toBeInTheDocument();
+      expect(screen.getByTestId('lan-share-indicator')).toBeInTheDocument();
+
+      vi.useFakeTimers();
+      try {
+        // Enter Focus Mode via keyboard shortcut (so the pointer is not hovering over the toolbar)
+        // and let UnifiedToolbar auto-hide (`inert`, `data-hidden="true"`).
+        fireEvent.keyDown(window, { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true });
+        expect(useStudySyncStore.getState().immersive).toBe(true);
+        expect(screen.getByTestId('unified-toolbar')).toHaveAttribute('data-immersive', 'true');
+        act(() => {
+          vi.advanceTimersByTime(AUTO_HIDE_DELAY_MS + 100);
+        });
+        expect(screen.getByTestId('unified-toolbar')).toHaveAttribute('data-hidden', 'true');
+
+        // Floating indicator stays visible & clickable outside the hidden toolbar.
+        const floatingIndicator = screen.getByTestId('lan-share-floating-indicator');
+        expect(floatingIndicator).toBeVisible();
+        fireEvent.click(floatingIndicator);
+        expect(screen.getByTestId('lan-share-dialog')).toBeInTheDocument();
+
+        // Closing the Share dialog keeps sharing active and the indicator visible.
+        fireEvent.keyDown(window, { key: 'Escape' });
+        expect(screen.queryByTestId('lan-share-dialog')).not.toBeInTheDocument();
+        expect(screen.getByTestId('lan-share-floating-indicator')).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

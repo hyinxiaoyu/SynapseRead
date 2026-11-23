@@ -174,7 +174,18 @@ function isSearchField(target: EventTarget | null): boolean {
   return element?.dataset?.commandScope === 'search';
 }
 
+export function hasOpenModalDialog(): boolean {
+  return (
+    typeof document !== 'undefined' &&
+    document.querySelector('[role="dialog"][aria-modal="true"]') !== null
+  );
+}
+
 function blocksShortcut(event: KeyboardEvent, definition: CommandDefinition): boolean {
+  // While any modal dialog is open, block all background app commands (including
+  // modified shortcuts like ⌘W, ⌘O, ⌘D, and ⇧⌘F), while letting the dialog's
+  // own inputs and controls keep editing/clipboard keys (`R3-04`, `T-56`).
+  if (hasOpenModalDialog()) return true;
   const { target } = event;
   if (isEditableShortcutTarget(target)) {
     return !(definition.allowInSearch && isSearchField(target));
@@ -309,10 +320,18 @@ function dispatchToCommand(event: KeyboardEvent): KeydownResult {
     );
     if (binding === undefined) continue;
     if (blocksShortcut(event, definition)) {
-      // The field owns the key, but it still must not reach the webview: `Ctrl+R`
-      // and `Ctrl+F` would reload the app or open Edge's Find bar over the note
-      // being edited. Editing and clipboard keys stay the field's.
-      if (isBrowserAction(event, platform)) event.preventDefault();
+      // The field or modal owns the key, but background app/browser actions still
+      // must not fall through to the webview (`Ctrl+R` reload, `Ctrl+F` Find bar).
+      // Editing and clipboard keys (`TEXT_FIELD_SHORTCUTS`) stay native.
+      if (
+        isBrowserAction(event, platform) ||
+        (hasOpenModalDialog() &&
+          !isEditableShortcutTarget(event.target) &&
+          isModified(event) &&
+          !TEXT_FIELD_SHORTCUTS.some((shortcut) => shortcutMatches(event, shortcut)))
+      ) {
+        event.preventDefault();
+      }
       return 'passed';
     }
     const handler = resolve(id);
