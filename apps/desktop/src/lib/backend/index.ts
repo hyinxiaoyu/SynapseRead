@@ -3,7 +3,10 @@ import { isTauri } from '@tauri-apps/api/core';
 import type { CommandId } from '@/features/commands/commands';
 import {
   createMemoryBackendWithPreview,
+  type MemoryBackendWithPreview,
+  type MemoryHostStats,
   type MemoryLanTestController,
+  type MemoryMenuItemStateMap,
 } from '@/lib/backend/memoryBackend';
 import { createTauriBackend } from '@/lib/backend/tauriBackend';
 import type { StudyBackend } from '@/lib/backend/types';
@@ -11,6 +14,11 @@ import type { StudyBackend } from '@/lib/backend/types';
 export interface SynapsePreviewController {
   chooseMenuCommand(commandId: CommandId): void;
   lan: MemoryLanTestController;
+  getMenuItemStates(): MemoryMenuItemStateMap;
+  getHostStats(): MemoryHostStats;
+  listLocalBookmarks: MemoryBackendWithPreview['listLocalBookmarks'];
+  pauseNextCursorWrite(): void;
+  releasePausedCursorWrite(): void;
 }
 
 declare global {
@@ -23,14 +31,19 @@ export function createDefaultBackend(): StudyBackend {
   if (isTauri()) {
     return createTauriBackend();
   }
-  const { backend, emitMenuCommand, lan } = createMemoryBackendWithPreview();
+  const preview = createMemoryBackendWithPreview();
   if (typeof window !== 'undefined') {
     window.__synapsePreview = {
-      chooseMenuCommand: emitMenuCommand,
-      lan,
+      chooseMenuCommand: preview.emitMenuCommand,
+      lan: preview.lan,
+      getMenuItemStates: preview.getMenuItemStates,
+      getHostStats: preview.getHostStats,
+      listLocalBookmarks: preview.listLocalBookmarks,
+      pauseNextCursorWrite: preview.pauseNextCursorWrite,
+      releasePausedCursorWrite: preview.releasePausedCursorWrite,
     };
   }
-  return backend;
+  return preview.backend;
 }
 
 export type { StudyBackend };

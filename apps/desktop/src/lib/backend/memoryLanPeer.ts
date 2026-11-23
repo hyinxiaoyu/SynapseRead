@@ -101,6 +101,12 @@ export type MemoryLanCommandName =
 
 export type MemoryLanStepPhase = 'plan' | 'execute' | 'commit';
 
+export interface MemoryFileTransferEvent {
+  bookId: string;
+  downloadedBytes: number;
+  totalBytes: number;
+}
+
 export interface MemoryLanPeerStats {
   connectCount: number;
   catalogCount: number;
@@ -109,6 +115,12 @@ export interface MemoryLanPeerStats {
   cancelCount: number;
   disconnectCount: number;
   lastRequestedDecisions: BookImportDecision[];
+  shareStartCount: number;
+  lastShareStartInput: LanShareStartInput | null;
+  shareRegenerateCount: number;
+  shareStopCount: number;
+  shareDisconnectPeerCount: number;
+  fileTransferEvents: MemoryFileTransferEvent[];
 }
 
 export interface MemoryLanTestController {
@@ -121,7 +133,7 @@ export interface MemoryLanTestController {
   simulateShareCodeLocked(): LanShareSnapshot;
   simulateSharePeerBlocked(peerIp: string, reason?: PeerRejectReason): LanShareSnapshot;
   simulateShareStopped(reason: ListenerStopReason, errorCode?: string | null): LanShareSnapshot;
-  pauseNextTransfer(phase?: MemoryLanStepPhase): void;
+  pauseNextTransfer(phase?: MemoryLanStepPhase, bookId?: string): void;
   releasePausedTransfer(): void;
   mutateLocalFile(documentId: string, bytes: Uint8Array): void;
   mutateLocalCursor(
@@ -326,9 +338,10 @@ function createMemoryLanAdapterInner(
     : { positions: true, bookmarks: true };
   let customBooks: MemoryLanPeerBook[] | null = options.books ?? null;
   const persistentErrors: Partial<Record<MemoryLanCommandName, IpcError>> = { ...options.errors };
-  const nextErrors: Partial<Record<MemoryLanCommandName, IpcError>> = {};
+  const nextErrors: Partial<Record<MemoryLanCommandName, IpcError[]>> = {};
 
   let pausedPhaseTarget: MemoryLanStepPhase | null = null;
+  let pausedBookIdTarget: string | null = null;
   let pausedTransferWaiter: (() => void) | null = null;
 
   const stats: MemoryLanPeerStats = {
@@ -339,6 +352,12 @@ function createMemoryLanAdapterInner(
     cancelCount: 0,
     disconnectCount: 0,
     lastRequestedDecisions: [],
+    shareStartCount: 0,
+    lastShareStartInput: null,
+    shareRegenerateCount: 0,
+    shareStopCount: 0,
+    shareDisconnectPeerCount: 0,
+    fileTransferEvents: [],
   };
 
   let shareSnapshot: LanShareSnapshot = { ...INITIAL_LAN_SHARE_SNAPSHOT };
@@ -356,10 +375,15 @@ function createMemoryLanAdapterInner(
   };
 
   const takeCommandError = (command: MemoryLanCommandName): IpcError | null => {
-    const once = nextErrors[command];
-    if (once !== undefined) {
-      delete nextErrors[command];
-      return once;
+    const queue = nextErrors[command];
+    if (queue && queue.length > 0) {
+      const once = queue.shift();
+      if (queue.length === 0) {
+        delete nextErrors[command];
+      }
+      if (once !== undefined) {
+        return once;
+      }
     }
     return persistentErrors[command] ?? null;
   };
@@ -368,8 +392,12 @@ function createMemoryLanAdapterInner(
     if (options.onBeforeBookStep) {
       await options.onBeforeBookStep(phase, bookId);
     }
-    if (pausedPhaseTarget === phase) {
+    if (
+      pausedPhaseTarget === phase &&
+      (pausedBookIdTarget === null || pausedBookIdTarget === bookId)
+    ) {
       pausedPhaseTarget = null;
+      pausedBookIdTarget = null;
       await new Promise<void>((resolve) => {
         pausedTransferWaiter = () => {
           pausedTransferWaiter = null;
@@ -483,6 +511,11 @@ function createMemoryLanAdapterInner(
     },
 
     async lanShareStart(input: LanShareStartInput): Promise<LanShareSnapshot | null> {
+      stats.shareStartCount += 1;
+      stats.lastShareStartInput = {
+        ...input,
+        documentIds: [...input.documentIds],
+      };
       const err = takeCommandError('lanShareStart');
       if (err) throw err;
       if (input.documentIds.length === 0) {
@@ -527,6 +560,7 @@ function createMemoryLanAdapterInner(
     },
 
     async lanShareRegenerateCode(): Promise<LanShareSnapshot> {
+      stats.shareRegenerateCount += 1;
       if (
         shareSnapshot.status.state !== 'listening' &&
         shareSnapshot.status.state !== 'codeLocked'
@@ -545,6 +579,7 @@ function createMemoryLanAdapterInner(
     },
 
     async lanShareStop(): Promise<LanShareSnapshot> {
+      stats.shareStopCount += 1;
       const wasActive = shareSnapshot.status.state !== 'off';
       shareSnapshot = {
         ...INITIAL_LAN_SHARE_SNAPSHOT,
@@ -560,6 +595,7 @@ function createMemoryLanAdapterInner(
     },
 
     async lanShareDisconnectPeer(): Promise<LanShareSnapshot> {
+      stats.shareDisconnectPeerCount += 1;
       const wasActive = shareSnapshot.status.state !== 'off';
       shareSnapshot = {
         ...INITIAL_LAN_SHARE_SNAPSHOT,
@@ -936,11 +972,15 @@ function createMemoryLanAdapterInner(
               };
             } else {
               const totalBytes = planned.peer.bytes.byteLength;
-              onProgress({
-                phase: 'fileTransfer',
+              const transferEvent: MemoryFileTransferEvent = {
                 bookId: planned.peer.bookId,
                 downloadedBytes: totalBytes,
                 totalBytes,
+              };
+              stats.fileTransferEvents.push(transferEvent);
+              onProgress({
+                phase: 'fileTransfer',
+                ...transferEvent,
               });
               // Yield so a synchronous `lanImportCancel` issued inside the
               // `fileTransfer` progress listener (or an injected commit hook)
@@ -1296,7 +1336,9 @@ function createMemoryLanAdapterInner(
       peerPermissions = { ...permissions };
     },
     setNextError(command, error) {
-      nextErrors[command] = error;
+      const queue = nextErrors[command] ?? [];
+      queue.push(error);
+      nextErrors[command] = queue;
     },
     setPersistentError(command, error) {
       if (error === null) {
@@ -1350,8 +1392,9 @@ function createMemoryLanAdapterInner(
       });
       return { ...shareSnapshot };
     },
-    pauseNextTransfer(phase = 'commit') {
+    pauseNextTransfer(phase = 'commit', bookId) {
       pausedPhaseTarget = phase;
+      pausedBookIdTarget = bookId ?? null;
     },
     releasePausedTransfer() {
       pausedTransferWaiter?.();
@@ -1377,6 +1420,13 @@ function createMemoryLanAdapterInner(
       return {
         ...stats,
         lastRequestedDecisions: stats.lastRequestedDecisions.map((d) => ({ ...d })),
+        lastShareStartInput: stats.lastShareStartInput
+          ? {
+              ...stats.lastShareStartInput,
+              documentIds: [...stats.lastShareStartInput.documentIds],
+            }
+          : null,
+        fileTransferEvents: stats.fileTransferEvents.map((e) => ({ ...e })),
       };
     },
   };

@@ -136,10 +136,24 @@ const PDF_ZOOM_MODES: readonly string[] = [
 
 const now = () => new Date().toISOString();
 
+export interface MemoryHostStats {
+  pickDocumentCount: number;
+  updateCursorCount: number;
+  bookmarkMutationCount: number;
+  pendingCursorWrite: boolean;
+}
+
+export type MemoryMenuItemStateMap = Record<string, { enabled: boolean; title?: string }>;
+
 export interface MemoryBackendWithPreview {
   backend: StudyBackend;
   emitMenuCommand(commandId: CommandId): void;
   lan: MemoryLanTestController;
+  getMenuItemStates(): MemoryMenuItemStateMap;
+  getHostStats(): MemoryHostStats;
+  listLocalBookmarks(documentId?: string): Bookmark[];
+  pauseNextCursorWrite(): void;
+  releasePausedCursorWrite(): void;
 }
 
 /**
@@ -363,11 +377,19 @@ export function createMemoryBackendWithPreview({
     lanPeer,
   );
 
+  let pickDocumentCount = 0;
+  let updateCursorCount = 0;
+  let bookmarkMutationCount = 0;
+  let pauseCursorNext = false;
+  let pendingCursorWaiter: (() => void) | null = null;
+  const menuItemStates: MemoryMenuItemStateMap = {};
+
   const backend: StudyBackend = {
     kind: 'memory',
     chromeStyle: 'standard',
 
     async pickDocument() {
+      pickDocumentCount += 1;
       const path = paths[picks % paths.length];
       if (path === undefined) return null;
       picks += 1;
@@ -403,6 +425,16 @@ export function createMemoryBackendWithPreview({
           `progress must be a fraction between 0 and 1, got ${progress}`,
         );
       }
+      if (pauseCursorNext) {
+        pauseCursorNext = false;
+        await new Promise<void>((resolve) => {
+          pendingCursorWaiter = () => {
+            pendingCursorWaiter = null;
+            resolve();
+          };
+        });
+      }
+      updateCursorCount += 1;
       document.lastCursorAnchor = anchor;
       document.lastProgress = progress ?? null;
     },
@@ -1036,6 +1068,7 @@ export function createMemoryBackendWithPreview({
           `${input.anchor.format} anchor on a ${document.format} document`,
         );
       }
+      bookmarkMutationCount += 1;
       const firstLine = input.label
         ?.split('\n')
         .map((line) => line.trim())
@@ -1073,6 +1106,7 @@ export function createMemoryBackendWithPreview({
 
     async deleteBookmark(bookmarkId) {
       require(bookmarks, bookmarkId, 'bookmark');
+      bookmarkMutationCount += 1;
       bookmarks.delete(bookmarkId);
     },
 
@@ -1083,7 +1117,14 @@ export function createMemoryBackendWithPreview({
         menuListeners.delete(listener);
       };
     },
-    setMenuItemStates: async () => undefined,
+    setMenuItemStates: async (states) => {
+      for (const entry of states) {
+        menuItemStates[entry.id] = {
+          enabled: entry.enabled,
+          ...(entry.title !== undefined ? { title: entry.title } : {}),
+        };
+      }
+    },
     // The page's Fullscreen API stands in for the window's in the browser preview.
     isFullscreen: async () => globalThis.document?.fullscreenElement != null,
     async setFullscreen(fullscreen) {
@@ -1131,5 +1172,35 @@ export function createMemoryBackendWithPreview({
       }
     },
     lan: lanController,
+    getMenuItemStates() {
+      const copy: MemoryMenuItemStateMap = {};
+      for (const [id, state] of Object.entries(menuItemStates)) {
+        copy[id] = { ...state };
+      }
+      return copy;
+    },
+    getHostStats() {
+      return {
+        pickDocumentCount,
+        updateCursorCount,
+        bookmarkMutationCount,
+        pendingCursorWrite: pendingCursorWaiter !== null,
+      };
+    },
+    listLocalBookmarks(documentId) {
+      const entries = [...bookmarks.values()];
+      return (documentId ? entries.filter((b) => b.documentId === documentId) : entries).map(
+        (b) => ({
+          ...b,
+          anchor: { ...b.anchor },
+        }),
+      );
+    },
+    pauseNextCursorWrite() {
+      pauseCursorNext = true;
+    },
+    releasePausedCursorWrite() {
+      pendingCursorWaiter?.();
+    },
   };
 }
