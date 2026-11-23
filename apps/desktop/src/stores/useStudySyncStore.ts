@@ -9,15 +9,27 @@ import {
   type Annotation,
   annotationHasNote,
   type AnnotationPatch,
+  type BookImportDecision,
   type Bookmark,
   bookmarkLocationKey,
   type CardPatch,
+  type CatalogBookClassification,
   type CreateAnnotationOptions,
   DEFAULT_READING_PREFERENCES,
   DEFAULT_WORKSPACE_PANE_LAYOUT,
   type DocumentContentReader,
   type DocumentSourceStatus,
+  INITIAL_LAN_SHARE_SNAPSHOT,
+  type IpcError,
   type JumpRequest,
+  type LanImportExecutionReport,
+  type LanImportPlanResult,
+  type LanImportProgress,
+  type LanImportSessionInfo,
+  type LanInterface,
+  type LanShareEventPayload,
+  type LanShareSnapshot,
+  type LanShareStartInput,
   type MindMapEdge,
   type MindMapNode,
   type NoteCard,
@@ -25,6 +37,7 @@ import {
   type ReaderSelection,
   DEFAULT_PDF_LAYOUT,
   type PdfLayout,
+  type PlanProgress,
   type ReadingPreferences,
   type RelinkDocumentResult,
   type RestoredCard,
@@ -32,6 +45,11 @@ import {
   type StudyNotebook,
   type Viewport,
   type WorkspacePaneLayout,
+  isCatalogBookClassification,
+  isLanImportExecutionReport,
+  isLanImportPlanResult,
+  isLanImportProgress,
+  isLanShareSnapshot,
 } from '@/types/domain';
 
 export const DEFAULT_NOTEBOOK_TITLE = 'My Notebook';
@@ -49,6 +67,61 @@ export interface DeletedCardSnapshot {
 }
 
 export type DeletionKind = 'annotation' | 'card';
+
+export interface LanShareSliceState {
+  interfaces: LanInterface[];
+  snapshot: LanShareSnapshot;
+  loading: boolean;
+  error: IpcError | null;
+}
+
+export type LanImportPhase =
+  'idle' | 'connecting' | 'catalog' | 'planning' | 'preview' | 'importing' | 'results';
+
+export interface LanImportSliceState {
+  phase: LanImportPhase;
+  session: LanImportSessionInfo | null;
+  catalog: CatalogBookClassification[];
+  plan: LanImportPlanResult | null;
+  planProgress: PlanProgress | null;
+  executionProgress: LanImportProgress | null;
+  executionReport: LanImportExecutionReport | null;
+  activeOperationId: string | null;
+  error: IpcError | null;
+}
+
+const INITIAL_LAN_SHARE_SLICE: LanShareSliceState = {
+  interfaces: [],
+  snapshot: { ...INITIAL_LAN_SHARE_SNAPSHOT },
+  loading: false,
+  error: null,
+};
+
+const INITIAL_LAN_IMPORT_SLICE: LanImportSliceState = {
+  phase: 'idle',
+  session: null,
+  catalog: [],
+  plan: null,
+  planProgress: null,
+  executionProgress: null,
+  executionReport: null,
+  activeOperationId: null,
+  error: null,
+};
+
+function toIpcError(error: unknown): IpcError {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof error.code === 'string' &&
+    'message' in error &&
+    typeof error.message === 'string'
+  ) {
+    return { code: error.code, message: error.message };
+  }
+  return { code: 'internal', message: describeError(error) };
+}
 
 /** Reopen Closed Tab keeps a bounded history: nobody reopens the 21st-last tab. */
 const MAX_CLOSED_TABS = 20;
@@ -133,6 +206,11 @@ export interface StudySyncState {
   excerptNonce: number;
   /** MindMap -> Reader: the jump the reader for that document should perform. */
   jumpRequest: JumpRequest | null;
+
+  /** Session-scoped LAN sharing state (ADR 0008, #144). */
+  lanShare: LanShareSliceState;
+  /** Session-scoped LAN import state (ADR 0008, #144). */
+  lanImport: LanImportSliceState;
 
   initialize(): Promise<void>;
   dismissError(): void;
@@ -237,6 +315,25 @@ export interface StudySyncState {
   removeBookmark(bookmarkId: string): Promise<void>;
   toggleBookmark(documentId: string, anchor: AnchorLocation, label?: string): Promise<void>;
   jumpToBookmark(bookmarkId: string): void;
+
+  // ---- LAN Book Sync actions (ADR 0008, #144) -----------------------------
+  loadLanInterfaces(): Promise<LanInterface[]>;
+  startLanShare(input: LanShareStartInput): Promise<LanShareSnapshot | null>;
+  refreshLanShareStatus(): Promise<LanShareSnapshot | null>;
+  regenerateLanShareCode(): Promise<LanShareSnapshot | null>;
+  stopLanShare(): Promise<LanShareSnapshot | null>;
+  disconnectLanSharePeer(): Promise<LanShareSnapshot | null>;
+  clearLanShareError(): void;
+
+  connectLanImport(address: string, code: string): Promise<LanImportSessionInfo | null>;
+  refreshLanImportCatalog(): Promise<CatalogBookClassification[]>;
+  planLanImport(bookIds: string[]): Promise<LanImportPlanResult | null>;
+  executeLanImport(decisions: BookImportDecision[]): Promise<LanImportExecutionReport | null>;
+  cancelLanImportOperation(): Promise<boolean>;
+  /** Returns to catalog selection while keeping the paired session alive (`R3-09`). */
+  backToLanImportCatalog(): Promise<void>;
+  disconnectLanImport(): Promise<void>;
+  clearLanImportError(): void;
 }
 
 export interface RevealRequest {
@@ -455,15 +552,27 @@ export function createStudySyncStore(backend: StudyBackend) {
       });
     };
 
+    const sourceVerifySeqs = new Map<string, number>();
+    const nextSourceVerifySeq = (documentId: string): number => {
+      const next = (sourceVerifySeqs.get(documentId) ?? 0) + 1;
+      sourceVerifySeqs.set(documentId, next);
+      return next;
+    };
+
     const checkDocumentSource = async (
       documentId: string,
     ): Promise<DocumentSourceStatus | null> => {
       if (!get().documents.some((doc) => doc.id === documentId)) return null;
       const lockEpoch = getDocumentLockEpoch(documentId);
+      const verifySeq = nextSourceVerifySeq(documentId);
       let status: DocumentSourceStatus | null = null;
       await guarded(async () => {
         status = await backend.verifyDocumentSource(documentId);
-        if (isDocumentLocked(documentId) || getDocumentLockEpoch(documentId) !== lockEpoch) {
+        if (
+          isDocumentLocked(documentId) ||
+          getDocumentLockEpoch(documentId) !== lockEpoch ||
+          sourceVerifySeqs.get(documentId) !== verifySeq
+        ) {
           status = null;
           return;
         }
@@ -698,6 +807,21 @@ export function createStudySyncStore(backend: StudyBackend) {
       }
     });
 
+    let lanImportEpoch = 0;
+    let lanImportOpSeq = 0;
+    let lanImportCatalogSeq = 0;
+    let activeImportSessionId: string | null = null;
+
+    backend.onLanShareEvent((payload: LanShareEventPayload) => {
+      if (!isLanShareSnapshot(payload.snapshot)) return;
+      set((state) => ({
+        lanShare: {
+          ...state.lanShare,
+          snapshot: payload.snapshot,
+        },
+      }));
+    });
+
     return {
       status: 'idle',
       error: null,
@@ -739,6 +863,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       inspectRequest: null,
       excerptNonce: 0,
       jumpRequest: null,
+      lanShare: { ...INITIAL_LAN_SHARE_SLICE, snapshot: { ...INITIAL_LAN_SHARE_SNAPSHOT } },
+      lanImport: { ...INITIAL_LAN_IMPORT_SLICE },
 
       async initialize() {
         if (get().status === 'loading' || get().status === 'ready') return;
@@ -1727,6 +1853,487 @@ export function createStudySyncStore(backend: StudyBackend) {
         }));
         persistSession();
         void checkDocumentSource(bookmark.documentId);
+      },
+
+      // ---- LAN Book Sync actions (ADR 0008, #144) -------------------------
+
+      async loadLanInterfaces() {
+        set((state) => ({
+          lanShare: { ...state.lanShare, loading: true, error: null },
+        }));
+        try {
+          const interfaces = await backend.lanListInterfaces();
+          set((state) => ({
+            lanShare: { ...state.lanShare, interfaces, loading: false },
+          }));
+          return interfaces;
+        } catch (error) {
+          set((state) => ({
+            lanShare: { ...state.lanShare, loading: false, error: toIpcError(error) },
+          }));
+          return [];
+        }
+      },
+
+      async startLanShare(input) {
+        set((state) => ({
+          lanShare: { ...state.lanShare, loading: true, error: null },
+        }));
+        try {
+          const snapshot = await backend.lanShareStart(input);
+          if (snapshot === null) {
+            set((state) => ({
+              lanShare: { ...state.lanShare, loading: false },
+            }));
+            return null;
+          }
+          if (!isLanShareSnapshot(snapshot)) {
+            throw { code: 'internal', message: 'invalid LAN share snapshot payload' };
+          }
+          set((state) => ({
+            lanShare: { ...state.lanShare, snapshot, loading: false },
+          }));
+          return snapshot;
+        } catch (error) {
+          set((state) => ({
+            lanShare: { ...state.lanShare, loading: false, error: toIpcError(error) },
+          }));
+          return null;
+        }
+      },
+
+      async refreshLanShareStatus() {
+        try {
+          const snapshot = await backend.lanShareStatus();
+          if (!isLanShareSnapshot(snapshot)) return null;
+          set((state) => ({
+            lanShare: { ...state.lanShare, snapshot },
+          }));
+          return snapshot;
+        } catch (error) {
+          set((state) => ({
+            lanShare: { ...state.lanShare, error: toIpcError(error) },
+          }));
+          return null;
+        }
+      },
+
+      async regenerateLanShareCode() {
+        set((state) => ({
+          lanShare: { ...state.lanShare, loading: true, error: null },
+        }));
+        try {
+          const snapshot = await backend.lanShareRegenerateCode();
+          if (!isLanShareSnapshot(snapshot)) {
+            throw { code: 'internal', message: 'invalid LAN share snapshot payload' };
+          }
+          set((state) => ({
+            lanShare: { ...state.lanShare, snapshot, loading: false },
+          }));
+          return snapshot;
+        } catch (error) {
+          set((state) => ({
+            lanShare: { ...state.lanShare, loading: false, error: toIpcError(error) },
+          }));
+          return null;
+        }
+      },
+
+      async stopLanShare() {
+        set((state) => ({
+          lanShare: { ...state.lanShare, loading: true, error: null },
+        }));
+        try {
+          const snapshot = await backend.lanShareStop();
+          set((state) => ({
+            lanShare: {
+              ...state.lanShare,
+              snapshot: isLanShareSnapshot(snapshot) ? snapshot : { ...INITIAL_LAN_SHARE_SNAPSHOT },
+              loading: false,
+            },
+          }));
+          return snapshot;
+        } catch (error) {
+          set((state) => ({
+            lanShare: { ...state.lanShare, loading: false, error: toIpcError(error) },
+          }));
+          return null;
+        }
+      },
+
+      async disconnectLanSharePeer() {
+        set((state) => ({
+          lanShare: { ...state.lanShare, loading: true, error: null },
+        }));
+        try {
+          const snapshot = await backend.lanShareDisconnectPeer();
+          set((state) => ({
+            lanShare: {
+              ...state.lanShare,
+              snapshot: isLanShareSnapshot(snapshot) ? snapshot : { ...INITIAL_LAN_SHARE_SNAPSHOT },
+              loading: false,
+            },
+          }));
+          return snapshot;
+        } catch (error) {
+          set((state) => ({
+            lanShare: { ...state.lanShare, loading: false, error: toIpcError(error) },
+          }));
+          return null;
+        }
+      },
+
+      clearLanShareError() {
+        set((state) => ({
+          lanShare: { ...state.lanShare, error: null },
+        }));
+      },
+
+      async connectLanImport(address, code) {
+        const epoch = (lanImportEpoch += 1);
+        lanImportOpSeq += 1;
+        lanImportCatalogSeq += 1;
+        const previousSessionId =
+          activeImportSessionId ?? get().lanImport.session?.sessionId ?? null;
+        activeImportSessionId = null;
+        if (previousSessionId) {
+          void backend.lanImportDisconnect(previousSessionId).catch(() => undefined);
+        }
+        const operationId = crypto.randomUUID();
+        set({
+          lanImport: {
+            ...INITIAL_LAN_IMPORT_SLICE,
+            phase: 'connecting',
+            activeOperationId: operationId,
+          },
+        });
+        try {
+          const session = await backend.lanImportConnect({ address, code, operationId });
+          if (lanImportEpoch !== epoch) {
+            // Disconnect or a newer connect invalidated this pairing while in flight;
+            // proactively end the orphaned session on the source.
+            void backend.lanImportDisconnect(session.sessionId).catch(() => undefined);
+            return null;
+          }
+          // Expose `sessionId` immediately so a Disconnect during slow catalog fetch
+          // can tear down this session synchronously and cleanly.
+          activeImportSessionId = session.sessionId;
+          set((state) =>
+            lanImportEpoch === epoch
+              ? {
+                  lanImport: {
+                    ...state.lanImport,
+                    session,
+                  },
+                }
+              : state,
+          );
+          const rawCatalog = await backend.lanImportCatalog(session.sessionId);
+          if (lanImportEpoch !== epoch) {
+            return null;
+          }
+          const catalog = rawCatalog.filter(isCatalogBookClassification);
+          set({
+            lanImport: {
+              phase: 'catalog',
+              session,
+              catalog,
+              plan: null,
+              planProgress: null,
+              executionProgress: null,
+              executionReport: null,
+              activeOperationId: null,
+              error: null,
+            },
+          });
+          return session;
+        } catch (error) {
+          if (lanImportEpoch !== epoch) {
+            return null;
+          }
+          const staleSessionId = activeImportSessionId;
+          activeImportSessionId = null;
+          if (staleSessionId) {
+            void backend.lanImportDisconnect(staleSessionId).catch(() => undefined);
+          }
+          set({
+            lanImport: {
+              ...INITIAL_LAN_IMPORT_SLICE,
+              phase: 'idle',
+              error: toIpcError(error),
+            },
+          });
+          return null;
+        }
+      },
+
+      async refreshLanImportCatalog() {
+        const session = get().lanImport.session;
+        if (!session) return [];
+        const epoch = lanImportEpoch;
+        const catalogSeq = (lanImportCatalogSeq += 1);
+        try {
+          const rawCatalog = await backend.lanImportCatalog(session.sessionId);
+          if (lanImportEpoch !== epoch || lanImportCatalogSeq !== catalogSeq) return [];
+          const catalog = rawCatalog.filter(isCatalogBookClassification);
+          set((state) => ({
+            lanImport: { ...state.lanImport, catalog, error: null },
+          }));
+          return catalog;
+        } catch (error) {
+          if (lanImportEpoch !== epoch || lanImportCatalogSeq !== catalogSeq) return [];
+          set((state) => ({
+            lanImport: { ...state.lanImport, error: toIpcError(error) },
+          }));
+          return [];
+        }
+      },
+
+      async planLanImport(bookIds) {
+        const { session, phase } = get().lanImport;
+        if (!session || phase === 'importing') return null;
+        const epoch = lanImportEpoch;
+        const opSeq = (lanImportOpSeq += 1);
+        const operationId = crypto.randomUUID();
+        set((state) => ({
+          lanImport: {
+            ...state.lanImport,
+            phase: 'planning',
+            plan: null,
+            planProgress: { completedBooks: 0, totalBooks: bookIds.length, bookId: '' },
+            activeOperationId: operationId,
+            error: null,
+          },
+        }));
+        try {
+          const result = await backend.lanImportPlan(
+            { sessionId: session.sessionId, bookIds, operationId },
+            (progress) => {
+              if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return;
+              set((state) => ({
+                lanImport: { ...state.lanImport, planProgress: progress },
+              }));
+            },
+          );
+          if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return null;
+          if (!isLanImportPlanResult(result)) {
+            throw { code: 'internal', message: 'invalid LAN import plan payload' };
+          }
+          set((state) => ({
+            lanImport: {
+              ...state.lanImport,
+              phase: 'preview',
+              plan: result,
+              activeOperationId: null,
+              error: null,
+            },
+          }));
+          return result;
+        } catch (error) {
+          if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return null;
+          set((state) => ({
+            lanImport: {
+              ...state.lanImport,
+              phase: 'catalog',
+              planProgress: null,
+              activeOperationId: null,
+              error: toIpcError(error),
+            },
+          }));
+          return null;
+        }
+      },
+
+      async executeLanImport(decisions) {
+        const { session, plan, phase } = get().lanImport;
+        if (!session || !plan || phase === 'importing') return null;
+        const epoch = lanImportEpoch;
+        const opSeq = (lanImportOpSeq += 1);
+        const operationId = crypto.randomUUID();
+        set((state) => ({
+          lanImport: {
+            ...state.lanImport,
+            phase: 'importing',
+            executionProgress: null,
+            executionReport: null,
+            activeOperationId: operationId,
+            error: null,
+          },
+        }));
+
+        const pendingRefreshes: Array<Promise<unknown>> = [];
+        const refreshedDocIds = new Set<string>();
+        const enqueueBookRefresh = (docId: string) => {
+          if (refreshedDocIds.has(docId)) return;
+          refreshedDocIds.add(docId);
+          const wasMissing = get().documentSourceStatuses[docId]?.state === 'missing';
+          const refreshBook = async () => {
+            await get().refreshDocument(docId);
+            await get().refreshBookmarks(docId);
+            // When a managed book is restored back to its original `<sha256>.<ext>`
+            // path (or Rust returns `AlreadyPresent`), `filePath` is unchanged so
+            // `refreshDocument` cannot see recovery by path diff alone: re-verify
+            // the source file under a per-document sequence + lock epoch guard so
+            // a stale response can never overwrite a newer status (`changed`, etc.).
+            if (wasMissing && get().documentSourceStatuses[docId]?.state === 'missing') {
+              const lockEpoch = getDocumentLockEpoch(docId);
+              const verifySeq = nextSourceVerifySeq(docId);
+              const beforeDoc = get().documents.find((doc) => doc.id === docId);
+              const expectedPath = beforeDoc?.filePath;
+              const expectedHash = beforeDoc?.fileHash;
+              const verified = await backend.verifyDocumentSource(docId).catch(() => null);
+              if (
+                verified &&
+                sourceVerifySeqs.get(docId) === verifySeq &&
+                getDocumentLockEpoch(docId) === lockEpoch
+              ) {
+                set((state) => {
+                  const currentDoc = state.documents.find((doc) => doc.id === docId);
+                  if (
+                    currentDoc === undefined ||
+                    currentDoc.filePath !== expectedPath ||
+                    currentDoc.fileHash !== expectedHash ||
+                    state.documentSourceStatuses[docId]?.state !== 'missing'
+                  ) {
+                    return state;
+                  }
+                  const recovered = verified.state === 'ok';
+                  return {
+                    documentSourceStatuses: {
+                      ...state.documentSourceStatuses,
+                      [docId]: verified,
+                    },
+                    ...(recovered
+                      ? {
+                          relinkedNonceByDocumentId: {
+                            ...state.relinkedNonceByDocumentId,
+                            [docId]: (state.relinkedNonceByDocumentId[docId] ?? 0) + 1,
+                          },
+                          selection: state.selection?.documentId === docId ? null : state.selection,
+                        }
+                      : {}),
+                  };
+                });
+              }
+            }
+          };
+          pendingRefreshes.push(refreshBook());
+        };
+
+        try {
+          const report = await backend.lanImportExecute(
+            {
+              sessionId: session.sessionId,
+              planId: plan.planId,
+              decisions,
+              operationId,
+            },
+            (progress) => {
+              if (!isLanImportProgress(progress)) return;
+              if (lanImportEpoch === epoch && lanImportOpSeq === opSeq) {
+                set((state) => ({
+                  lanImport: { ...state.lanImport, executionProgress: progress },
+                }));
+              }
+              // Live per-book refresh using `#137` actions (`T-32`, `R2-02`, `R3-06`).
+              // Committed books always refresh into the library even if Disconnect raced.
+              if (progress.phase === 'bookCompleted' && progress.result.documentId !== null) {
+                enqueueBookRefresh(progress.result.documentId);
+              }
+            },
+          );
+          if (!isLanImportExecutionReport(report)) {
+            await Promise.allSettled(pendingRefreshes);
+            if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return null;
+            throw { code: 'internal', message: 'invalid LAN import execution report' };
+          }
+          // Reconcile any committed books whose `bookCompleted` channel event arrived
+          // after `lanImportExecute` resolved or was absent, before publishing `results`.
+          for (const book of report.books) {
+            if (book.documentId !== null) {
+              enqueueBookRefresh(book.documentId);
+            }
+          }
+          await Promise.allSettled(pendingRefreshes);
+          if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return null;
+          set((state) => ({
+            lanImport: {
+              ...state.lanImport,
+              phase: 'results',
+              executionReport: report,
+              activeOperationId: null,
+              error: null,
+            },
+          }));
+          return report;
+        } catch (error) {
+          await Promise.allSettled(pendingRefreshes);
+          if (lanImportEpoch !== epoch || lanImportOpSeq !== opSeq) return null;
+          set((state) => ({
+            lanImport: {
+              ...state.lanImport,
+              phase: 'preview',
+              activeOperationId: null,
+              error: toIpcError(error),
+            },
+          }));
+          return null;
+        }
+      },
+
+      async cancelLanImportOperation() {
+        const operationId = get().lanImport.activeOperationId;
+        if (!operationId) return false;
+        try {
+          return await backend.lanImportCancel(operationId);
+        } catch {
+          return false;
+        }
+      },
+
+      async backToLanImportCatalog() {
+        const { session, phase } = get().lanImport;
+        if (!session || phase === 'importing') return;
+        lanImportOpSeq += 1;
+        set((state) => ({
+          lanImport: {
+            ...state.lanImport,
+            phase: 'catalog',
+            plan: null,
+            planProgress: null,
+            executionProgress: null,
+            executionReport: null,
+            activeOperationId: null,
+            error: null,
+          },
+        }));
+        await get().refreshLanImportCatalog();
+      },
+
+      async disconnectLanImport() {
+        // Synchronously invalidate all in-flight connect/catalog/plan/execute
+        // operations before any await so late responses can never resurrect state.
+        lanImportEpoch += 1;
+        lanImportOpSeq += 1;
+        lanImportCatalogSeq += 1;
+        const sessionId = activeImportSessionId ?? get().lanImport.session?.sessionId ?? null;
+        const operationId = get().lanImport.activeOperationId;
+        activeImportSessionId = null;
+        set({
+          lanImport: { ...INITIAL_LAN_IMPORT_SLICE },
+        });
+        if (operationId) {
+          await backend.lanImportCancel(operationId).catch(() => false);
+        }
+        if (sessionId) {
+          await backend.lanImportDisconnect(sessionId).catch(() => undefined);
+        }
+      },
+
+      clearLanImportError() {
+        set((state) => ({
+          lanImport: { ...state.lanImport, error: null },
+        }));
       },
     };
   });

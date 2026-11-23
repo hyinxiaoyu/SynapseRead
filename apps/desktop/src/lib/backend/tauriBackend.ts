@@ -4,28 +4,58 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import type { DroppedDocumentsPayload, StudyBackend } from '@/lib/backend/types';
 import { detectPlatform } from '@/lib/platform';
-import type {
-  Annotation,
-  Bookmark,
-  CreatedExcerpt,
-  DeletedCard,
-  DocumentSourceStatus,
-  MindMapEdge,
-  NoteCard,
-  NotebookGraph,
-  PdfLayout,
-  ReadingPreferences,
-  RelinkDocumentResult,
-  RestoredAnnotation,
-  RestoredCard,
-  StudyDocument,
-  StudyNotebook,
-  TextChunk,
-  WorkspaceSession,
+import {
+  type Annotation,
+  type Bookmark,
+  type CatalogBookClassification,
+  type CreatedExcerpt,
+  type DeletedCard,
+  type DocumentSourceStatus,
+  type LanImportExecutionReport,
+  type LanImportPlanResult,
+  type LanImportSessionInfo,
+  type LanInterface,
+  type LanShareSnapshot,
+  type MindMapEdge,
+  type NoteCard,
+  type NotebookGraph,
+  type PdfLayout,
+  type ReadingPreferences,
+  type RelinkDocumentResult,
+  type RestoredAnnotation,
+  type RestoredCard,
+  type StudyDocument,
+  type StudyNotebook,
+  type TextChunk,
+  type WorkspaceSession,
+  isCatalogBookClassification,
+  isLanImportExecutionReport,
+  isLanImportPlanResult,
+  isLanImportProgress,
+  isLanImportSessionInfo,
+  isLanInterface,
+  isLanShareEventPayload,
+  isLanShareSnapshot,
+  isPlanProgress,
 } from '@/types/domain';
+
+function assertPayload<T>(value: unknown, guard: (v: unknown) => v is T, label: string): T {
+  if (!guard(value)) {
+    throw { code: 'internal', message: `invalid ${label} payload` };
+  }
+  return value;
+}
+
+function assertPayloadArray<T>(value: unknown, guard: (v: unknown) => v is T, label: string): T[] {
+  if (!Array.isArray(value) || !value.every(guard)) {
+    throw { code: 'internal', message: `invalid ${label} payload` };
+  }
+  return value;
+}
 
 const DOCUMENTS_DROPPED_EVENT = 'synapse://documents-dropped';
 const BEFORE_CLOSE_EVENT = 'synapse://before-close';
+const LAN_SHARE_EVENT = 'synapse://lan-share-event';
 const MENU_COMMAND_EVENT = 'menu-command';
 
 /**
@@ -202,5 +232,117 @@ export function createTauriBackend(): StudyBackend {
         signal?.removeEventListener('abort', onAbort);
       });
     },
+
+    // ---- LAN Book Sync (1:1 audited against `apps/desktop/src-tauri/src/ipc_tests.rs`) ----
+
+    lanListInterfaces: async () =>
+      assertPayloadArray<LanInterface>(
+        await invoke<unknown>('lan_list_interfaces'),
+        isLanInterface,
+        'lan_list_interfaces',
+      ),
+    lanShareStart: async (input) => {
+      const result = await invoke<unknown>('lan_share_start', {
+        input: {
+          documentIds: input.documentIds,
+          positions: input.positions,
+          bookmarks: input.bookmarks,
+          interfaceIp: input.interfaceIp ?? null,
+        },
+      });
+      return result === null
+        ? null
+        : assertPayload<LanShareSnapshot>(result, isLanShareSnapshot, 'lan_share_start');
+    },
+    lanShareStatus: async () =>
+      assertPayload<LanShareSnapshot>(
+        await invoke<unknown>('lan_share_status'),
+        isLanShareSnapshot,
+        'lan_share_status',
+      ),
+    lanShareRegenerateCode: async () =>
+      assertPayload<LanShareSnapshot>(
+        await invoke<unknown>('lan_share_regenerate_code'),
+        isLanShareSnapshot,
+        'lan_share_regenerate_code',
+      ),
+    lanShareStop: async () =>
+      assertPayload<LanShareSnapshot>(
+        await invoke<unknown>('lan_share_stop'),
+        isLanShareSnapshot,
+        'lan_share_stop',
+      ),
+    lanShareDisconnectPeer: async () =>
+      assertPayload<LanShareSnapshot>(
+        await invoke<unknown>('lan_share_disconnect_peer'),
+        isLanShareSnapshot,
+        'lan_share_disconnect_peer',
+      ),
+    onLanShareEvent: (listener) =>
+      subscribe((isLive) =>
+        listen<unknown>(LAN_SHARE_EVENT, (event) => {
+          if (isLive() && isLanShareEventPayload(event.payload)) {
+            listener(event.payload);
+          }
+        }),
+      ),
+
+    lanImportConnect: async (input) =>
+      assertPayload<LanImportSessionInfo>(
+        await invoke<unknown>('lan_import_connect', {
+          input: {
+            address: input.address,
+            code: input.code,
+            operationId: input.operationId ?? null,
+          },
+        }),
+        isLanImportSessionInfo,
+        'lan_import_connect',
+      ),
+    lanImportCatalog: async (sessionId) =>
+      assertPayloadArray<CatalogBookClassification>(
+        await invoke<unknown>('lan_import_catalog', { sessionId }),
+        isCatalogBookClassification,
+        'lan_import_catalog',
+      ),
+    async lanImportPlan(input, onProgress) {
+      const channel = new Channel<unknown>();
+      channel.onmessage = (progress) => {
+        if (isPlanProgress(progress)) onProgress(progress);
+      };
+      return assertPayload<LanImportPlanResult>(
+        await invoke<unknown>('lan_import_plan', {
+          input: {
+            sessionId: input.sessionId,
+            bookIds: input.bookIds,
+            operationId: input.operationId ?? null,
+          },
+          onProgress: channel,
+        }),
+        isLanImportPlanResult,
+        'lan_import_plan',
+      );
+    },
+    async lanImportExecute(input, onProgress) {
+      const channel = new Channel<unknown>();
+      channel.onmessage = (progress) => {
+        if (isLanImportProgress(progress)) onProgress(progress);
+      };
+      return assertPayload<LanImportExecutionReport>(
+        await invoke<unknown>('lan_import_execute', {
+          input: {
+            sessionId: input.sessionId,
+            planId: input.planId,
+            decisions: input.decisions,
+            operationId: input.operationId ?? null,
+          },
+          onProgress: channel,
+        }),
+        isLanImportExecutionReport,
+        'lan_import_execute',
+      );
+    },
+    lanImportCancel: (operationId) => invoke<boolean>('lan_import_cancel', { operationId }),
+    lanImportDisconnect: (sessionId) => invoke('lan_import_disconnect', { sessionId }),
   };
 }
