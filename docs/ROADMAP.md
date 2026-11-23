@@ -131,16 +131,29 @@ Tracking issue `#132` ([ADR 0008](adr/0008-lan-book-sync.md)): pull-only, sessio
 HTTP/1.1 sharing of books, reading positions, and bookmarks between two SynapseRead desktop
 instances on the same private IPv4 LAN, with zero SQLite schema migrations.
 
-- Core persistence and managed library storage (`<app-data>/library/<sha256>.<ext>`),
-  insert-only bookmark merge, conditional cursor CAS (`replace_cursor_if`), and
-  sole-connection startup reconciliation.
-- Tauri-free `crates/synapse-lan` crate for address policy, pairing codes, HTTP/1.1
-  server/client, and import orchestration.
-- Native Rust confirmation before sharing, Share/Import dialogs exposed atomically in
-  `fixtures/contract/commands.json`, and Chromium E2E coverage.
-- **Native macOS acceptance prerequisite:** requires Apple-signed builds launched from
-  Finder (depends on M4 code signing) to validate Local Network privacy and macOS
-  Application Firewall behavior on two physical Macs.
+- [x] Policy & architecture (`#133`, [ADR 0008](adr/0008-lan-book-sync.md), narrow LAN
+      exception in `AGENTS.md`).
+- [x] Core persistence & managed storage (`#134`–`#136`, `#138`): lock-free document
+      hashing, content-addressed `<app-data>/library/<sha256>.<ext>` storage,
+      sole-connection startup reconciliation, insert-only bookmark merge, and conditional
+      cursor CAS (`replace_cursor_if`).
+- [x] Tauri-free `crates/synapse-lan` crate (`#139`–`#142`, `#148`): LAN address policy,
+      `bind_auto`, pairing/session state machine and HTTP/1.1 request guards, `/v1` source
+      endpoints + golden fixtures, receiver keep-alive client, import orchestrator, and
+      loopback E2E suite.
+- [x] Desktop IPC, frontend contract & UI (`#137`, `#143`–`#146`, `#149`): native Rust
+      share confirmation, full close/exit teardown, `Info.plist`, typed backend contract
+      and deterministic fake peer, cursor-flush and missing-file recovery hardening,
+      accessible Share/Import dialogs, Focus-Mode-safe active-sharing indicator, atomic
+      `fixtures/contract/commands.json` menu exposure, and Chromium E2E suite.
+- [x] User documentation (`README.md`) and single-Mac verification evidence on
+      `macOS 15.6.1 (24G90, Apple M4, arm64)` recorded in
+      [ADR 0008](adr/0008-lan-book-sync.md).
+- [ ] **Native two-Mac Apple-signed Finder validation (`#147`, `OD-2`):** pending M4 Apple
+      code-signing and a second physical Mac for `M-pack` and `M-perm` runs (Local Network
+      privacy prompts/denial/recovery, macOS Application Firewall, guest Wi-Fi client
+      isolation, ad hoc vs Apple-signed comparison, `WKWebView` clipboard & VoiceOver smoke,
+      and role swap).
 
 ## V1.1 and later
 

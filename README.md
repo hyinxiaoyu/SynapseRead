@@ -5,11 +5,14 @@ Read on one side, and excerpts become connected cards on an
 infinite mind map on the other. Every card links back to the exact passage it came
 from.
 
-> **Status: Reader experience milestone (R01–R12) complete.** PDF, EPUB, and TXT
-> documents support full local reading, search, bookmarks, independent highlights and
-> notes, session restoration, source recovery, and excerpting to the MindMap, verified
-> on macOS (`arm64`, `WKWebView`). See the [roadmap](docs/ROADMAP.md) and
-> [reader implementation plan](docs/READER_PLAN.md).
+> **Status: Reader experience milestone (R01–R12) complete; V1 LAN Book Sync implemented.**
+> PDF, EPUB, and TXT documents support full local reading, search, bookmarks, independent
+> highlights and notes, session restoration, source recovery, and excerpting to the
+> MindMap, verified on macOS (`arm64`, `WKWebView`), alongside session-scoped LAN book sync
+> verified across all automated gates (two-Mac Apple-signed Finder acceptance tracked in
+> `#147`). See the [roadmap](docs/ROADMAP.md),
+> [reader implementation plan](docs/READER_PLAN.md), and
+> [ADR 0008](docs/adr/0008-lan-book-sync.md).
 
 ## Features
 
@@ -60,7 +63,18 @@ from.
   detection (`missing`/`moved`/`changed`) with explicit file relinking (`Cmd/Ctrl+O`,
   `Cmd/Ctrl+W`)
 - Streaming UTF-8 text pipeline with a pluggable decoder interface
-- Local SQLite storage, with no accounts and no network access
+- Opt-in session-scoped LAN book sync (`File ▸ Share Books on This Network…` and
+  `File ▸ Import from Another Device…`): pull-only read-only sharing between two
+  SynapseRead desktop instances on the same private IPv4 LAN, gated by a native OS
+  confirmation dialog, single-use 6-digit pairing code (10-minute expiry, 5-attempt
+  lockout), single IP-bound receiver, selectable book scope, optional reading-position
+  adoption (compare-and-swap) and insert-only bookmark merge, Focus-Mode-safe active
+  sharing indicator, and offline-ready storage in `<app-data>/library/` (plaintext HTTP/1.1
+  on trusted networks only; highlights, notes, captures, MindMap cards, preferences, local
+  paths, and device names are never shared)
+- Local SQLite storage with no accounts, no cloud services, and no telemetry; the only
+  network activity is opt-in, session-scoped LAN book sync between your own devices on the
+  same private IPv4 network
 
 **Planned**
 
@@ -111,9 +125,54 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm build --target universal-apple-darwin
 ```
 
-App data is stored in the OS app-data directory, for example
-`~/Library/Application Support/app.synapseread.desktop/synapseread.sqlite3` on
-macOS.
+App data is stored in the OS app-data directory (for example
+`~/Library/Application Support/app.synapseread.desktop/` on macOS):
+
+- `synapseread.sqlite3` — local SQLite database for documents, annotations, bookmarks, and
+  MindMap data
+- `captures/` — rectangle image captures attached to excerpts
+- `library/<sha256>.<ext>` — content-addressed book copies imported over LAN sync so they
+  remain openable offline after the sharing device disconnects
+- `sync-staging/` — temporary `.part` download staging cleaned up on cancellation or
+  sole-connection startup reconciliation
+
+## LAN book sync
+
+SynapseRead can copy books, saved reading positions, and bookmarks from one desktop instance
+to another over a trusted local network without accounts or cloud storage. No network
+listener starts automatically at launch: sharing begins only when you choose
+`File ▸ Share Books on This Network…` and confirm the native system prompt, and stops when
+you click **Stop sharing**, the pairing code expires, the paired session is idle for 10
+minutes, the network changes, or the app closes.
+
+> **Trusted networks only:** V1 LAN sync uses plaintext HTTP/1.1 on your local network
+> (`Use only on networks you trust. Transfers are not encrypted.`). Highlights, notes,
+> captures, MindMap cards, reading preferences, local filesystem paths, and device/host
+> names never leave the device.
+
+### Troubleshooting
+
+- **macOS Local Network permission:** Packaged macOS builds launched from Finder require
+  Local Network access on the receiving Mac. If macOS denies access (or the first attempt
+  fails), open **System Settings → Privacy & Security → Local Network**, enable
+  **SynapseRead**, and click **Retry** (relaunch the app if macOS prompts you to do so).
+  Note that dev builds launched from Terminal (`pnpm dev`) inherit Terminal's network
+  access and do not display app-level permission prompts.
+- **macOS Application Firewall:** On the sharing Mac, check **System Settings → Network →
+  Firewall**. Allow incoming connections for **SynapseRead** and make sure **Block all
+  incoming connections** is turned off.
+- **Same-subnet, VLAN, and VPN constraints:** Sharing binds only to a single
+  broadcast-capable private IPv4 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) or
+  link-local (`169.254.0.0/16`) interface on ports `49319`–`49328` (default `49319`,
+  advancing on port conflict). Loopback, CGNAT (`100.64.0.0/10`), and VPN/point-to-point
+  (`utun*`) interfaces are excluded. Connection attempts from another subnet or VLAN are
+  rejected and surfaced as a blocked-peer notice in the Share dialog.
+- **Guest Wi-Fi and client isolation:** Guest Wi-Fi networks frequently isolate connected
+  devices from reaching each other directly. Connect both devices to a non-isolated local
+  Wi-Fi or Ethernet network.
+- **Network changes while sharing:** SynapseRead polls network interfaces every 5 seconds
+  during an active share. If your Wi-Fi network changes or the bound IP disappears, sharing
+  stops immediately (**Needs attention**) — reconnect and start a new sharing session.
 
 ## Development
 
@@ -141,25 +200,30 @@ and coding constraints.
 │   ├── src/                      # React frontend
 │   │   ├── components/ui/        # Shadcn UI components
 │   │   ├── features/
+│   │   │   ├── commands/         # Central command registry and keyboard shortcuts
 │   │   │   ├── workspace/        # Split-pane shell
 │   │   │   ├── reader/           # Document tabs and the viewer registry
 │   │   │   ├── mindmap/          # React Flow canvas
-│   │   │   └── inspector/        # Card editor
+│   │   │   ├── inspector/        # Card editor
+│   │   │   └── lanSync/          # Share/Import dialogs and active-sharing indicator
 │   │   ├── lib/backend/          # StudyBackend: Tauri and in-memory implementations
 │   │   ├── stores/               # useStudySyncStore, the Reader <-> MindMap bus
 │   │   └── types/domain.ts       # Domain types, AnchorLocation, DocumentViewerProps
 │   └── src-tauri/                # Tauri shell
+│       ├── Info.plist            # macOS Local Network usage description
 │       └── src/
 │           ├── access.rs         # Asset scope, derived from registered documents
-│           └── commands/         # db.rs, fs_reader.rs: thin IPC adapters
+│           └── commands/         # db.rs, fs_reader.rs, lan.rs: thin IPC adapters
 ├── crates/synapse-core/          # Backend logic, free of Tauri
 │   ├── migrations/               # SQLite schema
 │   └── src/
 │       ├── captures.rs           # Rectangle captures on disk
 │       ├── db.rs                 # Migrations and queries
 │       ├── domain.rs             # Domain types
-│       └── fs_reader.rs          # TextDecoderService, EncodingDetector, streaming
-├── fixtures/contract/            # JSON checked by both Rust and TypeScript tests
+│       ├── fs_reader.rs          # TextDecoderService, EncodingDetector, streaming
+│       └── library.rs            # Managed library storage, staging, and reconciliation
+├── crates/synapse-lan/           # Tauri-free LAN sync protocol, client/server, orchestrator
+├── fixtures/contract/            # JSON & /v1 LAN fixtures checked by Rust and TypeScript
 ├── fixtures/documents/           # Small sample documents for tests and the preview
 ├── docs/ROADMAP.md               # Milestones
 ├── docs/adr/                     # Decision records

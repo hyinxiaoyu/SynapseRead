@@ -185,7 +185,67 @@ Per Apple TN3179 and macOS firewall behavior:
 - Outgoing TCP connections to local addresses require macOS Local Network privacy approval (receiver), while incoming TCP accepts are governed by the macOS Application Firewall (source).
 - `apps/desktop/src-tauri/Info.plist` must declare `NSLocalNetworkUsageDescription` (verified via `plutil -p` in `#143`, `UA-6`), with no Bonjour keys.
 - Because Terminal/dev launches bypass Local Network privacy and ad hoc signatures behave inconsistently, native two-Mac acceptance (`#147`) requires Apple-signed builds launched from Finder (dependent on M4 code signing).
-- Observed OS/chip/WebKit/signing evidence and `UA-1`–`UA-17` resolutions will be appended to this ADR in `#147`.
+- Observed OS/chip/WebKit/signing evidence and `UA-1`–`UA-17` resolutions are tracked in [Validation Evidence & Assumption Status](#validation-evidence--assumption-status) below (partial single-Mac baseline recorded; two-Mac Apple-signed Finder acceptance remains tracked in `#147`).
+
+## Validation Evidence & Assumption Status
+
+### Single-Mac Baseline & Release Bundle (`2026-11-23`, Baseline `d4e7837`)
+
+Executed on a single macOS host prior to M4 Apple code-signing and second-Mac hardware availability:
+
+- **Host environment:** `macOS 15.6.1 (24G90)`, `Apple M4` (`arm64`, 24 GiB RAM), `WebKit.framework` `20621.3.11.11.3`, Safari `18.6`, `WKWebView` `AppleWebKit/605.1.15`, `Node v24.14.1`, `pnpm 12.16.1`, `rustc 1.99.1 (58cf8f9c3 2026-10-13)`.
+- **Release bundle (`pnpm build`):**
+  - `SynapseRead.app`: `9.93 MiB` (`Contents/MacOS/synapseread-desktop`: `10,319,488` bytes / `9.84 MiB`, `Mach-O 64-bit executable arm64`).
+  - `SynapseRead_0.1.0_aarch64.dmg`: `6,434,272` bytes (`6.14 MiB`), `hdiutil verify` `VALID`.
+- **Bundle `Info.plist` (`T-44` / `UA-6`):** `plutil -p target/release/bundle/macos/SynapseRead.app/Contents/Info.plist` confirmed `NSLocalNetworkUsageDescription` (`"SynapseRead uses your local network only when you choose to share or import books with another device on the same network."`) is merged verbatim and `NSBonjourServices` is absent.
+- **Code-signing status (`OD-2` / `UA-8`):** `security find-identity -v -p codesigning` reported `0 valid identities found`; `codesign -dv --verbose=4 target/release/bundle/macos/SynapseRead.app` reported `Signature=adhoc` (`flags=0x20002(adhoc,linker-signed)`, `TeamIdentifier=not set`).
+- **Host network & firewall baseline:** `socketfilterfw --getglobalstate` reported `Firewall is disabled. (State = 0)`; `sysctl net.inet.ip.portrange` reported `first: 49152`, `last: 65535`, `hifirst: 49152`, `hilast: 65535`.
+
+### Automated CI Gates (Verified at `d4e7837`)
+
+- `pnpm check`: passed (`prettier --check .`, `eslint . --max-warnings=0`, `tsc -b --noEmit`, Vitest `62` files / `1144` tests).
+- `pnpm e2e`: passed (`20/20` Chromium `Chrome/157.0.8103.79` flows including `lan-sync`, `0` CSP violations, `0` page errors).
+- `cargo fmt --all --check`: passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo test --workspace`: passed (`synapse-core`: `140 passed`; `synapse-lan`: `91 passed`, `1 ignored` `ua4_t08`; `synapseread-desktop`: `52 passed`, including `T-12`, `T-19`, `T-44`, `T-54`, `T-57`, `R3-05`, and `R3-07`).
+
+### Single-Mac Platform & Hardware Measurements
+
+- **Live interface filtering (`T-06`):** Against active host IPv4 interfaces (`lo0` `127.0.0.1/8`, `en1` `192.168.6.206/24`, `feth365` `192.168.193.238/24`, `utun4` `100.114.162.67/32`), `list_candidate_interfaces(&SystemInterfaceProvider)` returned `en1` (`192.168.6.206/24`) and `feth365` (`192.168.193.238/24`), excluding loopback (`lo0`) and VPN/CGNAT (`utun4`).
+- **macOS bind semantics (`T-08` / `UA-4`):** `cargo test -p synapse-lan ua4_t08 -- --ignored --nocapture` passed on `en1 (192.168.6.206/24)`: `bind_auto(192.168.6.206)` bound `192.168.6.206:49319` alongside a `0.0.0.0:49319` wildcard holder, and fell back on `EADDRINUSE` to `192.168.6.206:49320` when `192.168.6.206:49319` was already occupied.
+- **Socket options (`UA-5`):** `crates/synapse-lan/src/bind.rs` explicitly configures `SO_REUSEADDR` via `socket2` (`true` on Unix, `false` on Windows); runtime `getsockopt(SO_REUSEADDR) = true` verified on bound listener `192.168.6.206:49319`.
+- **Listener lifecycle (`T-10`):** Launching the packaged `SynapseRead.app` binary under an isolated `HOME` initialized SQLite with zero listening TCP sockets (`lsof -nP -iTCP -sTCP:LISTEN` empty). In a release probe calling `synapse_lan::bind_auto(192.168.6.206)`, `lsof` showed `TCP 192.168.6.206:49319 (LISTEN)` while active (single-IP bound, never `*:49319`) and zero listening sockets before bind and after listener drop.
+- **Crate dependency footprint (`UA-14`):** `cargo tree -p synapse-lan -e features --depth 2` confirmed HTTP/1-only `hyper 1.12.0` (`client`, `http1`, `server`), `hyper-util 0.1.21` (`http1`, `tokio`), `if-addrs 0.15.0`, `socket2 0.6.5`, and existing workspace major versions (`sha2 0.11.1`, `base64 0.23.1`, `getrandom 0.4.3`), with zero HTTP/2 or Tauri crates.
+- **1 GiB SHA-256 throughput (`UA-16`):** Release-mode `synapse_core::fs_reader::hash_file` on `Apple M4` hashed `10 MiB` (`10,485,760` bytes) in `4.32 ms` (`2,315.19 MiB/s`) and `1 GiB` (`1,073,741,824` bytes) in `0.525 s` (`1,949.64 MiB/s`, post-`sync_all`) and `0.439 s` (`2,332.81 MiB/s`, warm cache).
+
+### Platform Assumptions (`UA-1`–`UA-17`)
+
+| ID      | Assumption                                                                         | Status                               | Evidence / Notes                                                                                                      |
+| ------- | ---------------------------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `UA-1`  | Denied macOS Local Network permission fails BSD `connect` like an unreachable host | Pending (`#147` `M-perm`)            | Requires Apple-signed Finder launch across two Macs (`T-41`, `T-42`).                                                 |
+| `UA-2`  | Source replies on accepted sockets need no Local Network grant                     | Pending (`#147` `M-perm`)            | Requires two-Mac Finder run with source Local Network denied (`T-43`).                                                |
+| `UA-3`  | Loopback is exempt from Local Network privacy                                      | Verified (automated loopback)        | All `synapse-lan` loopback E2E tests pass on macOS; production policy rejects `127.0.0.1` outside `test-loopback`.    |
+| `UA-4`  | Specific-address bind coexists with another app's wildcard listener on macOS       | Verified                             | `ua4_t08` passed against live `en1 (192.168.6.206/24)` (PR #155 and re-verified at `d4e7837`).                        |
+| `UA-5`  | Unix listeners set `SO_REUSEADDR` consistently                                     | Verified                             | `bind.rs` sets `socket2` `SO_REUSEADDR=true` on Unix (`false` on Windows); `getsockopt` confirmed `true` at runtime.  |
+| `UA-6`  | Tauri v2 merges `src-tauri/Info.plist` into the `.app` bundle                      | Verified (bundle); Pending (alert)   | `plutil -p` confirmed `NSLocalNetworkUsageDescription` in `SynapseRead.app` and zero `NSBonjourServices` (`T-44`).    |
+| `UA-7`  | macOS Application Firewall default state and alert behavior                        | Partially observed (`#147` `M-pack`) | Test Mac `socketfilterfw --getglobalstate` = `disabled (State = 0)`; enabled/Allow/Deny/"Block all" (`T-46`) pending. |
+| `UA-8`  | Ad hoc vs Apple-signed behavior with Local Network privacy & firewall              | Partially observed (`#147` `M-perm`) | Local host has 0 signing identities (`Signature=adhoc`); Apple-signed comparison (`T-49`) blocked on M4 code-signing. |
+| `UA-9`  | GitHub-hosted macOS runners bypass Local Network privacy prompts                   | Accepted / Verified                  | Per Apple TN3179; manual Finder runs remain required in `#147`.                                                       |
+| `UA-10` | `navigator.clipboard.writeText` works in packaged `WKWebView`                      | Pending (`#147` `M-pack`)            | Selectable `ip:port` text fallback implemented in `LanShareDialog.tsx`; native `WKWebView` check (`T-53`) pending.    |
+| `UA-11` | TXT, PDF, and EPUB readers survive hostile imported anchors                        | Verified                             | Hostile-anchor reader tests (`T-38`) implemented in `#137` (PR #151) and passing in `pnpm test`.                      |
+| `UA-12` | TN3179 Local Network reset button availability on target macOS                     | Pending (`#147` `M-perm`)            | Test host is `macOS 15.6.1 (24G90)`; use fresh macOS user account / VM snapshot per first-prompt run.                 |
+| `UA-13` | Unthrottled 6-digit pairing code brute-force risk within 10 min window             | Mitigated                            | `SessionManager` enforces 5 failures -> `CodeLocked`, single-use code, 10 min expiry, and per-IP throttle (`T-01`).   |
+| `UA-14` | `hyper` HTTP/1 features add minimal transitive crates                              | Verified                             | Only 3 external crates added to `Cargo.lock` in PR #155 (`httpdate`, `if-addrs`, `tokio-macros`); zero HTTP/2 crates. |
+| `UA-15` | `49319`–`49328` overlaps macOS ephemeral port range (`49152`–`65535`)              | Verified                             | `sysctl net.inet.ip.portrange` = `49152–65535`; `bind_auto` `EADDRINUSE` fallback verified (`T-07`, `T-08`).          |
+| `UA-16` | Multi-GB SHA-256 takes seconds on Apple Silicon                                    | Verified                             | `Apple M4` release `hash_file`: `10 MiB` in `4.32 ms` (`2,315.19 MiB/s`); `1 GiB` in `0.439–0.525 s`.                 |
+| `UA-17` | Guest Wi-Fi networks isolate peer-to-peer LAN clients                              | Pending (`#147` `M-pack`)            | Physical guest SSID unreachable guidance test (`T-47`) requires two Macs on an isolated network.                      |
+
+### Pending Two-Mac Apple-Signed Acceptance (`#147`, `OD-2`)
+
+The following items from `#147` (`LS-20`) remain open until M4 Apple code-signing and a second physical Mac are available:
+
+- **`M-perm` (fresh user account / VM snapshot):** Finder-launched signed Local Network prompt, deny, System Settings recovery, and Retry (`T-41`, `T-42`), Terminal dev non-prompt check (`T-45`), source denied Local Network test (`T-43`), `NSLocalNetworkUsageDescription` alert text inspection (`T-44`), ad hoc vs Apple-signed comparison (`T-49`), and `UA-12` reset check.
+- **`M-pack` (two physical Macs on LAN):** macOS Application Firewall Allow / Deny / "Block all incoming connections" (`T-46`), guest Wi-Fi client isolation (`T-47`), multi-interface + VPN candidate filtering and Wi-Fi switch (`T-06`, `T-09`), native confirmation decline & Disconnect mid-transfer in packaged app (`T-12`, `T-02`), PDF/EPUB/TXT/Markdown transfer and offline reopen (`T-15`, `T-28`), ≥ 1 GB multi-Mac transfer cancel/force-quit/sleep recovery & concurrent UI responsiveness (`T-18`, `T-19`, `T-27`, `T-48`), open-book cursor flush/conflict/bookmark live refresh (`T-29`–`T-32`, `T-34`–`T-39`), `WKWebView` clipboard copy (`T-53`), VoiceOver & keyboard smoke (`T-56`), optional `arm64`/`x86_64` (`T-50`), and Mac B → Mac A role swap.
 
 ## What Would Reverse This
 
