@@ -143,7 +143,8 @@ to another over a trusted local network without accounts or cloud storage. No ne
 listener starts automatically at launch: sharing begins only when you choose
 `File ▸ Share Books on This Network…` and confirm the native system prompt, and stops when
 you click **Stop sharing**, the pairing code expires, the paired session is idle for 10
-minutes, the network changes, or the app closes.
+minutes, the bound IPv4 address is no longer available on an eligible interface, or the app
+closes.
 
 > **Trusted networks only:** V1 LAN sync uses plaintext HTTP/1.1 on your local network
 > (`Use only on networks you trust. Transfers are not encrypted.`). Highlights, notes,
