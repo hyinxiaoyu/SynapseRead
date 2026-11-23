@@ -867,77 +867,119 @@ export function createMemoryLanAdapter(
                 });
                 continue;
               }
-              // Always re-read the live document AFTER the pre-commit await so:
-              // 1. Two concurrent plans importing the same book never create duplicate records.
-              // 2. A healthy local file registered concurrently keeps its original `filePath`,
-              //    writes no managed copy, and reports `file: skipped` (Rust `AlreadyPresent`).
-              // 3. Repairing a genuinely missing file never overwrites a local reading position
-              //    updated while the file transfer was in flight (only `filePath` is updated).
-              const liveDoc =
-                (targetDoc ? host.documents.get(targetDoc.id) : undefined) ??
-                [...host.documents.values()].find((doc) => doc.fileHash === planned.peer.bookId) ??
-                null;
-              targetDoc = liveDoc && liveDoc.fileHash === planned.peer.bookId ? liveDoc : null;
+              // Bounded re-verification loop: re-read the live document, verify its
+              // on-disk bytes and hash, recheck cancellation, and if the document's
+              // path/hash changed during async `readFile` (e.g. concurrent `relinkDocument`),
+              // discard the stale read result and re-verify the current record.
+              const MAX_COMMIT_VERIFY_ATTEMPTS = 3;
+              let existingFileState:
+                'none' | 'healthy' | 'missing' | 'changed' | 'cancelled' | 'unstable' = 'none';
 
-              let existingFileState: 'none' | 'healthy' | 'missing' | 'changed' = 'none';
-              if (targetDoc) {
+              for (let attempt = 0; attempt < MAX_COMMIT_VERIFY_ATTEMPTS; attempt += 1) {
+                const liveDoc =
+                  (targetDoc ? host.documents.get(targetDoc.id) : undefined) ??
+                  [...host.documents.values()].find(
+                    (doc) => doc.fileHash === planned.peer.bookId,
+                  ) ??
+                  null;
+                targetDoc = liveDoc && liveDoc.fileHash === planned.peer.bookId ? liveDoc : null;
+
+                if (!targetDoc) {
+                  existingFileState = 'none';
+                  break;
+                }
+
                 const checkedDocId = targetDoc.id;
                 const checkedPath = targetDoc.filePath;
                 const checkedHash = targetDoc.fileHash;
                 if (!(checkedPath in host.files)) {
                   existingFileState = 'missing';
-                } else {
-                  let readBytes: Uint8Array | null = null;
-                  try {
-                    readBytes = await host.readFile(checkedPath);
-                  } catch {
-                    readBytes = null;
-                  }
-                  // Recheck cancellation immediately after async `readFile` on both
-                  // success and failure paths before any file or metadata mutation.
-                  if (op.state.cancelled) {
-                    cancelled = true;
-                    const result: LanBookImportResult = {
-                      bookId: planned.peer.bookId,
-                      documentId: planned.summary.localDocumentId,
-                      state: planned.summary.state,
-                      file: { status: 'cancelled' },
-                      position: { status: 'cancelled' },
-                      bookmarks: { status: 'cancelled' },
-                      bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
-                    };
-                    results.push(result);
-                    onProgress({
-                      phase: 'bookCompleted',
-                      bookId: planned.peer.bookId,
-                      bookIndex: idx,
-                      totalBooks: input.decisions.length,
-                      result,
-                    });
-                    continue;
-                  }
-                  const afterReadDoc = host.documents.get(checkedDocId) ?? null;
-                  if (
-                    afterReadDoc &&
-                    afterReadDoc.filePath === checkedPath &&
-                    afterReadDoc.fileHash === checkedHash
-                  ) {
-                    targetDoc = afterReadDoc;
-                    if (readBytes === null) {
-                      existingFileState = 'missing';
-                    } else {
-                      existingFileState =
-                        host.hashBytes(readBytes) === checkedHash ? 'healthy' : 'changed';
-                    }
-                  } else {
-                    const fallback =
-                      [...host.documents.values()].find(
-                        (doc) => doc.fileHash === planned.peer.bookId,
-                      ) ?? null;
-                    targetDoc = fallback;
-                    existingFileState = targetDoc ? 'missing' : 'none';
-                  }
+                  break;
                 }
+
+                let readBytes: Uint8Array | null = null;
+                try {
+                  readBytes = await host.readFile(checkedPath);
+                } catch {
+                  readBytes = null;
+                }
+
+                // Recheck cancellation immediately after async `readFile` on both
+                // success and failure paths before any file or metadata mutation.
+                if (op.state.cancelled) {
+                  existingFileState = 'cancelled';
+                  break;
+                }
+
+                const afterReadDoc = host.documents.get(checkedDocId) ?? null;
+                if (
+                  afterReadDoc &&
+                  afterReadDoc.filePath === checkedPath &&
+                  afterReadDoc.fileHash === checkedHash
+                ) {
+                  targetDoc = afterReadDoc;
+                  existingFileState =
+                    readBytes === null
+                      ? 'missing'
+                      : host.hashBytes(readBytes) === checkedHash
+                        ? 'healthy'
+                        : 'changed';
+                  break;
+                }
+
+                // Path or hash changed concurrently (e.g. `relinkDocument`): discard
+                // stale bytes and re-verify the current record on the next iteration.
+                targetDoc = null;
+                existingFileState = 'unstable';
+              }
+
+              if (existingFileState === 'cancelled') {
+                cancelled = true;
+                const result: LanBookImportResult = {
+                  bookId: planned.peer.bookId,
+                  documentId: planned.summary.localDocumentId,
+                  state: planned.summary.state,
+                  file: { status: 'cancelled' },
+                  position: { status: 'cancelled' },
+                  bookmarks: { status: 'cancelled' },
+                  bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+                };
+                results.push(result);
+                onProgress({
+                  phase: 'bookCompleted',
+                  bookId: planned.peer.bookId,
+                  bookIndex: idx,
+                  totalBooks: input.decisions.length,
+                  result,
+                });
+                continue;
+              }
+
+              if (existingFileState === 'unstable') {
+                const result: LanBookImportResult = {
+                  bookId: planned.peer.bookId,
+                  documentId: planned.summary.localDocumentId,
+                  state: planned.summary.state,
+                  file: {
+                    status: 'failed',
+                    error: {
+                      code: 'lan_source_changed',
+                      message: 'local document changed repeatedly during verification',
+                    },
+                  },
+                  position: { status: 'skipped' },
+                  bookmarks: { status: 'skipped' },
+                  bookmarkCounts: { inserted: 0, existing: 0, skipped: 0 },
+                };
+                results.push(result);
+                onProgress({
+                  phase: 'bookCompleted',
+                  bookId: planned.peer.bookId,
+                  bookIndex: idx,
+                  totalBooks: input.decisions.length,
+                  result,
+                });
+                continue;
               }
 
               if (targetDoc && existingFileState === 'changed') {

@@ -1156,4 +1156,97 @@ describe('memory backend card delete and restore', () => {
     expect(afterDoc.lastProgress).toBeNull();
     expect(await backend.listBookmarks()).toHaveLength(0);
   });
+
+  it('re-verifies the relinked healthy path when relinkDocument runs during commit-time readFile', async () => {
+    const bookBytes = new TextEncoder().encode('Same-hash relinked book bytes');
+    let originalMissing = false;
+    let pauseOriginalRead = false;
+    let enteredOriginalRead!: () => void;
+    const originalReadEntered = new Promise<void>((resolve) => {
+      enteredOriginalRead = resolve;
+    });
+    let releaseOriginalRead!: () => void;
+    const originalReadReleased = new Promise<void>((resolve) => {
+      releaseOriginalRead = resolve;
+    });
+
+    const backend = createMemoryBackend({
+      library: {
+        '/local/book.txt': async () => {
+          if (pauseOriginalRead) {
+            pauseOriginalRead = false;
+            enteredOriginalRead();
+            await originalReadReleased;
+            throw new Error('ENOENT');
+          }
+          if (originalMissing) throw new Error('ENOENT');
+          return bookBytes;
+        },
+        '/local/relinked.txt': bookBytes,
+      },
+      lanPeer: {
+        pairingCode: '123456',
+        books: [
+          {
+            title: 'book',
+            format: 'txt',
+            extension: 'txt',
+            bytes: bookBytes,
+          },
+        ],
+        onBeforeBookStep: async (phase) => {
+          if (phase === 'commit') {
+            pauseOriginalRead = true;
+          }
+        },
+      },
+    });
+
+    const doc = (await backend.pickDocument())!;
+    expect(doc.filePath).toBe('/local/book.txt');
+    originalMissing = true;
+
+    const session = await backend.lanImportConnect({
+      address: '192.168.1.25:49319',
+      code: '123456',
+    });
+    const catalog = await backend.lanImportCatalog(session.sessionId);
+    expect(catalog[0]?.state).toBe('missingFile');
+
+    const plan = await backend.lanImportPlan(
+      { sessionId: session.sessionId, bookIds: [catalog[0]!.bookId] },
+      () => undefined,
+    );
+
+    const execPromise = backend.lanImportExecute(
+      {
+        sessionId: session.sessionId,
+        planId: plan.planId,
+        decisions: plan.defaultDecisions,
+      },
+      () => undefined,
+    );
+
+    await originalReadEntered;
+    // Relink the document to the healthy same-hash `/local/relinked.txt` while the old read is paused.
+    const relinked = (await backend.relinkDocument(doc.id))!;
+    expect(relinked.document.id).toBe(doc.id);
+    expect(relinked.document.filePath).toBe('/local/relinked.txt');
+    releaseOriginalRead();
+
+    const report = await execPromise;
+    expect(report.books[0]?.documentId).toBe(doc.id);
+    expect(report.books[0]?.file).toEqual({ status: 'skipped' });
+
+    const docs = await backend.listDocuments();
+    expect(docs).toHaveLength(1);
+    expect(docs[0]?.id).toBe(doc.id);
+    expect(docs[0]?.filePath).toBe('/local/relinked.txt');
+
+    // No extra managed `/library/...` copy was created.
+    const expectedManagedPath = `/library/${doc.fileHash.replace(/[^a-zA-Z0-9_-]/g, '_')}.txt`;
+    await expect(
+      backend.loadDocumentSource({ ...doc, filePath: expectedManagedPath }),
+    ).rejects.toMatchObject({ code: 'io' });
+  });
 });
