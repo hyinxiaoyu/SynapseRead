@@ -9,8 +9,8 @@ from.
 > PDF, EPUB, and TXT documents support full local reading, search, bookmarks, independent
 > highlights and notes, session restoration, source recovery, and excerpting to the
 > MindMap, verified on macOS (`arm64`, `WKWebView`), alongside session-scoped LAN book sync
-> verified across all automated gates (two-Mac Apple-signed Finder acceptance tracked in
-> `#147`). See the [roadmap](docs/ROADMAP.md),
+> (local single-Mac baseline checked at `d4e7837`; two-Mac Apple-signed Finder acceptance
+> tracked in `#147`). See the [roadmap](docs/ROADMAP.md),
 > [reader implementation plan](docs/READER_PLAN.md), and
 > [ADR 0008](docs/adr/0008-lan-book-sync.md).
 
@@ -152,12 +152,13 @@ minutes, the network changes, or the app closes.
 
 ### Troubleshooting
 
-- **macOS Local Network permission:** Packaged macOS builds launched from Finder require
-  Local Network access on the receiving Mac. If macOS denies access (or the first attempt
-  fails), open **System Settings → Privacy & Security → Local Network**, enable
-  **SynapseRead**, and click **Retry** (relaunch the app if macOS prompts you to do so).
-  Note that dev builds launched from Terminal (`pnpm dev`) inherit Terminal's network
-  access and do not display app-level permission prompts.
+- **macOS Local Network permission (macOS 15 and later):** Packaged macOS builds launched
+  from Finder require Local Network access on the receiving Mac (per Apple TN3179). If
+  macOS denies access (or the first attempt fails), open **System Settings → Privacy &
+  Security → Local Network**, enable **SynapseRead**, and click **Retry** (relaunch the
+  app if macOS prompts you to do so). Note that dev builds launched from Terminal
+  (`pnpm dev`) inherit Terminal's network access and do not display app-level permission
+  prompts.
 - **macOS Application Firewall:** On the sharing Mac, check **System Settings → Network →
   Firewall**. Allow incoming connections for **SynapseRead** and make sure **Block all
   incoming connections** is turned off.
@@ -165,14 +166,21 @@ minutes, the network changes, or the app closes.
   broadcast-capable private IPv4 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) or
   link-local (`169.254.0.0/16`) interface on ports `49319`–`49328` (default `49319`,
   advancing on port conflict). Loopback, CGNAT (`100.64.0.0/10`), and VPN/point-to-point
-  (`utun*`) interfaces are excluded. Connection attempts from another subnet or VLAN are
-  rejected and surfaced as a blocked-peer notice in the Share dialog.
+  (`utun*`) interfaces are excluded. Only connection attempts that reach the sharing
+  listener and are rejected by its subnet/address policy increment the blocked-peer
+  counter and surface a blocked-peer notice in the Share dialog. When VLAN routing, a
+  firewall, or client isolation blocks traffic before it reaches the sharing device, no
+  blocked-peer notice appears on the source — troubleshoot from the receiving device's
+  connection failure instead.
 - **Guest Wi-Fi and client isolation:** Guest Wi-Fi networks frequently isolate connected
-  devices from reaching each other directly. Connect both devices to a non-isolated local
-  Wi-Fi or Ethernet network.
-- **Network changes while sharing:** SynapseRead polls network interfaces every 5 seconds
-  during an active share. If your Wi-Fi network changes or the bound IP disappears, sharing
-  stops immediately (**Needs attention**) — reconnect and start a new sharing session.
+  devices from reaching each other directly. If isolation drops traffic before it reaches
+  the sharing listener, the receiver sees a connection failure and the source shows no
+  blocked-peer notice; connect both devices to a non-isolated local Wi-Fi or Ethernet
+  network.
+- **Network changes while sharing:** While sharing, SynapseRead checks the bound IPv4
+  address every 5 seconds; if that address is no longer present on an eligible interface,
+  sharing stops and shows **Needs attention** (if a network change leaves the same IPv4
+  address active on an eligible interface, the session continues running).
 
 ## Development
 

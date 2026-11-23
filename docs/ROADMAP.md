@@ -151,9 +151,10 @@ instances on the same private IPv4 LAN, with zero SQLite schema migrations.
       [ADR 0008](adr/0008-lan-book-sync.md).
 - [ ] **Native two-Mac Apple-signed Finder validation (`#147`, `OD-2`):** pending M4 Apple
       code-signing and a second physical Mac for `M-pack` and `M-perm` runs (Local Network
-      privacy prompts/denial/recovery, macOS Application Firewall, guest Wi-Fi client
-      isolation, ad hoc vs Apple-signed comparison, `WKWebView` clipboard & VoiceOver smoke,
-      and role swap).
+      privacy prompts/denial/recovery, macOS Application Firewall, packaged-app `T-10`
+      listener lifecycle, multi-format transfers including `T-21`–`T-24`, 5-failure lockout,
+      **Back to catalog**, guest Wi-Fi client isolation, ad hoc vs Apple-signed comparison,
+      `WKWebView` clipboard & VoiceOver smoke, and role swap).
 
 ## V1.1 and later
 
