@@ -384,7 +384,8 @@ impl LanListenerHandle {
     /// Waits until the listener exits and returns the exact [`ListenerStopReason`].
     pub async fn wait_stopped(&mut self) -> ListenerStopReason {
         loop {
-            if let Some(reason) = *self.stopped_rx.borrow() {
+            let current = *self.stopped_rx.borrow();
+            if let Some(reason) = current {
                 if let Some(task) = self.task.take() {
                     let _ = task.await;
                 }

@@ -3178,10 +3178,13 @@ dependencies = [
  "serde",
  "serde_json",
  "synapse-core",
+ "synapse-lan",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

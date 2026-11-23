@@ -55,6 +55,18 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::relink_document,
         commands::fs_reader::read_text_stream,
         commands::fs_reader::cancel_text_stream,
+        commands::lan::lan_list_interfaces,
+        commands::lan::lan_share_start,
+        commands::lan::lan_share_status,
+        commands::lan::lan_share_regenerate_code,
+        commands::lan::lan_share_stop,
+        commands::lan::lan_share_disconnect_peer,
+        commands::lan::lan_import_connect,
+        commands::lan::lan_import_catalog,
+        commands::lan::lan_import_plan,
+        commands::lan::lan_import_execute,
+        commands::lan::lan_import_cancel,
+        commands::lan::lan_import_disconnect,
         menu::set_menu_item_states,
         close_flush::confirm_flush_before_close,
     ])
@@ -88,6 +100,10 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle().clone();
+                // Tear down active LAN sharing and receiver imports immediately
+                // so closing the last window on macOS never leaves a socket or
+                // background import running (`R2-03`, `R3-05`, `T-10`).
+                app.state::<AppState>().lan.shutdown_all();
                 let coordinator = app.state::<CloseFlushCoordinator>();
                 match coordinator.begin_close() {
                     CloseDecision::Proceed => {}
@@ -105,6 +121,7 @@ pub fn run() {
                         tauri::async_runtime::spawn_blocking(move || {
                             let coordinator = app.state::<CloseFlushCoordinator>();
                             coordinator.wait_for_flush(token, FLUSH_TIMEOUT);
+                            app.state::<AppState>().lan.shutdown_all();
                             coordinator.mark_allow_close();
                             let _ = window.close();
                         });
@@ -132,22 +149,32 @@ pub fn run() {
         .expect("failed to build SynapseRead");
 
     app.run(|app_handle, event| {
-        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-            // Programmatic exit or no live windows: proceed immediately.
-            if code.is_some() || app_handle.webview_windows().is_empty() {
-                return;
-            }
-            let coordinator = app_handle.state::<CloseFlushCoordinator>();
-            match coordinator.begin_exit() {
-                CloseDecision::Proceed => {}
-                CloseDecision::AlreadyWaiting => {
-                    api.prevent_exit();
+        match event {
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
+                // Always tear down active LAN sharing and receiver imports
+                // before any early return (including programmatic `code.is_some()`
+                // exits from `request_app_exit`: `R2-03`, `R3-05`, `T-10`).
+                app_handle.state::<AppState>().lan.shutdown_all();
+                // Programmatic exit or no live windows: proceed immediately.
+                if code.is_some() || app_handle.webview_windows().is_empty() {
+                    return;
                 }
-                CloseDecision::StartFlush(token) => {
-                    api.prevent_exit();
-                    spawn_exit_flush(app_handle, token);
+                let coordinator = app_handle.state::<CloseFlushCoordinator>();
+                match coordinator.begin_exit() {
+                    CloseDecision::Proceed => {}
+                    CloseDecision::AlreadyWaiting => {
+                        api.prevent_exit();
+                    }
+                    CloseDecision::StartFlush(token) => {
+                        api.prevent_exit();
+                        spawn_exit_flush(app_handle, token);
+                    }
                 }
             }
+            tauri::RunEvent::Exit => {
+                app_handle.state::<AppState>().lan.shutdown_all();
+            }
+            _ => {}
         }
     });
 }
@@ -156,6 +183,7 @@ pub fn run() {
 /// Quit menu item / `⌘Q`, since macOS `PredefinedMenuItem::quit` invokes AppKit
 /// `terminate:` directly and bypasses `RunEvent::ExitRequested`: #117).
 fn request_app_exit<R: Runtime>(app: &tauri::AppHandle<R>) {
+    app.state::<AppState>().lan.shutdown_all();
     if app.webview_windows().is_empty() {
         app.exit(0);
         return;
@@ -174,6 +202,7 @@ fn spawn_exit_flush<R: Runtime>(app: &tauri::AppHandle<R>, token: u64) {
     tauri::async_runtime::spawn_blocking(move || {
         let coordinator = app.state::<CloseFlushCoordinator>();
         coordinator.wait_for_flush(token, FLUSH_TIMEOUT);
+        app.state::<AppState>().lan.shutdown_all();
         coordinator.mark_allow_exit();
         app.exit(0);
     });
