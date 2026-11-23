@@ -15,11 +15,13 @@ import {
 } from '@/features/commands/commands';
 import {
   commandState,
+  commandStatesChanged,
   dispatchCommandKeydown,
   forgetRecentCommandRuns,
   hasOpenModalDialog,
   isBrowserOnlyShortcut,
   onCommandRun,
+  onCommandStatesChange,
   registerCommands,
   runCommand,
 } from '@/features/commands/registry';
@@ -736,5 +738,60 @@ describe('modal dialog shortcut isolation (R3-04, T-56)', () => {
     expect(hasOpenModalDialog()).toBe(false);
     window.dispatchEvent(key({ key: 'd', code: 'KeyD', metaKey: true }));
     expect(toggleBookmark).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects native menu/toolbar runs synchronously and syncs disabled states while a modal is open (#168)', async () => {
+    const closeTab = vi.fn();
+    const openFile = vi.fn();
+    const toggleBookmark = vi.fn();
+    const toggleImmersive = vi.fn();
+    register(() => ({
+      'file.closeTab': { run: closeTab },
+      'file.open': { run: openFile },
+      'bookmarks.toggle': { run: toggleBookmark },
+      'view.immersive': { run: toggleImmersive },
+    }));
+
+    const stateChanges = vi.fn();
+    cleanups.push(onCommandStatesChange(stateChanges));
+
+    expect(commandState('file.closeTab').enabled).toBe(true);
+    expect(commandState('file.open').enabled).toBe(true);
+    expect(commandState('bookmarks.toggle').enabled).toBe(true);
+    expect(commandState('view.immersive').enabled).toBe(true);
+
+    document.body.innerHTML = '<div role="dialog" aria-modal="true"><button>Done</button></div>';
+    commandStatesChanged();
+
+    expect(stateChanges).toHaveBeenCalled();
+    expect(commandState('file.closeTab').enabled).toBe(false);
+    expect(commandState('file.open').enabled).toBe(false);
+    expect(commandState('bookmarks.toggle').enabled).toBe(false);
+    expect(commandState('view.immersive').enabled).toBe(false);
+
+    for (const id of [
+      'file.closeTab',
+      'file.open',
+      'bookmarks.toggle',
+      'view.immersive',
+    ] as const) {
+      expect(runCommand(id, 'menu')).toBe(false);
+      expect(runCommand(id, 'toolbar')).toBe(false);
+    }
+    expect(closeTab).not.toHaveBeenCalled();
+    expect(openFile).not.toHaveBeenCalled();
+    expect(toggleBookmark).not.toHaveBeenCalled();
+    expect(toggleImmersive).not.toHaveBeenCalled();
+
+    // Removing the modal via DOM mutation notifies subscribers via MutationObserver too.
+    stateChanges.mockClear();
+    document.body.innerHTML = '';
+    await Promise.resolve();
+    expect(stateChanges).toHaveBeenCalled();
+    expect(commandState('file.closeTab').enabled).toBe(true);
+
+    forgetRecentCommandRuns();
+    expect(runCommand('file.closeTab', 'menu')).toBe(true);
+    expect(closeTab).toHaveBeenCalledTimes(1);
   });
 });

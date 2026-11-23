@@ -2,6 +2,7 @@ import { X } from 'lucide-react';
 import { type ReactNode, type RefObject, useId, useLayoutEffect, useRef } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { commandStatesChanged } from '@/features/commands/registry';
 import { cn } from '@/lib/utils';
 
 const FOCUSABLE_SELECTOR = [
@@ -144,11 +145,13 @@ function LanSyncDialogContent({
 
     // Capture phase ensures Escape and Tab never leak to Focus Mode or reader panes.
     window.addEventListener('keydown', onKeyDown, true);
+    commandStatesChanged();
     return () => {
       window.removeEventListener('keydown', onKeyDown, true);
       if (previousFocused && previousFocused.isConnected) {
         previousFocused.focus({ preventScroll: true });
       }
+      commandStatesChanged();
     };
   }, []);
 

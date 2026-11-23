@@ -8,6 +8,7 @@ import {
   formatShortcut,
   MENUS,
 } from '@/features/commands/commands';
+import { commandStatesChanged } from '@/features/commands/registry';
 
 /** Help ▸ Keyboard Shortcuts: every command with a key, grouped as in the menu bar. */
 export function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
@@ -15,6 +16,7 @@ export function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     closeRef.current?.focus();
+    commandStatesChanged();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
@@ -22,7 +24,10 @@ export function KeyboardShortcutsDialog({ onClose }: { onClose: () => void }) {
     };
     // Capture: the dialog closes before anything under it sees the key.
     window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      commandStatesChanged();
+    };
   }, [onClose]);
 
   return (

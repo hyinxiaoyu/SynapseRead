@@ -70,8 +70,36 @@ function resolve(id: CommandId): CommandHandler | null {
   return null;
 }
 
+let lastModalOpen: boolean | null = null;
+let modalObserver: MutationObserver | null = null;
+
 function notifyStateListeners() {
+  lastModalOpen = hasOpenModalDialog();
   for (const listener of stateListeners) listener();
+}
+
+function syncModalObserver() {
+  if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
+  const needsObserver = stateListeners.size > 0;
+  if (needsObserver && !modalObserver) {
+    lastModalOpen = hasOpenModalDialog();
+    modalObserver = new MutationObserver(() => {
+      const nextModalOpen = hasOpenModalDialog();
+      if (nextModalOpen !== lastModalOpen) {
+        notifyStateListeners();
+      }
+    });
+    modalObserver.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['role', 'aria-modal'],
+    });
+  } else if (!needsObserver && modalObserver) {
+    modalObserver.disconnect();
+    modalObserver = null;
+    lastModalOpen = null;
+  }
 }
 
 export function registerCommands(read: () => CommandHandlers): () => void {
@@ -93,9 +121,10 @@ export function commandStatesChanged() {
 
 export function commandState(id: CommandId): CommandState {
   const handler = resolve(id);
+  const blocked = hasOpenModalDialog();
   return {
     id,
-    enabled: handler !== null && handler.enabled !== false,
+    enabled: !blocked && handler !== null && handler.enabled !== false,
     title: handler?.title ?? commandDefinition(id).title,
   };
 }
@@ -106,7 +135,11 @@ export function commandStates(): CommandState[] {
 
 export function onCommandStatesChange(listener: () => void): () => void {
   stateListeners.add(listener);
-  return () => stateListeners.delete(listener);
+  syncModalObserver();
+  return () => {
+    stateListeners.delete(listener);
+    syncModalObserver();
+  };
 }
 
 /** Observes every command that runs, whatever triggered it. */
@@ -122,6 +155,9 @@ export function forgetRecentCommandRuns() {
 
 /** Runs a command if something currently handles it; reports whether it ran. */
 export function runCommand(id: CommandId, source: CommandSource): boolean {
+  // Reject all background commands synchronously across keyboard, native menu, and
+  // toolbar routes while a modal dialog is open (`#168`: menu state IPC lags).
+  if (hasOpenModalDialog()) return false;
   const handler = resolve(id);
   if (!handler || handler.enabled === false) return false;
   const now = performance.now();

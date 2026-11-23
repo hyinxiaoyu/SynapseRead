@@ -1096,5 +1096,134 @@ describe('StudyWorkspace', () => {
         vi.useRealTimers();
       }
     });
+
+    it('isolates both DOM shortcuts and native menu commands while Share modal is open, keeping modal inputs editable (#168)', async () => {
+      let emitMenuCommand: ((id: string) => void) | null = null;
+      const setMenuItemStates = vi.fn<(states: readonly MenuItemState[]) => Promise<void>>(
+        async () => undefined,
+      );
+      const originalOpenDocument = useStudySyncStore.getState().openDocument;
+      const openDocSpy = vi.fn(async () => originalOpenDocument());
+      const toggleBookmarkSpy = vi.fn(async () => undefined);
+
+      act(() => {
+        useStudySyncStore.setState({
+          onMenuCommand: (listener) => {
+            emitMenuCommand = listener;
+            return () => {
+              if (emitMenuCommand === listener) emitMenuCommand = null;
+            };
+          },
+          setMenuItemStates,
+        });
+      });
+
+      await renderReady();
+
+      // Open one document tab so closeTab, bookmarks, and Focus Mode are all active.
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      expect(await screen.findByRole('tab')).toBeInTheDocument();
+
+      const activeDocId = useStudySyncStore.getState().activeDocumentId;
+      expect(activeDocId).not.toBeNull();
+      act(() => {
+        useStudySyncStore.setState({
+          openDocument: openDocSpy,
+          toggleBookmark: toggleBookmarkSpy,
+        });
+      });
+
+      const offSnapshotWithBook = { ...INITIAL_LAN_SHARE_SNAPSHOT };
+      act(() => {
+        useStudySyncStore.setState((state) => ({
+          lanShare: {
+            ...state.lanShare,
+            snapshot: {
+              ...offSnapshotWithBook,
+              status: { state: 'listening', failedAttempts: 0, maxFailedAttempts: 5 },
+              address: '192.168.1.42:49319',
+            },
+          },
+          refreshLanShareStatus: vi.fn(async () => ({
+            ...offSnapshotWithBook,
+            status: { state: 'listening' as const, failedAttempts: 0, maxFailedAttempts: 5 },
+            address: '192.168.1.42:49319',
+          })),
+        }));
+      });
+
+      fireEvent.click(screen.getByTestId('lan-share-indicator'));
+      expect(await screen.findByTestId('lan-share-dialog')).toBeInTheDocument();
+
+      // Wait past useNativeMenu's 16ms debounce and confirm menu items were disabled.
+      await waitFor(() => {
+        const disabledCalls = setMenuItemStates.mock.calls.flatMap((args) => args[0]);
+        expect(disabledCalls).toContainEqual({ id: 'file.closeTab', enabled: false });
+        expect(disabledCalls).toContainEqual({ id: 'file.open', enabled: false });
+        expect(disabledCalls).toContainEqual({ id: 'bookmarks.toggle', enabled: false });
+        expect(disabledCalls).toContainEqual({ id: 'view.immersive', enabled: false });
+      });
+
+      // Fire BOTH DOM shortcuts and native menu `onMenuCommand` events while modal is open.
+      for (const init of [
+        { key: 'w', code: 'KeyW', metaKey: true },
+        { key: 'o', code: 'KeyO', metaKey: true },
+        { key: 'd', code: 'KeyD', metaKey: true },
+        { key: 'F', code: 'KeyF', metaKey: true, shiftKey: true },
+      ]) {
+        fireEvent.keyDown(window, init);
+      }
+      act(() => {
+        emitMenuCommand?.('file.closeTab');
+        emitMenuCommand?.('file.open');
+        emitMenuCommand?.('bookmarks.toggle');
+        emitMenuCommand?.('view.immersive');
+      });
+
+      // Background state stayed completely untouched.
+      expect(screen.getAllByRole('tab')).toHaveLength(1);
+      expect(useStudySyncStore.getState().openDocumentIds).toEqual([activeDocId]);
+      expect(openDocSpy).not.toHaveBeenCalled();
+      expect(toggleBookmarkSpy).not.toHaveBeenCalled();
+      expect(useStudySyncStore.getState().immersive).toBe(false);
+
+      // Modal inputs still allow typing and clipboard shortcuts when not active-listening.
+      await act(async () => {
+        useStudySyncStore.setState((state) => ({
+          lanShare: { ...state.lanShare, snapshot: { ...INITIAL_LAN_SHARE_SNAPSHOT } },
+          refreshLanShareStatus: vi.fn(async () => ({ ...INITIAL_LAN_SHARE_SNAPSHOT })),
+        }));
+      });
+      fireEvent.click(screen.getByTestId('lan-share-scope-selected'));
+      const searchInput = await screen.findByTestId('lan-share-book-search');
+      searchInput.focus();
+      const copyEvent = new KeyboardEvent('keydown', {
+        key: 'c',
+        code: 'KeyC',
+        metaKey: true,
+        bubbles: true,
+        cancelable: true,
+      });
+      searchInput.dispatchEvent(copyEvent);
+      expect(copyEvent.defaultPrevented).toBe(false);
+
+      // Close modal -> native menu re-enables and commands work again.
+      setMenuItemStates.mockClear();
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(screen.queryByTestId('lan-share-dialog')).not.toBeInTheDocument();
+
+      await waitFor(() => {
+        const reenabled = setMenuItemStates.mock.calls.flatMap((args) => args[0]);
+        expect(reenabled).toContainEqual({ id: 'file.closeTab', enabled: true });
+        expect(reenabled).toContainEqual({ id: 'file.open', enabled: true });
+      });
+
+      act(() => {
+        emitMenuCommand?.('file.closeTab');
+      });
+      await waitFor(() => {
+        expect(useStudySyncStore.getState().openDocumentIds).toHaveLength(0);
+      });
+    });
   });
 });
