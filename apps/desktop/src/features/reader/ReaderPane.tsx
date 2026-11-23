@@ -301,6 +301,7 @@ export function ReaderPane({
             aria-label="Recent documents"
             aria-pressed={recentMenuOpen}
             data-testid="recent-documents-toggle"
+            data-recent-count={recentDocuments.length}
             onClick={() => setRecentMenuOpen((open) => !open)}
           >
             <Clock />

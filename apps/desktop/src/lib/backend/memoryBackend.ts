@@ -1,13 +1,26 @@
+import type { CommandId } from '@/features/commands/commands';
 import {
-  createMemoryLanAdapter,
+  createMemoryLanAdapterWithController,
+  type MemoryLanCommandName,
   type MemoryLanPeerBook,
   type MemoryLanPeerBookmark,
   type MemoryLanPeerOptions,
+  type MemoryLanPeerStats,
+  type MemoryLanStepPhase,
+  type MemoryLanTestController,
 } from '@/lib/backend/memoryLanPeer';
 import { DEFAULT_CHUNK_BYTES, streamUtf8Lossy } from '@/lib/backend/memoryTextStream';
 import type { StudyBackend } from '@/lib/backend/types';
 
-export type { MemoryLanPeerBook, MemoryLanPeerBookmark, MemoryLanPeerOptions };
+export type {
+  MemoryLanCommandName,
+  MemoryLanPeerBook,
+  MemoryLanPeerBookmark,
+  MemoryLanPeerOptions,
+  MemoryLanPeerStats,
+  MemoryLanStepPhase,
+  MemoryLanTestController,
+};
 import { formatForPath } from '@/lib/documentFormats';
 import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
 import sampleCodeEpubUrl from '../../../../../fixtures/documents/sample-code.epub?url&no-inline';
@@ -123,16 +136,40 @@ const PDF_ZOOM_MODES: readonly string[] = [
 
 const now = () => new Date().toISOString();
 
+export interface MemoryHostStats {
+  pickDocumentCount: number;
+  updateCursorCount: number;
+  bookmarkMutationCount: number;
+  pendingCursorWrite: boolean;
+}
+
+export type MemoryMenuItemStateMap = Record<string, { enabled: boolean; title?: string }>;
+
+export interface MemoryBackendWithPreview {
+  backend: StudyBackend;
+  emitMenuCommand(commandId: CommandId): void;
+  lan: MemoryLanTestController;
+  getMenuItemStates(): MemoryMenuItemStateMap;
+  getHostStats(): MemoryHostStats;
+  listLocalBookmarks(documentId?: string): Bookmark[];
+  pauseNextCursorWrite(): void;
+  releasePausedCursorWrite(): void;
+}
+
 /**
  * Non-persistent backend for tests and `pnpm dev:web`. It mirrors the rules of
  * the Rust layer that the UI can observe (referential checks, content identity)
  * but is not a second source of truth: Rust remains authoritative.
  */
-export function createMemoryBackend({
+export function createMemoryBackend(options: MemoryBackendOptions = {}): StudyBackend {
+  return createMemoryBackendWithPreview(options).backend;
+}
+
+export function createMemoryBackendWithPreview({
   library = PREVIEW_LIBRARY,
   chunkBytes = DEFAULT_CHUNK_BYTES,
   lanPeer,
-}: MemoryBackendOptions = {}): StudyBackend {
+}: MemoryBackendOptions = {}): MemoryBackendWithPreview {
   const files: Record<string, MemoryFile> = { ...library };
   const paths = Object.keys(files);
   const documents = new Map<string, StudyDocument>();
@@ -156,6 +193,7 @@ export function createMemoryBackend({
     }
   >();
   const bookmarks = new Map<string, Bookmark>();
+  const menuListeners = new Set<(commandId: string) => void>();
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
   /** In save order: a save deletes and re-adds its entry, so the last is the latest. */
   const pdfLayouts = new Map<string, PdfLayout>();
@@ -326,11 +364,32 @@ export function createMemoryBackend({
     return document;
   };
 
-  return {
+  const { adapter: lanAdapter, controller: lanController } = createMemoryLanAdapterWithController(
+    {
+      files,
+      documents,
+      bookmarks,
+      hashBytes,
+      readFile,
+      monotonicNow,
+      fail,
+    },
+    lanPeer,
+  );
+
+  let pickDocumentCount = 0;
+  let updateCursorCount = 0;
+  let bookmarkMutationCount = 0;
+  let pauseCursorNext = false;
+  let pendingCursorWaiter: (() => void) | null = null;
+  const menuItemStates: MemoryMenuItemStateMap = {};
+
+  const backend: StudyBackend = {
     kind: 'memory',
     chromeStyle: 'standard',
 
     async pickDocument() {
+      pickDocumentCount += 1;
       const path = paths[picks % paths.length];
       if (path === undefined) return null;
       picks += 1;
@@ -366,6 +425,16 @@ export function createMemoryBackend({
           `progress must be a fraction between 0 and 1, got ${progress}`,
         );
       }
+      if (pauseCursorNext) {
+        pauseCursorNext = false;
+        await new Promise<void>((resolve) => {
+          pendingCursorWaiter = () => {
+            pendingCursorWaiter = null;
+            resolve();
+          };
+        });
+      }
+      updateCursorCount += 1;
       document.lastCursorAnchor = anchor;
       document.lastProgress = progress ?? null;
     },
@@ -999,6 +1068,7 @@ export function createMemoryBackend({
           `${input.anchor.format} anchor on a ${document.format} document`,
         );
       }
+      bookmarkMutationCount += 1;
       const firstLine = input.label
         ?.split('\n')
         .map((line) => line.trim())
@@ -1036,12 +1106,25 @@ export function createMemoryBackend({
 
     async deleteBookmark(bookmarkId) {
       require(bookmarks, bookmarkId, 'bookmark');
+      bookmarkMutationCount += 1;
       bookmarks.delete(bookmarkId);
     },
 
-    // A browser has no native menu; the keyboard and toolbar reach every command.
-    onMenuCommand: () => () => undefined,
-    setMenuItemStates: async () => undefined,
+    // A browser has no native menu, though preview tests can trigger menu choices.
+    onMenuCommand(listener) {
+      menuListeners.add(listener);
+      return () => {
+        menuListeners.delete(listener);
+      };
+    },
+    setMenuItemStates: async (states) => {
+      for (const entry of states) {
+        menuItemStates[entry.id] = {
+          enabled: entry.enabled,
+          ...(entry.title !== undefined ? { title: entry.title } : {}),
+        };
+      }
+    },
     // The page's Fullscreen API stands in for the window's in the browser preview.
     isFullscreen: async () => globalThis.document?.fullscreenElement != null,
     async setFullscreen(fullscreen) {
@@ -1078,17 +1161,46 @@ export function createMemoryBackend({
       return streamUtf8Lossy(bytes, chunkBytes, onChunk, signal);
     },
 
-    ...createMemoryLanAdapter(
-      {
-        files,
-        documents,
-        bookmarks,
-        hashBytes,
-        readFile,
-        monotonicNow,
-        fail,
-      },
-      lanPeer,
-    ),
+    ...lanAdapter,
+  };
+
+  return {
+    backend,
+    emitMenuCommand(commandId: CommandId) {
+      for (const listener of [...menuListeners]) {
+        listener(commandId);
+      }
+    },
+    lan: lanController,
+    getMenuItemStates() {
+      const copy: MemoryMenuItemStateMap = {};
+      for (const [id, state] of Object.entries(menuItemStates)) {
+        copy[id] = { ...state };
+      }
+      return copy;
+    },
+    getHostStats() {
+      return {
+        pickDocumentCount,
+        updateCursorCount,
+        bookmarkMutationCount,
+        pendingCursorWrite: pendingCursorWaiter !== null,
+      };
+    },
+    listLocalBookmarks(documentId) {
+      const entries = [...bookmarks.values()];
+      return (documentId ? entries.filter((b) => b.documentId === documentId) : entries).map(
+        (b) => ({
+          ...b,
+          anchor: { ...b.anchor },
+        }),
+      );
+    },
+    pauseNextCursorWrite() {
+      pauseCursorNext = true;
+    },
+    releasePausedCursorWrite() {
+      pendingCursorWaiter?.();
+    },
   };
 }

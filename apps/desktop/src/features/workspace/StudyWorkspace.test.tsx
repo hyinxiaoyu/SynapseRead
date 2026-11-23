@@ -1,14 +1,16 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useEffect, useState } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MENUS } from '@/features/commands/commands';
 import { dispatchEscape } from '@/features/commands/escape';
-import { forgetRecentCommandRuns } from '@/features/commands/registry';
+import { commandState, forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
 import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
 import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
 import { AUTO_HIDE_DELAY_MS } from '@/features/workspace/UnifiedToolbar';
-import type { MenuItemState } from '@/lib/backend/types';
-import { useStudySyncStore } from '@/stores/useStudySyncStore';
+import { createMemoryBackendWithPreview } from '@/lib/backend/memoryBackend';
+import type { MenuItemState, StudyBackend } from '@/lib/backend/types';
+import { createStudySyncStore, useStudySyncStore } from '@/stores/useStudySyncStore';
 import {
   type AnchorLocation,
   DEFAULT_WORKSPACE_PANE_LAYOUT,
@@ -1224,6 +1226,374 @@ describe('StudyWorkspace', () => {
       await waitFor(() => {
         expect(useStudySyncStore.getState().openDocumentIds).toHaveLength(0);
       });
+    });
+
+    it('exposes both File menu LAN sync commands atomically and opens both dialogs (#149)', async () => {
+      const fileMenu = MENUS.find((menu) => menu.id === 'file');
+      expect(fileMenu?.items).toContain('file.shareOnNetwork');
+      expect(fileMenu?.items).toContain('file.importFromDevice');
+
+      await renderReady();
+
+      expect(commandState('file.shareOnNetwork').enabled).toBe(true);
+      expect(commandState('file.importFromDevice').enabled).toBe(true);
+
+      act(() => {
+        expect(runCommand('file.shareOnNetwork', 'menu')).toBe(true);
+      });
+      expect(await screen.findByTestId('lan-share-dialog')).toBeInTheDocument();
+
+      // Modal dialog lock prevents menu commands while Share modal is open (#168).
+      expect(commandState('file.importFromDevice').enabled).toBe(false);
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(screen.queryByTestId('lan-share-dialog')).not.toBeInTheDocument();
+
+      act(() => {
+        expect(runCommand('file.importFromDevice', 'menu')).toBe(true);
+      });
+      expect(await screen.findByTestId('lan-import-dialog')).toBeInTheDocument();
+    });
+  });
+
+  describe('Import-to-Share switch guard across async phases (#170)', () => {
+    let unbindStore: (() => void) | null = null;
+
+    afterEach(() => {
+      unbindStore?.();
+      unbindStore = null;
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      useStudySyncStore.setState(initialState, true);
+      document.body.innerHTML = '';
+    });
+
+    function createDeferred<T = void>() {
+      let resolve!: (value: T) => void;
+      let reject!: (error: unknown) => void;
+      const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      return { promise, resolve, reject };
+    }
+
+    function bindWorkspaceStore(backend: StudyBackend) {
+      unbindStore?.();
+      const temp = createStudySyncStore(backend);
+      useStudySyncStore.setState(temp.getState(), true);
+      unbindStore = temp.subscribe((next) => {
+        useStudySyncStore.setState(next);
+      });
+      return temp;
+    }
+
+    function assertShareBlocked(
+      emitMenuCommand: (id: 'file.shareOnNetwork') => void,
+      disconnectSpy: { mock: { calls: unknown[] } },
+    ) {
+      const disconnectsBefore = disconnectSpy.mock.calls.length;
+      expect(commandState('file.shareOnNetwork').enabled).toBe(false);
+      expect(runCommand('file.shareOnNetwork', 'menu')).toBe(false);
+      act(() => {
+        emitMenuCommand('file.shareOnNetwork');
+      });
+      const toolbarIndicator = screen.getByTestId('lan-share-indicator');
+      expect(toolbarIndicator).toBeDisabled();
+      fireEvent.click(toolbarIndicator);
+      expect(screen.queryByTestId('lan-share-dialog')).not.toBeInTheDocument();
+      expect(screen.getByTestId('lan-import-dialog')).toBeInTheDocument();
+      expect(disconnectSpy).toHaveBeenCalledTimes(disconnectsBefore);
+    }
+
+    it('rejects switching to Share via native menu or indicator across connect, catalog, plan, cursor flush, and execute', async () => {
+      const preview = createMemoryBackendWithPreview();
+      const store = bindWorkspaceStore(preview.backend);
+
+      const disconnectSpy = vi.spyOn(preview.backend, 'lanImportDisconnect');
+
+      const connectGate = createDeferred();
+      const origConnect = preview.backend.lanImportConnect.bind(preview.backend);
+      vi.spyOn(preview.backend, 'lanImportConnect').mockImplementationOnce(async (input) => {
+        await connectGate.promise;
+        return origConnect(input);
+      });
+
+      await renderReady();
+      fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+      expect(await screen.findByRole('tab')).toBeInTheDocument();
+      const activeId = useStudySyncStore.getState().activeDocumentId;
+      const sampleDoc = useStudySyncStore.getState().documents.find((doc) => doc.id === activeId);
+      if (!sampleDoc) {
+        throw new Error('Expected open document after clicking Open');
+      }
+      await preview.backend.lanShareStart({
+        documentIds: [sampleDoc.id],
+        positions: true,
+        bookmarks: true,
+      });
+      const sharedBytes = new TextEncoder().encode('LAN switch guard sample text');
+      preview.lan.setBooks([
+        {
+          bookId: sampleDoc.fileHash,
+          title: sampleDoc.title,
+          format: sampleDoc.format,
+          extension: 'txt',
+          bytes: sharedBytes,
+          fileAvailable: true,
+          position: { anchor: SAMPLE_ANCHOR[sampleDoc.format], progress: 0.72 },
+          bookmarks: [{ anchor: SAMPLE_ANCHOR[sampleDoc.format], label: 'Peer note' }],
+        },
+      ]);
+      await store.getState().refreshLanShareStatus();
+      expect(screen.getByTestId('lan-share-indicator')).toBeEnabled();
+
+      // 1. Connecting stage blocked while `lanImportConnect` is pending.
+      act(() => {
+        expect(runCommand('file.importFromDevice', 'menu')).toBe(true);
+      });
+      expect(await screen.findByTestId('lan-import-dialog')).toBeInTheDocument();
+      fireEvent.change(screen.getByTestId('lan-import-address-input'), {
+        target: { value: '192.168.1.42' },
+      });
+      fireEvent.change(screen.getByTestId('lan-import-code-input'), {
+        target: { value: '123456' },
+      });
+      fireEvent.click(screen.getByTestId('lan-import-connect-submit'));
+      await waitFor(() => {
+        expect(useStudySyncStore.getState().lanImport.phase).toBe('connecting');
+      });
+      assertShareBlocked(preview.emitMenuCommand, disconnectSpy);
+
+      // 2. Paired Catalog stage (both idle and while a slow refresh is pending).
+      await act(async () => {
+        connectGate.resolve();
+      });
+      await screen.findByTestId('lan-import-catalog-list');
+      assertShareBlocked(preview.emitMenuCommand, disconnectSpy);
+
+      const catalogGate = createDeferred();
+      const origCatalog = preview.backend.lanImportCatalog.bind(preview.backend);
+      vi.spyOn(preview.backend, 'lanImportCatalog').mockImplementationOnce(async (sessionId) => {
+        await catalogGate.promise;
+        return origCatalog(sessionId);
+      });
+      fireEvent.click(screen.getByTestId('lan-import-catalog-refresh'));
+      await waitFor(() => {
+        expect(screen.getByTestId('lan-import-catalog-refresh')).toBeDisabled();
+      });
+      assertShareBlocked(preview.emitMenuCommand, disconnectSpy);
+      await act(async () => {
+        catalogGate.resolve();
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId('lan-import-catalog-refresh')).toBeEnabled();
+      });
+
+      // 3. Planning stage blocked while `lanImportPlan` is pending.
+      const planGate = createDeferred();
+      const origPlan = preview.backend.lanImportPlan.bind(preview.backend);
+      vi.spyOn(preview.backend, 'lanImportPlan').mockImplementationOnce(
+        async (input, onProgress) => {
+          await planGate.promise;
+          return origPlan(input, onProgress);
+        },
+      );
+      const catalogCheckbox = screen.getByTestId(
+        `lan-import-catalog-checkbox-${sampleDoc.fileHash}`,
+      );
+      expect(catalogCheckbox).toBeEnabled();
+      fireEvent.click(catalogCheckbox);
+      expect(catalogCheckbox).toBeChecked();
+      const reviewButton = screen.getByTestId('lan-import-review');
+      expect(reviewButton).toBeEnabled();
+      fireEvent.click(reviewButton);
+      await waitFor(() => {
+        expect(useStudySyncStore.getState().lanImport.phase).toBe('planning');
+      });
+      assertShareBlocked(preview.emitMenuCommand, disconnectSpy);
+      await act(async () => {
+        planGate.resolve();
+      });
+      await screen.findByTestId('lan-import-start-execute');
+
+      // 4. Closing open tab + flushing pending `updateDocumentCursor` write before `execute`.
+      const posCheckbox = screen.getByTestId(
+        `lan-import-position-checkbox-${sampleDoc.fileHash}`,
+      ) as HTMLInputElement;
+      expect(posCheckbox.closest('label')).toHaveTextContent('Close and use source position');
+      if (!posCheckbox.checked) {
+        fireEvent.click(posCheckbox);
+      }
+      expect(posCheckbox).toBeChecked();
+
+      const cursorGate = createDeferred();
+      const origUpdateCursor = preview.backend.updateDocumentCursor.bind(preview.backend);
+      vi.spyOn(preview.backend, 'updateDocumentCursor').mockImplementationOnce(
+        async (docId, anchor, progress) => {
+          await cursorGate.promise;
+          return origUpdateCursor(docId, anchor, progress);
+        },
+      );
+      const executeGate = createDeferred();
+      const origExecute = preview.backend.lanImportExecute.bind(preview.backend);
+      const executeSpy = vi
+        .spyOn(preview.backend, 'lanImportExecute')
+        .mockImplementationOnce(async (input, onProgress) => {
+          await executeGate.promise;
+          return origExecute(input, onProgress);
+        });
+
+      act(() => {
+        useStudySyncStore
+          .getState()
+          .reportCursor(sampleDoc.id, SAMPLE_ANCHOR[sampleDoc.format], 0.12);
+      });
+      fireEvent.click(screen.getByTestId('lan-import-start-execute'));
+      await waitFor(() => {
+        expect(useStudySyncStore.getState().openDocumentIds).not.toContain(sampleDoc.id);
+      });
+      expect(executeSpy).not.toHaveBeenCalled();
+      assertShareBlocked(preview.emitMenuCommand, disconnectSpy);
+
+      // 5. Importing stage blocked while `lanImportExecute` is pending.
+      await act(async () => {
+        cursorGate.resolve();
+      });
+      await waitFor(() => {
+        expect(executeSpy).toHaveBeenCalledTimes(1);
+        expect(useStudySyncStore.getState().lanImport.phase).toBe('importing');
+      });
+      assertShareBlocked(preview.emitMenuCommand, disconnectSpy);
+
+      await act(async () => {
+        executeGate.resolve();
+      });
+      await screen.findByTestId('lan-import-results');
+
+      // Clean exit disconnects once and restores Share access.
+      fireEvent.click(screen.getByTestId('lan-import-done'));
+      await waitFor(() => {
+        expect(screen.queryByTestId('lan-import-dialog')).not.toBeInTheDocument();
+      });
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
+      expect(commandState('file.shareOnNetwork').enabled).toBe(true);
+      expect(screen.getByTestId('lan-share-indicator')).toBeEnabled();
+
+      act(() => {
+        expect(runCommand('file.shareOnNetwork', 'menu')).toBe(true);
+      });
+      expect(await screen.findByTestId('lan-share-dialog')).toBeInTheDocument();
+    });
+
+    it('calls disconnect once and prevents late connect/catalog responses from reviving an exited session', async () => {
+      const preview = createMemoryBackendWithPreview();
+      bindWorkspaceStore(preview.backend);
+
+      const disconnectSpy = vi.spyOn(preview.backend, 'lanImportDisconnect');
+      const connectResultGate =
+        createDeferred<Awaited<ReturnType<StudyBackend['lanImportConnect']>>>();
+      const catalogResultGate =
+        createDeferred<Awaited<ReturnType<StudyBackend['lanImportCatalog']>>>();
+
+      const origConnect = preview.backend.lanImportConnect.bind(preview.backend);
+      const origCatalog = preview.backend.lanImportCatalog.bind(preview.backend);
+
+      await renderReady();
+
+      // Case A: Slow `lanImportConnect` finishes after user cancels and closes Import to open Share.
+      vi.spyOn(preview.backend, 'lanImportConnect').mockImplementationOnce(async (input) => {
+        const realSession = await origConnect(input);
+        return await connectResultGate.promise.then(() => realSession);
+      });
+      act(() => {
+        expect(runCommand('file.importFromDevice', 'menu')).toBe(true);
+      });
+      fireEvent.change(await screen.findByTestId('lan-import-address-input'), {
+        target: { value: '192.168.1.42' },
+      });
+      fireEvent.change(screen.getByTestId('lan-import-code-input'), {
+        target: { value: '123456' },
+      });
+      fireEvent.click(screen.getByTestId('lan-import-connect-submit'));
+      await waitFor(() => {
+        expect(useStudySyncStore.getState().lanImport.phase).toBe('connecting');
+      });
+
+      fireEvent.click(screen.getByTestId('lan-import-connect-cancel'));
+      fireEvent.click(screen.getByRole('button', { name: 'Close Import from Another Device' }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('lan-import-dialog')).not.toBeInTheDocument();
+      });
+
+      act(() => {
+        expect(runCommand('file.shareOnNetwork', 'menu')).toBe(true);
+      });
+      expect(await screen.findByTestId('lan-share-dialog')).toBeInTheDocument();
+
+      await act(async () => {
+        connectResultGate.resolve({
+          sessionId: 'stale-session',
+          address: '192.168.1.42:49319',
+          idleTimeoutSeconds: 600,
+          permissions: { positions: true, bookmarks: true },
+        });
+      });
+      // Late connect resolution must neither revive UI state nor leak an orphaned source session.
+      expect(useStudySyncStore.getState().lanImport.session).toBeNull();
+      expect(useStudySyncStore.getState().lanImport.phase).toBe('idle');
+      await waitFor(() => {
+        expect(disconnectSpy).toHaveBeenCalledTimes(1);
+      });
+
+      const shareDialog = screen.getByTestId('lan-share-dialog');
+      fireEvent.click(within(shareDialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('lan-share-dialog')).not.toBeInTheDocument();
+      });
+
+      // Case B: Paired catalog refresh in flight when user closes Import; late catalog cannot revive session.
+      disconnectSpy.mockClear();
+      act(() => {
+        expect(runCommand('file.importFromDevice', 'menu')).toBe(true);
+      });
+      fireEvent.change(await screen.findByTestId('lan-import-address-input'), {
+        target: { value: '192.168.1.42' },
+      });
+      fireEvent.change(screen.getByTestId('lan-import-code-input'), {
+        target: { value: '123456' },
+      });
+      fireEvent.click(screen.getByTestId('lan-import-connect-submit'));
+      await screen.findByTestId('lan-import-catalog-list');
+
+      let slowCatalogSessionId = '';
+      vi.spyOn(preview.backend, 'lanImportCatalog').mockImplementationOnce(async (sessionId) => {
+        slowCatalogSessionId = sessionId;
+        const realBooks = await origCatalog(sessionId);
+        return await catalogResultGate.promise.then(() => realBooks);
+      });
+      fireEvent.click(screen.getByTestId('lan-import-catalog-refresh'));
+      await waitFor(() => {
+        expect(slowCatalogSessionId).not.toBe('');
+      });
+
+      const dialog = screen.getByTestId('lan-import-dialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+      await waitFor(() => {
+        expect(screen.queryByTestId('lan-import-dialog')).not.toBeInTheDocument();
+      });
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
+
+      act(() => {
+        expect(runCommand('file.shareOnNetwork', 'menu')).toBe(true);
+      });
+      expect(await screen.findByTestId('lan-share-dialog')).toBeInTheDocument();
+
+      await act(async () => {
+        catalogResultGate.resolve([]);
+      });
+      expect(useStudySyncStore.getState().lanImport.session).toBeNull();
+      expect(useStudySyncStore.getState().lanImport.catalog).toEqual([]);
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
     });
   });
 });

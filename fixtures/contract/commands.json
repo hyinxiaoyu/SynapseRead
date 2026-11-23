@@ -4,7 +4,15 @@
     {
       "id": "file",
       "title": "File",
-      "items": ["file.open", "separator", "file.closeTab", "file.reopenClosedTab"]
+      "items": [
+        "file.open",
+        "separator",
+        "file.closeTab",
+        "file.reopenClosedTab",
+        "separator",
+        "file.shareOnNetwork",
+        "file.importFromDevice"
+      ]
     },
     {
       "id": "edit",
@@ -104,6 +112,8 @@
     "file.open": { "title": "Open…", "shortcut": "CmdOrCtrl+O" },
     "file.closeTab": { "title": "Close Tab", "shortcut": "CmdOrCtrl+W" },
     "file.reopenClosedTab": { "title": "Reopen Closed Tab", "shortcut": "Shift+CmdOrCtrl+T" },
+    "file.shareOnNetwork": { "title": "Share Books on This Network…" },
+    "file.importFromDevice": { "title": "Import from Another Device…" },
     "edit.find": { "title": "Find…", "shortcut": "CmdOrCtrl+F", "allowInSearch": true },
     "edit.findNext": { "title": "Find Next", "shortcut": "CmdOrCtrl+G", "allowInSearch": true },
     "edit.findPrevious": {

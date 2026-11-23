@@ -7,10 +7,12 @@ export function LanShareIndicator({
   snapshot,
   onClick,
   variant = 'toolbar',
+  disabled = false,
 }: {
   snapshot: LanShareSnapshot;
   onClick: () => void;
   variant?: 'toolbar' | 'floating';
+  disabled?: boolean;
 }) {
   if (snapshot.status.state === 'off') return null;
 
@@ -36,9 +38,10 @@ export function LanShareIndicator({
       data-share-state={snapshot.status.state}
       aria-label={`LAN sharing active: ${statusDescription}. Click to open sharing window.`}
       title={snapshot.address ? `${statusDescription} (${snapshot.address})` : statusDescription}
+      disabled={disabled}
       onClick={onClick}
       className={cn(
-        'inline-flex shrink-0 items-center gap-1.5 rounded-full border text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        'inline-flex shrink-0 items-center gap-1.5 rounded-full border text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50',
         snapshot.status.state === 'codeLocked'
           ? 'border-amber-600/40 bg-amber-500/15 text-amber-900 hover:bg-amber-500/25 dark:border-amber-400/40 dark:bg-amber-500/20 dark:text-amber-100'
           : 'border-emerald-600/35 bg-emerald-500/10 text-emerald-900 hover:bg-emerald-500/20 dark:border-emerald-400/40 dark:bg-emerald-500/20 dark:text-emerald-100',

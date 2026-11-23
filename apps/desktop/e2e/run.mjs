@@ -9,6 +9,7 @@ import { epubProgressFlow } from './epubProgress.mjs';
 import { goToFlow } from './goTo.mjs';
 import { launchPage, serveDist, warmUp } from './harness.mjs';
 import { keyboardFlow } from './keyboard.mjs';
+import { lanSyncFlow } from './lanSync.mjs';
 import { linkPeekFlow } from './linkPeek.mjs';
 import { markdownFlow } from './markdown.mjs';
 import { mindmapFlow } from './mindmap.mjs';
@@ -35,6 +36,7 @@ const FLOWS = {
   'epub-code-blocks': epubCodeBlocksFlow,
   'epub-progress': epubProgressFlow,
   keyboard: keyboardFlow,
+  'lan-sync': lanSyncFlow,
   'txt-chapters': txtChaptersFlow,
   'go-to': goToFlow,
   'link-peek': linkPeekFlow,

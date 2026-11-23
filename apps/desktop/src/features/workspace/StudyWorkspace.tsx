@@ -15,6 +15,7 @@ import {
 } from '@/features/commands/registry';
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
+import { LanImportDialog } from '@/features/lanSync/LanImportDialog';
 import { LanShareDialog } from '@/features/lanSync/LanShareDialog';
 import { LanShareIndicator } from '@/features/lanSync/LanShareIndicator';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
@@ -110,6 +111,7 @@ export function StudyWorkspace() {
   const onBeforeClose = useStudySyncStore((state) => state.onBeforeClose);
   const lanShareSnapshot = useStudySyncStore((state) => state.lanShare.snapshot);
   const refreshLanShareStatus = useStudySyncStore((state) => state.refreshLanShareStatus);
+  const lanImportPhase = useStudySyncStore((state) => state.lanImport.phase);
 
   const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
@@ -127,6 +129,8 @@ export function StudyWorkspace() {
   const [slots, setSlots] = useState<ToolbarSlots>(EMPTY_SLOTS);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [isImportPreparingFlush, setIsImportPreparingFlush] = useState(false);
   /** The panes focus mode collapsed, to reopen when it ends. */
   const [panesBeforeImmersive, setPanesBeforeImmersive] = useState<{
     mindMap: boolean;
@@ -335,11 +339,37 @@ export function StudyWorkspace() {
       : null,
   );
 
+  const isLanImportBusy =
+    lanImportPhase === 'connecting' ||
+    lanImportPhase === 'planning' ||
+    lanImportPhase === 'importing' ||
+    lanImportPhase === 'disconnecting' ||
+    isImportPreparingFlush;
+  // Share cannot open while Import is mounted or holds a transition lock (`#170`):
+  // unmounting Import mid-session would skip `disconnectLanImport()`.
+  const isShareBlockedByImport = importDialogOpen || isLanImportBusy;
+
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
-  const openShareDialog = useCallback(() => setShareDialogOpen(true), []);
+  const openShareDialog = useCallback(() => {
+    if (isShareBlockedByImport) return;
+    setShareDialogOpen(true);
+  }, [isShareBlockedByImport]);
   const closeShareDialog = useCallback(() => setShareDialogOpen(false), []);
+  const openImportDialog = useCallback(() => {
+    if (shareDialogOpen) return;
+    setImportDialogOpen(true);
+  }, [shareDialogOpen]);
+  const closeImportDialog = useCallback(() => setImportDialogOpen(false), []);
 
   const workspaceCommands: CommandHandlers = {
+    'file.shareOnNetwork': {
+      run: openShareDialog,
+      enabled: !isShareBlockedByImport,
+    },
+    'file.importFromDevice': {
+      run: openImportDialog,
+      enabled: !shareDialogOpen,
+    },
     'window.mindMap': {
       run: toggleMindMap,
       enabled: ready,
@@ -472,6 +502,7 @@ export function StudyWorkspace() {
               <LanShareIndicator
                 snapshot={lanShareSnapshot}
                 variant="toolbar"
+                disabled={isShareBlockedByImport}
                 onClick={openShareDialog}
               />
               {backendKind === 'memory' && (
@@ -589,10 +620,16 @@ export function StudyWorkspace() {
           <LanShareIndicator
             snapshot={lanShareSnapshot}
             variant="floating"
+            disabled={isShareBlockedByImport}
             onClick={openShareDialog}
           />
         )}
         <LanShareDialog open={shareDialogOpen} onClose={closeShareDialog} />
+        <LanImportDialog
+          open={importDialogOpen}
+          onClose={closeImportDialog}
+          onCloseFlushBusyChange={setIsImportPreparingFlush}
+        />
         {shortcutsOpen && <KeyboardShortcutsDialog onClose={closeShortcuts} />}
         <p
           ref={excerptStatusRef}
