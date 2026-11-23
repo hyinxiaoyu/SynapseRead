@@ -121,6 +121,7 @@ export interface MemoryLanPeerStats {
   shareStopCount: number;
   shareDisconnectPeerCount: number;
   fileTransferEvents: MemoryFileTransferEvent[];
+  pausedState: { phase: MemoryLanStepPhase; bookId: string } | null;
 }
 
 export interface MemoryLanTestController {
@@ -358,6 +359,7 @@ function createMemoryLanAdapterInner(
     shareStopCount: 0,
     shareDisconnectPeerCount: 0,
     fileTransferEvents: [],
+    pausedState: null,
   };
 
   let shareSnapshot: LanShareSnapshot = { ...INITIAL_LAN_SHARE_SNAPSHOT };
@@ -398,9 +400,11 @@ function createMemoryLanAdapterInner(
     ) {
       pausedPhaseTarget = null;
       pausedBookIdTarget = null;
+      stats.pausedState = { phase, bookId };
       await new Promise<void>((resolve) => {
         pausedTransferWaiter = () => {
           pausedTransferWaiter = null;
+          stats.pausedState = null;
           resolve();
         };
       });
@@ -1427,6 +1431,7 @@ function createMemoryLanAdapterInner(
             }
           : null,
         fileTransferEvents: stats.fileTransferEvents.map((e) => ({ ...e })),
+        pausedState: stats.pausedState ? { ...stats.pausedState } : null,
       };
     },
   };

@@ -647,21 +647,45 @@ export async function lanSyncFlow(page) {
   );
   await clickTestId(page, 'lan-import-start-execute');
 
-  // Wait until Retryable Chronicle pauses in commit AFTER Travelogue and sample.txt have finished.
+  // Wait until Retryable Chronicle pauses at commit AFTER Travelogue and sample.txt complete
+  // AND live Recent + Bookmarks DOM updates have flushed.
   await page.waitFor(
     `(() => {
       const progress = document.querySelector('[data-testid="lan-import-progress"]');
       if (!progress || !progress.checkVisibility({ visibilityProperty: true })) return false;
       const stats = window.__synapsePreview.lan.getPeerStats();
+      if (
+        stats.pausedState?.phase !== 'commit' ||
+        stats.pausedState?.bookId !== ${JSON.stringify(chronicleBookId)}
+      ) {
+        return false;
+      }
       const slice = stats.fileTransferEvents.slice(${batch1Snapshot.eventCount});
       const bookmarks = window.__synapsePreview.listLocalBookmarks(${JSON.stringify(sampleTxtDoc.id)});
-      return slice.some((e) => e.bookId === ${JSON.stringify(travelogueBookId)}) && bookmarks.length >= 2;
+      if (
+        !slice.some((e) => e.bookId === ${JSON.stringify(travelogueBookId)}) ||
+        bookmarks.length < 2
+      ) {
+        return false;
+      }
+      const recentCount = Number(
+        document.querySelector('[data-testid="recent-documents-toggle"]')?.dataset.recentCount ?? '0',
+      );
+      if (recentCount < ${batch1Snapshot.recentCount + 1}) return false;
+      const openBookmarkLabels = [
+        ...document.querySelectorAll('[data-testid="txt-viewer"] [data-testid="bookmark-label"]'),
+      ].map((el) => el.textContent?.trim());
+      return (
+        openBookmarkLabels.includes('Remote Mark 1') &&
+        openBookmarkLabels.includes('Remote Mark 2')
+      );
     })()`,
-    'Travelogue transfer + sample.txt live bookmark refresh while Retryable Chronicle is paused',
+    'Retryable Chronicle commit pause + Travelogue/sample.txt live UI refresh',
   );
 
-  // Confirm 0-byte transfer for bookmark-only sample.txt, live Recent refresh, and live open Bookmarks DOM WHILE paused.
+  // Confirm 0-byte transfer for bookmark-only sample.txt, commit pause, live Recent refresh, and live open Bookmarks DOM WHILE paused.
   const midBatchState = await page.evaluate(`({
+    pausedState: window.__synapsePreview.lan.getPeerStats().pausedState,
     events: window.__synapsePreview.lan.getPeerStats().fileTransferEvents.slice(${batch1Snapshot.eventCount}),
     recentCount: Number(document.querySelector('[data-testid="recent-documents-toggle"]')?.dataset.recentCount ?? '0'),
     openBookmarkLabels: [...document.querySelectorAll('[data-testid="txt-viewer"] [data-testid="bookmark-label"]')].map((el) => el.textContent?.trim()),
@@ -670,6 +694,11 @@ export async function lanSyncFlow(page) {
   assert(
     midBatchState.dialogOpen,
     'expected Batch 1 progress dialog still active while Chronicle paused',
+  );
+  assert(
+    midBatchState.pausedState?.phase === 'commit' &&
+      midBatchState.pausedState?.bookId === chronicleBookId,
+    `expected Retryable Chronicle paused at commit, got: ${JSON.stringify(midBatchState.pausedState)}`,
   );
   assert(
     !midBatchState.events.some((e) => e.bookId === sampleTxtDoc.fileHash),

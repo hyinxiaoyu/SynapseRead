@@ -343,6 +343,7 @@ export function StudyWorkspace() {
     lanImportPhase === 'connecting' ||
     lanImportPhase === 'planning' ||
     lanImportPhase === 'importing' ||
+    lanImportPhase === 'disconnecting' ||
     isImportPreparingFlush;
   // Share cannot open while Import is mounted or holds a transition lock (`#170`):
   // unmounting Import mid-session would skip `disconnectLanImport()`.
