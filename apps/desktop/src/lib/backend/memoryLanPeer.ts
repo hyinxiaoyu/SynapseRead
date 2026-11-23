@@ -22,6 +22,8 @@ import {
   type LanShareEventPayload,
   type LanShareSnapshot,
   type LanShareStartInput,
+  type ListenerStopReason,
+  type PeerRejectReason,
   type PlanProgress,
   type PlannedBookmarkPreview,
   type SharePermissions,
@@ -87,6 +89,48 @@ export interface MemoryLanHostContext {
   readFile: (path: string) => Promise<Uint8Array>;
   monotonicNow: () => string;
   fail: (code: string, message: string) => IpcError;
+}
+
+export type MemoryLanCommandName =
+  | 'lanListInterfaces'
+  | 'lanShareStart'
+  | 'lanImportConnect'
+  | 'lanImportCatalog'
+  | 'lanImportPlan'
+  | 'lanImportExecute';
+
+export type MemoryLanStepPhase = 'plan' | 'execute' | 'commit';
+
+export interface MemoryLanPeerStats {
+  connectCount: number;
+  catalogCount: number;
+  planCount: number;
+  executeCount: number;
+  cancelCount: number;
+  disconnectCount: number;
+  lastRequestedDecisions: BookImportDecision[];
+}
+
+export interface MemoryLanTestController {
+  setInterfaces(nextInterfaces: LanInterface[]): void;
+  setBooks(books: MemoryLanPeerBook[] | null): void;
+  setPermissions(permissions: SharePermissions): void;
+  setNextError(command: MemoryLanCommandName, error: IpcError): void;
+  setPersistentError(command: MemoryLanCommandName, error: IpcError | null): void;
+  simulateSharePaired(peerIp?: string): LanShareSnapshot;
+  simulateShareCodeLocked(): LanShareSnapshot;
+  simulateSharePeerBlocked(peerIp: string, reason?: PeerRejectReason): LanShareSnapshot;
+  simulateShareStopped(reason: ListenerStopReason, errorCode?: string | null): LanShareSnapshot;
+  pauseNextTransfer(phase?: MemoryLanStepPhase): void;
+  releasePausedTransfer(): void;
+  mutateLocalFile(documentId: string, bytes: Uint8Array): void;
+  mutateLocalCursor(
+    documentId: string,
+    anchor: AnchorLocation | null,
+    progress: number | null,
+  ): void;
+  listLocalDocuments(): StudyDocument[];
+  getPeerStats(): MemoryLanPeerStats;
 }
 
 const DEFAULT_INTERFACES: LanInterface[] = [
@@ -256,16 +300,45 @@ interface InternalReceiverSession {
   executingPlans: Set<string>;
 }
 
+export function createMemoryLanAdapterWithController(
+  host: MemoryLanHostContext,
+  options: MemoryLanPeerOptions = {},
+) {
+  return createMemoryLanAdapterInner(host, options);
+}
+
 export function createMemoryLanAdapter(
   host: MemoryLanHostContext,
   options: MemoryLanPeerOptions = {},
 ) {
-  const interfaces = options.interfaces ?? DEFAULT_INTERFACES;
+  return createMemoryLanAdapterInner(host, options).adapter;
+}
+
+function createMemoryLanAdapterInner(
+  host: MemoryLanHostContext,
+  options: MemoryLanPeerOptions = {},
+) {
+  let interfaces = options.interfaces ? [...options.interfaces] : [...DEFAULT_INTERFACES];
   const confirmShare = options.confirmShare ?? true;
   const expectedCode = options.pairingCode ?? DEFAULT_PAIRING_CODE;
-  const peerPermissions: SharePermissions = options.permissions ?? {
-    positions: true,
-    bookmarks: true,
+  let peerPermissions: SharePermissions = options.permissions
+    ? { ...options.permissions }
+    : { positions: true, bookmarks: true };
+  let customBooks: MemoryLanPeerBook[] | null = options.books ?? null;
+  const persistentErrors: Partial<Record<MemoryLanCommandName, IpcError>> = { ...options.errors };
+  const nextErrors: Partial<Record<MemoryLanCommandName, IpcError>> = {};
+
+  let pausedPhaseTarget: MemoryLanStepPhase | null = null;
+  let pausedTransferWaiter: (() => void) | null = null;
+
+  const stats: MemoryLanPeerStats = {
+    connectCount: 0,
+    catalogCount: 0,
+    planCount: 0,
+    executeCount: 0,
+    cancelCount: 0,
+    disconnectCount: 0,
+    lastRequestedDecisions: [],
   };
 
   let shareSnapshot: LanShareSnapshot = { ...INITIAL_LAN_SHARE_SNAPSHOT };
@@ -282,8 +355,32 @@ export function createMemoryLanAdapter(
     }
   };
 
+  const takeCommandError = (command: MemoryLanCommandName): IpcError | null => {
+    const once = nextErrors[command];
+    if (once !== undefined) {
+      delete nextErrors[command];
+      return once;
+    }
+    return persistentErrors[command] ?? null;
+  };
+
+  const maybePauseOrHook = async (phase: MemoryLanStepPhase, bookId: string): Promise<void> => {
+    if (options.onBeforeBookStep) {
+      await options.onBeforeBookStep(phase, bookId);
+    }
+    if (pausedPhaseTarget === phase) {
+      pausedPhaseTarget = null;
+      await new Promise<void>((resolve) => {
+        pausedTransferWaiter = () => {
+          pausedTransferWaiter = null;
+          resolve();
+        };
+      });
+    }
+  };
+
   const resolvePeerBooks = (): ResolvedPeerBook[] => {
-    const raw = options.books ?? buildDefaultPeerBooks(host.hashBytes);
+    const raw = customBooks ?? buildDefaultPeerBooks(host.hashBytes);
     return raw.map((book) => {
       const bytes = book.bytes ?? null;
       const bookId = book.bookId ?? (bytes ? host.hashBytes(bytes) : '0'.repeat(64));
@@ -378,14 +475,16 @@ export function createMemoryLanAdapter(
     return { key, state };
   };
 
-  return {
+  const adapter = {
     async lanListInterfaces(): Promise<LanInterface[]> {
-      if (options.errors?.lanListInterfaces) throw options.errors.lanListInterfaces;
+      const err = takeCommandError('lanListInterfaces');
+      if (err) throw err;
       return interfaces.map((iface) => ({ ...iface, subnet: { ...iface.subnet } }));
     },
 
     async lanShareStart(input: LanShareStartInput): Promise<LanShareSnapshot | null> {
-      if (options.errors?.lanShareStart) throw options.errors.lanShareStart;
+      const err = takeCommandError('lanShareStart');
+      if (err) throw err;
       if (input.documentIds.length === 0) {
         throw host.fail('lan_scope_denied', 'select at least one book to share');
       }
@@ -483,7 +582,9 @@ export function createMemoryLanAdapter(
     },
 
     async lanImportConnect(input: LanImportConnectInput): Promise<LanImportSessionInfo> {
-      if (options.errors?.lanImportConnect) throw options.errors.lanImportConnect;
+      stats.connectCount += 1;
+      const err = takeCommandError('lanImportConnect');
+      if (err) throw err;
       if (!/^\d{6}$/.test(input.code)) {
         throw host.fail('lan_auth_invalid', 'pairing code must be exactly 6 digits');
       }
@@ -525,7 +626,9 @@ export function createMemoryLanAdapter(
     },
 
     async lanImportCatalog(sessionId: string): Promise<CatalogBookClassification[]> {
-      if (options.errors?.lanImportCatalog) throw options.errors.lanImportCatalog;
+      stats.catalogCount += 1;
+      const err = takeCommandError('lanImportCatalog');
+      if (err) throw err;
       const session = sessions.get(sessionId);
       if (!session) throw host.fail('lan_auth_expired', 'receiver session expired');
       const peerBooks = resolvePeerBooks();
@@ -559,7 +662,9 @@ export function createMemoryLanAdapter(
       input: LanImportPlanInput,
       onProgress: (progress: PlanProgress) => void,
     ): Promise<LanImportPlanResult> {
-      if (options.errors?.lanImportPlan) throw options.errors.lanImportPlan;
+      stats.planCount += 1;
+      const err = takeCommandError('lanImportPlan');
+      if (err) throw err;
       const session = sessions.get(input.sessionId);
       if (!session) throw host.fail('lan_auth_expired', 'receiver session expired');
       const op = registerOp(input.operationId, input.sessionId);
@@ -579,9 +684,7 @@ export function createMemoryLanAdapter(
         for (let idx = 0; idx < selected.length; idx += 1) {
           const peer = selected[idx];
           if (!peer) continue;
-          if (options.onBeforeBookStep) {
-            await options.onBeforeBookStep('plan', peer.bookId);
-          }
+          await maybePauseOrHook('plan', peer.bookId);
           if (op.state.cancelled) {
             throw host.fail('lan_cancelled', 'LAN operation cancelled');
           }
@@ -741,7 +844,10 @@ export function createMemoryLanAdapter(
       input: LanImportExecuteInput,
       onProgress: (progress: LanImportProgress) => void,
     ): Promise<LanImportExecutionReport> {
-      if (options.errors?.lanImportExecute) throw options.errors.lanImportExecute;
+      stats.executeCount += 1;
+      stats.lastRequestedDecisions = input.decisions.map((d) => ({ ...d }));
+      const err = takeCommandError('lanImportExecute');
+      if (err) throw err;
       const session = sessions.get(input.sessionId);
       if (!session) throw host.fail('lan_auth_expired', 'receiver session expired');
       if (session.executingPlans.has(input.planId)) {
@@ -762,9 +868,7 @@ export function createMemoryLanAdapter(
           const planned = plan.books.find((b) => b.summary.bookId === decision.bookId);
           if (!planned) continue;
 
-          if (options.onBeforeBookStep) {
-            await options.onBeforeBookStep('execute', planned.peer.bookId);
-          }
+          await maybePauseOrHook('execute', planned.peer.bookId);
 
           if (op.state.cancelled) {
             cancelled = true;
@@ -841,8 +945,8 @@ export function createMemoryLanAdapter(
               // Yield so a synchronous `lanImportCancel` issued inside the
               // `fileTransfer` progress listener (or an injected commit hook)
               // is observed BEFORE publishing the file or mutating documents.
-              if (options.onBeforeBookStep) {
-                await options.onBeforeBookStep('commit', planned.peer.bookId);
+              if (options.onBeforeBookStep || pausedPhaseTarget === 'commit') {
+                await maybePauseOrHook('commit', planned.peer.bookId);
               } else {
                 await Promise.resolve();
               }
@@ -1163,6 +1267,7 @@ export function createMemoryLanAdapter(
     },
 
     async lanImportCancel(operationId: string): Promise<boolean> {
+      stats.cancelCount += 1;
       const op = activeOps.get(operationId);
       if (!op) return false;
       op.cancelled = true;
@@ -1170,6 +1275,7 @@ export function createMemoryLanAdapter(
     },
 
     async lanImportDisconnect(sessionId: string): Promise<void> {
+      stats.disconnectCount += 1;
       for (const op of activeOps.values()) {
         if (op.sessionId === sessionId) {
           op.cancelled = true;
@@ -1178,4 +1284,102 @@ export function createMemoryLanAdapter(
       sessions.delete(sessionId);
     },
   };
+
+  const controller: MemoryLanTestController = {
+    setInterfaces(nextInterfaces) {
+      interfaces = nextInterfaces.map((iface) => ({ ...iface, subnet: { ...iface.subnet } }));
+    },
+    setBooks(books) {
+      customBooks = books ? [...books] : null;
+    },
+    setPermissions(permissions) {
+      peerPermissions = { ...permissions };
+    },
+    setNextError(command, error) {
+      nextErrors[command] = error;
+    },
+    setPersistentError(command, error) {
+      if (error === null) {
+        delete persistentErrors[command];
+      } else {
+        persistentErrors[command] = error;
+      }
+    },
+    simulateSharePaired(peerIp = '192.168.1.99') {
+      shareSnapshot = {
+        ...shareSnapshot,
+        status: { state: 'paired', peerIp },
+        pairingCode: null,
+        codeExpiresAtMs: null,
+      };
+      return { ...shareSnapshot };
+    },
+    simulateShareCodeLocked() {
+      shareSnapshot = {
+        ...shareSnapshot,
+        status: {
+          state: 'codeLocked',
+        },
+        pairingCode: null,
+        codeExpiresAtMs: null,
+      };
+      return { ...shareSnapshot };
+    },
+    simulateSharePeerBlocked(peerIp, reason = 'outOfSubnet') {
+      const totalBlocked = shareSnapshot.blockedPeerCount + 1;
+      shareSnapshot = {
+        ...shareSnapshot,
+        blockedPeerCount: totalBlocked,
+        lastBlockedPeerIp: peerIp,
+      };
+      emitShareEvent({
+        event: { kind: 'peerBlocked', peerIp, reason, totalBlocked },
+        snapshot: { ...shareSnapshot },
+      });
+      return { ...shareSnapshot };
+    },
+    simulateShareStopped(reason, errorCode = null) {
+      shareSnapshot = {
+        ...INITIAL_LAN_SHARE_SNAPSHOT,
+        lastStopReason: reason,
+        lastStopErrorCode: errorCode,
+      };
+      emitShareEvent({
+        event: { kind: 'stopped', reason, errorCode },
+        snapshot: { ...shareSnapshot },
+      });
+      return { ...shareSnapshot };
+    },
+    pauseNextTransfer(phase = 'commit') {
+      pausedPhaseTarget = phase;
+    },
+    releasePausedTransfer() {
+      pausedTransferWaiter?.();
+    },
+    mutateLocalFile(documentId, bytes) {
+      const doc = host.documents.get(documentId);
+      if (!doc) throw host.fail('not_found', `document not found: ${documentId}`);
+      host.files[doc.filePath] = new Uint8Array(bytes);
+    },
+    mutateLocalCursor(documentId, anchor, progress) {
+      const doc = host.documents.get(documentId);
+      if (!doc) throw host.fail('not_found', `document not found: ${documentId}`);
+      host.documents.set(documentId, {
+        ...doc,
+        lastCursorAnchor: anchor,
+        lastProgress: progress,
+      });
+    },
+    listLocalDocuments() {
+      return [...host.documents.values()].map((doc) => ({ ...doc }));
+    },
+    getPeerStats() {
+      return {
+        ...stats,
+        lastRequestedDecisions: stats.lastRequestedDecisions.map((d) => ({ ...d })),
+      };
+    },
+  };
+
+  return { adapter, controller };
 }

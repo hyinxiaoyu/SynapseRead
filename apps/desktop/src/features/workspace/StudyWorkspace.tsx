@@ -15,6 +15,7 @@ import {
 } from '@/features/commands/registry';
 import { useNativeMenu } from '@/features/commands/useNativeMenu';
 import { InspectorPane } from '@/features/inspector/InspectorPane';
+import { LanImportDialog } from '@/features/lanSync/LanImportDialog';
 import { LanShareDialog } from '@/features/lanSync/LanShareDialog';
 import { LanShareIndicator } from '@/features/lanSync/LanShareIndicator';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
@@ -110,6 +111,7 @@ export function StudyWorkspace() {
   const onBeforeClose = useStudySyncStore((state) => state.onBeforeClose);
   const lanShareSnapshot = useStudySyncStore((state) => state.lanShare.snapshot);
   const refreshLanShareStatus = useStudySyncStore((state) => state.refreshLanShareStatus);
+  const lanImportPhase = useStudySyncStore((state) => state.lanImport.phase);
 
   const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
@@ -127,6 +129,7 @@ export function StudyWorkspace() {
   const [slots, setSlots] = useState<ToolbarSlots>(EMPTY_SLOTS);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
   /** The panes focus mode collapsed, to reopen when it ends. */
   const [panesBeforeImmersive, setPanesBeforeImmersive] = useState<{
     mindMap: boolean;
@@ -335,11 +338,29 @@ export function StudyWorkspace() {
       : null,
   );
 
+  const isLanImportBusy = lanImportPhase === 'planning' || lanImportPhase === 'importing';
+
   const closeShortcuts = useCallback(() => setShortcutsOpen(false), []);
-  const openShareDialog = useCallback(() => setShareDialogOpen(true), []);
+  const openShareDialog = useCallback(() => {
+    if (isLanImportBusy) return;
+    setImportDialogOpen(false);
+    setShareDialogOpen(true);
+  }, [isLanImportBusy]);
   const closeShareDialog = useCallback(() => setShareDialogOpen(false), []);
+  const openImportDialog = useCallback(() => {
+    setShareDialogOpen(false);
+    setImportDialogOpen(true);
+  }, []);
+  const closeImportDialog = useCallback(() => setImportDialogOpen(false), []);
 
   const workspaceCommands: CommandHandlers = {
+    'file.shareOnNetwork': {
+      run: openShareDialog,
+      enabled: !isLanImportBusy,
+    },
+    'file.importFromDevice': {
+      run: openImportDialog,
+    },
     'window.mindMap': {
       run: toggleMindMap,
       enabled: ready,
@@ -593,6 +614,7 @@ export function StudyWorkspace() {
           />
         )}
         <LanShareDialog open={shareDialogOpen} onClose={closeShareDialog} />
+        <LanImportDialog open={importDialogOpen} onClose={closeImportDialog} />
         {shortcutsOpen && <KeyboardShortcutsDialog onClose={closeShortcuts} />}
         <p
           ref={excerptStatusRef}

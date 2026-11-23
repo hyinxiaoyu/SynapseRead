@@ -2,8 +2,9 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { useEffect, useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MENUS } from '@/features/commands/commands';
 import { dispatchEscape } from '@/features/commands/escape';
-import { forgetRecentCommandRuns } from '@/features/commands/registry';
+import { commandState, forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
 import { INFO_NOTICE_MS, NOTICE_FADE_MS } from '@/features/reader/ReaderNotice';
 import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
 import { AUTO_HIDE_DELAY_MS } from '@/features/workspace/UnifiedToolbar';
@@ -1224,6 +1225,32 @@ describe('StudyWorkspace', () => {
       await waitFor(() => {
         expect(useStudySyncStore.getState().openDocumentIds).toHaveLength(0);
       });
+    });
+
+    it('exposes both File menu LAN sync commands atomically and opens both dialogs (#149)', async () => {
+      const fileMenu = MENUS.find((menu) => menu.id === 'file');
+      expect(fileMenu?.items).toContain('file.shareOnNetwork');
+      expect(fileMenu?.items).toContain('file.importFromDevice');
+
+      await renderReady();
+
+      expect(commandState('file.shareOnNetwork').enabled).toBe(true);
+      expect(commandState('file.importFromDevice').enabled).toBe(true);
+
+      act(() => {
+        expect(runCommand('file.shareOnNetwork', 'menu')).toBe(true);
+      });
+      expect(await screen.findByTestId('lan-share-dialog')).toBeInTheDocument();
+
+      // Modal dialog lock prevents menu commands while Share modal is open (#168).
+      expect(commandState('file.importFromDevice').enabled).toBe(false);
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(screen.queryByTestId('lan-share-dialog')).not.toBeInTheDocument();
+
+      act(() => {
+        expect(runCommand('file.importFromDevice', 'menu')).toBe(true);
+      });
+      expect(await screen.findByTestId('lan-import-dialog')).toBeInTheDocument();
     });
   });
 });
