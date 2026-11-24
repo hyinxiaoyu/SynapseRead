@@ -46,17 +46,17 @@ Under **`OD-2 Rev 2`** (self-used open-source policy):
      xattr -dr com.apple.quarantine /Applications/SynapseRead.app
      ```
 
-   - Run the evidence collector on both Macs before starting and confirm both show the **same `CDHash`** and **Signing type** (`Self-Signed (...)` or `adhoc (bound)`).
+   - Run the evidence collector on both Macs before starting and confirm both show the **same `CDHash`**, **Signing type** (`Self-Signed (...)` or `adhoc (bound)`), and **`Signature integrity` = `valid`**.
 5. **Launch Method**: Always double-click `/Applications/SynapseRead.app` from **Finder** (only `T-45` intentionally launches a dev build from Terminal).
 6. **Test Fixtures & Privacy**:
-   - Use non-sensitive synthetic or public-domain test files (`PDF`, `EPUB`, `TXT`, `.md`, plus a `>= 1 GB` test fixture for `T-18`/`T-48`).
+   - Use non-sensitive synthetic or public-domain test files (`PDF`, `EPUB`, `TXT`, `.md`, plus a `>= 1 GB` test fixture for `T-18`, `T-27`, `T-48`).
    - **Never** commit personal documents, SQLite databases, screenshots with private data, or raw evidence logs into the repository.
 
 ---
 
 ## 3. Evidence Collection
 
-Use the read-only checkpoint collector [`scripts/lan-sync-collect-evidence.sh`](../scripts/lan-sync-collect-evidence.sh) on the active Mac(s) at each checkpoint. It makes **no network calls**, **never modifies app data**, and **never prints user book filenames**.
+Use the read-only checkpoint collector [`scripts/lan-sync-collect-evidence.sh`](../scripts/lan-sync-collect-evidence.sh) on the active Mac(s) at each checkpoint. It makes **no network calls**, **never modifies app data**, **never prints user book filenames**, and binds process/listener inspection strictly to the current user and `--app` (or `--executable`) path.
 
 ```sh
 # Store all evidence outside the SynapseRead repository:
@@ -73,7 +73,7 @@ scripts/lan-sync-collect-evidence.sh \
 
 - **Report filenames**: automatically saved as `<YYYYmmddTHHMMSS>-<role>-<label>.md` inside `--out`.
 - **Screenshot naming**: save screenshots alongside the reports as `<role>-<T-id>-<step>.png` (for example, `mac-b-T-41-local-network-prompt.png`).
-- **Manual observations**: macOS provides no public CLI for per-app Local Network privacy toggles, so record **System Settings → Privacy & Security → Local Network** state and system prompt text manually with screenshots.
+- **Manual observations**: macOS provides no public CLI for per-app Local Network privacy toggles, so record **System Settings → Privacy & Security → Local Network** state, system alert text, and explicit confirmation of Finder double-click launches manually with screenshots.
 
 ---
 
@@ -83,18 +83,28 @@ Run each step in a **fresh macOS user account or VM snapshot** on `Mac B` (and `
 
 ### `T-45` — Control: Terminal / Dev Launch Non-Prompt Check
 
-1. From Terminal on `Mac B`, launch a dev build (`pnpm dev`) or execute the binary directly from Terminal.
+1. From Terminal on `Mac B`, launch a dev build (`pnpm dev` or `target/debug/synapseread-desktop`) or execute the binary directly from Terminal.
 2. Open `File ▸ Import from Another Device…`, enter `Mac A`'s address and code, and click **Connect**.
-3. Run the collector (`--role mac-b --label T-45-terminal`).
+3. Run the collector targeting the dev binary or exact PID (`--executable` avoids mixing with an installed `/Applications/SynapseRead.app` instance):
+
+   ```sh
+   scripts/lan-sync-collect-evidence.sh \
+     --role mac-b \
+     --label T-45-terminal \
+     --executable target/debug/synapseread-desktop \
+     --build-sha "$BUILD_SHA" \
+     --out "$EVIDENCE_DIR"
+   ```
+
 4. **Expected**:
    - Terminal-launched processes do **not** trigger a per-app macOS Local Network privacy alert (inheriting Terminal's network access per TN3179).
-   - Collector `## Process` reports `parent <ppid> (<shell>) — Terminal/other launch, NOT valid permission evidence (T-45)`.
+   - Collector `## Process` reports `parent <ppid> (<shell>) — non-launchd launch, NOT valid Finder permission evidence (T-45)`.
    - Quit the dev/Terminal launch before continuing.
 
 ### `T-41` & `T-44` (`UA-1`, `UA-6`) — First-Run Finder Local Network Prompt, Allow & Retry
 
-1. Ensure `Mac A` is launched from **Finder**, sharing at least one book via `File ▸ Share Books on This Network…` -> **Start sharing** -> confirm **Start Sharing** on the native prompt.
-2. On a fresh account/snapshot on `Mac B`, launch `/Applications/SynapseRead.app` from **Finder**. Run collector `--role mac-b --label T-41-launch` and confirm `Launch context: launchd (Finder/Dock/open) — valid launch context`.
+1. Ensure `Mac A` is launched by double-clicking `/Applications/SynapseRead.app` in **Finder**, sharing at least one book via `File ▸ Share Books on This Network…` -> **Start sharing** -> confirm **Start Sharing** on the native prompt.
+2. On a fresh account/snapshot on `Mac B`, launch `/Applications/SynapseRead.app` by double-clicking in **Finder**. Run collector `--role mac-b --label T-41-launch` and confirm `ppid=1 (launchd child — consistent with Finder/Dock/open; confirm Finder double-click manually)` (and record manual Finder confirmation).
 3. Open `File ▸ Import from Another Device…`, enter `Mac A`'s `IP:port` and 6-digit code, and click **Connect**.
 4. Take a screenshot of the macOS Local Network permission dialog (`mac-b-T-44-prompt.png`) and click **Allow**.
 5. If the initial `Connect` attempt failed with `lan_unreachable` while waiting on the alert, click **Retry** (note whether single auto-retry succeeded automatically or manual **Retry** was needed).
@@ -122,16 +132,33 @@ Run each step in a **fresh macOS user account or VM snapshot** on `Mac B` (and `
 
 ### `T-49` (`UA-8`, Self-Use Scope) — Rebuild Persistence: Local Self-Signed vs Ad Hoc
 
-1. Test replacing `/Applications/SynapseRead.app` with a freshly rebuilt `.app` from the same source tree (touching a harmless comment or clean rebuild so `CDHash` changes):
-   - **Ad hoc bound (`--adhoc-sign`) arm**: replace `/Applications/SynapseRead.app` and launch from **Finder**. Run collector (`--label T-49-adhoc-rebuild`) and attempt LAN import to `Mac A`. Record whether Local Network and Firewall permissions stay granted or require re-granting.
-   - **Local self-signed (`--local-sign`) arm** _(if a local Keychain Code Signing certificate is provisioned on your Macs)_: install `--local-sign` build, grant Local Network/Firewall, replace `/Applications/SynapseRead.app` with a second `--local-sign` rebuild, launch from **Finder**, and record whether permissions persist across rebuilds.
-   - **Paid Apple Developer ID arm**: record verbatim as `Deferred / N/A per OD-2 Rev 2 (self-used open-source project without paid Apple Developer account)`.
+Execute the **Ad hoc bound (`--adhoc-sign`)** arm, execute the **Local self-signed (`--local-sign`)** arm _(if a local Keychain Code Signing certificate is provisioned)_, and record the **Paid Apple Developer ID** arm as deferred:
+
+1. **Pre-replacement baseline (mandatory for EACH tested signing mode)**:
+   - Install the initial verified build (`Build 1`) into `/Applications/SynapseRead.app` on the Mac under test and launch from **Finder**.
+   - Run the collector (`--label T-49-<mode>-pre`) and record `Build 1` **`CDHash`**, initial **Local Network** toggle (**System Settings → Privacy & Security → Local Network**), and initial **Application Firewall** rule (**System Settings → Network → Firewall**, with Firewall ON and incoming connections allowed for SynapseRead).
+   - Verify BOTH directions succeed **before** replacing the app:
+     - **Local Network (outbound) pre-check**: put the Mac under test in the **receiver** role, connect to the peer Mac, and confirm catalog load succeeds.
+     - **Application Firewall (inbound) pre-check**: put the Mac under test in the **source** role (`Firewall ON`, SynapseRead allowed), start sharing, and confirm the peer Mac connects and imports cleanly.
+2. **Rebuild and replace with a strictly different `CDHash`**:
+   - Quit SynapseRead (`⌘Q`).
+   - Build and verify a fresh replacement (`Build 2`) in the same signing mode (`--adhoc-sign` or `--local-sign`) such that its `CDHash` differs from `Build 1` (for example, after a commit or harmless build metadata/comment change).
+   - Replace `/Applications/SynapseRead.app` with `Build 2`, clear any quarantine, and launch `Build 2` from **Finder**.
+3. **Post-replacement pre-connection inspection**:
+   - **Before** clicking Share or Connect, run the collector (`--label T-49-<mode>-post-before-connect`) to confirm **`Build 2 CDHash` ≠ `Build 1 CDHash`**, `Signature integrity = valid`, and initial Firewall rule state; screenshot **System Settings → Privacy & Security → Local Network** and **System Settings → Network → Firewall** to record whether existing toggles/rules survived replacement or disappeared/reset.
+4. **Post-replacement directional checks**:
+   - **Local Network (outbound) post-check**: put the Mac under test in the **receiver** role and connect to the peer Mac. Record whether macOS prompts again, succeeds immediately, or fails with `lan_unreachable` until re-enabled.
+   - **Application Firewall (inbound) post-check**: put the Mac under test in the **source** role (`Firewall ON`), start sharing, and have the peer Mac connect. Record whether incoming connections succeed, fail, or trigger a firewall prompt, and whether re-allowing in System Settings is required.
+5. **Paid Apple Developer ID arm**: record verbatim as `Deferred / N/A per OD-2 Rev 2 (self-used open-source project without paid Apple Developer account)`.
+6. Record pre-replacement and post-replacement `CDHash`, Local Network, and Firewall outcomes separately for each tested mode in Appendix B.
 
 ### `UA-3` — Local Network Denied: Physical LAN vs Loopback Isolation Check
 
-1. Keep `/Applications/SynapseRead.app` on `Mac B` launched from **Finder** with **Local Network** explicitly toggled **OFF** in **System Settings → Privacy & Security → Local Network**.
-2. Confirm connecting to `Mac A`'s physical LAN IP (`192.168.x.x` / `10.x.x.x` / `172.16-31.x.x`) fails with `lan_unreachable`.
-3. On the same host (or via two profiles/note of `synapse-lan` loopback tests vs Finder UI where `127.0.0.1` is tested), record physical LAN failure vs loopback behavior (`UA-3`), or record maintainer-accepted evidence citing `synapse-lan` loopback E2E + denied physical-LAN Finder run.
+Because production builds enforce `AddressPolicy::lan_only()` ([`crates/synapse-lan/src/address.rs`](../crates/synapse-lan/src/address.rs#L236-L252)), `127.0.0.1` is rejected before any socket call (`T-57`) and cannot be tested through the Finder UI. Resolve `UA-3` using the two concrete halves below plus ADR 0008 maintainer sign-off:
+
+1. **Physical LAN denial (Finder-launched `.app`)**: Keep `/Applications/SynapseRead.app` launched from **Finder** on the macOS 15+ test Mac with **Local Network** explicitly toggled **OFF** in **System Settings → Privacy & Security → Local Network**, attempt to connect to the peer Mac's physical private LAN IPv4 (`192.168.x.x` / `10.x.x.x` / `172.16-31.x.x`), and record the `lan_unreachable` failure (`--label UA-3-lan-denied` + screenshot).
+2. **Loopback exemption regression (`synapse-lan`)**: Run and record the `cargo test -p synapse-lan` loopback E2E suite (which exercises real sockets on `127.0.0.1` via test-only `AddressPolicy::loopback_for_tests()`) on the macOS 15+ host.
+3. **Maintainer sign-off**: Record both halves explicitly in Appendix B and mark `UA-3` for maintainer acceptance in ADR 0008 (noting that production `AddressPolicy::lan_only()` intentionally blocks loopback in the packaged app).
 
 ---
 
@@ -213,13 +240,13 @@ On `Mac A` under **System Settings → Network → Firewall**:
 
 Prepare a test library on `Mac A` containing at least one **PDF**, **EPUB**, **TXT**, **Markdown (`.md`)**, and one **`>= 1 GB` file** (plus reading positions and bookmarks).
 
-#### `T-15` & `T-28` — Multi-Format Transfer, `.md` Preservation (`R2-01`), and Offline Reopen
+#### `T-15` & `T-28` — Multi-Format Transfer, `.md` Preservation (`R2-01`), Offline Reopen & Position Resume
 
-1. Import PDF, EPUB, TXT, and `.md` books from `Mac A` onto `Mac B`.
-2. Run collector (`--role mac-b --label T-15-after-import`) and verify `library/` file count increased. Verify offline storage preserves the `.md` extension (`<sha256>.md`, not `.txt`) on disk (`R2-01`) without listing filenames in evidence.
-3. **Quit SynapseRead on `Mac A`** (`⌘Q`) so `Mac A` is completely offline (`T-28`).
-4. Open and read every imported book on `Mac B` (PDF, EPUB, TXT, `.md`).
-5. **Expected**: All four formats open and navigate cleanly offline after `Mac A` quits.
+1. On **`Mac A` (source)**, open all four format books (**PDF**, **EPUB**, **TXT**, **`.md`**) and advance each to a distinct, identifiable **non-start** reading position (for example: PDF page 2+, EPUB section/page 2+, TXT non-zero line, `.md` non-zero section/line). Record the exact saved position per format before sharing.
+2. Start sharing on `Mac A` with **Reading positions** enabled. On `Mac B`, import all four books with **Use source reading position** selected.
+3. Run collector (`--role mac-b --label T-15-after-import`) and verify `library/` file count increased and `.md` extension preservation (`<sha256>.md`, not `.txt`, `R2-01`) without listing filenames in evidence.
+4. **Quit SynapseRead on `Mac A`** (`⌘Q`) so `Mac A` is completely offline (`T-15` / `T-28`).
+5. On `Mac B`, open every imported book (**PDF**, **EPUB**, **TXT**, **`.md`**) offline and navigate to verify both offline readability (`T-15`) and that each format resumes at its exact imported non-start source position (`T-28`). Record the observed resume position per format in Appendix B.
 
 #### `T-17` — Source File Edited After Catalog Load (`409 lan_source_changed`)
 
@@ -235,9 +262,13 @@ Prepare a test library on `Mac A` containing at least one **PDF**, **EPUB**, **T
 3. **`T-23` (`File missing` restore)**: On `Mac B`, delete or move the backing file of a previously imported/opened `.md` book (preserving its DB record, annotations/notes/MindMap cards) so `Mac A` has the matching SHA. Reconnect from `Mac B` -> badge shows **`File missing`**, checkbox **`Download and restore file`**. Import -> restores `.md` copy and re-opens cleanly with all local annotations/notes/MindMap cards intact.
 4. **`T-24` (`Local file changed`)**: Modify a user-linked external file on `Mac B` so its SHA differs from the DB record while keeping the book record. Reconnect -> catalog marks it **`Local file changed`** (disabled checkbox / ineligible, `Local file changed. Open this book to resolve the change first.`).
 
-#### `T-18`, `T-19`, `T-27`, `T-48` (`>= 1 GB` File) — Cancel, Force-Quit Reconciliation, Sleep & Concurrency
+#### `T-18`, `T-19`, `T-27`, `T-48` (`>= 1 GB` File) — Cancel, Force-Quit, Concurrent Reader, Sleep & Quit Recovery
 
-1. **`T-48` (Concurrent UI responsiveness)**: Start importing a `>= 1 GB` book from `Mac A` to `Mac B`. While progress bar is actively advancing, switch windows/tabs or open another book on `Mac B` (note: keep the import dialog open if testing UI responsiveness inside/alongside the dialog, or scroll/bookmark an existing book before cancelling if testing non-blocking main thread / cancel). Record transfer duration and UI responsiveness.
+1. **`T-27` (Concurrent responsiveness during `>= 1 GB` hashing/streaming)**:
+   - On `Mac A` (source), open a readable book alongside the sharing setup and start sharing the `>= 1 GB` fixture (plus bookmarks). On `Mac B`, start importing the `>= 1 GB` file.
+   - While `Mac B`'s progress bar is actively advancing:
+     - On **`Mac A`**, click **Hide** on the Share dialog, open the book in the reader, scroll rapidly across pages/lines, and add/toggle bookmarks (`⌘D`). Confirm reader interaction remains responsive without stalling `Mac B`'s live transfer progress (`--label T-27-mid-transfer`).
+     - On **`Mac B`**, observe smooth progress bar updates and verify clicking **Cancel** responds promptly without UI freeze. Record total transfer duration when running a full `>= 1 GB` completion pass.
 2. **`T-18` (Cancel mid-transfer)**: Click **Cancel** during the `>= 1 GB` transfer -> results banner shows `Import cancelled`; collector (`--label T-18-after-cancel`) shows `0` `.part` files left in `sync-staging/`.
 3. **`R3-05` (Window close cancels import)**: Start the `>= 1 GB` transfer again and close `Mac B`'s window (`⌘W` / close button). Verify transfer cancels cleanly and `sync-staging/` has `0` `.part` files.
 4. **`T-19` & `R3-01` (Force-quit receiver startup reconciliation)**:
@@ -245,7 +276,9 @@ Prepare a test library on `Mac A` containing at least one **PDF**, **EPUB**, **T
    - Run collector (`--role mac-b --label T-19-before-relaunch`) to confirm `.part` count `>= 1`.
    - Launch `Mac B` from **Finder**, let startup finish, then run collector (`--label T-19-after-relaunch`) -> `sync-staging/` `.part` count is `0`.
    - (`R3-01`) Verify while a valid transfer is active in instance 1, launching a second instance does not delete instance 1's active `.part` file (sole-connection lock guard).
-5. **`T-27` (Source sleep / quit recovery)**: Start an import and either put `Mac A` to sleep or quit `Mac A` mid-session. Verify `Mac B` reports the interruption cleanly (`Import completed with some items needing attention` or `lan_source_stopped` / `lan_unreachable`), keeps completed items, removes partial downloads, and allows closing/reconnecting.
+5. **`T-48` (Source sleep AND quit recovery — run BOTH sub-cases)**:
+   - **Sleep sub-case**: Start importing the `>= 1 GB` file on `Mac B`, then put `Mac A` to sleep mid-transfer (`Apple menu ▸ Sleep`). Verify `Mac B` reports a clean connection/interruption error and leaves `0` `.part` files in `sync-staging/`. Wake `Mac A` (click **Regenerate code** / start a fresh share if the session stopped), reconnect from `Mac B` (or retry), and confirm the transfer **completes successfully**.
+   - **Quit sub-case**: Start importing the `>= 1 GB` file again on `Mac B`, then quit `Mac A` (`⌘Q`) mid-transfer. Verify `Mac B` surfaces the interruption cleanly (`lan_source_stopped` / `lan_unreachable`) and cleans `sync-staging/` (`0` `.part` files). Relaunch `Mac A` from **Finder**, start sharing again, reconnect from `Mac B`, and confirm the transfer **completes successfully**.
 
 #### `T-29`–`T-32` — Reading Positions, Conflict, Open-Book Flush & Recent Refresh
 
@@ -259,9 +292,12 @@ Prepare a test library on `Mac A` containing at least one **PDF**, **EPUB**, **T
 1. **`T-34` (Bookmark-only `0`-byte transfer)**: On a book already **`On this device`**, add a new bookmark on `Mac A`, import only the bookmark on `Mac B` -> `On this device — no file transfer needed`, `Bookmarks: Imported (+1)`, `0` book file bytes transferred.
 2. **`T-35` (Idempotent repeat import)**: Immediately run import again on the same book -> preview reports `Already on device` (`0` new), `Import` inserts `0` new bookmarks, total bookmark count unchanged.
 3. **`T-36` (Same-location different-label preservation)**: Ensure `Mac B` has bookmark label `"Local Note"` at the exact same location/anchor where `Mac A` has `"Source Note"`. Import -> `Mac B` keeps its original bookmark row (`id`, label `"Local Note"`, anchor payload, and `created_at` unchanged).
-4. **`T-37` (Delete & per-item deselection)**:
-   - Delete a bookmark on `Mac A` and re-import on `Mac B` -> `Mac B`'s copy is **not** deleted (V1 insert-only policy).
-   - Add 2 new bookmarks on `Mac A`, open Preview on `Mac B`, click **`Show bookmarks`**, uncheck 1 of the 2 new bookmarks, and click **Import** -> only the checked bookmark is imported (`+1`).
+4. **`T-37` (Receiver local deletion offered again, per-item deselection, and re-import restore)**:
+   - On `Mac B`, open the book with at least 2 imported bookmarks from `Mac A`, delete 1 bookmark locally in the Bookmarks sidebar (or delete 2 bookmarks), and close/save.
+   - Re-connect `Mac B` to `Mac A` (or click **Back to catalog** -> **Review import**) and click **`Show bookmarks`** in Preview -> verify the locally deleted bookmark(s) appear again as selectable **`new`** candidate(s).
+   - **Uncheck** the deleted bookmark in **`Show bookmarks`** (per-item deselection) and click **Import** -> confirm the deselected bookmark is **not** re-added (`+0` for that item).
+   - Re-preview once more, leave the deleted bookmark **checked**, and click **Import** -> confirm it is restored cleanly (`+1`).
+   - _(Separately note that deleting a bookmark on `Mac A` leaves `Mac B`'s existing bookmark untouched under V1 insert-only semantics.)_
 5. **`T-39` (Live open Bookmarks panel refresh)**: Keep a book open on `Mac B` with `View ▸ Bookmarks` (`⌥⌘5`) sidebar visible. Import a new bookmark for that open book from `Mac A` -> the open Bookmarks panel updates live without reopening the book.
 6. **`R3-09` (In-session `Back to catalog`)**: Click **`Back to catalog`** from Preview and from Results -> returns to the connected catalog within the same pairing session without re-entering the 6-digit code.
 
@@ -272,14 +308,12 @@ Prepare a test library on `Mac A` containing at least one **PDF**, **EPUB**, **T
 1. On active `Share Books on This Network` dialog on `Mac A`, click **Copy address**.
 2. Paste into another app (e.g., TextEdit or `Mac B` notes) and verify `<ip>:<port>` copied cleanly, button showed `Copied`, and selectable `<ip>:<port>` (`select-all`) also supports `⌘C` manual copy fallback.
 
-#### `T-56` — VoiceOver & Keyboard Accessibility Smoke
+#### `T-56` — Keyboard Accessibility & VoiceOver Smoke (Both Required)
 
-1. Enable **VoiceOver** (`⌘F5`) or navigate Share and Import dialogs using **Keyboard only** (`Tab`, `Shift+Tab`, `Space`, `Enter`, `Escape`).
-2. **Expected**:
-   - Focus stays trapped inside the open modal dialog (`Tab` / `Shift+Tab` wraps cleanly).
-   - Reader shortcuts do not fire behind the modal.
-   - `Escape` closes idle dialogs but does not dismiss an active transfer when dismissal is locked.
-   - Controls and status/error alerts announce sensibly in VoiceOver.
+Run **both** checks explicitly (do not skip either):
+
+1. **Keyboard-only check**: Navigate Share and Import dialogs using **Keyboard only** (`Tab`, `Shift+Tab`, `Space`, `Enter`, `Escape`). Confirm focus stays trapped inside the open modal (`Tab` / `Shift+Tab` wraps cleanly), reader shortcuts do not fire behind the modal, and `Escape` closes idle dialogs without dismissing an active transfer when dismissal is locked.
+2. **VoiceOver check**: Enable **VoiceOver** (`⌘F5`), step through Share (idle + active/error states) and Import (Connect, Catalog, Preview, Progress, Results) controls, and confirm labels, roles, status badges, and `role="alert"` banners announce coherently.
 
 #### `T-50` — Optional Mixed `arm64` ↔ `x86_64` Transfer
 
@@ -299,7 +333,7 @@ Swap roles so **`Mac B` shares** via `File ▸ Share Books on This Network…` a
 ## 6. Defect & Exception Rules
 
 - **Defect Rule**: Any real product, packaging, or protocol defect uncovered during Track B must get a dedicated GitHub issue and a `fix/*` PR with automated regression tests. Rebuild both Macs from the new merged `main` commit SHA and re-verify the affected row(s) before starting Track C.
-- **Exception Rule**: Any deferred or `N/A` item (such as the paid Apple Developer ID comparison arm of `T-49` / `UA-8` under `OD-2 Rev 2`, or `T-50` if no Intel Mac is available) must record explicit rationale and owner sign-off in Appendix B before Track C closes `#147` and `#132`.
+- **Exception Rule**: Any deferred or `N/A` item (such as the paid Apple Developer ID comparison arm of `T-49` / `UA-8` under `OD-2 Rev 2`, `UA-3` loopback split under `AddressPolicy::lan_only()`, or `T-50` if no Intel Mac is available) must record explicit rationale and owner sign-off in Appendix B before Track C closes `#147` and `#132`.
 
 ---
 
@@ -316,6 +350,7 @@ Swap roles so **`Mac B` shares** via `File ▸ Share Books on This Network…` a
 | Source Commit SHA      |                          |                            |
 | Signing Mode (`--...`) |                          |                            |
 | `codesign -dv` Type    |                          |                            |
+| `codesign --verify`    |                          |                            |
 | `CDHash`               |                          |                            |
 | Launch Method          | Finder (`/Applications`) | Finder (`/Applications`)   |
 | Initial Firewall State |                          |                            |
@@ -324,51 +359,52 @@ Swap roles so **`Mac B` shares** via `File ▸ Share Books on This Network…` a
 
 Leave **Result** blank until the physical two-Mac run completes. Valid values: `Pass`, `Fail`, `Exception`, `N/A`.
 
-| ID               | Run    | Roles       | Expected                                                                                                | Result | Evidence (collector label / screenshot / metrics) | Issue / sign-off |
-| ---------------- | ------ | ----------- | ------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------- | ---------------- |
-| `T-45`           | `Perm` | `Mac B`     | Terminal/dev launch shows no Local Network alert; collector flags non-`launchd` parent                  |        |                                                   |                  |
-| `T-41`           | `Perm` | `Mac A/B`   | Finder launch on fresh account prompts Local Network; **Allow** + **Retry** succeeds                    |        |                                                   |                  |
-| `T-44` / `UA-6`  | `Perm` | `Mac B`     | Alert text matches `Info.plist` `NSLocalNetworkUsageDescription`; no `NSBonjourServices`                |        |                                                   |                  |
-| `T-42` / `UA-1`  | `Perm` | `Mac B`     | **Don't Allow** triggers `lan_unreachable` hints; System Settings enable + **Retry** recovery recorded  |        |                                                   |                  |
-| `UA-12`          | `Perm` | `Mac B`     | Local Network Settings toggle/reset and relaunch requirement recorded on target macOS 15+ build         |        |                                                   |                  |
-| `T-43` / `UA-2`  | `Perm` | `Mac A`     | Source with Local Network denied still serves incoming transfer from allowed `Mac B` (or outcome noted) |        |                                                   |                  |
-| `T-49` / `UA-8`  | `Perm` | `Mac B`     | Local self-signed vs ad hoc rebuild Local Network/Firewall persistence observed; Dev ID deferred        |        |                                                   |                  |
-| `UA-3`           | `Perm` | `Mac B`     | Finder-launched Local Network denial blocks physical LAN while loopback behavior documented             |        |                                                   |                  |
-| `T-10`           | `Pack` | `Mac A`     | `LISTEN` count `0` (launch) -> `1` bound IP (share) -> `0` (stop / close `R3-05` / quit)                |        |                                                   |                  |
-| `T-08` / `UA-4`  | `Pack` | `Mac A/B`   | Coexists with `0.0.0.0:49319` wildcard; falls back to `49320` when `<lan_ip>:49319` occupied            |        |                                                   |                  |
-| `T-12`           | `Pack` | `Mac A`     | Declining native `Share Books on This Network` confirmation leaves `0` listeners                        |        |                                                   |                  |
-| `OD-5` / `R3-09` | `Pack` | `Mac A/B`   | 5 wrong codes -> `Code locked` + `lan_attempts_exceeded` + **Regenerate code** recovery                 |        |                                                   |                  |
-| `T-02`           | `Pack` | `Mac A/B`   | **Disconnect receiver** mid-transfer aborts immediately and cleans staging                              |        |                                                   |                  |
-| `T-06`           | `Pack` | `Mac A`     | Interface selector lists LAN interfaces only; `utun*` VPN and `lo0` excluded                            |        |                                                   |                  |
-| `T-09`           | `Pack` | `Mac A`     | Wi-Fi loss/switch losing bound IP stops share with **Needs attention** (`lan_network_changed`)          |        |                                                   |                  |
-| `R3-04`          | `Pack` | `Mac A`     | Active-sharing indicator remains visible and clickable in Focus Mode (`⇧⌘F`)                            |        |                                                   |                  |
-| `T-46` / `UA-7`  | `Pack` | `Mac A/B`   | macOS Firewall Allow / Deny / "Block all incoming connections" matches expected `lan_unreachable`       |        |                                                   |                  |
-| `T-47` / `UA-17` | `Pack` | `Mac A/B`   | Guest Wi-Fi isolation fails on receiver (`lan_unreachable`); no spurious blocked-peer count on source   |        |                                                   |                  |
-| `T-15`           | `Pack` | `Mac A/B`   | PDF, EPUB, TXT, and `.md` transfer with `.md` extension preserved (`R2-01`)                             |        |                                                   |                  |
-| `T-28`           | `Pack` | `Mac A/B`   | All 4 imported formats reopen offline on `Mac B` after `Mac A` quits                                    |        |                                                   |                  |
-| `T-17`           | `Pack` | `Mac A/B`   | Source file edited after catalog load -> `lan_source_changed` (`0` bytes committed)                     |        |                                                   |                  |
-| `T-21`           | `Pack` | `Mac A/B`   | Renamed duplicate shows `On this device`, transfers `0` file bytes                                      |        |                                                   |                  |
-| `T-22`           | `Pack` | `Mac A/B`   | `Same title, different version` + `Download as a separate version` creates distinct document            |        |                                                   |                  |
-| `T-23`           | `Pack` | `Mac A/B`   | `File missing` + `Download and restore file` restores `.md` while preserving local study data           |        |                                                   |                  |
-| `T-24`           | `Pack` | `Mac A/B`   | `Local file changed` marked ineligible in catalog and preview                                           |        |                                                   |                  |
-| `T-18`           | `Pack` | `Mac A/B`   | Cancel mid-transfer (`>= 1 GB`) and window close (`R3-05`) clean `.part` files                          |        |                                                   |                  |
-| `T-19` / `R3-01` | `Pack` | `Mac B`     | Force-quit leaves `.part`, startup reconciles to `0`, second instance guards active transfer (`R3-01`)  |        |                                                   |                  |
-| `T-27`           | `Pack` | `Mac A/B`   | Source sleep/quit mid-transfer recovers cleanly with partial staging cleaned                            |        |                                                   |                  |
-| `T-48`           | `Pack` | `Mac B`     | `>= 1 GB` transfer keeps UI responsive and records transfer timing                                      |        |                                                   |                  |
-| `T-29`           | `Pack` | `Mac A/B`   | **Keep yours** vs **Use source reading position** works accurately                                      |        |                                                   |                  |
-| `T-30`           | `Pack` | `Mac A/B`   | `lan_position_conflict` triggers **Replace with source position anyway** re-confirm                     |        |                                                   |                  |
-| `T-31`           | `Pack` | `Mac A/B`   | Open-book scroll + **Close and use source position** flushes, closes, and applies source position       |        |                                                   |                  |
-| `T-32`           | `Pack` | `Mac B`     | **Continue reading** (`Recent documents`) updates immediately after import                              |        |                                                   |                  |
-| `T-34`           | `Pack` | `Mac A/B`   | Bookmark-only import on existing book transfers `0` file bytes                                          |        |                                                   |                  |
-| `T-35`           | `Pack` | `Mac A/B`   | Repeat import inserts `0` new bookmarks (`Already on device`, total unchanged)                          |        |                                                   |                  |
-| `T-36`           | `Pack` | `Mac A/B`   | Same-location different-label preserves receiver `id`, label, anchor, and `created_at`                  |        |                                                   |                  |
-| `T-37`           | `Pack` | `Mac A/B`   | Deleted source bookmark is not removed; per-item deselection in **Show bookmarks** works                |        |                                                   |                  |
-| `T-39`           | `Pack` | `Mac B`     | Live open **Bookmarks** sidebar updates immediately when new bookmarks import                           |        |                                                   |                  |
-| `R3-09`          | `Pack` | `Mac B`     | **Back to catalog** returns to active session catalog without re-pairing                                |        |                                                   |                  |
-| `T-53` / `UA-10` | `Pack` | `Mac A`     | `WKWebView` **Copy address** + manual selectable fallback copy `<ip>:<port>`                            |        |                                                   |                  |
-| `T-56`           | `Pack` | `Mac A/B`   | VoiceOver smoke, keyboard focus trap (`Tab`/`Escape`), and shortcut isolation                           |        |                                                   |                  |
-| `T-50`           | `Pack` | `Mac A/B`   | Optional `arm64` ↔ `x86_64` transfer (or `N/A` if single-arch hardware only)                            |        |                                                   |                  |
-| `Role Swap`      | `Pack` | `Mac B → A` | `Mac B` shares -> `Mac A` imports (smoke across R2–R5 + offline reopen)                                 |        |                                                   |                  |
+| ID                         | Run    | Roles     | Expected                                                                                                                     | Result | Evidence (collector label / screenshot / metrics) | Issue / sign-off |
+| -------------------------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------- | ---------------- |
+| `T-45`                     | `Perm` | `Mac B`   | Terminal/dev launch shows no Local Network alert; collector (`--executable`) flags non-`launchd` parent                      |        |                                                   |                  |
+| `T-41`                     | `Perm` | `Mac A/B` | Finder launch on fresh account prompts Local Network; **Allow** + **Retry** succeeds                                         |        |                                                   |                  |
+| `T-44` / `UA-6`            | `Perm` | `Mac B`   | Alert text matches `Info.plist` `NSLocalNetworkUsageDescription`; no `NSBonjourServices`                                     |        |                                                   |                  |
+| `T-42` / `UA-1`            | `Perm` | `Mac B`   | **Don't Allow** triggers `lan_unreachable` hints; System Settings enable + **Retry** recovery recorded                       |        |                                                   |                  |
+| `UA-12`                    | `Perm` | `Mac B`   | Local Network Settings toggle/reset and relaunch requirement recorded on target macOS 15+ build                              |        |                                                   |                  |
+| `T-43` / `UA-2`            | `Perm` | `Mac A`   | Source with Local Network denied still serves incoming transfer from allowed `Mac B` (or outcome noted)                      |        |                                                   |                  |
+| `T-49` / `UA-8` (Ad hoc)   | `Perm` | `Mac A/B` | Pre-replacement & post-replacement (new `CDHash`) Local Network (receiver) + Firewall (source) observed; Dev ID deferred     |        |                                                   |                  |
+| `T-49` / `UA-8` (Self-sgn) | `Perm` | `Mac A/B` | Pre-replacement & post-replacement (new `CDHash`) Local Network (receiver) + Firewall (source) observed (if cert configured) |        |                                                   |                  |
+| `UA-3`                     | `Perm` | `Mac B`   | Finder physical LAN denied (`lan_unreachable`) + `synapse-lan` loopback E2E pass recorded; maintainer sign-off               |        |                                                   |                  |
+| `T-10`                     | `Pack` | `Mac A`   | `LISTEN` count `0` (launch) -> `1` bound IP (share) -> `0` (stop / close `R3-05` / quit)                                     |        |                                                   |                  |
+| `T-08` / `UA-4`            | `Pack` | `Mac A/B` | Coexists with `0.0.0.0:49319` wildcard; falls back to `49320` when `<lan_ip>:49319` occupied                                 |        |                                                   |                  |
+| `T-12`                     | `Pack` | `Mac A`   | Declining native `Share Books on This Network` confirmation leaves `0` listeners                                             |        |                                                   |                  |
+| `OD-5` / `R3-09`           | `Pack` | `Mac A/B` | 5 wrong codes -> `Code locked` + `lan_attempts_exceeded` + **Regenerate code** recovery                                      |        |                                                   |                  |
+| `T-02`                     | `Pack` | `Mac A/B` | **Disconnect receiver** mid-transfer aborts immediately and cleans staging                                                   |        |                                                   |                  |
+| `T-06`                     | `Pack` | `Mac A`   | Interface selector lists LAN interfaces only; `utun*` VPN and `lo0` excluded                                                 |        |                                                   |                  |
+| `T-09`                     | `Pack` | `Mac A`   | Wi-Fi loss/switch losing bound IP stops share with **Needs attention** (`lan_network_changed`)                               |        |                                                   |                  |
+| `R3-04`                    | `Pack` | `Mac A`   | Active-sharing indicator remains visible and clickable in Focus Mode (`⇧⌘F`)                                                 |        |                                                   |                  |
+| `T-46` / `UA-7`            | `Pack` | `Mac A/B` | macOS Firewall Allow / Deny / "Block all incoming connections" matches expected `lan_unreachable`                            |        |                                                   |                  |
+| `T-47` / `UA-17`           | `Pack` | `Mac A/B` | Guest Wi-Fi isolation fails on receiver (`lan_unreachable`); no spurious blocked-peer count on source                        |        |                                                   |                  |
+| `T-15`                     | `Pack` | `Mac A/B` | PDF, EPUB, TXT, and `.md` transfer with `.md` extension preserved (`R2-01`) and reopen offline after `Mac A` quits           |        |                                                   |                  |
+| `T-28`                     | `Pack` | `Mac A/B` | PDF, EPUB, TXT, and `.md` all resume at their imported non-start source reading positions offline after `Mac A` quits        |        |                                                   |                  |
+| `T-17`                     | `Pack` | `Mac A/B` | Source file edited after catalog load -> `lan_source_changed` (`0` bytes committed)                                          |        |                                                   |                  |
+| `T-21`                     | `Pack` | `Mac A/B` | Renamed duplicate shows `On this device`, transfers `0` file bytes                                                           |        |                                                   |                  |
+| `T-22`                     | `Pack` | `Mac A/B` | `Same title, different version` + `Download as a separate version` creates distinct document                                 |        |                                                   |                  |
+| `T-23`                     | `Pack` | `Mac A/B` | `File missing` + `Download and restore file` restores `.md` while preserving local study data                                |        |                                                   |                  |
+| `T-24`                     | `Pack` | `Mac A/B` | `Local file changed` marked ineligible in catalog and preview                                                                |        |                                                   |                  |
+| `T-18`                     | `Pack` | `Mac A/B` | Cancel mid-transfer (`>= 1 GB`) and window close (`R3-05`) clean `.part` files                                               |        |                                                   |                  |
+| `T-19` / `R3-01`           | `Pack` | `Mac B`   | Force-quit leaves `.part`, startup reconciles to `0`, second instance guards active transfer (`R3-01`)                       |        |                                                   |                  |
+| `T-27`                     | `Pack` | `Mac A/B` | Reader scrolling & bookmarking stay responsive on source (`Hide` dialog) while `>= 1 GB` transfer advances; duration noted   |        |                                                   |                  |
+| `T-48`                     | `Pack` | `Mac A/B` | Source sleep AND source quit mid-transfer both error cleanly, leave `0` `.part`, and succeed on reconnect/retry              |        |                                                   |                  |
+| `T-29`                     | `Pack` | `Mac A/B` | **Keep yours** vs **Use source reading position** works accurately                                                           |        |                                                   |                  |
+| `T-30`                     | `Pack` | `Mac A/B` | `lan_position_conflict` triggers **Replace with source position anyway** re-confirm                                          |        |                                                   |                  |
+| `T-31`                     | `Pack` | `Mac A/B` | Open-book scroll + **Close and use source position** flushes, closes, and applies source position                            |        |                                                   |                  |
+| `T-32`                     | `Pack` | `Mac B`   | **Continue reading** (`Recent documents`) updates immediately after import                                                   |        |                                                   |                  |
+| `T-34`                     | `Pack` | `Mac A/B` | Bookmark-only import on existing book transfers `0` file bytes                                                               |        |                                                   |                  |
+| `T-35`                     | `Pack` | `Mac A/B` | Repeat import inserts `0` new bookmarks (`Already on device`, total unchanged)                                               |        |                                                   |                  |
+| `T-36`                     | `Pack` | `Mac A/B` | Same-location different-label preserves receiver `id`, label, anchor, and `created_at`                                       |        |                                                   |                  |
+| `T-37`                     | `Pack` | `Mac A/B` | Receiver-deleted bookmark reappears as selectable in Preview; per-item deselect skips it; re-checking restores it            |        |                                                   |                  |
+| `T-39`                     | `Pack` | `Mac B`   | Live open **Bookmarks** sidebar updates immediately when new bookmarks import                                                |        |                                                   |                  |
+| `R3-09`                    | `Pack` | `Mac B`   | **Back to catalog** returns to active session catalog without re-pairing                                                     |        |                                                   |                  |
+| `T-53` / `UA-10`           | `Pack` | `Mac A`   | `WKWebView` **Copy address** + manual selectable fallback copy `<ip>:<port>`                                                 |        |                                                   |                  |
+| `T-56`                     | `Pack` | `Mac A/B` | BOTH keyboard-only navigation (focus trap, shortcut isolation, `Escape`) AND VoiceOver smoke pass                            |        |                                                   |                  |
+| `T-50`                     | `Pack` | `Mac A/B` | Optional `arm64` ↔ `x86_64` transfer (or `N/A` if single-arch hardware only)                                                 |        |                                                   |                  |
+| `Role Swap`                | `Pack` | `Mac B→A` | `Mac B` shares -> `Mac A` imports (smoke across R2–R5 + offline reopen)                                                      |        |                                                   |                  |
 
 ### Appendix C: Track C Transcription & Milestone Closure
 
