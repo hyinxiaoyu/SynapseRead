@@ -2,6 +2,16 @@
 # Shared GitHub tag and Release state checks for release-validate.sh and
 # release-publish-draft.sh. Designed to be sourced by Bash 3.2+ scripts.
 
+# Compute lowercase SHA-256 hex digest of a file using shasum or sha256sum.
+compute_file_sha256() {
+  local file_path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file_path" | awk '{print $1}'
+  else
+    sha256sum "$file_path" | awk '{print $1}'
+  fi
+}
+
 # Dereference refs/tags/<tag_name> to a commit SHA via GitHub REST API.
 # Prints the 40-char commit SHA if the tag exists remotely, or empty string if absent.
 # Handles both lightweight tags (object.type == "commit") and annotated/nested
@@ -148,4 +158,64 @@ check_release_target_state() {
   fi
 
   printf ''
+}
+
+# Fetch a single release by ID and assert it is still a draft for <tag_name>
+# bound to <build_sha>, with remote tag (if present) still pointing to <build_sha>
+# and a valid upload_url matching that exact release ID.
+# Prints the release JSON object on stdout.
+fetch_verified_draft_release_json() {
+  local repo="$1"
+  local release_id="$2"
+  local tag_name="$3"
+  local build_sha="$4"
+
+  local remote_tag_commit=""
+  remote_tag_commit="$(resolve_remote_tag_commit "$repo" "$tag_name")"
+  if [ -n "$remote_tag_commit" ] && [ "$remote_tag_commit" != "$build_sha" ]; then
+    echo "Error: Remote tag '${tag_name}' points to commit ${remote_tag_commit}, which differs from build commit ${build_sha}." >&2
+    return 1
+  fi
+
+  local release_json=""
+  release_json="$(gh api "repos/${repo}/releases/${release_id}")"
+
+  local actual_id=""
+  local actual_tag=""
+  local is_draft=""
+  local commitish=""
+  local upload_url=""
+  actual_id="$(printf '%s' "$release_json" | jq -r '.id // empty')"
+  actual_tag="$(printf '%s' "$release_json" | jq -r '.tag_name // empty')"
+  is_draft="$(printf '%s' "$release_json" | jq -r 'if .draft == true then "true" else "false" end')"
+  commitish="$(printf '%s' "$release_json" | jq -r '.target_commitish // empty')"
+  upload_url="$(printf '%s' "$release_json" | jq -r '.upload_url // empty')"
+
+  if [ "$actual_id" != "$release_id" ]; then
+    echo "Error: Release lookup returned id='${actual_id}', expected '${release_id}'." >&2
+    return 1
+  fi
+  if [ "$actual_tag" != "$tag_name" ]; then
+    echo "Error: Release id=${release_id} has tag_name='${actual_tag}', expected '${tag_name}'." >&2
+    return 1
+  fi
+  if [ "$is_draft" != "true" ]; then
+    echo "Error: Release id=${release_id} for '${tag_name}' is no longer a draft (draft=${is_draft}); refusing to modify a published release." >&2
+    return 1
+  fi
+  if [ "$commitish" != "$build_sha" ]; then
+    echo "Error: Release id=${release_id} for '${tag_name}' is bound to target_commitish='${commitish}', expected '${build_sha}'." >&2
+    return 1
+  fi
+
+  local upload_base="${upload_url%%\{*}"
+  case "$upload_base" in
+    https://*/releases/"${release_id}"/assets|http://*/releases/"${release_id}"/assets) ;;
+    *)
+      echo "Error: Release id=${release_id} returned unexpected upload_url '${upload_url}'." >&2
+      return 1
+      ;;
+  esac
+
+  printf '%s' "$release_json"
 }

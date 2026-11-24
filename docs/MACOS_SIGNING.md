@@ -54,6 +54,8 @@ openssl base64 -A -in DeveloperIDApplication.p12 | gh secret set APPLE_CERTIFICA
 - **`workflow_dispatch` (signed test build for `#147`):** Run **Release** manually from GitHub Actions with `create_release=false` (whether dispatched from a branch or a `v*` tag) to download a signed, notarized `SynapseRead-<version>-macos-universal` workflow artifact without creating or modifying any GitHub Release. Setting `create_release=true` creates or updates a draft Release only when the built commit matches any existing remote tag/draft and no published Release exists for that tag.
 - **`workflow_dispatch` (unsigned CI smoke test):** Set `allow_unsigned=true` (requires `create_release=false`) when Apple secrets are not configured yet. Unsigned artifacts are labeled `-unsigned` and are not valid for `#147`.
 
+> **Draft Release Protection:** `scripts/release-publish-draft.sh` uploads missing assets directly to the verified draft's Release ID `upload_url` without `--clobber` or asset deletion, skips identical-digest assets, and aborts on digest mismatches or published releases. To guarantee at the GitHub server level that a release cannot receive new or modified assets if someone publishes the draft mid-upload, enable **Release immutability** in **Repository Settings → General → Releases**.
+
 ## Local Signed & Notarized Builds
 
 Use [`scripts/macos-build-signed.sh`](../scripts/macos-build-signed.sh) to build, sign, notarize (`.app` and `.dmg`), staple, and verify locally:

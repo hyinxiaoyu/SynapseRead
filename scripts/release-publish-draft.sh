@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Create or update a draft GitHub Release for a single commit SHA and tag,
-# verifying tag target, draft target_commitish, non-published status, and
-# asset checksums immediately before upload.
+# Create or update a draft GitHub Release for a single commit SHA and tag.
+# Uploads only missing assets directly to the verified Release ID's upload_url
+# without --clobber or asset deletion, skips assets whose SHA-256 digest
+# already matches, and fails immediately on digest mismatch or non-draft state.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/release-state.sh
@@ -16,6 +17,31 @@ require_non_empty() {
     echo "Error: Missing required environment variable ${name}." >&2
     exit 1
   fi
+}
+
+asset_content_type() {
+  case "$1" in
+    *.dmg) printf 'application/x-apple-diskimage' ;;
+    *.zip) printf 'application/zip' ;;
+    *.txt) printf 'text/plain; charset=utf-8' ;;
+    *) printf 'application/octet-stream' ;;
+  esac
+}
+
+list_release_assets_json() {
+  local repo="$1"
+  local release_id="$2"
+  local release_json="$3"
+
+  local embedded_count=0
+  embedded_count="$(printf '%s' "$release_json" | jq '(.assets // []) | length')"
+  if [ "$embedded_count" -lt 30 ]; then
+    printf '%s' "$release_json" | jq -c '.assets // []'
+    return 0
+  fi
+
+  gh api --paginate "repos/${repo}/releases/${release_id}/assets" \
+    | jq -c -n '[inputs | .[]?]'
 }
 
 require_non_empty "GITHUB_REPOSITORY" "${GITHUB_REPOSITORY:-}"
@@ -51,6 +77,10 @@ APP_ZIP_OUT="SynapseRead_${APP_VERSION}_universal.app.zip"
 SUMS_OUT="SHA256SUMS.txt"
 
 for asset in "$DMG_OUT" "$APP_ZIP_OUT" "$SUMS_OUT"; do
+  if ! printf '%s' "$asset" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+    echo "Error: Unsafe release asset name '${asset}'." >&2
+    exit 1
+  fi
   if [ ! -f "${ASSETS_DIR}/${asset}" ]; then
     echo "Error: Expected release asset not found: ${ASSETS_DIR}/${asset}" >&2
     exit 1
@@ -85,8 +115,10 @@ if [ -z "$existing_draft_id" ]; then
     echo "Error: Newly created release did not match expected draft/commit state (id=${created_id}, draft=${created_draft}, target_commitish=${created_commitish})." >&2
     exit 1
   fi
+  verified_draft_id="$created_id"
 else
   echo "Reusing existing draft release id=${existing_draft_id} for ${TAG_NAME} at commit ${BUILD_SHA}..."
+  verified_draft_id="$existing_draft_id"
 fi
 
 upload_err_file="$(mktemp)"
@@ -95,37 +127,72 @@ cleanup_err_file() {
 }
 trap cleanup_err_file EXIT
 
-for attempt in 1 2 3; do
-  # Re-verify remote tag and release state immediately before every upload/clobber.
-  verified_draft_id="$(check_release_target_state "$GITHUB_REPOSITORY" "$TAG_NAME" "$BUILD_SHA")"
-  if [ -z "$verified_draft_id" ]; then
-    echo "Error: Draft release for '${TAG_NAME}' was not found during pre-upload verification." >&2
+for asset in "$DMG_OUT" "$APP_ZIP_OUT" "$SUMS_OUT"; do
+  asset_path="${ASSETS_DIR}/${asset}"
+  local_sha256="$(compute_file_sha256 "$asset_path")"
+  expected_digest="sha256:${local_sha256}"
+  content_type="$(asset_content_type "$asset")"
+
+  attempt=1
+  while [ "$attempt" -le 2 ]; do
+    release_json="$(fetch_verified_draft_release_json "$GITHUB_REPOSITORY" "$verified_draft_id" "$TAG_NAME" "$BUILD_SHA")"
+    upload_url="$(printf '%s' "$release_json" | jq -r '.upload_url')"
+    upload_base="${upload_url%%\{*}"
+    assets_json="$(list_release_assets_json "$GITHUB_REPOSITORY" "$verified_draft_id" "$release_json")"
+
+    matching_assets="$(printf '%s' "$assets_json" | jq -c --arg name "$asset" '[.[] | select(.name == $name)]')"
+    matching_count="$(printf '%s' "$matching_assets" | jq 'length')"
+
+    if [ "$matching_count" -gt 1 ]; then
+      echo "Error: Found multiple assets named '${asset}' on release id=${verified_draft_id}." >&2
+      exit 1
+    fi
+
+    if [ "$matching_count" -eq 1 ]; then
+      remote_state="$(printf '%s' "$matching_assets" | jq -r '.[0].state // empty')"
+      remote_digest="$(printf '%s' "$matching_assets" | jq -r '.[0].digest // empty')"
+      if [ "$remote_state" = "uploaded" ] && [ "$remote_digest" = "$expected_digest" ]; then
+        echo "Skipping '${asset}': already uploaded on draft id=${verified_draft_id} with matching digest (${remote_digest})."
+        break
+      fi
+      echo "Error: Asset '${asset}' already exists on release id=${verified_draft_id} with different or unverified digest (state='${remote_state}', digest='${remote_digest:-none}', expected='${expected_digest}'); refusing to delete or overwrite." >&2
+      exit 1
+    fi
+
+    echo "Uploading '${asset}' to draft release id=${verified_draft_id}..."
+    set +e
+    upload_resp="$(gh api --method POST "${upload_base}?name=${asset}" \
+      -H "Content-Type: ${content_type}" \
+      --input "$asset_path" 2>"$upload_err_file")"
+    upload_rc=$?
+    set -e
+
+    if [ "$upload_rc" -eq 0 ]; then
+      uploaded_digest="$(printf '%s' "$upload_resp" | jq -r '.digest // empty' 2>/dev/null || true)"
+      if [ -n "$uploaded_digest" ] && [ "$uploaded_digest" != "$expected_digest" ]; then
+        echo "Error: Uploaded asset '${asset}' returned unexpected digest '${uploaded_digest}', expected '${expected_digest}'." >&2
+        exit 1
+      fi
+      break
+    fi
+
+    upload_err="$(cat "$upload_err_file")"
+    printf '%s\n' "$upload_err" >&2
+
+    # Retry once only on transient 5xx server failures; never retry 4xx (such as
+    # 422 already_exists or immutable-release rejections).
+    if [ "$attempt" -eq 1 ] && printf '%s' "$upload_err" | grep -Eq 'HTTP 5[0-9]{2}'; then
+      attempt=$((attempt + 1))
+      sleep "${RELEASE_UPLOAD_RETRY_DELAY:-3}"
+      continue
+    fi
+
+    echo "Error: Failed to upload asset '${asset}' to release id=${verified_draft_id}." >&2
     exit 1
-  fi
-
-  set +e
-  gh release upload "$TAG_NAME" \
-    "${ASSETS_DIR}/${DMG_OUT}" \
-    "${ASSETS_DIR}/${APP_ZIP_OUT}" \
-    "${ASSETS_DIR}/${SUMS_OUT}" \
-    --clobber 2>"$upload_err_file"
-  upload_rc=$?
-  set -e
-
-  if [ "$upload_rc" -eq 0 ]; then
-    echo "Uploaded assets to draft release id=${verified_draft_id} (${TAG_NAME})."
-    exit 0
-  fi
-
-  upload_err="$(cat "$upload_err_file")"
-  printf '%s\n' "$upload_err" >&2
-
-  # Retry briefly only when GitHub's GraphQL draft index lags immediately after creation.
-  if [ "$attempt" -lt 3 ] && printf '%s' "$upload_err" | grep -qi "release not found"; then
-    sleep "${RELEASE_UPLOAD_RETRY_DELAY:-3}"
-    continue
-  fi
-
-  echo "Error: Failed to upload assets to release '${TAG_NAME}'." >&2
-  exit 1
+  done
 done
+
+# Post-upload verification ensures the release stayed a draft bound to BUILD_SHA
+# throughout the upload sequence (even on repositories without Release immutability).
+fetch_verified_draft_release_json "$GITHUB_REPOSITORY" "$verified_draft_id" "$TAG_NAME" "$BUILD_SHA" >/dev/null
+echo "Draft release id=${verified_draft_id} (${TAG_NAME}) verified with all assets."
