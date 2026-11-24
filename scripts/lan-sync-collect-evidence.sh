@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Read-only checkpoint snapshot tool for two-Mac LAN Book Sync validation (#147).
-# Collects host, bundle, signature, process launch context, TCP listener,
-# non-SSID IPv4 network, macOS Firewall, and aggregate app-data counts without
-# making network calls or listing user book filenames.
+# Collects host, bundle, signature metadata + strict verification, bundle-bound
+# process context, TCP listeners, non-SSID IPv4 network, macOS Firewall, and
+# aggregate app-data counts without making network calls or listing filenames.
 
 usage() {
   cat <<'EOF'
@@ -14,6 +14,10 @@ Options:
   --role <mac-a|mac-b>   Device role for this checkpoint (required)
   --label <text>         Checkpoint label, e.g. T-10-launch; chars [A-Za-z0-9._-] (required)
   --app <path>           Path to SynapseRead.app (default: /Applications/SynapseRead.app)
+  --executable <path>    Override target executable path when matching processes
+                         (e.g. target/debug/synapseread-desktop for T-45)
+  --pid <pid>            Restrict process/listener inspection to one PID (must match
+                         current user and target executable)
   --app-data <dir>       Path to app data dir
                          (default: $HOME/Library/Application Support/app.synapseread.desktop)
   --build-sha <hex>      Source commit SHA, 7-40 hex chars (optional)
@@ -34,6 +38,8 @@ fi
 ROLE=""
 LABEL=""
 APP_PATH="/Applications/SynapseRead.app"
+EXPLICIT_EXECUTABLE=""
+TARGET_PID=""
 APP_DATA_DIR="${HOME}/Library/Application Support/app.synapseread.desktop"
 BUILD_SHA=""
 OUT_DIR=""
@@ -65,6 +71,24 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       APP_PATH="$2"
+      shift 2
+      ;;
+    --executable)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "Error: --executable requires a binary path." >&2
+        usage >&2
+        exit 1
+      fi
+      EXPLICIT_EXECUTABLE="$2"
+      shift 2
+      ;;
+    --pid)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        echo "Error: --pid requires a numeric process ID." >&2
+        usage >&2
+        exit 1
+      fi
+      TARGET_PID="$2"
       shift 2
       ;;
     --app-data)
@@ -136,6 +160,19 @@ if [[ ! -d "$APP_PATH" || "$APP_PATH" != *.app ]]; then
   echo "Error: App bundle directory not found or does not end in .app: $APP_PATH" >&2
   exit 1
 fi
+
+if [[ -n "$EXPLICIT_EXECUTABLE" ]]; then
+  if [[ ! -f "$EXPLICIT_EXECUTABLE" ]]; then
+    echo "Error: --executable file not found: $EXPLICIT_EXECUTABLE" >&2
+    exit 1
+  fi
+fi
+
+if [[ -n "$TARGET_PID" ]] && ! [[ "$TARGET_PID" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --pid must be a positive integer (got '$TARGET_PID')." >&2
+  exit 1
+fi
+
 if [[ "$APP_DATA_DIR" != "/" ]]; then
   APP_DATA_DIR="${APP_DATA_DIR%/}"
 fi
@@ -147,6 +184,29 @@ fi
 
 SOCKETFILTERFW="${SYNAPSEREAD_SOCKETFILTERFW:-/usr/libexec/ApplicationFirewall/socketfilterfw}"
 WEBKIT_PLIST="${SYNAPSEREAD_WEBKIT_PLIST:-/System/Library/Frameworks/WebKit.framework/Resources/Info.plist}"
+
+canonicalize_path() {
+  local p="$1"
+  local dir="" base=""
+  dir="$(dirname "$p")"
+  base="$(basename "$p")"
+  if [[ -d "$dir" ]]; then
+    local real_dir=""
+    if real_dir="$(cd "$dir" 2>/dev/null && pwd -P)"; then
+      if [[ "$real_dir" == "/" ]]; then
+        printf '/%s' "$base"
+      else
+        printf '%s/%s' "$real_dir" "$base"
+      fi
+      return 0
+    fi
+  fi
+  printf '%s' "$p"
+}
+
+TARGET_EXEC="${EXPLICIT_EXECUTABLE:-${APP_PATH}/Contents/MacOS/synapseread-desktop}"
+TARGET_EXEC_REAL="$(canonicalize_path "$TARGET_EXEC")"
+TARGET_PROC_NAME="$(basename "$TARGET_EXEC")"
 
 probe_value() {
   local out=""
@@ -164,6 +224,108 @@ probe_firewall_arg() {
   else
     printf 'unavailable'
   fi
+}
+
+# Parse `lsof` output while separating confirmed 0-match (`rc=1` with empty output,
+# or `rc=0` with header-only) from probe failures (`rc>=2`, `rc=1` with error text,
+# or unexpected non-socket output).
+# Sets global variables: LSOF_PARSED_STATUS ("ok"|"failed"), LSOF_PARSED_COUNT,
+# LSOF_PARSED_TEXT, LSOF_PARSED_HAS_WILDCARD.
+LSOF_PARSED_STATUS="failed"
+LSOF_PARSED_COUNT="unavailable"
+LSOF_PARSED_TEXT="unavailable"
+LSOF_PARSED_HAS_WILDCARD="false"
+
+parse_lsof_tcp() {
+  local out="$1"
+  local rc="$2"
+  local state_tag="$3"
+  local empty_label="$4"
+
+  LSOF_PARSED_STATUS="failed"
+  LSOF_PARSED_COUNT="unavailable"
+  LSOF_PARSED_TEXT="unavailable"
+  LSOF_PARSED_HAS_WILDCARD="false"
+
+  if [[ "$rc" -eq 1 && -z "$out" ]]; then
+    LSOF_PARSED_STATUS="ok"
+    LSOF_PARSED_COUNT="0"
+    LSOF_PARSED_TEXT="$empty_label"
+    return 0
+  fi
+
+  if [[ "$rc" -ne 0 ]]; then
+    return 0
+  fi
+
+  if [[ -z "$out" ]]; then
+    LSOF_PARSED_STATUS="ok"
+    LSOF_PARSED_COUNT="0"
+    LSOF_PARSED_TEXT="$empty_label"
+    return 0
+  fi
+
+  local sock_lines="" unexpected_lines="" line="" saw_header="false"
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    if [[ "$saw_header" == "false" ]] && [[ "$line" == COMMAND* ]]; then
+      saw_header="true"
+      continue
+    fi
+    if printf '%s' "$line" | grep -Fq "(${state_tag})"; then
+      if [[ -n "$sock_lines" ]]; then
+        sock_lines="${sock_lines}"$'\n'"${line}"
+      else
+        sock_lines="$line"
+      fi
+    else
+      unexpected_lines="true"
+    fi
+  done <<< "$out"
+
+  if [[ "$unexpected_lines" == "true" ]]; then
+    return 0
+  fi
+
+  if [[ -n "$sock_lines" ]]; then
+    local cnt=0
+    cnt="$(printf '%s\n' "$sock_lines" | wc -l | tr -d '[:space:]')"
+    LSOF_PARSED_STATUS="ok"
+    LSOF_PARSED_COUNT="$cnt"
+    LSOF_PARSED_TEXT="$out"
+    if printf '%s\n' "$sock_lines" | grep -Eq '(\*:|0\.0\.0\.0:)'; then
+      LSOF_PARSED_HAS_WILDCARD="true"
+    fi
+  elif [[ "$saw_header" == "true" ]]; then
+    LSOF_PARSED_STATUS="ok"
+    LSOF_PARSED_COUNT="0"
+    LSOF_PARSED_TEXT="$empty_label"
+  fi
+}
+
+# Count regular files safely even when filenames contain newlines, without ever
+# leaking filenames. Emits one 'x' byte per matched file via -exec printf x \;.
+count_dir_files() {
+  local dir="$1"
+  local pattern="${2:-}"
+  local marks=""
+  if [[ -n "$pattern" ]]; then
+    marks="$(find "$dir" -type f -name "$pattern" -exec printf x \; 2>/dev/null)" || return 1
+  else
+    marks="$(find "$dir" -type f -exec printf x \; 2>/dev/null)" || return 1
+  fi
+  printf '%s' "${#marks}"
+}
+
+measure_dir_kib() {
+  local dir="$1"
+  local du_out="" kib=""
+  du_out="$(du -sk "$dir" 2>/dev/null)" || return 1
+  kib="$(printf '%s\n' "$du_out" | awk 'NR == 1 && $1 ~ /^[0-9]+$/ { print $1 }')"
+  if [[ -z "$kib" ]]; then
+    return 1
+  fi
+  printf '%s' "$kib"
 }
 
 collect_report() {
@@ -275,6 +437,7 @@ collect_report() {
 
   printf '## App bundle\n\n'
   printf -- '- Path: `%s`\n' "$APP_PATH"
+  printf -- '- Target executable: `%s`\n' "$TARGET_EXEC_REAL"
   printf -- '- `CFBundleShortVersionString`: `%s`\n' "$short_ver"
   printf -- '- `CFBundleVersion`: `%s`\n' "$bundle_ver"
   printf -- '- `NSLocalNetworkUsageDescription`: %s\n' "$local_net_desc"
@@ -284,11 +447,35 @@ collect_report() {
   printf -- '- Quarantine (`com.apple.quarantine`): %s\n\n' "$quarantine_status"
 
   # ## Code signature
-  local cs_out="" cs_rc=0 signing_type="unsigned/unknown"
+  local cs_out="" cs_rc=0 cs_verify_out="" cs_verify_rc=0
+  local signing_type="unavailable" integrity_status="unavailable"
   cs_out="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)" || cs_rc=$?
+  cs_verify_out="$(codesign --verify --deep --strict --verbose=2 "$APP_PATH" 2>&1)" || cs_verify_rc=$?
+
+  local cs_has_meta="false" cs_unsigned="false"
+  if [[ "$cs_rc" -eq 0 ]] || printf '%s\n' "$cs_out" | grep -Eq '^(Identifier=|Signature=|CodeDirectory )'; then
+    cs_has_meta="true"
+  elif printf '%s\n' "$cs_out" | grep -qi 'not signed at all'; then
+    cs_unsigned="true"
+  fi
+
+  if [[ "$cs_has_meta" == "true" ]]; then
+    if [[ "$cs_verify_rc" -eq 0 ]]; then
+      integrity_status="valid (passed codesign --verify --deep --strict)"
+    elif [[ -n "$cs_verify_out" ]] && ! printf '%s\n' "$cs_verify_out" | grep -qi 'mocked failure'; then
+      local verify_summary=""
+      verify_summary="$(printf '%s\n' "$cs_verify_out" | head -n 1 | tr '\r\n' ' ' | sed 's/[[:space:]]*$//')"
+      integrity_status="INVALID (${verify_summary}) — NOT valid for #147"
+    else
+      integrity_status="INVALID (codesign --verify --deep --strict exited ${cs_verify_rc}) — NOT valid for #147"
+    fi
+  elif [[ "$cs_unsigned" == "true" ]]; then
+    signing_type="unsigned"
+    integrity_status="INVALID (unsigned) — NOT valid for #147"
+  fi
 
   printf '## Code signature\n\n'
-  if [[ "$cs_rc" -eq 0 ]] || printf '%s\n' "$cs_out" | grep -Eq '^(Identifier=|Signature=|CodeDirectory )'; then
+  if [[ "$cs_has_meta" == "true" ]]; then
     local filtered_cs="" first_auth="" cs_core=""
     cs_core="$(printf '%s\n' "$cs_out" | grep -E '^(Identifier=|Format=|CDHash=|Signature=|TeamIdentifier=|Info\.plist|Runtime Version=|CodeDirectory )' || true)"
     first_auth="$(printf '%s\n' "$cs_out" | grep -E '^Authority=' | head -n 1 || true)"
@@ -304,132 +491,208 @@ collect_report() {
       fi
     fi
 
-    local cd_line="" auth_val="" sig_val=""
+    local cd_line="" auth_val="" sig_val="" plist_not_bound="false"
     cd_line="$(printf '%s\n' "$cs_out" | grep -E '^CodeDirectory ' | head -n 1 || true)"
     sig_val="$(printf '%s\n' "$cs_out" | awk -F= '$1 == "Signature" { print $2; exit }' || true)"
     auth_val="${first_auth#Authority=}"
+    if printf '%s\n' "$cs_out" | grep -Eq '^Info\.plist=not bound$'; then
+      plist_not_bound="true"
+    fi
 
-    if [[ "$cd_line" == *"linker-signed"* ]] || printf '%s\n' "$cs_out" | grep -Eq '^Info\.plist=not bound$'; then
+    # Keep codesign -dv metadata separate from codesign --verify integrity: a
+    # tampered Info.plist causes codesign -dv to report Info.plist=not bound
+    # without setting the linker-signed CodeDirectory flag.
+    if [[ "$cd_line" == *"linker-signed"* ]]; then
       signing_type="linker-signed (Info.plist not bound) — NOT valid for #147"
     elif [[ "$sig_val" == "adhoc" ]]; then
-      signing_type="adhoc (bound)"
+      if [[ "$plist_not_bound" == "true" ]]; then
+        signing_type="adhoc (Info.plist=not bound; see integrity status) — NOT valid for #147"
+      elif [[ "$cs_verify_rc" -eq 0 ]]; then
+        signing_type="adhoc (bound)"
+      else
+        signing_type="adhoc (bound metadata; integrity failed) — NOT valid for #147"
+      fi
     elif [[ -n "$auth_val" ]]; then
       if [[ "$auth_val" == "Developer ID Application"* ]]; then
         signing_type="Developer ID"
       else
         signing_type="Self-Signed (${auth_val})"
       fi
+      if [[ "$plist_not_bound" == "true" || "$cs_verify_rc" -ne 0 ]]; then
+        signing_type="${signing_type} — NOT valid for #147"
+      fi
     else
       signing_type="unsigned/unknown"
     fi
 
-    printf -- '- Signing type: %s\n\n' "$signing_type"
+    printf -- '- Signing type: %s\n' "$signing_type"
+    printf -- '- Signature integrity (`codesign --verify --deep --strict`): %s\n\n' "$integrity_status"
     printf '```text\n%s\n```\n\n' "${filtered_cs:-unavailable}"
   else
-    printf -- '- Signing type: unsigned/unknown\n'
+    printf -- '- Signing type: %s\n' "$signing_type"
+    printf -- '- Signature integrity (`codesign --verify --deep --strict`): %s\n' "$integrity_status"
     printf -- '- `codesign -dv`: unavailable\n\n'
   fi
 
-  # ## Process
-  local pgrep_out="" pgrep_rc=0
+  # ## Process (strictly scoped to current user and target executable path)
+  local current_uid="" process_status="failed" excluded_other_count=0
   local -a pids=()
-  pgrep_out="$(pgrep -x synapseread-desktop 2>&1)" || pgrep_rc=$?
+  current_uid="$(id -u 2>/dev/null || true)"
 
-  printf '## Process\n\n'
-  if [[ "$pgrep_rc" -eq 0 && -n "$pgrep_out" ]]; then
-    local line=""
-    while IFS= read -r line; do
-      line="$(printf '%s' "$line" | tr -d '[:space:]')"
-      if [[ "$line" =~ ^[0-9]+$ ]]; then
-        pids+=("$line")
+  if [[ -z "$current_uid" || ! "$current_uid" =~ ^[0-9]+$ ]]; then
+    process_status="failed"
+  elif [[ -n "$TARGET_PID" ]]; then
+    local pid_uid_out="" pid_uid_rc=0 pid_comm_out="" pid_comm_rc=0
+    pid_uid_out="$(ps -ww -o uid= -p "$TARGET_PID" 2>&1)" || pid_uid_rc=$?
+    if [[ "$pid_uid_rc" -ne 0 ]]; then
+      if ps -o pid= -p "$$" >/dev/null 2>&1 && [[ -z "$pid_uid_out" ]]; then
+        process_status="none"
+      else
+        process_status="failed"
       fi
-    done <<< "$pgrep_out"
+    else
+      local trimmed_uid=""
+      trimmed_uid="$(printf '%s' "$pid_uid_out" | tr -d '[:space:]')"
+      pid_comm_out="$(ps -ww -o comm= -p "$TARGET_PID" 2>&1)" || pid_comm_rc=$?
+      if [[ "$pid_comm_rc" -ne 0 || -z "$pid_comm_out" ]]; then
+        process_status="failed"
+      elif [[ "$trimmed_uid" != "$current_uid" ]]; then
+        process_status="none"
+        excluded_other_count=1
+      else
+        local trimmed_comm="" real_comm=""
+        trimmed_comm="$(printf '%s' "$pid_comm_out" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        real_comm="$(canonicalize_path "$trimmed_comm")"
+        if [[ "$real_comm" == "$TARGET_EXEC_REAL" || "$trimmed_comm" == "$TARGET_EXEC" ]]; then
+          pids+=("$TARGET_PID")
+          process_status="matched"
+        else
+          process_status="none"
+          excluded_other_count=1
+        fi
+      fi
+    fi
+  else
+    local pgrep_out="" pgrep_rc=0
+    pgrep_out="$(pgrep -u "$current_uid" -x "$TARGET_PROC_NAME" 2>&1)" || pgrep_rc=$?
+    if [[ "$pgrep_rc" -eq 1 && -z "$pgrep_out" ]]; then
+      process_status="none"
+    elif [[ "$pgrep_rc" -eq 0 ]]; then
+      if [[ -z "$pgrep_out" ]]; then
+        process_status="failed"
+      else
+        local -a candidate_pids=()
+        local line="" malformed="false"
+        while IFS= read -r line; do
+          line="$(printf '%s' "$line" | tr -d '[:space:]')"
+          [[ -z "$line" ]] && continue
+          if [[ "$line" =~ ^[0-9]+$ ]]; then
+            candidate_pids+=("$line")
+          else
+            malformed="true"
+            break
+          fi
+        done <<< "$pgrep_out"
+
+        if [[ "$malformed" == "true" || ${#candidate_pids[@]} -eq 0 ]]; then
+          process_status="failed"
+        else
+          local cand=""
+          process_status="matched"
+          for cand in "${candidate_pids[@]}"; do
+            local cand_comm_out="" cand_comm_rc=0
+            cand_comm_out="$(ps -ww -o comm= -p "$cand" 2>&1)" || cand_comm_rc=$?
+            if [[ "$cand_comm_rc" -ne 0 || -z "$cand_comm_out" ]]; then
+              process_status="failed"
+              pids=()
+              break
+            fi
+            local cand_comm_trimmed="" cand_comm_real=""
+            cand_comm_trimmed="$(printf '%s' "$cand_comm_out" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            cand_comm_real="$(canonicalize_path "$cand_comm_trimmed")"
+            if [[ "$cand_comm_real" == "$TARGET_EXEC_REAL" || "$cand_comm_trimmed" == "$TARGET_EXEC" ]]; then
+              pids+=("$cand")
+            else
+              excluded_other_count=$((excluded_other_count + 1))
+            fi
+          done
+          if [[ "$process_status" == "matched" && ${#pids[@]} -eq 0 ]]; then
+            process_status="none"
+          fi
+        fi
+      fi
+    else
+      # Exit codes >= 2 (empty or diagnostic) or exit 1 with diagnostic output
+      # are probe failures, never "not running".
+      process_status="failed"
+    fi
   fi
 
-  if [[ ${#pids[@]} -gt 0 ]]; then
+  printf '## Process\n\n'
+  if [[ "$process_status" == "matched" ]]; then
     local pid=""
     for pid in "${pids[@]}"; do
       local ps_info="" ppid_val="" launch_ctx=""
-      ps_info="$(probe_value ps -o ppid=,user=,etime=,command= -p "$pid")"
-      ppid_val="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
+      ps_info="$(probe_value ps -ww -o ppid=,user=,etime=,command= -p "$pid")"
+      ppid_val="$(ps -ww -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)"
       if [[ "$ppid_val" == "1" ]]; then
-        launch_ctx="launchd (Finder/Dock/open) — valid launch context"
+        launch_ctx="ppid=1 (launchd child — consistent with Finder/Dock/open; confirm Finder double-click manually)"
       elif [[ "$ppid_val" =~ ^[0-9]+$ ]]; then
         local pcomm=""
-        pcomm="$(ps -o comm= -p "$ppid_val" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
+        pcomm="$(ps -ww -o comm= -p "$ppid_val" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true)"
         if [[ -z "$pcomm" ]]; then
           pcomm="unknown"
         fi
-        launch_ctx="parent ${ppid_val} (${pcomm}) — Terminal/other launch, NOT valid permission evidence (T-45)"
+        launch_ctx="parent ${ppid_val} (${pcomm}) — non-launchd launch, NOT valid Finder permission evidence (T-45)"
       else
         launch_ctx="unavailable"
       fi
       printf -- '- PID `%s`: `%s`\n' "$pid" "$ps_info"
       printf -- '  - Launch context: %s\n' "$launch_ctx"
     done
+    if [[ "$excluded_other_count" -gt 0 ]]; then
+      printf -- '- Excluded other-executable/other-user PIDs: %s\n' "$excluded_other_count"
+    fi
     printf '\n'
-  elif [[ "$pgrep_rc" -ne 0 && -n "$pgrep_out" ]]; then
-    printf -- '- Status: unavailable\n\n'
+  elif [[ "$process_status" == "none" ]]; then
+    printf -- '- Status: not running (for target executable `%s`)\n' "$TARGET_EXEC_REAL"
+    if [[ "$excluded_other_count" -gt 0 ]]; then
+      printf -- '- Excluded other-executable/other-user PIDs: %s\n' "$excluded_other_count"
+    fi
+    printf '\n'
   else
-    printf -- '- Status: not running\n\n'
+    printf -- '- Status: unavailable (process probe failed)\n\n'
   fi
 
   # ## Listeners
-  local listen_count="0" est_count="0" has_wildcard="false"
-  local listen_display="0 listeners" port_range_display="none"
+  local listen_count="unavailable" est_count="unavailable" has_wildcard="false"
+  local listen_display="unavailable" port_range_display="unavailable"
 
-  if [[ ${#pids[@]} -gt 0 ]]; then
+  if [[ "$process_status" == "none" ]]; then
+    listen_count="0"
+    est_count="0"
+    listen_display="0 listeners"
+  elif [[ "$process_status" == "matched" ]]; then
     local pids_csv=""
     pids_csv="$(IFS=,; echo "${pids[*]}")"
 
     local lsof_listen_out="" lsof_listen_rc=0
     lsof_listen_out="$(lsof -nP -a -p "$pids_csv" -iTCP -sTCP:LISTEN 2>&1)" || lsof_listen_rc=$?
-    if [[ "$lsof_listen_rc" -eq 0 && -n "$lsof_listen_out" ]] || printf '%s\n' "$lsof_listen_out" | grep -Eq '^(COMMAND|.*\(LISTEN\))'; then
-      local data_lines=""
-      data_lines="$(printf '%s\n' "$lsof_listen_out" | awk 'NR == 1 && $1 == "COMMAND" { next } NF > 0 { print }')"
-      if [[ -n "$data_lines" ]]; then
-        listen_count="$(printf '%s\n' "$data_lines" | wc -l | tr -d '[:space:]')"
-        listen_display="$lsof_listen_out"
-        if printf '%s\n' "$data_lines" | grep -Eq '(\*:|0\.0\.0\.0:)'; then
-          has_wildcard="true"
-        fi
-      else
-        listen_count="0"
-        listen_display="0 listeners"
-      fi
-    elif [[ "$lsof_listen_rc" -ne 0 && -n "$lsof_listen_out" ]]; then
-      listen_count="unavailable"
-      listen_display="unavailable"
-    fi
+    parse_lsof_tcp "$lsof_listen_out" "$lsof_listen_rc" "LISTEN" "0 listeners"
+    listen_count="$LSOF_PARSED_COUNT"
+    listen_display="$LSOF_PARSED_TEXT"
+    has_wildcard="$LSOF_PARSED_HAS_WILDCARD"
 
     local lsof_est_out="" lsof_est_rc=0
     lsof_est_out="$(lsof -nP -a -p "$pids_csv" -iTCP -sTCP:ESTABLISHED 2>&1)" || lsof_est_rc=$?
-    if [[ "$lsof_est_rc" -eq 0 && -n "$lsof_est_out" ]] || printf '%s\n' "$lsof_est_out" | grep -Eq '^(COMMAND|.*\(ESTABLISHED\))'; then
-      local est_lines=""
-      est_lines="$(printf '%s\n' "$lsof_est_out" | awk 'NR == 1 && $1 == "COMMAND" { next } NF > 0 { print }')"
-      if [[ -n "$est_lines" ]]; then
-        est_count="$(printf '%s\n' "$est_lines" | wc -l | tr -d '[:space:]')"
-      else
-        est_count="0"
-      fi
-    elif [[ "$lsof_est_rc" -ne 0 && -n "$lsof_est_out" ]]; then
-      est_count="unavailable"
-    fi
+    parse_lsof_tcp "$lsof_est_out" "$lsof_est_rc" "ESTABLISHED" "0 established"
+    est_count="$LSOF_PARSED_COUNT"
   fi
 
   local lsof_port_out="" lsof_port_rc=0
   lsof_port_out="$(lsof -nP -iTCP:49319-49328 -sTCP:LISTEN 2>&1)" || lsof_port_rc=$?
-  if [[ "$lsof_port_rc" -eq 0 && -n "$lsof_port_out" ]] || printf '%s\n' "$lsof_port_out" | grep -Eq '^(COMMAND|.*\(LISTEN\))'; then
-    local port_data=""
-    port_data="$(printf '%s\n' "$lsof_port_out" | awk 'NR == 1 && $1 == "COMMAND" { next } NF > 0 { print }')"
-    if [[ -n "$port_data" ]]; then
-      port_range_display="$lsof_port_out"
-    else
-      port_range_display="none"
-    fi
-  elif [[ "$lsof_port_rc" -ne 0 && -n "$lsof_port_out" ]]; then
-    port_range_display="unavailable"
-  fi
+  parse_lsof_tcp "$lsof_port_out" "$lsof_port_rc" "LISTEN" "none"
+  port_range_display="$LSOF_PARSED_TEXT"
 
   printf '## Listeners\n\n'
   printf -- '- SynapseRead LISTEN sockets: %s\n' "$listen_count"
@@ -514,20 +777,37 @@ collect_report() {
     fi
 
     if [[ -d "${APP_DATA_DIR}/library" ]]; then
-      local lib_count="" lib_kib=""
-      lib_count="$(find "${APP_DATA_DIR}/library" -type f 2>/dev/null | wc -l | tr -d '[:space:]')"
-      lib_kib="$(du -sk "${APP_DATA_DIR}/library" 2>/dev/null | awk '{print $1}')"
-      printf -- '- `library/`: %s file(s), %s KiB\n' "${lib_count:-0}" "${lib_kib:-0}"
+      local lib_count="unavailable" lib_kib="unavailable" lib_size_disp="unavailable"
+      if lib_count="$(count_dir_files "${APP_DATA_DIR}/library")"; then
+        lib_count="${lib_count} file(s)"
+      else
+        lib_count="unavailable"
+      fi
+      if lib_kib="$(measure_dir_kib "${APP_DATA_DIR}/library")"; then
+        lib_size_disp="${lib_kib} KiB"
+      else
+        lib_size_disp="unavailable"
+      fi
+      printf -- '- `library/`: %s, %s\n' "$lib_count" "$lib_size_disp"
     else
       printf -- '- `library/`: not present\n'
     fi
 
     if [[ -d "${APP_DATA_DIR}/sync-staging" ]]; then
-      local stg_count="" part_count="" stg_kib=""
-      stg_count="$(find "${APP_DATA_DIR}/sync-staging" -type f 2>/dev/null | wc -l | tr -d '[:space:]')"
-      part_count="$(find "${APP_DATA_DIR}/sync-staging" -type f -name '*.part' 2>/dev/null | wc -l | tr -d '[:space:]')"
-      stg_kib="$(du -sk "${APP_DATA_DIR}/sync-staging" 2>/dev/null | awk '{print $1}')"
-      printf -- '- `sync-staging/`: %s file(s) (%s `.part`), %s KiB\n\n' "${stg_count:-0}" "${part_count:-0}" "${stg_kib:-0}"
+      local stg_count="unavailable" part_count="unavailable" stg_kib="unavailable" stg_size_disp="unavailable"
+      local stg_files_disp="unavailable" stg_parts_disp="unavailable"
+      if stg_count="$(count_dir_files "${APP_DATA_DIR}/sync-staging")"; then
+        stg_files_disp="${stg_count} file(s)"
+      fi
+      if part_count="$(count_dir_files "${APP_DATA_DIR}/sync-staging" "*.part")"; then
+        stg_parts_disp="${part_count} \`.part\`"
+      fi
+      if stg_kib="$(measure_dir_kib "${APP_DATA_DIR}/sync-staging")"; then
+        stg_size_disp="${stg_kib} KiB"
+      else
+        stg_size_disp="unavailable"
+      fi
+      printf -- '- `sync-staging/`: %s (%s), %s\n\n' "$stg_files_disp" "$stg_parts_disp" "$stg_size_disp"
     else
       printf -- '- `sync-staging/`: not present\n\n'
     fi
