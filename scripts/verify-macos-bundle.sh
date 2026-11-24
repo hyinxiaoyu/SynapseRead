@@ -105,21 +105,62 @@ fi
 FAILURES=0
 DMG_MOUNT_POINT=""
 DMG_MOUNTED=false
+CLEANUP_DETACH_REPORTED=false
+CLEANUP_RMDIR_REPORTED=false
 LAST_DETECTED_ARCHS=""
 
 cleanup_dmg_mount() {
+  local cleanup_err=0
   if [[ "${DMG_MOUNTED:-false}" == "true" && -n "${DMG_MOUNT_POINT:-}" ]]; then
-    if ! hdiutil detach "$DMG_MOUNT_POINT" >/dev/null 2>&1; then
-      hdiutil detach "$DMG_MOUNT_POINT" -force >/dev/null 2>&1 || true
+    local detach_err="" force_err=""
+    if detach_err="$(hdiutil detach "$DMG_MOUNT_POINT" 2>&1)"; then
+      DMG_MOUNTED=false
+    elif force_err="$(hdiutil detach "$DMG_MOUNT_POINT" -force 2>&1)"; then
+      DMG_MOUNTED=false
+    else
+      cleanup_err=1
+      if [[ "${CLEANUP_DETACH_REPORTED:-false}" != "true" ]]; then
+        CLEANUP_DETACH_REPORTED=true
+        local detach_msg force_msg
+        detach_msg="$(printf '%s' "$detach_err" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+        force_msg="$(printf '%s' "$force_err" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+        fail "Failed to detach DMG mount point '${DMG_MOUNT_POINT}': normal detach (${detach_msg:-failed}); force detach (${force_msg:-failed})"
+      fi
     fi
-    DMG_MOUNTED=false
   fi
-  if [[ -n "${DMG_MOUNT_POINT:-}" && -d "$DMG_MOUNT_POINT" ]]; then
-    rmdir "$DMG_MOUNT_POINT" >/dev/null 2>&1 || true
-    DMG_MOUNT_POINT=""
+
+  if [[ "${DMG_MOUNTED:-false}" == "false" && -n "${DMG_MOUNT_POINT:-}" ]]; then
+    if [[ -d "$DMG_MOUNT_POINT" ]]; then
+      local rmdir_err=""
+      if rmdir_err="$(rmdir "$DMG_MOUNT_POINT" 2>&1)"; then
+        DMG_MOUNT_POINT=""
+      else
+        cleanup_err=1
+        if [[ "${CLEANUP_RMDIR_REPORTED:-false}" != "true" ]]; then
+          CLEANUP_RMDIR_REPORTED=true
+          local rmdir_msg
+          rmdir_msg="$(printf '%s' "$rmdir_err" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+          fail "Failed to remove DMG mount directory '${DMG_MOUNT_POINT}': ${rmdir_msg:-rmdir failed}"
+        fi
+      fi
+    else
+      DMG_MOUNT_POINT=""
+    fi
   fi
+
+  return "$cleanup_err"
 }
-trap cleanup_dmg_mount EXIT
+
+on_exit() {
+  local exit_status=$?
+  if ! cleanup_dmg_mount; then
+    if [[ "$exit_status" -eq 0 ]]; then
+      exit_status=1
+    fi
+  fi
+  exit "$exit_status"
+}
+trap on_exit EXIT
 
 pass() {
   echo "[PASS] $1"
@@ -298,7 +339,7 @@ verify_dmg_inner_app() {
   DMG_MOUNT_POINT="$(mktemp -d "${TMPDIR:-/tmp}/synapseread-dmg-verify.XXXXXX")"
   if ! hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$DMG_MOUNT_POINT" "$dmg_path" </dev/null >/dev/null 2>&1; then
     fail "Failed to attach DMG read-only for inner app inspection: $dmg_path"
-    cleanup_dmg_mount
+    cleanup_dmg_mount || true
     return
   fi
   DMG_MOUNTED=true
@@ -306,7 +347,7 @@ verify_dmg_inner_app() {
   local dmg_app_path="${DMG_MOUNT_POINT}/SynapseRead.app"
   if [[ ! -d "$dmg_app_path" || -L "$dmg_app_path" ]]; then
     fail "Mounted DMG does not contain SynapseRead.app: $dmg_path"
-    cleanup_dmg_mount
+    cleanup_dmg_mount || true
     return
   fi
 
@@ -339,7 +380,7 @@ verify_dmg_inner_app() {
     done
   fi
 
-  cleanup_dmg_mount
+  cleanup_dmg_mount || true
 }
 
 APP_CS="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1 || true)"

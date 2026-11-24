@@ -1061,6 +1061,21 @@ case "$sub" in
     ;;
   detach)
     mountpoint="${1:-}"
+    shift || true
+    is_force=false
+    for arg in "$@"; do
+      if [ "$arg" = "-force" ]; then
+        is_force=true
+      fi
+    done
+    if [ "$is_force" = false ] && [ -f "${MAC_STATE}/detach_normal_fail" ]; then
+      echo "hdiutil: couldn't unmount \"${mountpoint}\" - Resource busy (mocked)" >&2
+      exit 1
+    fi
+    if [ "$is_force" = true ] && [ -f "${MAC_STATE}/detach_force_fail" ]; then
+      echo "hdiutil: force unmount failed for \"${mountpoint}\" (mocked)" >&2
+      exit 1
+    fi
     if [ -z "$mountpoint" ] || [ ! -d "$mountpoint" ]; then
       exit 1
     fi
@@ -1157,7 +1172,7 @@ FP_ALT="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 reset_mac_state() {
   rm -rf "${MAC_STATE}/cs" "${MAC_STATE}/mounted" "$MAC_TARGET_DIR" "$MAC_TMP_DIR"
-  rm -f "${MAC_STATE}/security_fail" "${MAC_STATE}/attach_fail" "${MAC_STATE}/sign_seq"
+  rm -f "${MAC_STATE}/security_fail" "${MAC_STATE}/attach_fail" "${MAC_STATE}/detach_normal_fail" "${MAC_STATE}/detach_force_fail" "${MAC_STATE}/sign_seq"
   mkdir -p "${MAC_STATE}/cs" "${MAC_STATE}/mounted" "$MAC_TARGET_DIR" "$MAC_TMP_DIR"
   : > "${MAC_STATE}/calls.log"
   cat > "${MAC_STATE}/identities.txt" <<IDS
@@ -1581,4 +1596,91 @@ if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_37" --dmg
 fi
 assert_no_leaked_mounts "test 37 attach failure"
 
-echo "All 37 release script regression tests passed."
+echo "38. verify-macos-bundle: normal detach fails but force detach succeeds -> passes and cleans up"
+reset_mac_state
+APP_38="$TMP_DIR/app38/SynapseRead.app"
+DMG_38="$TMP_DIR/app38.dmg"
+make_fake_app "$APP_38" "arm64"
+set_cs_state "$APP_38" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=5555555555555555555555555555555555555555\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_38" "$APP_38"
+touch "${MAC_STATE}/detach_normal_fail"
+OUT_38="$TMP_DIR/out38.log"
+run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_38" --dmg "$DMG_38" --require-adhoc-bound >"$OUT_38" 2>&1
+if ! grep -Fq 'All requested macOS bundle checks passed.' "$OUT_38"; then
+  echo "[FAIL] Expected success when force detach recovers cleanup:" >&2
+  cat "$OUT_38" >&2
+  exit 1
+fi
+if ! grep -q '^hdiutil detach .* -force$' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected fallback hdiutil detach -force call:" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 38 force detach recovery"
+
+echo "39. verify-macos-bundle: both normal and force detach fail when main checks pass -> exits non-zero with mount point and hdiutil error"
+reset_mac_state
+APP_39="$TMP_DIR/app39/SynapseRead.app"
+DMG_39="$TMP_DIR/app39.dmg"
+make_fake_app "$APP_39" "arm64"
+set_cs_state "$APP_39" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=6666666666666666666666666666666666666666\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_39" "$APP_39"
+touch "${MAC_STATE}/detach_normal_fail" "${MAC_STATE}/detach_force_fail"
+OUT_39="$TMP_DIR/out39.log"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_39" --dmg "$DMG_39" --require-adhoc-bound >"$OUT_39" 2>&1; then
+  echo "[FAIL] Expected verify-macos-bundle to fail when both normal and force detach fail" >&2
+  cat "$OUT_39" >&2
+  exit 1
+fi
+if grep -Fq 'All requested macOS bundle checks passed.' "$OUT_39"; then
+  echo "[FAIL] Must not print success banner when detach failed:" >&2
+  cat "$OUT_39" >&2
+  exit 1
+fi
+if ! grep -Fq 'synapseread-dmg-verify.' "$OUT_39" \
+  || ! grep -Fq 'Resource busy (mocked)' "$OUT_39" \
+  || ! grep -Fq 'force unmount failed' "$OUT_39"; then
+  echo "[FAIL] Expected detach error output to include mount point and hdiutil error details:" >&2
+  cat "$OUT_39" >&2
+  exit 1
+fi
+if [ "$(find "${MAC_STATE}/mounted" -mindepth 1 | wc -l | tr -d ' ')" -ne 1 ]; then
+  echo "[FAIL] Expected mount state to remain tracked while unmount failed" >&2
+  exit 1
+fi
+if [ "$(grep -c '^hdiutil detach ' "${MAC_STATE}/calls.log")" -lt 4 ]; then
+  echo "[FAIL] Expected EXIT trap to retry detach while DMG_MOUNTED remained true" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+
+echo "40. verify-macos-bundle: main verification failure plus detach failure preserves original error and appends cleanup failure"
+reset_mac_state
+APP_40_OUTER="$TMP_DIR/app40_outer/SynapseRead.app"
+APP_40_INNER="$TMP_DIR/app40_inner/SynapseRead.app"
+DMG_40="$TMP_DIR/app40.dmg"
+make_fake_app "$APP_40_OUTER" "arm64"
+make_fake_app "$APP_40_INNER" "arm64"
+set_cs_state "$APP_40_OUTER" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=7777777777777777777777777777777777777777\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+set_cs_state "$APP_40_INNER" $'Signature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\nCDHash=8888888888888888888888888888888888888888\nCodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_40" "$APP_40_INNER"
+touch "${MAC_STATE}/detach_normal_fail" "${MAC_STATE}/detach_force_fail"
+OUT_40="$TMP_DIR/out40.log"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_40_OUTER" --dmg "$DMG_40" --require-adhoc-bound >"$OUT_40" 2>&1; then
+  echo "[FAIL] Expected verify-macos-bundle to fail when both main checks and detach fail" >&2
+  exit 1
+fi
+if ! grep -Fq 'not bound' "$OUT_40" \
+  || ! grep -Fq 'synapseread-dmg-verify.' "$OUT_40" \
+  || ! grep -Fq 'force unmount failed' "$OUT_40"; then
+  echo "[FAIL] Expected both original validation failure and detach failure in output:" >&2
+  cat "$OUT_40" >&2
+  exit 1
+fi
+if ! grep -Eq 'Verification failed with [2-9][0-9]* error\(s\)\.' "$OUT_40"; then
+  echo "[FAIL] Expected multiple errors reported (original + cleanup failure):" >&2
+  cat "$OUT_40" >&2
+  exit 1
+fi
+
+echo "All 40 release script regression tests passed."
