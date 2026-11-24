@@ -136,6 +136,7 @@ cat > "${MOCK_BIN}/codesign" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 STATE="${MOCK_STATE:?}"
+printf 'codesign %s\n' "$*" >> "${STATE}/calls.log"
 if [[ -f "${STATE}/fail_all" ]]; then
   echo "codesign: mocked failure" >&2
   exit 1
@@ -344,6 +345,7 @@ cat > "$FAKE_FW" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 STATE="${MOCK_STATE:?}"
+printf 'socketfilterfw %s\n' "$*" >> "${STATE}/calls.log"
 if [[ -f "${STATE}/fail_all" ]]; then
   exit 1
 fi
@@ -354,6 +356,17 @@ case "${1:-}" in
   --getappblocked) echo "Incoming connection to ${2:-} is permitted." ;;
   *) exit 1 ;;
 esac
+EOF
+
+cat > "${MOCK_BIN}/date" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE="${MOCK_STATE:?}"
+if [[ -f "${STATE}/fixed_date" ]]; then
+  cat "${STATE}/fixed_date"
+  exit 0
+fi
+/bin/date "$@"
 EOF
 
 chmod +x "$MOCK_BIN"/*
@@ -718,4 +731,122 @@ assert_contains "$OUT_16" "SynapseRead LISTEN sockets: unavailable" "test 16 LIS
 assert_contains "$OUT_16" "SynapseRead ESTABLISHED sockets: unavailable" "test 16 ESTABLISHED unavailable"
 assert_contains "$OUT_16" "Global state: unavailable" "test 16 firewall unavailable"
 
-echo "All 16 LAN evidence collector tests passed."
+echo "17. --out same-second serial runs allocate unique files without overwriting prior evidence"
+reset_state
+cat > "${MOCK_STATE}/codesign.dv" <<'CS'
+Identifier=app.synapseread.desktop
+Signature=adhoc
+Info.plist entries=16
+CodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded
+CS
+echo "20261125T074500" > "${MOCK_STATE}/fixed_date"
+OUT_DIR_17="${TMP_DIR}/evidence_serial"
+STDOUT_17A="$(run_collector --role mac-a --label same-sec --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 1111111 --out "$OUT_DIR_17" 2>"${TMP_DIR}/err17a.log")"
+STDOUT_17B="$(run_collector --role mac-a --label same-sec --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 2222222 --out "$OUT_DIR_17" 2>"${TMP_DIR}/err17b.log")"
+COUNT_17="$(find "$OUT_DIR_17" -maxdepth 1 -type f -name '20261125T074500-mac-a-same-sec*.md' | wc -l | tr -d '[:space:]')"
+if [[ "$COUNT_17" -ne 2 ]]; then
+  echo "[FAIL] expected 2 distinct serial files under $OUT_DIR_17, got $COUNT_17" >&2
+  exit 1
+fi
+if ! diff -u <(printf '%s\n' "$STDOUT_17A") "${OUT_DIR_17}/20261125T074500-mac-a-same-sec.md"; then
+  echo "[FAIL] first serial file differs from its stdout" >&2
+  exit 1
+fi
+if ! diff -u <(printf '%s\n' "$STDOUT_17B") "${OUT_DIR_17}/20261125T074500-mac-a-same-sec-1.md"; then
+  echo "[FAIL] second serial file differs from its stdout" >&2
+  exit 1
+fi
+
+echo "18. --out same-second concurrent runs create unique files matching each process stdout"
+reset_state
+cat > "${MOCK_STATE}/codesign.dv" <<'CS'
+Identifier=app.synapseread.desktop
+Signature=adhoc
+Info.plist entries=16
+CodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded
+CS
+echo "20261125T074501" > "${MOCK_STATE}/fixed_date"
+OUT_DIR_18="${TMP_DIR}/evidence_parallel"
+mkdir -p "$OUT_DIR_18"
+PIDS_18=()
+SHAS_18=("aaaaaaa" "bbbbbbb" "ccccccc" "ddddddd")
+for idx in 0 1 2 3; do
+  run_collector --role mac-b --label par-sec --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha "${SHAS_18[$idx]}" --out "$OUT_DIR_18" \
+    > "${TMP_DIR}/par_${idx}.stdout" 2> "${TMP_DIR}/par_${idx}.stderr" &
+  PIDS_18+=("$!")
+done
+for p in "${PIDS_18[@]}"; do
+  if ! wait "$p"; then
+    echo "[FAIL] concurrent collector PID $p exited non-zero" >&2
+    exit 1
+  fi
+done
+COUNT_18="$(find "$OUT_DIR_18" -maxdepth 1 -type f -name '20261125T074501-mac-b-par-sec*.md' | wc -l | tr -d '[:space:]')"
+if [[ "$COUNT_18" -ne 4 ]]; then
+  echo "[FAIL] expected 4 distinct concurrent files under $OUT_DIR_18, got $COUNT_18" >&2
+  exit 1
+fi
+for idx in 0 1 2 3; do
+  sha="${SHAS_18[$idx]}"
+  matched_file="$(grep -l "\`${sha}\`" "${OUT_DIR_18}"/20261125T074501-mac-b-par-sec*.md || true)"
+  if [[ -z "$matched_file" ]] || [[ "$(printf '%s\n' "$matched_file" | wc -l | tr -d '[:space:]')" -ne 1 ]]; then
+    echo "[FAIL] expected exactly 1 output file containing SHA $sha" >&2
+    exit 1
+  fi
+  if ! diff -u "${TMP_DIR}/par_${idx}.stdout" "$matched_file"; then
+    echo "[FAIL] concurrent output file $matched_file differs from stdout par_${idx}" >&2
+    exit 1
+  fi
+done
+
+echo "19. T-45 standalone --executable runs without --app, marks bundle/signature/firewall N/A, and rejects explicit missing --app"
+reset_state
+printf '4242\n5150\n' > "${MOCK_STATE}/pids"
+echo "1" > "${MOCK_STATE}/ppid_4242"
+echo "${APP_DIR}/Contents/MacOS/synapseread-desktop" > "${MOCK_STATE}/exec_4242"
+echo "900" > "${MOCK_STATE}/ppid_5150"
+echo "/bin/zsh" > "${MOCK_STATE}/comm_900"
+echo "${DEV_BIN}" > "${MOCK_STATE}/exec_5150"
+OUT_19A="$(run_collector --role mac-b --label T-45-standalone --executable "$DEV_BIN" --app-data "${TMP_DIR}/missing-data")"
+assert_contains "$OUT_19A" "Mode: standalone executable (\`--executable\` without \`--app\`)" "test 19a standalone mode"
+assert_contains "$OUT_19A" "Bundle path: N/A" "test 19a bundle N/A"
+assert_contains "$OUT_19A" "Signing type: N/A" "test 19a signature N/A"
+assert_contains "$OUT_19A" "Signature integrity (\`codesign --verify --deep --strict\`): N/A" "test 19a integrity N/A"
+assert_contains "$OUT_19A" "App blocked: N/A" "test 19a firewall N/A"
+assert_contains "$OUT_19A" 'PID `5150`' "test 19a dev pid bound"
+assert_not_contains "$OUT_19A" 'PID `4242`' "test 19a installed pid excluded"
+assert_contains "$OUT_19A" "NOT valid Finder permission evidence (T-45)" "test 19a terminal warning"
+if [[ -f "${MOCK_STATE}/calls.log" ]] && grep -Eq '^(codesign|socketfilterfw) ' "${MOCK_STATE}/calls.log"; then
+  echo "[FAIL] standalone --executable mode must not invoke codesign or socketfilterfw:" >&2
+  cat "${MOCK_STATE}/calls.log" >&2
+  exit 1
+fi
+
+# 19b: when both --app and --executable are explicitly given, both targets are labeled clearly
+reset_state
+cat > "${MOCK_STATE}/codesign.dv" <<'CS'
+Identifier=app.synapseread.desktop
+Signature=adhoc
+Info.plist entries=16
+CodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded
+CS
+printf '4242\n5150\n' > "${MOCK_STATE}/pids"
+echo "1" > "${MOCK_STATE}/ppid_4242"
+echo "${APP_DIR}/Contents/MacOS/synapseread-desktop" > "${MOCK_STATE}/exec_4242"
+echo "900" > "${MOCK_STATE}/ppid_5150"
+echo "/bin/zsh" > "${MOCK_STATE}/comm_900"
+echo "${DEV_BIN}" > "${MOCK_STATE}/exec_5150"
+OUT_19B="$(run_collector --role mac-b --label dual-target --app "$APP_DIR" --executable "$DEV_BIN" --app-data "${TMP_DIR}/missing-data")"
+assert_contains "$OUT_19B" "Mode: dual target (\`--app\` bundle + explicit \`--executable\` process filter)" "test 19b dual target mode"
+assert_contains "$OUT_19B" "Inspected bundle (\`--app\`): \`${APP_DIR}\`" "test 19b inspected bundle"
+assert_contains "$OUT_19B" "Inspected process executable (\`--executable\`):" "test 19b inspected executable"
+assert_contains "$OUT_19B" "Signing type: adhoc (bound)" "test 19b bundle signature inspected"
+assert_contains "$OUT_19B" 'PID `5150`' "test 19b dev pid bound"
+
+# 19c: explicitly passing a nonexistent --app alongside valid --executable still fails
+if run_collector --role mac-b --label bad-explicit-app --executable "$DEV_BIN" --app "${TMP_DIR}/DoesNotExist.app" >/dev/null 2>&1; then
+  echo "[FAIL] expected explicit nonexistent --app alongside --executable to fail" >&2
+  exit 1
+fi
+
+echo "All 19 LAN evidence collector tests passed."

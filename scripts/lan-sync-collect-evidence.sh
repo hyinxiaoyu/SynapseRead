@@ -38,7 +38,9 @@ fi
 ROLE=""
 LABEL=""
 APP_PATH="/Applications/SynapseRead.app"
+APP_EXPLICIT="false"
 EXPLICIT_EXECUTABLE=""
+EXEC_EXPLICIT="false"
 TARGET_PID=""
 APP_DATA_DIR="${HOME}/Library/Application Support/app.synapseread.desktop"
 BUILD_SHA=""
@@ -71,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       APP_PATH="$2"
+      APP_EXPLICIT="true"
       shift 2
       ;;
     --executable)
@@ -80,6 +83,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       EXPLICIT_EXECUTABLE="$2"
+      EXEC_EXPLICIT="true"
       shift 2
       ;;
     --pid)
@@ -154,16 +158,21 @@ if ! [[ "$LABEL" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 
-APP_PATH="${APP_PATH%/}"
-[[ -z "$APP_PATH" ]] && APP_PATH="/"
-if [[ ! -d "$APP_PATH" || "$APP_PATH" != *.app ]]; then
-  echo "Error: App bundle directory not found or does not end in .app: $APP_PATH" >&2
-  exit 1
-fi
-
-if [[ -n "$EXPLICIT_EXECUTABLE" ]]; then
+if [[ "$EXEC_EXPLICIT" == "true" ]]; then
   if [[ ! -f "$EXPLICIT_EXECUTABLE" ]]; then
     echo "Error: --executable file not found: $EXPLICIT_EXECUTABLE" >&2
+    exit 1
+  fi
+fi
+
+HAS_APP_BUNDLE="true"
+if [[ "$EXEC_EXPLICIT" == "true" && "$APP_EXPLICIT" == "false" ]]; then
+  HAS_APP_BUNDLE="false"
+else
+  APP_PATH="${APP_PATH%/}"
+  [[ -z "$APP_PATH" ]] && APP_PATH="/"
+  if [[ ! -d "$APP_PATH" || "$APP_PATH" != *.app ]]; then
+    echo "Error: App bundle directory not found or does not end in .app: $APP_PATH" >&2
     exit 1
   fi
 fi
@@ -372,166 +381,203 @@ collect_report() {
   printf -- '- WebKit `CFBundleVersion`: `%s`\n\n' "$webkit_ver"
 
   # ## App bundle
-  local plist_path bin_path short_ver bundle_ver plist_readable="false"
-  local local_net_desc bonjour_status bin_archs bin_sha quarantine_status
-  plist_path="${APP_PATH}/Contents/Info.plist"
-  bin_path="${APP_PATH}/Contents/MacOS/synapseread-desktop"
-
-  if [[ -f "$plist_path" ]]; then
-    if plutil -extract CFBundleIdentifier raw -o - "$plist_path" >/dev/null 2>&1; then
-      plist_readable="true"
+  printf '## App bundle\n\n'
+  if [[ "$HAS_APP_BUNDLE" == "false" ]]; then
+    local dev_archs="unavailable" dev_sha="unavailable"
+    dev_archs="$(probe_value lipo -archs "$TARGET_EXEC_REAL")"
+    local shasum_out=""
+    if shasum_out="$(shasum -a 256 "$TARGET_EXEC_REAL" 2>/dev/null)" && [[ -n "$shasum_out" ]]; then
+      dev_sha="$(printf '%s' "$shasum_out" | awk '{print $1}')"
     fi
-    short_ver="$(probe_value plutil -extract CFBundleShortVersionString raw -o - "$plist_path")"
-    bundle_ver="$(probe_value plutil -extract CFBundleVersion raw -o - "$plist_path")"
+    printf -- '- Mode: standalone executable (`--executable` without `--app`)\n'
+    printf -- '- Bundle path: N/A (not applicable; `--app` not provided)\n'
+    printf -- '- Target executable: `%s`\n' "$TARGET_EXEC_REAL"
+    printf -- '- `CFBundleShortVersionString`: N/A (standalone executable)\n'
+    printf -- '- `CFBundleVersion`: N/A (standalone executable)\n'
+    printf -- '- `NSLocalNetworkUsageDescription`: N/A (standalone executable)\n'
+    printf -- '- `NSBonjourServices`: N/A (standalone executable)\n'
+    printf -- '- Executable architectures (`lipo -archs`): `%s`\n' "$dev_archs"
+    printf -- '- Executable SHA-256: `%s`\n' "$dev_sha"
+    printf -- '- Quarantine (`com.apple.quarantine`): N/A (standalone executable)\n\n'
+  else
+    local plist_path bin_path short_ver bundle_ver plist_readable="false"
+    local local_net_desc bonjour_status bin_archs bin_sha quarantine_status
+    plist_path="${APP_PATH}/Contents/Info.plist"
+    bin_path="${APP_PATH}/Contents/MacOS/synapseread-desktop"
 
-    local raw_desc=""
-    if raw_desc="$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$plist_path" 2>/dev/null)" && [[ -n "$raw_desc" ]]; then
-      local_net_desc="$raw_desc"
-    elif [[ "$plist_readable" == "true" ]]; then
+    if [[ -f "$plist_path" ]]; then
+      if plutil -extract CFBundleIdentifier raw -o - "$plist_path" >/dev/null 2>&1; then
+        plist_readable="true"
+      fi
+      short_ver="$(probe_value plutil -extract CFBundleShortVersionString raw -o - "$plist_path")"
+      bundle_ver="$(probe_value plutil -extract CFBundleVersion raw -o - "$plist_path")"
+
+      local raw_desc=""
+      if raw_desc="$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$plist_path" 2>/dev/null)" && [[ -n "$raw_desc" ]]; then
+        local_net_desc="$raw_desc"
+      elif [[ "$plist_readable" == "true" ]]; then
+        local_net_desc="MISSING"
+      else
+        local_net_desc="unavailable"
+      fi
+
+      local raw_p=""
+      if plutil -extract NSBonjourServices raw -o - "$plist_path" >/dev/null 2>&1; then
+        bonjour_status="PRESENT"
+      elif raw_p="$(plutil -p "$plist_path" 2>/dev/null)" && printf '%s\n' "$raw_p" | grep -q "NSBonjourServices"; then
+        bonjour_status="PRESENT"
+      elif [[ "$plist_readable" == "true" ]]; then
+        bonjour_status="absent"
+      else
+        bonjour_status="unavailable"
+      fi
+    else
+      short_ver="unavailable"
+      bundle_ver="unavailable"
       local_net_desc="MISSING"
-    else
-      local_net_desc="unavailable"
-    fi
-
-    local raw_p=""
-    if plutil -extract NSBonjourServices raw -o - "$plist_path" >/dev/null 2>&1; then
-      bonjour_status="PRESENT"
-    elif raw_p="$(plutil -p "$plist_path" 2>/dev/null)" && printf '%s\n' "$raw_p" | grep -q "NSBonjourServices"; then
-      bonjour_status="PRESENT"
-    elif [[ "$plist_readable" == "true" ]]; then
-      bonjour_status="absent"
-    else
       bonjour_status="unavailable"
     fi
-  else
-    short_ver="unavailable"
-    bundle_ver="unavailable"
-    local_net_desc="MISSING"
-    bonjour_status="unavailable"
-  fi
 
-  if [[ -e "$bin_path" ]]; then
-    bin_archs="$(probe_value lipo -archs "$bin_path")"
-    local shasum_out=""
-    if shasum_out="$(shasum -a 256 "$bin_path" 2>/dev/null)" && [[ -n "$shasum_out" ]]; then
-      bin_sha="$(printf '%s' "$shasum_out" | awk '{print $1}')"
+    if [[ -e "$bin_path" ]]; then
+      bin_archs="$(probe_value lipo -archs "$bin_path")"
+      local shasum_out=""
+      if shasum_out="$(shasum -a 256 "$bin_path" 2>/dev/null)" && [[ -n "$shasum_out" ]]; then
+        bin_sha="$(printf '%s' "$shasum_out" | awk '{print $1}')"
+      else
+        bin_sha="unavailable"
+      fi
     else
+      bin_archs="unavailable"
       bin_sha="unavailable"
     fi
-  else
-    bin_archs="unavailable"
-    bin_sha="unavailable"
-  fi
 
-  local xattr_out="" xattr_rc=0
-  xattr_out="$(xattr -p com.apple.quarantine "$APP_PATH" 2>&1)" || xattr_rc=$?
-  if [[ "$xattr_rc" -eq 0 ]]; then
-    quarantine_status="present"
-  elif printf '%s\n' "$xattr_out" | grep -qi "No such xattr"; then
-    quarantine_status="absent"
-  elif xattr "$APP_PATH" >/dev/null 2>&1; then
-    quarantine_status="absent"
-  else
-    quarantine_status="unavailable"
-  fi
+    local xattr_out="" xattr_rc=0
+    xattr_out="$(xattr -p com.apple.quarantine "$APP_PATH" 2>&1)" || xattr_rc=$?
+    if [[ "$xattr_rc" -eq 0 ]]; then
+      quarantine_status="present"
+    elif printf '%s\n' "$xattr_out" | grep -qi "No such xattr"; then
+      quarantine_status="absent"
+    elif xattr "$APP_PATH" >/dev/null 2>&1; then
+      quarantine_status="absent"
+    else
+      quarantine_status="unavailable"
+    fi
 
-  printf '## App bundle\n\n'
-  printf -- '- Path: `%s`\n' "$APP_PATH"
-  printf -- '- Target executable: `%s`\n' "$TARGET_EXEC_REAL"
-  printf -- '- `CFBundleShortVersionString`: `%s`\n' "$short_ver"
-  printf -- '- `CFBundleVersion`: `%s`\n' "$bundle_ver"
-  printf -- '- `NSLocalNetworkUsageDescription`: %s\n' "$local_net_desc"
-  printf -- '- `NSBonjourServices`: %s\n' "$bonjour_status"
-  printf -- '- Executable architectures (`lipo -archs`): `%s`\n' "$bin_archs"
-  printf -- '- Executable SHA-256: `%s`\n' "$bin_sha"
-  printf -- '- Quarantine (`com.apple.quarantine`): %s\n\n' "$quarantine_status"
+    if [[ "$EXEC_EXPLICIT" == "true" ]]; then
+      printf -- '- Mode: dual target (`--app` bundle + explicit `--executable` process filter)\n'
+      printf -- '- Inspected bundle (`--app`): `%s`\n' "$APP_PATH"
+      printf -- '- Inspected process executable (`--executable`): `%s`\n' "$TARGET_EXEC_REAL"
+      printf -- '- Bundle executable (`lipo`/SHA-256): `%s`\n' "$bin_path"
+    else
+      printf -- '- Path: `%s`\n' "$APP_PATH"
+      printf -- '- Target executable: `%s`\n' "$TARGET_EXEC_REAL"
+    fi
+    printf -- '- `CFBundleShortVersionString`: `%s`\n' "$short_ver"
+    printf -- '- `CFBundleVersion`: `%s`\n' "$bundle_ver"
+    printf -- '- `NSLocalNetworkUsageDescription`: %s\n' "$local_net_desc"
+    printf -- '- `NSBonjourServices`: %s\n' "$bonjour_status"
+    printf -- '- Executable architectures (`lipo -archs`): `%s`\n' "$bin_archs"
+    printf -- '- Executable SHA-256: `%s`\n' "$bin_sha"
+    printf -- '- Quarantine (`com.apple.quarantine`): %s\n\n' "$quarantine_status"
+  fi
 
   # ## Code signature
-  local cs_out="" cs_rc=0 cs_verify_out="" cs_verify_rc=0
-  local signing_type="unavailable" integrity_status="unavailable"
-  cs_out="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)" || cs_rc=$?
-  cs_verify_out="$(codesign --verify --deep --strict --verbose=2 "$APP_PATH" 2>&1)" || cs_verify_rc=$?
-
-  local cs_has_meta="false" cs_unsigned="false"
-  if [[ "$cs_rc" -eq 0 ]] || printf '%s\n' "$cs_out" | grep -Eq '^(Identifier=|Signature=|CodeDirectory )'; then
-    cs_has_meta="true"
-  elif printf '%s\n' "$cs_out" | grep -qi 'not signed at all'; then
-    cs_unsigned="true"
-  fi
-
-  if [[ "$cs_has_meta" == "true" ]]; then
-    if [[ "$cs_verify_rc" -eq 0 ]]; then
-      integrity_status="valid (passed codesign --verify --deep --strict)"
-    elif [[ -n "$cs_verify_out" ]] && ! printf '%s\n' "$cs_verify_out" | grep -qi 'mocked failure'; then
-      local verify_summary=""
-      verify_summary="$(printf '%s\n' "$cs_verify_out" | head -n 1 | tr '\r\n' ' ' | sed 's/[[:space:]]*$//')"
-      integrity_status="INVALID (${verify_summary}) — NOT valid for #147"
-    else
-      integrity_status="INVALID (codesign --verify --deep --strict exited ${cs_verify_rc}) — NOT valid for #147"
-    fi
-  elif [[ "$cs_unsigned" == "true" ]]; then
-    signing_type="unsigned"
-    integrity_status="INVALID (unsigned) — NOT valid for #147"
-  fi
-
   printf '## Code signature\n\n'
-  if [[ "$cs_has_meta" == "true" ]]; then
-    local filtered_cs="" first_auth="" cs_core=""
-    cs_core="$(printf '%s\n' "$cs_out" | grep -E '^(Identifier=|Format=|CDHash=|Signature=|TeamIdentifier=|Info\.plist|Runtime Version=|CodeDirectory )' || true)"
-    first_auth="$(printf '%s\n' "$cs_out" | grep -E '^Authority=' | head -n 1 || true)"
-
-    if [[ -n "$cs_core" ]]; then
-      filtered_cs="$cs_core"
-    fi
-    if [[ -n "$first_auth" ]]; then
-      if [[ -n "$filtered_cs" ]]; then
-        filtered_cs="${filtered_cs}"$'\n'"${first_auth}"
-      else
-        filtered_cs="$first_auth"
-      fi
-    fi
-
-    local cd_line="" auth_val="" sig_val="" plist_not_bound="false"
-    cd_line="$(printf '%s\n' "$cs_out" | grep -E '^CodeDirectory ' | head -n 1 || true)"
-    sig_val="$(printf '%s\n' "$cs_out" | awk -F= '$1 == "Signature" { print $2; exit }' || true)"
-    auth_val="${first_auth#Authority=}"
-    if printf '%s\n' "$cs_out" | grep -Eq '^Info\.plist=not bound$'; then
-      plist_not_bound="true"
-    fi
-
-    # Keep codesign -dv metadata separate from codesign --verify integrity: a
-    # tampered Info.plist causes codesign -dv to report Info.plist=not bound
-    # without setting the linker-signed CodeDirectory flag.
-    if [[ "$cd_line" == *"linker-signed"* ]]; then
-      signing_type="linker-signed (Info.plist not bound) — NOT valid for #147"
-    elif [[ "$sig_val" == "adhoc" ]]; then
-      if [[ "$plist_not_bound" == "true" ]]; then
-        signing_type="adhoc (Info.plist=not bound; see integrity status) — NOT valid for #147"
-      elif [[ "$cs_verify_rc" -eq 0 ]]; then
-        signing_type="adhoc (bound)"
-      else
-        signing_type="adhoc (bound metadata; integrity failed) — NOT valid for #147"
-      fi
-    elif [[ -n "$auth_val" ]]; then
-      if [[ "$auth_val" == "Developer ID Application"* ]]; then
-        signing_type="Developer ID"
-      else
-        signing_type="Self-Signed (${auth_val})"
-      fi
-      if [[ "$plist_not_bound" == "true" || "$cs_verify_rc" -ne 0 ]]; then
-        signing_type="${signing_type} — NOT valid for #147"
-      fi
-    else
-      signing_type="unsigned/unknown"
-    fi
-
-    printf -- '- Signing type: %s\n' "$signing_type"
-    printf -- '- Signature integrity (`codesign --verify --deep --strict`): %s\n\n' "$integrity_status"
-    printf '```text\n%s\n```\n\n' "${filtered_cs:-unavailable}"
+  if [[ "$HAS_APP_BUNDLE" == "false" ]]; then
+    printf -- '- Signing type: N/A (standalone `--executable` mode; no `--app` bundle)\n'
+    printf -- '- Signature integrity (`codesign --verify --deep --strict`): N/A (standalone `--executable` mode; no `--app` bundle)\n\n'
   else
-    printf -- '- Signing type: %s\n' "$signing_type"
-    printf -- '- Signature integrity (`codesign --verify --deep --strict`): %s\n' "$integrity_status"
-    printf -- '- `codesign -dv`: unavailable\n\n'
+    local cs_out="" cs_rc=0 cs_verify_out="" cs_verify_rc=0
+    local signing_type="unavailable" integrity_status="unavailable"
+    cs_out="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)" || cs_rc=$?
+    cs_verify_out="$(codesign --verify --deep --strict --verbose=2 "$APP_PATH" 2>&1)" || cs_verify_rc=$?
+
+    local cs_has_meta="false" cs_unsigned="false"
+    if [[ "$cs_rc" -eq 0 ]] || printf '%s\n' "$cs_out" | grep -Eq '^(Identifier=|Signature=|CodeDirectory )'; then
+      cs_has_meta="true"
+    elif printf '%s\n' "$cs_out" | grep -qi 'not signed at all'; then
+      cs_unsigned="true"
+    fi
+
+    if [[ "$cs_has_meta" == "true" ]]; then
+      if [[ "$cs_verify_rc" -eq 0 ]]; then
+        integrity_status="valid (passed codesign --verify --deep --strict)"
+      elif [[ -n "$cs_verify_out" ]] && ! printf '%s\n' "$cs_verify_out" | grep -qi 'mocked failure'; then
+        local verify_summary=""
+        verify_summary="$(printf '%s\n' "$cs_verify_out" | head -n 1 | tr '\r\n' ' ' | sed 's/[[:space:]]*$//')"
+        integrity_status="INVALID (${verify_summary}) — NOT valid for #147"
+      else
+        integrity_status="INVALID (codesign --verify --deep --strict exited ${cs_verify_rc}) — NOT valid for #147"
+      fi
+    elif [[ "$cs_unsigned" == "true" ]]; then
+      signing_type="unsigned"
+      integrity_status="INVALID (unsigned) — NOT valid for #147"
+    fi
+
+    if [[ "$cs_has_meta" == "true" ]]; then
+      local filtered_cs="" first_auth="" cs_core=""
+      cs_core="$(printf '%s\n' "$cs_out" | grep -E '^(Identifier=|Format=|CDHash=|Signature=|TeamIdentifier=|Info\.plist|Runtime Version=|CodeDirectory )' || true)"
+      first_auth="$(printf '%s\n' "$cs_out" | grep -E '^Authority=' | head -n 1 || true)"
+
+      if [[ -n "$cs_core" ]]; then
+        filtered_cs="$cs_core"
+      fi
+      if [[ -n "$first_auth" ]]; then
+        if [[ -n "$filtered_cs" ]]; then
+          filtered_cs="${filtered_cs}"$'\n'"${first_auth}"
+        else
+          filtered_cs="$first_auth"
+        fi
+      fi
+
+      local cd_line="" auth_val="" sig_val="" plist_not_bound="false"
+      cd_line="$(printf '%s\n' "$cs_out" | grep -E '^CodeDirectory ' | head -n 1 || true)"
+      sig_val="$(printf '%s\n' "$cs_out" | awk -F= '$1 == "Signature" { print $2; exit }' || true)"
+      auth_val="${first_auth#Authority=}"
+      if printf '%s\n' "$cs_out" | grep -Eq '^Info\.plist=not bound$'; then
+        plist_not_bound="true"
+      fi
+
+      # Keep codesign -dv metadata separate from codesign --verify integrity: a
+      # tampered Info.plist causes codesign -dv to report Info.plist=not bound
+      # without setting the linker-signed CodeDirectory flag.
+      if [[ "$cd_line" == *"linker-signed"* ]]; then
+        signing_type="linker-signed (Info.plist not bound) — NOT valid for #147"
+      elif [[ "$sig_val" == "adhoc" ]]; then
+        if [[ "$plist_not_bound" == "true" ]]; then
+          signing_type="adhoc (Info.plist=not bound; see integrity status) — NOT valid for #147"
+        elif [[ "$cs_verify_rc" -eq 0 ]]; then
+          signing_type="adhoc (bound)"
+        else
+          signing_type="adhoc (bound metadata; integrity failed) — NOT valid for #147"
+        fi
+      elif [[ -n "$auth_val" ]]; then
+        if [[ "$auth_val" == "Developer ID Application"* ]]; then
+          signing_type="Developer ID"
+        else
+          signing_type="Self-Signed (${auth_val})"
+        fi
+        if [[ "$plist_not_bound" == "true" || "$cs_verify_rc" -ne 0 ]]; then
+          signing_type="${signing_type} — NOT valid for #147"
+        fi
+      else
+        signing_type="unsigned/unknown"
+      fi
+
+      if [[ "$EXEC_EXPLICIT" == "true" ]]; then
+        printf -- '- Inspected bundle: `%s`\n' "$APP_PATH"
+      fi
+      printf -- '- Signing type: %s\n' "$signing_type"
+      printf -- '- Signature integrity (`codesign --verify --deep --strict`): %s\n\n' "$integrity_status"
+      printf '```text\n%s\n```\n\n' "${filtered_cs:-unavailable}"
+    else
+      if [[ "$EXEC_EXPLICIT" == "true" ]]; then
+        printf -- '- Inspected bundle: `%s`\n' "$APP_PATH"
+      fi
+      printf -- '- Signing type: %s\n' "$signing_type"
+      printf -- '- Signature integrity (`codesign --verify --deep --strict`): %s\n' "$integrity_status"
+      printf -- '- `codesign -dv`: unavailable\n\n'
+    fi
   fi
 
   # ## Process (strictly scoped to current user and target executable path)
@@ -749,17 +795,24 @@ collect_report() {
   printf '%s\n\n' "$net_lines"
 
   # ## Firewall
-  local fw_global fw_blockall fw_stealth fw_app
-  fw_global="$(probe_firewall_arg --getglobalstate)"
-  fw_blockall="$(probe_firewall_arg --getblockall)"
-  fw_stealth="$(probe_firewall_arg --getstealthmode)"
-  fw_app="$(probe_firewall_arg --getappblocked "$APP_PATH")"
-
   printf '## Firewall\n\n'
-  printf -- '- Global state: %s\n' "$fw_global"
-  printf -- '- Block all incoming: %s\n' "$fw_blockall"
-  printf -- '- Stealth mode: %s\n' "$fw_stealth"
-  printf -- '- App blocked (`%s`): %s\n\n' "$APP_PATH" "$fw_app"
+  if [[ "$HAS_APP_BUNDLE" == "false" ]]; then
+    printf -- '- Global state: N/A (standalone `--executable` mode; no `--app` bundle)\n'
+    printf -- '- Block all incoming: N/A (standalone `--executable` mode; no `--app` bundle)\n'
+    printf -- '- Stealth mode: N/A (standalone `--executable` mode; no `--app` bundle)\n'
+    printf -- '- App blocked: N/A (standalone `--executable` mode; no `--app` bundle)\n\n'
+  else
+    local fw_global fw_blockall fw_stealth fw_app
+    fw_global="$(probe_firewall_arg --getglobalstate)"
+    fw_blockall="$(probe_firewall_arg --getblockall)"
+    fw_stealth="$(probe_firewall_arg --getstealthmode)"
+    fw_app="$(probe_firewall_arg --getappblocked "$APP_PATH")"
+
+    printf -- '- Global state: %s\n' "$fw_global"
+    printf -- '- Block all incoming: %s\n' "$fw_blockall"
+    printf -- '- Stealth mode: %s\n' "$fw_stealth"
+    printf -- '- App blocked (`%s`): %s\n\n' "$APP_PATH" "$fw_app"
+  fi
 
   # ## App data
   printf '## App data\n\n'
@@ -818,13 +871,53 @@ collect_report() {
   printf 'macOS provides no public CLI to inspect per-app Local Network privacy state. Record the **System Settings → Privacy & Security → Local Network** toggle for **SynapseRead** and any system alert text manually (with a screenshot).\n'
 }
 
+write_unique_report() {
+  local out_dir="$1"
+  local stamp="$2"
+  local role="$3"
+  local label="$4"
+  local content="$5"
+
+  if [[ ! -d "$out_dir" ]]; then
+    mkdir -p "$out_dir"
+  fi
+  if [[ ! -w "$out_dir" ]]; then
+    echo "Error: Output directory is not writable: $out_dir" >&2
+    return 1
+  fi
+
+  local base="${out_dir%/}/${stamp}-${role}-${label}"
+  local candidate="${base}.md"
+  local seq=0
+
+  # Use shell noclobber (O_CREAT|O_EXCL) so concurrent same-second runs never
+  # overwrite an existing report file.
+  while true; do
+    if (
+      set -C
+      printf '%s\n' "$content" > "$candidate"
+    ) 2>/dev/null; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+    if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+      echo "Error: Failed to write evidence report to '$candidate'." >&2
+      return 1
+    fi
+    seq=$((seq + 1))
+    if [[ "$seq" -gt 10000 ]]; then
+      echo "Error: Too many filename collisions under '$out_dir' for '${stamp}-${role}-${label}'." >&2
+      return 1
+    fi
+    candidate="${base}-${seq}.md"
+  done
+}
+
 REPORT="$(collect_report)"
 printf '%s\n' "$REPORT"
 
 if [[ -n "$OUT_DIR" ]]; then
-  mkdir -p "$OUT_DIR"
   STAMP="$(date '+%Y%m%dT%H%M%S')"
-  OUT_FILE="${OUT_DIR%/}/${STAMP}-${ROLE}-${LABEL}.md"
-  printf '%s\n' "$REPORT" > "$OUT_FILE"
+  OUT_FILE="$(write_unique_report "$OUT_DIR" "$STAMP" "$ROLE" "$LABEL" "$REPORT")"
   echo "Saved LAN evidence report to: $OUT_FILE" >&2
 fi
