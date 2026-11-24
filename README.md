@@ -191,6 +191,8 @@ closes.
   sharing stops and shows **Needs attention** (if a network change leaves the same IPv4
   address active on an eligible interface, the session continues running).
 
+For the step-by-step two-Mac acceptance protocol and read-only checkpoint evidence collector, see [`docs/LAN_SYNC_VALIDATION.md`](docs/LAN_SYNC_VALIDATION.md).
+
 ## Development
 
 ```sh

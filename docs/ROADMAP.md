@@ -154,7 +154,8 @@ instances on the same private IPv4 LAN, with zero SQLite schema migrations.
 - [ ] **Native two-Mac Finder validation (`#147`, `OD-2 Rev 2`):** pending a second
       physical Mac for `M-pack` and `M-perm` runs on a Finder-launched packaged build
       signed with a local self-signed certificate (`--local-sign`) or ad hoc with bound
-      `Info.plist` (`--adhoc-sign`); covering Local Network privacy
+      `Info.plist` (`--adhoc-sign`); see the
+      [two-Mac validation runbook](LAN_SYNC_VALIDATION.md) covering Local Network privacy
       prompts/denial/recovery, macOS Application Firewall, packaged-app `T-10` listener
       lifecycle, multi-format transfers including `T-21`–`T-24`, 5-failure lockout,
       **Back to catalog**, guest Wi-Fi client isolation, local self-signed vs ad hoc
