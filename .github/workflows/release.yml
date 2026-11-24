@@ -1,0 +1,334 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: Create or update a draft GitHub Release
+        type: boolean
+        default: false
+      tag_name:
+        description: Tag name when creating a draft release (defaults to v<tauri.conf version>)
+        type: string
+        default: ''
+      allow_unsigned:
+        description: Allow unsigned build when Apple signing secrets are absent (cannot create release)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate release metadata
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      should_release: ${{ steps.meta.outputs.should_release }}
+      tag_name: ${{ steps.meta.outputs.tag_name }}
+      app_version: ${{ steps.meta.outputs.app_version }}
+      build_sha: ${{ steps.meta.outputs.build_sha }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate version, dispatch intent, and release target state
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          GITHUB_REF: ${{ github.ref }}
+          INPUT_CREATE_RELEASE: ${{ inputs.create_release }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          INPUT_ALLOW_UNSIGNED: ${{ inputs.allow_unsigned }}
+        run: scripts/release-validate.sh
+
+  build-macos:
+    name: Build (macOS Universal)
+    needs: validate
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      signed: ${{ steps.signing.outputs.signed }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify checked-out commit matches validated SHA
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.build_sha }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit (${ACTUAL_SHA}) does not match validated commit (${EXPECTED_SHA})." >&2
+            exit 1
+          fi
+
+      - name: Configure Apple signing and notarization
+        id: signing
+        shell: bash
+        env:
+          RAW_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          RAW_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          RAW_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          RAW_APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          RAW_APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          RAW_APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          RAW_APPLE_ID: ${{ secrets.APPLE_ID }}
+          RAW_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          RAW_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ALLOW_UNSIGNED: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_unsigned == true }}
+        run: |
+          set -euo pipefail
+
+          export_github_env() {
+            local name="$1"
+            local value="$2"
+            local delim
+            delim="SYNAPSEREAD_ENV_$(openssl rand -hex 12)"
+            {
+              printf '%s<<%s\n' "$name" "$delim"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delim"
+            } >> "$GITHUB_ENV"
+          }
+
+          has_cert=false
+          has_cert_pass=false
+          has_identity=false
+          [ -n "$RAW_APPLE_CERTIFICATE" ] && has_cert=true
+          [ -n "$RAW_APPLE_CERTIFICATE_PASSWORD" ] && has_cert_pass=true
+          [ -n "$RAW_APPLE_SIGNING_IDENTITY" ] && has_identity=true
+
+          if [ "$has_cert" != "$has_cert_pass" ]; then
+            echo "::error::Partial certificate signing secrets. Set both APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD (see docs/MACOS_SIGNING.md)." >&2
+            exit 1
+          fi
+
+          if [ "$has_identity" = "true" ] && [ "$has_cert" = "false" ]; then
+            echo "::error::APPLE_SIGNING_IDENTITY requires APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD on GitHub Actions runners (see docs/MACOS_SIGNING.md)." >&2
+            exit 1
+          fi
+
+          api_count=0
+          [ -n "$RAW_APPLE_API_KEY" ] && api_count=$((api_count + 1))
+          [ -n "$RAW_APPLE_API_ISSUER" ] && api_count=$((api_count + 1))
+          [ -n "$RAW_APPLE_API_KEY_P8" ] && api_count=$((api_count + 1))
+          if [ "$api_count" -eq 1 ] || [ "$api_count" -eq 2 ]; then
+            echo "::error::Partial App Store Connect API secrets. Set APPLE_API_KEY, APPLE_API_ISSUER, and APPLE_API_KEY_P8 together (see docs/MACOS_SIGNING.md)." >&2
+            exit 1
+          fi
+
+          id_count=0
+          [ -n "$RAW_APPLE_ID" ] && id_count=$((id_count + 1))
+          [ -n "$RAW_APPLE_PASSWORD" ] && id_count=$((id_count + 1))
+          [ -n "$RAW_APPLE_TEAM_ID" ] && id_count=$((id_count + 1))
+          if [ "$id_count" -eq 1 ] || [ "$id_count" -eq 2 ]; then
+            echo "::error::Partial Apple ID notarization secrets. Set APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID together (see docs/MACOS_SIGNING.md)." >&2
+            exit 1
+          fi
+
+          has_signing=false
+          [ "$has_cert" = "true" ] && has_signing=true
+
+          has_notary=false
+          if [ "$api_count" -eq 3 ] || [ "$id_count" -eq 3 ]; then
+            has_notary=true
+          fi
+
+          if [ "$has_signing" = "true" ] && [ "$has_notary" = "false" ]; then
+            echo "::error::APPLE_CERTIFICATE is configured without notarization credentials. Configure App Store Connect API key or Apple ID secrets (see docs/MACOS_SIGNING.md)." >&2
+            exit 1
+          fi
+          if [ "$has_signing" = "false" ] && [ "$has_notary" = "true" ]; then
+            echo "::error::Notarization credentials are configured without APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD (see docs/MACOS_SIGNING.md)." >&2
+            exit 1
+          fi
+
+          if [ "$has_signing" = "false" ] && [ "$has_notary" = "false" ]; then
+            if [ "$ALLOW_UNSIGNED" = "true" ]; then
+              echo "::warning::Apple Developer ID secrets are not configured; building an unsigned/ad-hoc bundle (allow_unsigned=true)."
+              echo "signed=false" >> "$GITHUB_OUTPUT"
+              echo "artifact_suffix=-unsigned" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Missing Apple Developer ID signing and notarization secrets. Configure them per docs/MACOS_SIGNING.md, or trigger workflow_dispatch with allow_unsigned=true for an unsigned smoke test." >&2
+            exit 1
+          fi
+
+          CLEAN_CERT="$(printf '%s' "$RAW_APPLE_CERTIFICATE" | tr -d '[:space:]')"
+          if [ -z "$CLEAN_CERT" ]; then
+            echo "::error::APPLE_CERTIFICATE became empty after stripping whitespace." >&2
+            exit 1
+          fi
+          export_github_env "APPLE_CERTIFICATE" "$CLEAN_CERT"
+          export_github_env "APPLE_CERTIFICATE_PASSWORD" "$RAW_APPLE_CERTIFICATE_PASSWORD"
+          if [ "$has_identity" = "true" ]; then
+            export_github_env "APPLE_SIGNING_IDENTITY" "$RAW_APPLE_SIGNING_IDENTITY"
+          fi
+
+          if [ "$api_count" -eq 3 ]; then
+            case "$RAW_APPLE_API_KEY" in
+              */*|*\\*|*..*)
+                echo "::error::APPLE_API_KEY contains invalid path characters." >&2
+                exit 1
+                ;;
+            esac
+
+            KEY_PATH="${RUNNER_TEMP}/AuthKey_${RAW_APPLE_API_KEY}.p8"
+            (
+              umask 077
+              if printf '%s' "$RAW_APPLE_API_KEY_P8" | grep -q "BEGIN PRIVATE KEY"; then
+                printf '%s\n' "$RAW_APPLE_API_KEY_P8" | tr -d '\r' > "$KEY_PATH"
+              else
+                printf '%s' "$RAW_APPLE_API_KEY_P8" | tr -d '[:space:]' | openssl base64 -d -A > "$KEY_PATH"
+              fi
+            )
+
+            if ! grep -q "BEGIN PRIVATE KEY" "$KEY_PATH"; then
+              rm -f "$KEY_PATH"
+              echo "::error::APPLE_API_KEY_P8 did not contain or decode to a valid PKCS#8 PEM private key." >&2
+              exit 1
+            fi
+
+            export_github_env "APPLE_API_KEY" "$RAW_APPLE_API_KEY"
+            export_github_env "APPLE_API_ISSUER" "$RAW_APPLE_API_ISSUER"
+            export_github_env "APPLE_API_KEY_PATH" "$KEY_PATH"
+          else
+            export_github_env "APPLE_ID" "$RAW_APPLE_ID"
+            export_github_env "APPLE_PASSWORD" "$RAW_APPLE_PASSWORD"
+            export_github_env "APPLE_TEAM_ID" "$RAW_APPLE_TEAM_ID"
+          fi
+
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+          echo "artifact_suffix=" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-universal-apple-darwin
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build macOS Universal bundle
+        run: pnpm --filter @synapseread/desktop tauri build --target universal-apple-darwin --ci
+
+      - name: Notarize and staple DMG
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
+        run: scripts/macos-notarize-dmg.sh "target/universal-apple-darwin/release/bundle/dmg/SynapseRead_${APP_VERSION}_universal.dmg"
+
+      - name: Verify macOS bundles
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
+          SIGNED: ${{ steps.signing.outputs.signed }}
+        run: |
+          set -euo pipefail
+          args=(
+            --app "target/universal-apple-darwin/release/bundle/macos/SynapseRead.app"
+            --dmg "target/universal-apple-darwin/release/bundle/dmg/SynapseRead_${APP_VERSION}_universal.dmg"
+            --require-universal
+          )
+          if [ "$SIGNED" = "true" ]; then
+            args+=(--require-signed)
+          fi
+          scripts/verify-macos-bundle.sh "${args[@]}"
+
+      - name: Stage release assets and checksums
+        env:
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
+        run: |
+          set -euo pipefail
+          ASSETS_DIR="${RUNNER_TEMP}/release-assets"
+          rm -rf "$ASSETS_DIR"
+          mkdir -p "$ASSETS_DIR"
+
+          DMG_OUT="SynapseRead_${APP_VERSION}_universal.dmg"
+          APP_ZIP_OUT="SynapseRead_${APP_VERSION}_universal.app.zip"
+          DMG_SRC="target/universal-apple-darwin/release/bundle/dmg/${DMG_OUT}"
+          APP_SRC="target/universal-apple-darwin/release/bundle/macos/SynapseRead.app"
+
+          cp "$DMG_SRC" "${ASSETS_DIR}/${DMG_OUT}"
+          ditto -c -k --keepParent --sequesterRsrc "$APP_SRC" "${ASSETS_DIR}/${APP_ZIP_OUT}"
+          (
+            cd "$ASSETS_DIR"
+            shasum -a 256 "$DMG_OUT" "$APP_ZIP_OUT" > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+          )
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SynapseRead-${{ needs.validate.outputs.app_version }}-macos-universal${{ steps.signing.outputs.artifact_suffix }}
+          path: ${{ runner.temp }}/release-assets/
+          if-no-files-found: error
+
+      - name: Clean up temporary signing files
+        if: always()
+        run: rm -f "${RUNNER_TEMP}"/AuthKey_*.p8
+
+  publish-release:
+    name: Publish draft GitHub Release
+    needs: [validate, build-macos]
+    if: needs.validate.outputs.should_release == 'true' && needs.build-macos.outputs.signed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: release-publish-${{ needs.validate.outputs.tag_name || github.run_id }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify checked-out commit matches validated SHA
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.build_sha }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit (${ACTUAL_SHA}) does not match validated commit (${EXPECTED_SHA})." >&2
+            exit 1
+          fi
+
+      - name: Download signed release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: SynapseRead-${{ needs.validate.outputs.app_version }}-macos-universal
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Create or update draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ needs.validate.outputs.tag_name }}
+          BUILD_SHA: ${{ needs.validate.outputs.build_sha }}
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
+          ASSETS_DIR: ${{ runner.temp }}/release-assets
+        run: scripts/release-publish-draft.sh

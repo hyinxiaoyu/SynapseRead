@@ -125,6 +125,8 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm build --target universal-apple-darwin
 ```
 
+For Apple Developer ID code-signing, notarization, and universal release builds via [`.github/workflows/release.yml`](.github/workflows/release.yml) or `scripts/macos-build-signed.sh`, see [docs/MACOS_SIGNING.md](docs/MACOS_SIGNING.md).
+
 App data is stored in the OS app-data directory (for example
 `~/Library/Application Support/app.synapseread.desktop/` on macOS):
 
