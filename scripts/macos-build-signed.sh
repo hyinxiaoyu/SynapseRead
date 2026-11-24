@@ -1,29 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build, sign, notarize (.app + .dmg), staple, and verify macOS bundles locally.
+# Build, sign, optionally notarize (.app + .dmg), and verify macOS bundles locally.
 # Defaults to universal-apple-darwin and enforces Apple Developer ID signing
-# and notarization unless --allow-unsigned is explicitly passed.
+# and notarization unless --local-sign, --adhoc-sign, or --allow-unsigned is passed.
 
 usage() {
   cat <<'EOF'
 Usage: scripts/macos-build-signed.sh [options]
 
 Options:
-  --target <triple>   universal-apple-darwin (default), aarch64-apple-darwin, or x86_64-apple-darwin
-  --allow-unsigned    Build without Apple signing/notarization (NOT valid for #147 Finder acceptance)
-  --ci                Pass --ci and CI=true to skip bundle_dmg.sh Finder Automation
-  -h, --help          Show this help message
+  --target <triple>      universal-apple-darwin (default), aarch64-apple-darwin, or x86_64-apple-darwin
+  --local-sign <id>      Sign with a local Keychain Code Signing certificate (no notarization; valid for #147)
+  --adhoc-sign           Ad hoc sign (-) binding Info.plist (no certificate/notarization; valid for #147)
+  --allow-unsigned       Build Tauri-default linker-signed bundle without binding Info.plist (NOT valid for #147)
+  --ci                   Pass --ci and CI=true to skip bundle_dmg.sh Finder Automation
+  -h, --help             Show this help message
 
-Signing environment (required unless --allow-unsigned):
+Signing environment (required for default Developer ID mode):
   Option 1: APPLE_CERTIFICATE (base64 .p12) + APPLE_CERTIFICATE_PASSWORD (+ optional APPLE_SIGNING_IDENTITY)
   Option 2: APPLE_SIGNING_IDENTITY installed in macOS Keychain
 
-Notarization environment (required unless --allow-unsigned):
+Notarization environment (required for default Developer ID mode):
   Option A: APPLE_API_KEY + APPLE_API_ISSUER (+ APPLE_API_KEY_PATH or AuthKey_<ID>.p8 in standard dir)
   Option B: APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID
 
-See docs/MACOS_SIGNING.md for full setup instructions.
+See docs/MACOS_SIGNING.md for full setup instructions (including self-use --local-sign / --adhoc-sign).
 EOF
 }
 
@@ -33,8 +35,18 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 TARGET="universal-apple-darwin"
-ALLOW_UNSIGNED=false
+SIGN_MODE="developer-id"
+LOCAL_SIGN_IDENTITY=""
 CI_MODE=false
+
+set_sign_mode() {
+  local mode="$1"
+  if [[ "$SIGN_MODE" != "developer-id" ]]; then
+    echo "Error: --allow-unsigned, --local-sign, and --adhoc-sign are mutually exclusive." >&2
+    exit 1
+  fi
+  SIGN_MODE="$mode"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,8 +58,25 @@ while [[ $# -gt 0 ]]; do
       TARGET="$2"
       shift 2
       ;;
+    --local-sign)
+      if [[ $# -lt 2 || -z "${2:-}" || "${2:-}" == --* ]]; then
+        echo "Error: --local-sign requires a non-empty Keychain signing identity." >&2
+        exit 1
+      fi
+      if [[ "$2" == "-" ]]; then
+        echo "Error: '--local-sign -' is not valid; use --adhoc-sign for an ad hoc build." >&2
+        exit 1
+      fi
+      set_sign_mode "local"
+      LOCAL_SIGN_IDENTITY="$2"
+      shift 2
+      ;;
+    --adhoc-sign)
+      set_sign_mode "adhoc"
+      shift
+      ;;
     --allow-unsigned)
-      ALLOW_UNSIGNED=true
+      set_sign_mode "unsigned"
       shift
       ;;
     --ci)
@@ -88,6 +117,16 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
+
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
+DMG_STAGING_DIR=""
+
+cleanup_dmg_staging() {
+  if [[ -n "${DMG_STAGING_DIR:-}" && -d "$DMG_STAGING_DIR" ]]; then
+    rm -rf "$DMG_STAGING_DIR"
+  fi
+}
+trap cleanup_dmg_staging EXIT
 
 INSTALLED_TARGETS="$(rustup target list --installed)"
 MISSING_TARGETS=()
@@ -194,14 +233,36 @@ validate_signing_and_notary_env() {
   fi
 }
 
-if [[ "$ALLOW_UNSIGNED" == "true" ]]; then
-  echo "Warning: Building unsigned/ad-hoc bundle (--allow-unsigned). This artifact is NOT valid for #147 signed Finder acceptance." >&2
+unset_apple_env() {
   unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY
   unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
   unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
-else
-  validate_signing_and_notary_env
-fi
+}
+
+case "$SIGN_MODE" in
+  developer-id)
+    validate_signing_and_notary_env
+    ;;
+  unsigned)
+    echo "Warning: Building Tauri-default linker-signed bundle (--allow-unsigned; Info.plist not bound). Not valid for #147 Finder acceptance — use --local-sign <identity> or --adhoc-sign (ADR 0008 OD-2 Rev 2)." >&2
+    unset_apple_env
+    ;;
+  local)
+    unset_apple_env
+    IDENTITIES_OUTPUT="$(security find-identity -v -p codesigning 2>&1 || true)"
+    if ! printf '%s\n' "$IDENTITIES_OUTPUT" | grep -Fq -- "$LOCAL_SIGN_IDENTITY"; then
+      echo "Error: Signing identity '$LOCAL_SIGN_IDENTITY' not found in macOS Keychain." >&2
+      printf '%s\n' "$IDENTITIES_OUTPUT" >&2
+      echo "Hint: create/trust a Code Signing certificate (Keychain Access → Certificate Assistant → Create a Certificate…; set Trust → Code Signing: Always Trust) — see docs/MACOS_SIGNING.md." >&2
+      exit 1
+    fi
+    echo "Local self-signed build (no notarization) using identity: ${LOCAL_SIGN_IDENTITY}"
+    ;;
+  adhoc)
+    unset_apple_env
+    echo "Ad hoc bound build (no certificate or notarization; Info.plist will be bound)."
+    ;;
+esac
 
 read_app_version() {
   local conf_path="apps/desktop/src-tauri/tauri.conf.json"
@@ -214,6 +275,22 @@ read_app_version() {
   fi
 }
 
+create_dmg_from_app() {
+  local app_path="$1"
+  local dmg_path="$2"
+
+  DMG_STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/synapseread-dmg.XXXXXX")"
+  ditto "$app_path" "$DMG_STAGING_DIR/SynapseRead.app"
+  ln -s /Applications "$DMG_STAGING_DIR/Applications"
+
+  mkdir -p "$(dirname "$dmg_path")"
+  rm -f "$dmg_path"
+  hdiutil create -volname "SynapseRead" -srcfolder "$DMG_STAGING_DIR" -fs HFS+ -format UDZO -ov "$dmg_path"
+
+  rm -rf "$DMG_STAGING_DIR"
+  DMG_STAGING_DIR=""
+}
+
 APP_VERSION="$(read_app_version)"
 if [[ -z "$APP_VERSION" ]]; then
   echo "Error: Could not determine app version from apps/desktop/src-tauri/tauri.conf.json." >&2
@@ -221,6 +298,10 @@ if [[ -z "$APP_VERSION" ]]; then
 fi
 
 BUILD_ARGS=(build --target "$TARGET")
+if [[ "$SIGN_MODE" == "local" || "$SIGN_MODE" == "adhoc" ]]; then
+  # Build only .app in Tauri so we can sign SynapseRead.app before packaging the DMG.
+  BUILD_ARGS+=(--bundles app)
+fi
 if [[ "$CI_MODE" == "true" ]]; then
   export CI=true
   BUILD_ARGS+=(--ci)
@@ -229,20 +310,44 @@ fi
 echo "Building SynapseRead v${APP_VERSION} for ${TARGET}..."
 pnpm --filter @synapseread/desktop tauri "${BUILD_ARGS[@]}"
 
-APP_PATH="target/${TARGET}/release/bundle/macos/SynapseRead.app"
-DMG_PATH="target/${TARGET}/release/bundle/dmg/SynapseRead_${APP_VERSION}_${DMG_ARCH}.dmg"
+APP_PATH="${TARGET_DIR}/${TARGET}/release/bundle/macos/SynapseRead.app"
+DMG_PATH="${TARGET_DIR}/${TARGET}/release/bundle/dmg/SynapseRead_${APP_VERSION}_${DMG_ARCH}.dmg"
 
-if [[ "$ALLOW_UNSIGNED" == "false" ]]; then
-  "$SCRIPT_DIR/macos-notarize-dmg.sh" "$DMG_PATH"
-fi
+case "$SIGN_MODE" in
+  developer-id)
+    "$SCRIPT_DIR/macos-notarize-dmg.sh" "$DMG_PATH"
+    ;;
+  local)
+    # --timestamp=none keeps local builds offline and deterministic, because the Apple timestamp service is meant for Developer ID.
+    codesign --force --deep --options runtime --timestamp=none --sign "$LOCAL_SIGN_IDENTITY" "$APP_PATH"
+    create_dmg_from_app "$APP_PATH" "$DMG_PATH"
+    codesign --force --timestamp=none --sign "$LOCAL_SIGN_IDENTITY" "$DMG_PATH"
+    ;;
+  adhoc)
+    codesign --force --deep --sign - "$APP_PATH"
+    create_dmg_from_app "$APP_PATH" "$DMG_PATH"
+    ;;
+  unsigned)
+    ;;
+esac
 
 VERIFY_ARGS=(--app "$APP_PATH" --dmg "$DMG_PATH")
 if [[ "$TARGET" == "universal-apple-darwin" ]]; then
   VERIFY_ARGS+=(--require-universal)
 fi
-if [[ "$ALLOW_UNSIGNED" == "false" ]]; then
-  VERIFY_ARGS+=(--require-signed)
-fi
+case "$SIGN_MODE" in
+  developer-id)
+    VERIFY_ARGS+=(--require-signed)
+    ;;
+  local)
+    VERIFY_ARGS+=(--require-local-signed)
+    ;;
+  adhoc)
+    VERIFY_ARGS+=(--require-adhoc-bound)
+    ;;
+  unsigned)
+    ;;
+esac
 
 "$SCRIPT_DIR/verify-macos-bundle.sh" "${VERIFY_ARGS[@]}"
 

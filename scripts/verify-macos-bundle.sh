@@ -2,19 +2,22 @@
 set -euo pipefail
 
 # Verify macOS .app and optional .dmg bundles for architecture, Info.plist
-# invariants (T-44 / UA-6), DMG integrity, Developer ID signing, Hardened
-# Runtime, Gatekeeper acceptance, and stapled notarization tickets.
+# invariants (T-44 / UA-6), DMG integrity, Developer ID signing, local
+# self-signed / ad hoc bound signatures, Hardened Runtime, Gatekeeper, and
+# stapled notarization tickets.
 
 usage() {
   cat <<'EOF'
 Usage: scripts/verify-macos-bundle.sh --app <path-to-SynapseRead.app> [options]
 
 Options:
-  --app <path>          Path to SynapseRead.app bundle (required)
-  --dmg <path>          Path to SynapseRead_*.dmg image (optional)
-  --require-universal   Assert main executable contains both arm64 and x86_64 slices
-  --require-signed      Assert Apple Developer ID signing, Hardened Runtime, spctl, and stapler
-  -h, --help            Show this help message
+  --app <path>            Path to SynapseRead.app bundle (required)
+  --dmg <path>            Path to SynapseRead_*.dmg image (optional)
+  --require-universal     Assert main executable contains both arm64 and x86_64 slices
+  --require-signed        Assert Apple Developer ID signing, Hardened Runtime, spctl, and stapler
+  --require-local-signed  Assert local Keychain certificate signature, bound Info.plist, and Hardened Runtime
+  --require-adhoc-bound   Assert ad hoc signature with bound Info.plist (not linker-signed)
+  -h, --help              Show this help message
 EOF
 }
 
@@ -26,7 +29,16 @@ fi
 APP_PATH=""
 DMG_PATH=""
 REQUIRE_UNIVERSAL=false
-REQUIRE_SIGNED=false
+VERIFY_SIGN_MODE="none"
+
+set_verify_sign_mode() {
+  local mode="$1"
+  if [[ "$VERIFY_SIGN_MODE" != "none" ]]; then
+    echo "Error: --require-signed, --require-local-signed, and --require-adhoc-bound are mutually exclusive." >&2
+    exit 1
+  fi
+  VERIFY_SIGN_MODE="$mode"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -51,7 +63,15 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --require-signed)
-      REQUIRE_SIGNED=true
+      set_verify_sign_mode "signed"
+      shift
+      ;;
+    --require-local-signed)
+      set_verify_sign_mode "local-signed"
+      shift
+      ;;
+    --require-adhoc-bound)
+      set_verify_sign_mode "adhoc-bound"
       shift
       ;;
     -h|--help)
@@ -157,91 +177,175 @@ if [[ -n "$DMG_PATH" ]]; then
   fi
 fi
 
+check_info_plist_bound() {
+  local cs_output="$1"
+  if printf '%s\n' "$cs_output" | grep -Eq '^Info\.plist entries=[0-9]+$'; then
+    pass "Info.plist is bound to the code signature"
+  elif printf '%s\n' "$cs_output" | grep -Eq '^Info\.plist=not bound$'; then
+    fail "Info.plist is not bound (linker-signed); re-sign with codesign --force --deep"
+  else
+    fail "Could not confirm bound Info.plist in codesign metadata"
+  fi
+}
+
 APP_CS="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1 || true)"
 
-if [[ "$REQUIRE_SIGNED" == "true" ]]; then
-  if codesign --verify --deep --strict --verbose=2 "$APP_PATH" >/dev/null 2>&1; then
-    pass "App bundle passed codesign --verify --deep --strict"
-  else
-    fail "App bundle failed codesign --verify --deep --strict"
-  fi
-
-  if printf '%s\n' "$APP_CS" | grep -Eq '^Signature=adhoc$'; then
-    fail "App bundle is ad-hoc signed; Apple Developer ID signature required"
-  else
-    pass "App bundle is not ad-hoc signed"
-  fi
-
-  if printf '%s\n' "$APP_CS" | grep -Eq '^Authority=Developer ID Application:'; then
-    pass "App bundle has Developer ID Application authority"
-  else
-    fail "App bundle missing Developer ID Application authority"
-  fi
-
-  if printf '%s\n' "$APP_CS" | grep -Eq '^CodeDirectory .*flags=0x[0-9a-fA-F]+\([^)]*runtime[^)]*\)'; then
-    pass "App bundle has Hardened Runtime enabled"
-  else
-    fail "App bundle missing Hardened Runtime flag"
-  fi
-
-  if printf '%s\n' "$APP_CS" | grep -Eq '^TeamIdentifier=not set$'; then
-    fail "App bundle TeamIdentifier is not set"
-  elif printf '%s\n' "$APP_CS" | grep -Eq '^TeamIdentifier=[A-Z0-9]{10}$'; then
-    pass "App bundle has valid 10-character TeamIdentifier"
-  else
-    fail "App bundle missing valid 10-character TeamIdentifier"
-  fi
-
-  if spctl --assess --type execute --verbose=4 "$APP_PATH" >/dev/null 2>&1; then
-    pass "App bundle accepted by Gatekeeper (spctl --assess --type execute)"
-  else
-    fail "App bundle rejected by Gatekeeper (spctl --assess --type execute)"
-  fi
-
-  if xcrun stapler validate "$APP_PATH" >/dev/null 2>&1; then
-    pass "App bundle has valid stapled notarization ticket"
-  else
-    fail "App bundle missing valid stapled notarization ticket"
-  fi
-
-  if [[ -n "$DMG_PATH" ]]; then
-    if codesign --verify --verbose=2 "$DMG_PATH" >/dev/null 2>&1; then
-      pass "DMG passed codesign --verify"
+case "$VERIFY_SIGN_MODE" in
+  signed)
+    if codesign --verify --deep --strict --verbose=2 "$APP_PATH" >/dev/null 2>&1; then
+      pass "App bundle passed codesign --verify --deep --strict"
     else
-      fail "DMG failed codesign --verify"
+      fail "App bundle failed codesign --verify --deep --strict"
     fi
 
-    DMG_CS="$(codesign -dv --verbose=4 "$DMG_PATH" 2>&1 || true)"
-    if printf '%s\n' "$DMG_CS" | grep -Eq '^Signature=adhoc$'; then
-      fail "DMG is ad-hoc signed; Apple Developer ID signature required"
-    elif printf '%s\n' "$DMG_CS" | grep -Eq '^Authority=Developer ID Application:'; then
-      pass "DMG has Developer ID Application authority"
+    if printf '%s\n' "$APP_CS" | grep -Eq '^Signature=adhoc$'; then
+      fail "App bundle is ad-hoc signed; Apple Developer ID signature required"
     else
-      fail "DMG missing Developer ID Application authority"
+      pass "App bundle is not ad-hoc signed"
     fi
 
-    if spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH" >/dev/null 2>&1; then
-      pass "DMG accepted by Gatekeeper (spctl --assess --type open)"
+    if printf '%s\n' "$APP_CS" | grep -Eq '^Authority=Developer ID Application:'; then
+      pass "App bundle has Developer ID Application authority"
     else
-      fail "DMG rejected by Gatekeeper (spctl --assess --type open)"
+      fail "App bundle missing Developer ID Application authority"
     fi
 
-    if xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
-      pass "DMG has valid stapled notarization ticket"
+    if printf '%s\n' "$APP_CS" | grep -Eq '^CodeDirectory .*flags=0x[0-9a-fA-F]+\([^)]*runtime[^)]*\)'; then
+      pass "App bundle has Hardened Runtime enabled"
     else
-      fail "DMG missing valid stapled notarization ticket"
+      fail "App bundle missing Hardened Runtime flag"
     fi
-  fi
-else
-  CS_SUMMARY="$(printf '%s\n' "$APP_CS" | grep -E '^(Signature=|Authority=|TeamIdentifier=|CodeDirectory )' || true)"
-  if [[ -n "$CS_SUMMARY" ]]; then
-    echo "[INFO] App codesign summary:"
-    printf '%s\n' "$CS_SUMMARY" | sed 's/^/       /'
-  else
-    echo "[INFO] App bundle appears unsigned."
-  fi
-  skip "Developer ID signature, Gatekeeper (spctl), and stapler checks (--require-signed not set)"
-fi
+
+    if printf '%s\n' "$APP_CS" | grep -Eq '^TeamIdentifier=not set$'; then
+      fail "App bundle TeamIdentifier is not set"
+    elif printf '%s\n' "$APP_CS" | grep -Eq '^TeamIdentifier=[A-Z0-9]{10}$'; then
+      pass "App bundle has valid 10-character TeamIdentifier"
+    else
+      fail "App bundle missing valid 10-character TeamIdentifier"
+    fi
+
+    if spctl --assess --type execute --verbose=4 "$APP_PATH" >/dev/null 2>&1; then
+      pass "App bundle accepted by Gatekeeper (spctl --assess --type execute)"
+    else
+      fail "App bundle rejected by Gatekeeper (spctl --assess --type execute)"
+    fi
+
+    if xcrun stapler validate "$APP_PATH" >/dev/null 2>&1; then
+      pass "App bundle has valid stapled notarization ticket"
+    else
+      fail "App bundle missing valid stapled notarization ticket"
+    fi
+
+    if [[ -n "$DMG_PATH" ]]; then
+      if codesign --verify --verbose=2 "$DMG_PATH" >/dev/null 2>&1; then
+        pass "DMG passed codesign --verify"
+      else
+        fail "DMG failed codesign --verify"
+      fi
+
+      DMG_CS="$(codesign -dv --verbose=4 "$DMG_PATH" 2>&1 || true)"
+      if printf '%s\n' "$DMG_CS" | grep -Eq '^Signature=adhoc$'; then
+        fail "DMG is ad-hoc signed; Apple Developer ID signature required"
+      elif printf '%s\n' "$DMG_CS" | grep -Eq '^Authority=Developer ID Application:'; then
+        pass "DMG has Developer ID Application authority"
+      else
+        fail "DMG missing Developer ID Application authority"
+      fi
+
+      if spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG_PATH" >/dev/null 2>&1; then
+        pass "DMG accepted by Gatekeeper (spctl --assess --type open)"
+      else
+        fail "DMG rejected by Gatekeeper (spctl --assess --type open)"
+      fi
+
+      if xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
+        pass "DMG has valid stapled notarization ticket"
+      else
+        fail "DMG missing valid stapled notarization ticket"
+      fi
+    fi
+    ;;
+  local-signed)
+    if codesign --verify --deep --strict --verbose=2 "$APP_PATH" >/dev/null 2>&1; then
+      pass "App bundle passed codesign --verify --deep --strict"
+    else
+      fail "App bundle failed codesign --verify --deep --strict"
+    fi
+
+    if printf '%s\n' "$APP_CS" | grep -Eq '^Signature=adhoc$'; then
+      fail "App bundle is ad-hoc signed; local certificate signature required"
+    else
+      pass "App bundle is not ad-hoc signed"
+    fi
+
+    FIRST_AUTH="$(printf '%s\n' "$APP_CS" | grep -E '^Authority=' | head -n 1 || true)"
+    if [[ -n "$FIRST_AUTH" ]]; then
+      pass "App bundle has signing authority (${FIRST_AUTH#Authority=})"
+    else
+      fail "App bundle missing Authority= in codesign metadata"
+    fi
+
+    check_info_plist_bound "$APP_CS"
+
+    if printf '%s\n' "$APP_CS" | grep -Eq '^CodeDirectory .*flags=0x[0-9a-fA-F]+\([^)]*runtime[^)]*\)'; then
+      pass "App bundle has Hardened Runtime enabled"
+    else
+      fail "App bundle missing Hardened Runtime flag"
+    fi
+
+    TEAM_LINE="$(printf '%s\n' "$APP_CS" | grep -E '^TeamIdentifier=' | head -n 1 || true)"
+    echo "[INFO] ${TEAM_LINE:-TeamIdentifier=unknown}"
+    skip "Gatekeeper (spctl) and stapler checks (local self-signed builds are not notarized; see docs/MACOS_SIGNING.md)"
+
+    if [[ -n "$DMG_PATH" ]]; then
+      if codesign --verify --verbose=2 "$DMG_PATH" >/dev/null 2>&1; then
+        pass "DMG passed codesign --verify"
+      else
+        fail "DMG failed codesign --verify"
+      fi
+
+      DMG_CS="$(codesign -dv --verbose=4 "$DMG_PATH" 2>&1 || true)"
+      if printf '%s\n' "$DMG_CS" | grep -Eq '^Signature=adhoc$'; then
+        fail "DMG is ad-hoc signed; local certificate signature required"
+      else
+        pass "DMG is not ad-hoc signed"
+      fi
+
+      DMG_AUTH="$(printf '%s\n' "$DMG_CS" | grep -E '^Authority=' | head -n 1 || true)"
+      if [[ -n "$DMG_AUTH" ]]; then
+        pass "DMG has signing authority (${DMG_AUTH#Authority=})"
+      else
+        fail "DMG missing Authority= in codesign metadata"
+      fi
+    fi
+    ;;
+  adhoc-bound)
+    if codesign --verify --deep --strict --verbose=2 "$APP_PATH" >/dev/null 2>&1; then
+      pass "App bundle passed codesign --verify --deep --strict"
+    else
+      fail "App bundle failed codesign --verify --deep --strict"
+    fi
+
+    if printf '%s\n' "$APP_CS" | grep -Eq '^Signature=adhoc$'; then
+      pass "App bundle is ad-hoc signed"
+    else
+      fail "App bundle is not ad-hoc signed (expected ad hoc signature)"
+    fi
+
+    check_info_plist_bound "$APP_CS"
+    skip "Developer ID, Gatekeeper (spctl), and stapler checks (ad hoc bound build; see docs/MACOS_SIGNING.md)"
+    ;;
+  none)
+    CS_SUMMARY="$(printf '%s\n' "$APP_CS" | grep -E '^(Signature=|Authority=|TeamIdentifier=|CodeDirectory |Info\.plist)' || true)"
+    if [[ -n "$CS_SUMMARY" ]]; then
+      echo "[INFO] App codesign summary:"
+      printf '%s\n' "$CS_SUMMARY" | sed 's/^/       /'
+    else
+      echo "[INFO] App bundle appears unsigned."
+    fi
+    skip "Developer ID signature, Gatekeeper (spctl), and stapler checks (--require-signed not set)"
+    ;;
+esac
 
 if [[ "$FAILURES" -gt 0 ]]; then
   echo "Verification failed with $FAILURES error(s)." >&2
