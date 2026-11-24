@@ -35,76 +35,22 @@ jobs:
       should_release: ${{ steps.meta.outputs.should_release }}
       tag_name: ${{ steps.meta.outputs.tag_name }}
       app_version: ${{ steps.meta.outputs.app_version }}
+      build_sha: ${{ steps.meta.outputs.build_sha }}
     steps:
       - uses: actions/checkout@v7
 
-      - name: Validate version and release inputs
+      - name: Validate version, dispatch intent, and release target state
         id: meta
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           GITHUB_REF: ${{ github.ref }}
           INPUT_CREATE_RELEASE: ${{ inputs.create_release }}
           INPUT_TAG: ${{ inputs.tag_name }}
           INPUT_ALLOW_UNSIGNED: ${{ inputs.allow_unsigned }}
-        run: |
-          set -euo pipefail
-
-          APP_VERSION=$(jq -r '.version' apps/desktop/src-tauri/tauri.conf.json)
-          if [ -z "$APP_VERSION" ] || [ "$APP_VERSION" = "null" ]; then
-            echo "Could not read version from apps/desktop/src-tauri/tauri.conf.json" >&2
-            exit 1
-          fi
-
-          CARGO_VERSION=$(awk '
-            /^\[workspace\.package\]$/ { in_section=1; next }
-            /^\[/ { in_section=0 }
-            in_section && /^version[[:space:]]*=/ {
-              gsub(/^version[[:space:]]*=[[:space:]]*"|".*$/, "")
-              print
-              exit
-            }
-          ' Cargo.toml)
-
-          if [ "$CARGO_VERSION" != "$APP_VERSION" ]; then
-            echo "Cargo.toml workspace version (${CARGO_VERSION}) does not match tauri.conf.json version (${APP_VERSION})" >&2
-            exit 1
-          fi
-
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$INPUT_ALLOW_UNSIGNED" = "true" ] && [ "$INPUT_CREATE_RELEASE" = "true" ]; then
-            echo "Cannot create a GitHub Release from an unsigned macOS build (allow_unsigned=true)." >&2
-            exit 1
-          fi
-
-          SHOULD_RELEASE=false
-          TAG_NAME=""
-          if [[ "$GITHUB_REF" == refs/tags/v* ]] || [ "$INPUT_CREATE_RELEASE" = "true" ]; then
-            SHOULD_RELEASE=true
-            if [ "$EVENT_NAME" = "push" ]; then
-              TAG_NAME="$REF_NAME"
-            elif [ -n "$INPUT_TAG" ]; then
-              TAG_NAME="$INPUT_TAG"
-            else
-              TAG_NAME="v${APP_VERSION}"
-            fi
-
-            case "$TAG_NAME" in
-              v*) ;;
-              *)
-                echo "Release tag '${TAG_NAME}' must start with 'v'" >&2
-                exit 1
-                ;;
-            esac
-
-            if [ "${TAG_NAME#v}" != "$APP_VERSION" ]; then
-              echo "Tag ${TAG_NAME} does not match tauri.conf.json version ${APP_VERSION}" >&2
-              exit 1
-            fi
-          fi
-
-          echo "should_release=${SHOULD_RELEASE}" >> "$GITHUB_OUTPUT"
-          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
-          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+        run: scripts/release-validate.sh
 
   build-macos:
     name: Build (macOS Universal)
@@ -112,9 +58,22 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 60
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      signed: ${{ steps.signing.outputs.signed }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Verify checked-out commit matches validated SHA
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.build_sha }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit (${ACTUAL_SHA}) does not match validated commit (${EXPECTED_SHA})." >&2
+            exit 1
+          fi
 
       - name: Configure Apple signing and notarization
         id: signing
@@ -329,46 +288,47 @@ jobs:
           path: ${{ runner.temp }}/release-assets/
           if-no-files-found: error
 
-      - name: Create or update draft GitHub Release
-        if: needs.validate.outputs.should_release == 'true' && steps.signing.outputs.signed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.validate.outputs.tag_name }}
-          APP_VERSION: ${{ needs.validate.outputs.app_version }}
-        run: |
-          set -euo pipefail
-          ASSETS_DIR="${RUNNER_TEMP}/release-assets"
-          DMG_OUT="SynapseRead_${APP_VERSION}_universal.dmg"
-          APP_ZIP_OUT="SynapseRead_${APP_VERSION}_universal.app.zip"
-
-          RELEASE_ID=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
-            | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag) | .id' | head -n 1)
-          if [ -z "$RELEASE_ID" ]; then
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
-              -f tag_name="$TAG_NAME" \
-              -f target_commitish="$GITHUB_SHA" \
-              -f name="SynapseRead ${TAG_NAME}" \
-              -F draft=true \
-              -F prerelease=false \
-              -F generate_release_notes=true >/dev/null
-          fi
-
-          # Retry upload briefly in case GitHub's GraphQL draft index lags just after creation.
-          for attempt in 1 2 3; do
-            if gh release upload "$TAG_NAME" \
-              "${ASSETS_DIR}/${DMG_OUT}" \
-              "${ASSETS_DIR}/${APP_ZIP_OUT}" \
-              "${ASSETS_DIR}/SHA256SUMS.txt" \
-              --clobber; then
-              exit 0
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "Failed to upload assets to release ${TAG_NAME}" >&2
-              exit 1
-            fi
-            sleep 3
-          done
-
       - name: Clean up temporary signing files
         if: always()
         run: rm -f "${RUNNER_TEMP}"/AuthKey_*.p8
+
+  publish-release:
+    name: Publish draft GitHub Release
+    needs: [validate, build-macos]
+    if: needs.validate.outputs.should_release == 'true' && needs.build-macos.outputs.signed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: release-publish-${{ needs.validate.outputs.tag_name || github.run_id }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Verify checked-out commit matches validated SHA
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.build_sha }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::Checked-out commit (${ACTUAL_SHA}) does not match validated commit (${EXPECTED_SHA})." >&2
+            exit 1
+          fi
+
+      - name: Download signed release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: SynapseRead-${{ needs.validate.outputs.app_version }}-macos-universal
+          path: ${{ runner.temp }}/release-assets
+
+      - name: Create or update draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ needs.validate.outputs.tag_name }}
+          BUILD_SHA: ${{ needs.validate.outputs.build_sha }}
+          APP_VERSION: ${{ needs.validate.outputs.app_version }}
+          ASSETS_DIR: ${{ runner.temp }}/release-assets
+        run: scripts/release-publish-draft.sh

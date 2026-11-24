@@ -40,18 +40,18 @@ Provide **one** complete notarization credential set (Option A is preferred if b
 | **Option A (App Store Connect API Key, recommended)** | `APPLE_API_KEY`, `APPLE_API_ISSUER`, `APPLE_API_KEY_P8` | Key ID, Issuer UUID, and `.p8` file contents (raw PKCS#8 PEM or base64-encoded `.p8`) |
 | **Option B (Apple ID)**                               | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`           | Apple ID email, app-specific password, and 10-character Team ID                       |
 
-To export a certificate from Keychain Access as base64 for `APPLE_CERTIFICATE`:
+To encode your exported `.p12` certificate and upload it directly to `APPLE_CERTIFICATE` without writing a base64 plaintext file to disk:
 
 ```sh
-openssl base64 -A -in DeveloperIDApplication.p12 -out DeveloperIDApplication.base64.txt
+openssl base64 -A -in DeveloperIDApplication.p12 | gh secret set APPLE_CERTIFICATE
 ```
 
-> **Note:** Never commit `.p12`, `.pem`, `.key`, or `.p8` files. All four extensions are listed in `.gitignore`.
+> **Note:** Never save plaintext certificate exports inside the repository, and never commit `.p12`, `.pem`, `.key`, or `.p8` files (all four extensions are listed in `.gitignore`).
 
 ### Triggering Builds
 
-- **Tag push (`v*`):** Push a tag matching `tauri.conf.json` `version` (for example `v0.1.0`) to build, sign, notarize, verify, and attach assets to a draft GitHub Release.
-- **`workflow_dispatch` (signed test build for `#147`):** Run **Release** manually from GitHub Actions (`create_release=false`) to download a signed, notarized `SynapseRead-<version>-macos-universal` workflow artifact without creating a release.
+- **Tag push (`v*`):** Push a tag matching `tauri.conf.json` `version` (for example `v0.1.0`) to build, sign, notarize, verify, and attach assets to a draft GitHub Release bound to that commit.
+- **`workflow_dispatch` (signed test build for `#147`):** Run **Release** manually from GitHub Actions with `create_release=false` (whether dispatched from a branch or a `v*` tag) to download a signed, notarized `SynapseRead-<version>-macos-universal` workflow artifact without creating or modifying any GitHub Release. Setting `create_release=true` creates or updates a draft Release only when the built commit matches any existing remote tag/draft and no published Release exists for that tag.
 - **`workflow_dispatch` (unsigned CI smoke test):** Set `allow_unsigned=true` (requires `create_release=false`) when Apple secrets are not configured yet. Unsigned artifacts are labeled `-unsigned` and are not valid for `#147`.
 
 ## Local Signed & Notarized Builds
