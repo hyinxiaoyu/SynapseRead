@@ -104,7 +104,8 @@ To build on both of your Macs with the same local identity, export the certifica
 ### 2. Build and Package Locally
 
 ```sh
-# Recommended for two personal Macs: local self-signed certificate (no notarization)
+# Recommended for two personal Macs: local self-signed certificate (no notarization).
+# Accepts exact certificate common name or 40-hex SHA-1 fingerprint from `security find-identity`.
 scripts/macos-build-signed.sh --local-sign "SynapseRead Local Signing"
 
 # Faster single-architecture build on Apple Silicon
@@ -116,9 +117,9 @@ scripts/macos-build-signed.sh --target aarch64-apple-darwin --adhoc-sign
 
 In `--local-sign` and `--adhoc-sign` modes, `scripts/macos-build-signed.sh`:
 
-1. Passes `--bundles app` to Tauri so Tauri does not package a DMG before `SynapseRead.app` is signed.
+1. Passes `--bundles app` to Tauri so Tauri does not package a DMG before `SynapseRead.app` is signed (and in `--local-sign` mode resolves the exact unique certificate SHA-1 fingerprint before building).
 2. Signs `SynapseRead.app` (`--options runtime --timestamp=none` for local self-signed, or `--sign -` for ad hoc).
-3. Packages `SynapseRead_<version>_<arch>.dmg` from the signed `.app` with `hdiutil`, signs the `.dmg` in `--local-sign` mode, and runs `scripts/verify-macos-bundle.sh` (`--require-local-signed` or `--require-adhoc-bound`).
+3. Packages `SynapseRead_<version>_<arch>.dmg` from the signed `.app` with `hdiutil`, signs the `.dmg` in `--local-sign` mode, and runs `scripts/verify-macos-bundle.sh` (`--require-local-signed` or `--require-adhoc-bound`, which also mounts the `.dmg` read-only to verify the inner `SynapseRead.app` signature, bound `Info.plist`, and per-architecture `CDHash` match).
 
 ### 3. Install, Clear Quarantine, and Re-Grant Caveat
 

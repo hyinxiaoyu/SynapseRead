@@ -11,7 +11,7 @@ Usage: scripts/macos-build-signed.sh [options]
 
 Options:
   --target <triple>      universal-apple-darwin (default), aarch64-apple-darwin, or x86_64-apple-darwin
-  --local-sign <id>      Sign with a local Keychain Code Signing certificate (no notarization; valid for #147)
+  --local-sign <id>      Sign with a local Keychain Code Signing certificate (exact name or 40-hex SHA-1 fingerprint; no notarization; valid for #147)
   --adhoc-sign           Ad hoc sign (-) binding Info.plist (no certificate/notarization; valid for #147)
   --allow-unsigned       Build Tauri-default linker-signed bundle without binding Info.plist (NOT valid for #147)
   --ci                   Pass --ci and CI=true to skip bundle_dmg.sh Finder Automation
@@ -37,6 +37,8 @@ fi
 TARGET="universal-apple-darwin"
 SIGN_MODE="developer-id"
 LOCAL_SIGN_IDENTITY=""
+LOCAL_SIGN_FINGERPRINT=""
+LOCAL_SIGN_NAME=""
 CI_MODE=false
 
 set_sign_mode() {
@@ -239,6 +241,72 @@ unset_apple_env() {
   unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
 }
 
+resolve_local_signing_identity() {
+  local query="$1"
+  local identities_output=""
+  if ! identities_output="$(security find-identity -v -p codesigning 2>&1)"; then
+    echo "Error: Failed to query macOS Keychain code signing identities ('security find-identity -v -p codesigning')." >&2
+    printf '%s\n' "$identities_output" >&2
+    exit 1
+  fi
+
+  local query_upper=""
+  local query_is_fp=false
+  if [[ "$query" =~ ^[0-9A-Fa-f]{40}$ ]]; then
+    query_is_fp=true
+    query_upper="$(printf '%s' "$query" | tr '[:lower:]' '[:upper:]')"
+  fi
+
+  # Parse only numbered identity lines carrying a 40-hex SHA-1 fingerprint and quoted name,
+  # never summary lines such as "0 valid identities found".
+  local identity_re='^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-Fa-f]{40})[[:space:]]+"(.+)"[[:space:]]*$'
+  local match_count=0
+  local matched_fp=""
+  local matched_name=""
+  local matched_lines=""
+  local line fp fp_upper name
+
+  while IFS= read -r line; do
+    if [[ "$line" =~ $identity_re ]]; then
+      fp="${BASH_REMATCH[1]}"
+      name="${BASH_REMATCH[2]}"
+      fp_upper="$(printf '%s' "$fp" | tr '[:lower:]' '[:upper:]')"
+
+      if [[ "$query_is_fp" == "true" ]]; then
+        if [[ "$fp_upper" == "$query_upper" ]]; then
+          match_count=$((match_count + 1))
+          matched_fp="$fp_upper"
+          matched_name="$name"
+          matched_lines+="${line}"$'\n'
+        fi
+      else
+        if [[ "$name" == "$query" ]]; then
+          match_count=$((match_count + 1))
+          matched_fp="$fp_upper"
+          matched_name="$name"
+          matched_lines+="${line}"$'\n'
+        fi
+      fi
+    fi
+  done <<< "$identities_output"
+
+  if [[ "$match_count" -eq 0 ]]; then
+    echo "Error: Signing identity '$query' not found in macOS Keychain (must match a valid identity's exact full name or 40-hex SHA-1 fingerprint)." >&2
+    printf '%s\n' "$identities_output" >&2
+    echo "Hint: create/trust a Code Signing certificate (Keychain Access → Certificate Assistant → Create a Certificate…; set Trust → Code Signing: Always Trust) — see docs/MACOS_SIGNING.md." >&2
+    exit 1
+  fi
+
+  if [[ "$match_count" -gt 1 ]]; then
+    echo "Error: Signing identity '$query' matched $match_count Keychain certificates (ambiguous). Pass the exact 40-hex SHA-1 fingerprint instead:" >&2
+    printf '%s' "$matched_lines" >&2
+    exit 1
+  fi
+
+  LOCAL_SIGN_FINGERPRINT="$matched_fp"
+  LOCAL_SIGN_NAME="$matched_name"
+}
+
 case "$SIGN_MODE" in
   developer-id)
     validate_signing_and_notary_env
@@ -249,14 +317,8 @@ case "$SIGN_MODE" in
     ;;
   local)
     unset_apple_env
-    IDENTITIES_OUTPUT="$(security find-identity -v -p codesigning 2>&1 || true)"
-    if ! printf '%s\n' "$IDENTITIES_OUTPUT" | grep -Fq -- "$LOCAL_SIGN_IDENTITY"; then
-      echo "Error: Signing identity '$LOCAL_SIGN_IDENTITY' not found in macOS Keychain." >&2
-      printf '%s\n' "$IDENTITIES_OUTPUT" >&2
-      echo "Hint: create/trust a Code Signing certificate (Keychain Access → Certificate Assistant → Create a Certificate…; set Trust → Code Signing: Always Trust) — see docs/MACOS_SIGNING.md." >&2
-      exit 1
-    fi
-    echo "Local self-signed build (no notarization) using identity: ${LOCAL_SIGN_IDENTITY}"
+    resolve_local_signing_identity "$LOCAL_SIGN_IDENTITY"
+    echo "Local self-signed build (no notarization) using identity: ${LOCAL_SIGN_NAME} (${LOCAL_SIGN_FINGERPRINT})"
     ;;
   adhoc)
     unset_apple_env
@@ -319,9 +381,9 @@ case "$SIGN_MODE" in
     ;;
   local)
     # --timestamp=none keeps local builds offline and deterministic, because the Apple timestamp service is meant for Developer ID.
-    codesign --force --deep --options runtime --timestamp=none --sign "$LOCAL_SIGN_IDENTITY" "$APP_PATH"
+    codesign --force --deep --options runtime --timestamp=none --sign "$LOCAL_SIGN_FINGERPRINT" "$APP_PATH"
     create_dmg_from_app "$APP_PATH" "$DMG_PATH"
-    codesign --force --timestamp=none --sign "$LOCAL_SIGN_IDENTITY" "$DMG_PATH"
+    codesign --force --timestamp=none --sign "$LOCAL_SIGN_FINGERPRINT" "$DMG_PATH"
     ;;
   adhoc)
     codesign --force --deep --sign - "$APP_PATH"

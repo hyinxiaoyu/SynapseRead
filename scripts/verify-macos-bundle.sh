@@ -103,6 +103,23 @@ if [[ -n "$DMG_PATH" && ! -f "$DMG_PATH" ]]; then
 fi
 
 FAILURES=0
+DMG_MOUNT_POINT=""
+DMG_MOUNTED=false
+LAST_DETECTED_ARCHS=""
+
+cleanup_dmg_mount() {
+  if [[ "${DMG_MOUNTED:-false}" == "true" && -n "${DMG_MOUNT_POINT:-}" ]]; then
+    if ! hdiutil detach "$DMG_MOUNT_POINT" >/dev/null 2>&1; then
+      hdiutil detach "$DMG_MOUNT_POINT" -force >/dev/null 2>&1 || true
+    fi
+    DMG_MOUNTED=false
+  fi
+  if [[ -n "${DMG_MOUNT_POINT:-}" && -d "$DMG_MOUNT_POINT" ]]; then
+    rmdir "$DMG_MOUNT_POINT" >/dev/null 2>&1 || true
+    DMG_MOUNT_POINT=""
+  fi
+}
+trap cleanup_dmg_mount EXIT
 
 pass() {
   echo "[PASS] $1"
@@ -117,57 +134,65 @@ skip() {
   echo "[SKIP] $1"
 }
 
-BIN_PATH="$APP_PATH/Contents/MacOS/synapseread-desktop"
-if [[ -x "$BIN_PATH" ]]; then
-  pass "Executable exists: $BIN_PATH"
-else
-  fail "Executable missing or not executable: $BIN_PATH"
-fi
+verify_app_structure() {
+  local app_path="$1"
+  local label="$2"
+  LAST_DETECTED_ARCHS=""
 
-if [[ -x "$BIN_PATH" ]]; then
-  RAW_ARCHS="$(lipo -archs "$BIN_PATH" 2>/dev/null || true)"
-  echo "[INFO] Detected architectures: ${RAW_ARCHS:-unknown}"
-  if [[ "$REQUIRE_UNIVERSAL" == "true" ]]; then
-    NORM_ARCHS=" $(printf '%s' "$RAW_ARCHS" | tr -s '[:space:]' ' ') "
-    if [[ "$NORM_ARCHS" == *" arm64 "* && "$NORM_ARCHS" == *" x86_64 "* ]]; then
-      pass "Universal binary contains arm64 and x86_64 slices"
+  local bin_path="$app_path/Contents/MacOS/synapseread-desktop"
+  if [[ -x "$bin_path" ]]; then
+    pass "${label} executable exists: $bin_path"
+    LAST_DETECTED_ARCHS="$(lipo -archs "$bin_path" 2>/dev/null || true)"
+    echo "[INFO] ${label} architectures: ${LAST_DETECTED_ARCHS:-unknown}"
+    if [[ "$REQUIRE_UNIVERSAL" == "true" ]]; then
+      local norm_archs=" $(printf '%s' "$LAST_DETECTED_ARCHS" | tr -s '[:space:]' ' ') "
+      if [[ "$norm_archs" == *" arm64 "* && "$norm_archs" == *" x86_64 "* ]]; then
+        pass "${label} universal binary contains arm64 and x86_64 slices"
+      else
+        fail "${label} expected universal binary with arm64 and x86_64 slices, got: ${LAST_DETECTED_ARCHS:-none}"
+      fi
+    fi
+  else
+    fail "${label} executable missing or not executable: $bin_path"
+  fi
+
+  local plist_path="$app_path/Contents/Info.plist"
+  if [[ ! -f "$plist_path" ]]; then
+    fail "${label} Info.plist missing: $plist_path"
+  else
+    if plutil -lint "$plist_path" >/dev/null 2>&1; then
+      pass "${label} Info.plist syntax valid"
     else
-      fail "Expected universal binary with arm64 and x86_64 slices, got: ${RAW_ARCHS:-none}"
+      fail "${label} Info.plist failed plutil -lint"
+    fi
+
+    local bundle_id
+    bundle_id="$(plutil -extract CFBundleIdentifier raw -o - "$plist_path" 2>/dev/null || true)"
+    if [[ "$bundle_id" == "app.synapseread.desktop" ]]; then
+      pass "${label} CFBundleIdentifier is app.synapseread.desktop"
+    else
+      fail "${label} unexpected CFBundleIdentifier: ${bundle_id:-missing} (expected app.synapseread.desktop)"
+    fi
+
+    local local_net_desc
+    local_net_desc="$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$plist_path" 2>/dev/null || true)"
+    if [[ -n "$local_net_desc" ]]; then
+      pass "${label} Info.plist declares NSLocalNetworkUsageDescription (T-44 / UA-6)"
+    else
+      fail "${label} Info.plist missing or empty NSLocalNetworkUsageDescription"
+    fi
+
+    if plutil -p "$plist_path" 2>/dev/null | grep -q "NSBonjourServices" \
+      || plutil -extract NSBonjourServices raw -o - "$plist_path" >/dev/null 2>&1; then
+      fail "${label} Info.plist must not declare NSBonjourServices"
+    else
+      pass "${label} Info.plist omits NSBonjourServices"
     fi
   fi
-fi
+}
 
-PLIST_PATH="$APP_PATH/Contents/Info.plist"
-if [[ ! -f "$PLIST_PATH" ]]; then
-  fail "Info.plist missing: $PLIST_PATH"
-else
-  if plutil -lint "$PLIST_PATH" >/dev/null 2>&1; then
-    pass "Info.plist syntax valid"
-  else
-    fail "Info.plist failed plutil -lint"
-  fi
-
-  BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "$PLIST_PATH" 2>/dev/null || true)"
-  if [[ "$BUNDLE_ID" == "app.synapseread.desktop" ]]; then
-    pass "CFBundleIdentifier is app.synapseread.desktop"
-  else
-    fail "Unexpected CFBundleIdentifier: ${BUNDLE_ID:-missing} (expected app.synapseread.desktop)"
-  fi
-
-  LOCAL_NET_DESC="$(plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST_PATH" 2>/dev/null || true)"
-  if [[ -n "$LOCAL_NET_DESC" ]]; then
-    pass "Info.plist declares NSLocalNetworkUsageDescription (T-44 / UA-6)"
-  else
-    fail "Info.plist missing or empty NSLocalNetworkUsageDescription"
-  fi
-
-  if plutil -p "$PLIST_PATH" 2>/dev/null | grep -q "NSBonjourServices" \
-    || plutil -extract NSBonjourServices raw -o - "$PLIST_PATH" >/dev/null 2>&1; then
-    fail "Info.plist must not declare NSBonjourServices"
-  else
-    pass "Info.plist omits NSBonjourServices"
-  fi
-fi
+verify_app_structure "$APP_PATH" "App bundle"
+OUTER_RAW_ARCHS="$LAST_DETECTED_ARCHS"
 
 if [[ -n "$DMG_PATH" ]]; then
   if hdiutil verify "$DMG_PATH" >/dev/null 2>&1; then
@@ -179,13 +204,142 @@ fi
 
 check_info_plist_bound() {
   local cs_output="$1"
+  local label="${2:-App bundle}"
   if printf '%s\n' "$cs_output" | grep -Eq '^Info\.plist entries=[0-9]+$'; then
-    pass "Info.plist is bound to the code signature"
+    pass "${label} Info.plist is bound to the code signature"
   elif printf '%s\n' "$cs_output" | grep -Eq '^Info\.plist=not bound$'; then
-    fail "Info.plist is not bound (linker-signed); re-sign with codesign --force --deep"
+    fail "${label} Info.plist is not bound (linker-signed); re-sign with codesign --force --deep"
   else
-    fail "Could not confirm bound Info.plist in codesign metadata"
+    fail "${label} could not confirm bound Info.plist in codesign metadata"
   fi
+}
+
+verify_app_signature() {
+  local app_path="$1"
+  local cs_output="$2"
+  local mode="$3"
+  local label="$4"
+
+  if codesign --verify --deep --strict --verbose=2 "$app_path" >/dev/null 2>&1; then
+    pass "${label} passed codesign --verify --deep --strict"
+  else
+    fail "${label} failed codesign --verify --deep --strict"
+  fi
+
+  case "$mode" in
+    local-signed)
+      if printf '%s\n' "$cs_output" | grep -Eq '^Signature=adhoc$'; then
+        fail "${label} is ad-hoc signed; local certificate signature required"
+      else
+        pass "${label} is not ad-hoc signed"
+      fi
+
+      local first_auth
+      first_auth="$(printf '%s\n' "$cs_output" | grep -E '^Authority=' | head -n 1 || true)"
+      if [[ -n "$first_auth" ]]; then
+        pass "${label} has signing authority (${first_auth#Authority=})"
+      else
+        fail "${label} missing Authority= in codesign metadata"
+      fi
+
+      check_info_plist_bound "$cs_output" "$label"
+
+      if printf '%s\n' "$cs_output" | grep -Eq '^CodeDirectory .*flags=0x[0-9a-fA-F]+\([^)]*runtime[^)]*\)'; then
+        pass "${label} has Hardened Runtime enabled"
+      else
+        fail "${label} missing Hardened Runtime flag"
+      fi
+
+      local team_line
+      team_line="$(printf '%s\n' "$cs_output" | grep -E '^TeamIdentifier=' | head -n 1 || true)"
+      echo "[INFO] ${label} ${team_line:-TeamIdentifier=unknown}"
+      ;;
+    adhoc-bound)
+      if printf '%s\n' "$cs_output" | grep -Eq '^Signature=adhoc$'; then
+        pass "${label} is ad-hoc signed"
+      else
+        fail "${label} is not ad-hoc signed (expected ad hoc signature)"
+      fi
+
+      check_info_plist_bound "$cs_output" "$label"
+      ;;
+    *)
+      echo "Internal error: unsupported mode '$mode' in verify_app_signature" >&2
+      exit 1
+      ;;
+  esac
+}
+
+normalize_archs() {
+  printf '%s\n' "$1" | tr -s '[:space:]' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+extract_cdhash_for_arch() {
+  local app_path="$1"
+  local arch="$2"
+  local cs_out
+  if ! cs_out="$(codesign -dv --verbose=4 --arch "$arch" "$app_path" 2>&1)"; then
+    return 1
+  fi
+  local cdhash
+  cdhash="$(printf '%s\n' "$cs_out" | awk -F= '$1 == "CDHash" { print $2; exit }')"
+  if [[ -z "$cdhash" ]]; then
+    return 1
+  fi
+  printf '%s' "$cdhash"
+}
+
+verify_dmg_inner_app() {
+  local outer_app="$1"
+  local outer_raw_archs="$2"
+  local dmg_path="$3"
+  local mode="$4"
+
+  DMG_MOUNT_POINT="$(mktemp -d "${TMPDIR:-/tmp}/synapseread-dmg-verify.XXXXXX")"
+  if ! hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$DMG_MOUNT_POINT" "$dmg_path" </dev/null >/dev/null 2>&1; then
+    fail "Failed to attach DMG read-only for inner app inspection: $dmg_path"
+    cleanup_dmg_mount
+    return
+  fi
+  DMG_MOUNTED=true
+
+  local dmg_app_path="${DMG_MOUNT_POINT}/SynapseRead.app"
+  if [[ ! -d "$dmg_app_path" || -L "$dmg_app_path" ]]; then
+    fail "Mounted DMG does not contain SynapseRead.app: $dmg_path"
+    cleanup_dmg_mount
+    return
+  fi
+
+  verify_app_structure "$dmg_app_path" "DMG app bundle"
+  local inner_raw_archs="$LAST_DETECTED_ARCHS"
+  local dmg_app_cs
+  dmg_app_cs="$(codesign -dv --verbose=4 "$dmg_app_path" 2>&1 || true)"
+  verify_app_signature "$dmg_app_path" "$dmg_app_cs" "$mode" "DMG app bundle"
+
+  local outer_archs inner_archs
+  outer_archs="$(normalize_archs "$outer_raw_archs")"
+  inner_archs="$(normalize_archs "$inner_raw_archs")"
+  if [[ -z "$outer_archs" || -z "$inner_archs" ]]; then
+    fail "Could not determine architectures for outer app (${outer_archs:-none}) or DMG app (${inner_archs:-none})"
+  elif [[ "$outer_archs" != "$inner_archs" ]]; then
+    fail "Architecture mismatch between outer app (${outer_archs}) and DMG app (${inner_archs})"
+  else
+    pass "DMG app architectures match outer app (${outer_archs})"
+    local arch outer_cdhash inner_cdhash
+    for arch in $outer_archs; do
+      outer_cdhash="$(extract_cdhash_for_arch "$outer_app" "$arch" || true)"
+      inner_cdhash="$(extract_cdhash_for_arch "$dmg_app_path" "$arch" || true)"
+      if [[ -z "$outer_cdhash" || -z "$inner_cdhash" ]]; then
+        fail "Missing CDHash for architecture ${arch} (outer=${outer_cdhash:-missing}, dmg=${inner_cdhash:-missing})"
+      elif [[ "$outer_cdhash" != "$inner_cdhash" ]]; then
+        fail "CDHash mismatch for architecture ${arch}: outer=${outer_cdhash}, dmg=${inner_cdhash}"
+      else
+        pass "DMG app CDHash matches outer app for ${arch} (${outer_cdhash})"
+      fi
+    done
+  fi
+
+  cleanup_dmg_mount
 }
 
 APP_CS="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1 || true)"
@@ -266,35 +420,7 @@ case "$VERIFY_SIGN_MODE" in
     fi
     ;;
   local-signed)
-    if codesign --verify --deep --strict --verbose=2 "$APP_PATH" >/dev/null 2>&1; then
-      pass "App bundle passed codesign --verify --deep --strict"
-    else
-      fail "App bundle failed codesign --verify --deep --strict"
-    fi
-
-    if printf '%s\n' "$APP_CS" | grep -Eq '^Signature=adhoc$'; then
-      fail "App bundle is ad-hoc signed; local certificate signature required"
-    else
-      pass "App bundle is not ad-hoc signed"
-    fi
-
-    FIRST_AUTH="$(printf '%s\n' "$APP_CS" | grep -E '^Authority=' | head -n 1 || true)"
-    if [[ -n "$FIRST_AUTH" ]]; then
-      pass "App bundle has signing authority (${FIRST_AUTH#Authority=})"
-    else
-      fail "App bundle missing Authority= in codesign metadata"
-    fi
-
-    check_info_plist_bound "$APP_CS"
-
-    if printf '%s\n' "$APP_CS" | grep -Eq '^CodeDirectory .*flags=0x[0-9a-fA-F]+\([^)]*runtime[^)]*\)'; then
-      pass "App bundle has Hardened Runtime enabled"
-    else
-      fail "App bundle missing Hardened Runtime flag"
-    fi
-
-    TEAM_LINE="$(printf '%s\n' "$APP_CS" | grep -E '^TeamIdentifier=' | head -n 1 || true)"
-    echo "[INFO] ${TEAM_LINE:-TeamIdentifier=unknown}"
+    verify_app_signature "$APP_PATH" "$APP_CS" "local-signed" "App bundle"
     skip "Gatekeeper (spctl) and stapler checks (local self-signed builds are not notarized; see docs/MACOS_SIGNING.md)"
 
     if [[ -n "$DMG_PATH" ]]; then
@@ -317,23 +443,17 @@ case "$VERIFY_SIGN_MODE" in
       else
         fail "DMG missing Authority= in codesign metadata"
       fi
+
+      verify_dmg_inner_app "$APP_PATH" "$OUTER_RAW_ARCHS" "$DMG_PATH" "local-signed"
     fi
     ;;
   adhoc-bound)
-    if codesign --verify --deep --strict --verbose=2 "$APP_PATH" >/dev/null 2>&1; then
-      pass "App bundle passed codesign --verify --deep --strict"
-    else
-      fail "App bundle failed codesign --verify --deep --strict"
-    fi
-
-    if printf '%s\n' "$APP_CS" | grep -Eq '^Signature=adhoc$'; then
-      pass "App bundle is ad-hoc signed"
-    else
-      fail "App bundle is not ad-hoc signed (expected ad hoc signature)"
-    fi
-
-    check_info_plist_bound "$APP_CS"
+    verify_app_signature "$APP_PATH" "$APP_CS" "adhoc-bound" "App bundle"
     skip "Developer ID, Gatekeeper (spctl), and stapler checks (ad hoc bound build; see docs/MACOS_SIGNING.md)"
+
+    if [[ -n "$DMG_PATH" ]]; then
+      verify_dmg_inner_app "$APP_PATH" "$OUTER_RAW_ARCHS" "$DMG_PATH" "adhoc-bound"
+    fi
     ;;
   none)
     CS_SUMMARY="$(printf '%s\n' "$APP_CS" | grep -E '^(Signature=|Authority=|TeamIdentifier=|CodeDirectory |Info\.plist)' || true)"
