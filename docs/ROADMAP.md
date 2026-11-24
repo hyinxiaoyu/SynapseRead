@@ -121,11 +121,13 @@ for task IDs, acceptance evidence, and measurements.
 ## M4: V1.0 release (macOS)
 
 - Performance targets with large fixtures (multi-GB TXT, 1000+ page PDF).
-- Universal build, code signing, and notarization; release workflow.
+- Universal build, code signing, and notarization; release workflow. Developer ID
+  signing is optional ([ADR 0008](adr/0008-lan-book-sync.md) `OD-2 Rev 2`); local
+  self-signed / ad hoc builds via `scripts/macos-build-signed.sh`.
 - Error reporting and recovery (missing or moved source files).
 - Accessibility and keyboard navigation pass.
 
-## LAN Book Sync (V1, alongside/after M4 signing)
+## LAN Book Sync (V1)
 
 Tracking issue `#132` ([ADR 0008](adr/0008-lan-book-sync.md)): pull-only, session-scoped
 HTTP/1.1 sharing of books, reading positions, and bookmarks between two SynapseRead desktop
@@ -149,12 +151,15 @@ instances on the same private IPv4 LAN, with zero SQLite schema migrations.
 - [x] User documentation (`README.md`) and single-Mac verification evidence on
       `macOS 15.6.1 (24G90, Apple M4, arm64)` recorded in
       [ADR 0008](adr/0008-lan-book-sync.md).
-- [ ] **Native two-Mac Apple-signed Finder validation (`#147`, `OD-2`):** pending M4 Apple
-      code-signing and a second physical Mac for `M-pack` and `M-perm` runs (Local Network
-      privacy prompts/denial/recovery, macOS Application Firewall, packaged-app `T-10`
-      listener lifecycle, multi-format transfers including `T-21`–`T-24`, 5-failure lockout,
-      **Back to catalog**, guest Wi-Fi client isolation, ad hoc vs Apple-signed comparison,
-      `WKWebView` clipboard & VoiceOver smoke, and role swap).
+- [ ] **Native two-Mac Finder validation (`#147`, `OD-2 Rev 2`):** pending a second
+      physical Mac for `M-pack` and `M-perm` runs on a Finder-launched packaged build
+      signed with a local self-signed certificate (`--local-sign`) or ad hoc with bound
+      `Info.plist` (`--adhoc-sign`); covering Local Network privacy
+      prompts/denial/recovery, macOS Application Firewall, packaged-app `T-10` listener
+      lifecycle, multi-format transfers including `T-21`–`T-24`, 5-failure lockout,
+      **Back to catalog**, guest Wi-Fi client isolation, local self-signed vs ad hoc
+      rebuild comparison (Developer ID arm deferred), `WKWebView` clipboard & VoiceOver
+      smoke, and role swap.
 
 ## V1.1 and later
 
