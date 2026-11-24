@@ -9,8 +9,8 @@ from.
 > PDF, EPUB, and TXT documents support full local reading, search, bookmarks, independent
 > highlights and notes, session restoration, source recovery, and excerpting to the
 > MindMap, verified on macOS (`arm64`, `WKWebView`), alongside session-scoped LAN book sync
-> (local single-Mac baseline checked at `d4e7837`; two-Mac Apple-signed Finder acceptance
-> tracked in `#147`). See the [roadmap](docs/ROADMAP.md),
+> (local single-Mac baseline checked at `d4e7837`; two-Mac Finder acceptance on local
+> self-signed or ad hoc builds per `OD-2 Rev 2` tracked in `#147`). See the [roadmap](docs/ROADMAP.md),
 > [reader implementation plan](docs/READER_PLAN.md), and
 > [ADR 0008](docs/adr/0008-lan-book-sync.md).
 
@@ -125,7 +125,7 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin
 pnpm build --target universal-apple-darwin
 ```
 
-For Apple Developer ID code-signing, notarization, and universal release builds via [`.github/workflows/release.yml`](.github/workflows/release.yml) or `scripts/macos-build-signed.sh`, see [docs/MACOS_SIGNING.md](docs/MACOS_SIGNING.md).
+Apple Developer ID code-signing and notarization via [`.github/workflows/release.yml`](.github/workflows/release.yml) or `scripts/macos-build-signed.sh` are optional (needed only for public Gatekeeper-accepted distribution). For builds on your own Macs without an Apple Developer account (`--local-sign` / `--adhoc-sign`), see [self-use / open-source macOS builds](docs/MACOS_SIGNING.md#self-use--open-source-macos-builds-no-apple-developer-account).
 
 App data is stored in the OS app-data directory (for example
 `~/Library/Application Support/app.synapseread.desktop/` on macOS):
@@ -165,6 +165,12 @@ closes.
 - **macOS Application Firewall:** On the sharing Mac, check **System Settings → Network →
   Firewall**. Allow incoming connections for **SynapseRead** and make sure **Block all
   incoming connections** is turned off.
+- **Self-signed or ad hoc builds:** If you copied `SynapseRead.app` between your own Macs,
+  clear quarantine once (`xattr -dr com.apple.quarantine /Applications/SynapseRead.app`)
+  or allow it in **System Settings → Privacy & Security → Open Anyway**. After replacing
+  the app with a rebuild, re-enable **SynapseRead** under **System Settings → Privacy &
+  Security → Local Network** and **System Settings → Network → Firewall** if access stops
+  working.
 - **Same-subnet, VLAN, and VPN constraints:** Sharing binds only to a single
   broadcast-capable private IPv4 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) or
   link-local (`169.254.0.0/16`) interface on ports `49319`–`49328` (default `49319`,

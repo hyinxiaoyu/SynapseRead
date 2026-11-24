@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Regression tests for scripts/release-validate.sh and scripts/release-publish-draft.sh.
-# Uses a stateful mocked `gh` CLI and temporary assets directory; makes zero network calls.
+# Regression tests for scripts/release-validate.sh, scripts/release-publish-draft.sh,
+# scripts/macos-build-signed.sh, and scripts/verify-macos-bundle.sh.
+# Uses stateful mocked CLIs (`gh`, `codesign`, `security`, `pnpm`, etc.) and temporary
+# directories; makes zero network calls.
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "Error: jq is required to run test-release-scripts.sh." >&2
@@ -703,4 +705,982 @@ if [ "$(grep -c 'POST https://uploads.github.com/repos/owner/repo/releases/91/as
   exit 1
 fi
 
-echo "All 23 release script regression tests passed."
+MAC_MOCK_BIN="$TMP_DIR/macbin"
+MAC_STATE="$TMP_DIR/macstate"
+MAC_TARGET_DIR="$TMP_DIR/target"
+MAC_TMP_DIR="$TMP_DIR/mactmp"
+mkdir -p "$MAC_MOCK_BIN" "$MAC_STATE/cs" "$MAC_STATE/mounted" "$MAC_TARGET_DIR" "$MAC_TMP_DIR"
+
+cat > "$MAC_MOCK_BIN/uname" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'uname %s\n' "$*" >> "${MOCK_MAC_STATE_DIR:?}/calls.log"
+if [ "${1:-}" = "-s" ]; then
+  echo "Darwin"
+  exit 0
+fi
+if [ -x /usr/bin/uname ]; then
+  exec /usr/bin/uname "$@"
+fi
+exec /bin/uname "$@"
+EOF
+
+cat > "$MAC_MOCK_BIN/rustup" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'rustup %s\n' "$*" >> "${MOCK_MAC_STATE_DIR:?}/calls.log"
+printf 'aarch64-apple-darwin\nx86_64-apple-darwin\n'
+EOF
+
+cat > "$MAC_MOCK_BIN/security" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+MAC_STATE="${MOCK_MAC_STATE_DIR:?}"
+printf 'security %s\n' "$*" >> "${MAC_STATE}/calls.log"
+if [ -f "${MAC_STATE}/security_fail" ]; then
+  echo "security: SecKeychainSearchCopyNext: mocked failure" >&2
+  exit 1
+fi
+cat "${MAC_STATE}/identities.txt"
+EOF
+
+cat > "$MAC_MOCK_BIN/pnpm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+MAC_STATE="${MOCK_MAC_STATE_DIR:?}"
+TARGET_ROOT="${CARGO_TARGET_DIR:?}"
+printf 'pnpm %s\n' "$*" >> "${MAC_STATE}/calls.log"
+
+target=""
+has_bundles_app=false
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--target" ]; then
+    target="$arg"
+  elif [ "$prev" = "--bundles" ] && [ "$arg" = "app" ]; then
+    has_bundles_app=true
+  fi
+  prev="$arg"
+done
+
+case "$target" in
+  universal-apple-darwin)
+    dmg_arch="universal"
+    archs="x86_64 arm64"
+    ;;
+  aarch64-apple-darwin)
+    dmg_arch="aarch64"
+    archs="arm64"
+    ;;
+  x86_64-apple-darwin)
+    dmg_arch="x64"
+    archs="x86_64"
+    ;;
+  *)
+    echo "Mock pnpm error: unexpected --target '$target'" >&2
+    exit 1
+    ;;
+esac
+
+app_dir="${TARGET_ROOT}/${target}/release/bundle/macos/SynapseRead.app"
+mkdir -p "${app_dir}/Contents/MacOS"
+printf '#!/bin/sh\nexit 0\n' > "${app_dir}/Contents/MacOS/synapseread-desktop"
+chmod +x "${app_dir}/Contents/MacOS/synapseread-desktop"
+printf '%s\n' "$archs" > "${app_dir}/Contents/MacOS/synapseread-desktop.archs"
+cat > "${app_dir}/Contents/Info.plist" <<'PLIST'
+CFBundleIdentifier=app.synapseread.desktop
+NSLocalNetworkUsageDescription=SynapseRead uses your local network only when you choose to share or import books with another device on the same network.
+PLIST
+
+seq_file="${MAC_STATE}/sign_seq"
+seq=1
+if [ -f "$seq_file" ]; then
+  seq=$(( $(cat "$seq_file") + 1 ))
+fi
+printf '%s\n' "$seq" > "$seq_file"
+
+first_arch="${archs%% *}"
+for a in $archs; do
+  if command -v shasum >/dev/null 2>&1; then
+    cdh="$(printf 'linker:%s:%s' "$seq" "$a" | shasum -a 256 | awk '{print substr($1, 1, 40)}')"
+  else
+    cdh="$(printf 'linker:%s:%s' "$seq" "$a" | sha256sum | awk '{print substr($1, 1, 40)}')"
+  fi
+  cat > "${app_dir}/.mock_codesign.dv.${a}" <<STATE
+Signature=adhoc
+Info.plist=not bound
+TeamIdentifier=not set
+CDHash=${cdh}
+CodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0 location=embedded
+STATE
+done
+cp "${app_dir}/.mock_codesign.dv.${first_arch}" "${app_dir}/.mock_codesign.dv"
+
+if [ "$has_bundles_app" = false ]; then
+  dmg_dir="${TARGET_ROOT}/${target}/release/bundle/dmg"
+  mkdir -p "$dmg_dir"
+  tar -cf "${dmg_dir}/SynapseRead_${APP_VERSION:?}_${dmg_arch}.dmg" -C "$(dirname "$app_dir")" "$(basename "$app_dir")"
+fi
+EOF
+
+cat > "$MAC_MOCK_BIN/codesign" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+MAC_STATE="${MOCK_MAC_STATE_DIR:?}"
+printf 'codesign %s\n' "$*" >> "${MAC_STATE}/calls.log"
+
+hash40() {
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 40)}'
+  else
+    printf '%s' "$1" | sha256sum | awk '{print substr($1, 1, 40)}'
+  fi
+}
+
+mode=""
+sign_id=""
+has_runtime=false
+arch=""
+last_arg=""
+while [ $# -gt 0 ]; do
+  last_arg="$1"
+  case "$1" in
+    --sign|-s)
+      mode="sign"
+      sign_id="${2:-}"
+      shift 2
+      ;;
+    --arch|-a)
+      arch="${2:-}"
+      shift 2
+      ;;
+    --options)
+      if [ "${2:-}" = "runtime" ] || [[ ",${2:-}," == *",runtime,"* ]]; then
+        has_runtime=true
+      fi
+      shift 2
+      ;;
+    --options=*)
+      opt_val="${1#--options=}"
+      if [ "$opt_val" = "runtime" ] || [[ ",${opt_val}," == *",runtime,"* ]]; then
+        has_runtime=true
+      fi
+      shift
+      ;;
+    -dv)
+      mode="dv"
+      shift
+      ;;
+    --verify)
+      mode="verify"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ -d "$last_arg" ]; then
+  state_prefix="${last_arg}/.mock_codesign"
+else
+  mkdir -p "${MAC_STATE}/cs"
+  state_prefix="${MAC_STATE}/cs/$(basename "$last_arg")"
+fi
+
+case "$mode" in
+  sign)
+    seq_file="${MAC_STATE}/sign_seq"
+    seq=1
+    if [ -f "$seq_file" ]; then
+      seq=$(( $(cat "$seq_file") + 1 ))
+    fi
+    printf '%s\n' "$seq" > "$seq_file"
+
+    resolved_authority="$sign_id"
+    if [[ "$sign_id" =~ ^[0-9A-Fa-f]{40}$ ]] && [ -f "${MAC_STATE}/identities.txt" ]; then
+      sign_upper="$(printf '%s' "$sign_id" | tr '[:lower:]' '[:upper:]')"
+      found_name="$(awk -v fp="$sign_upper" '
+        {
+          if (match($0, /^[[:space:]]*[0-9]+\)[[:space:]]+([0-9A-Fa-f]{40})[[:space:]]+"(.+)"[[:space:]]*$/)) {
+            line = $0
+            sub(/^[[:space:]]*[0-9]+\)[[:space:]]+/, "", line)
+            cur_fp = toupper(substr(line, 1, 40))
+            if (cur_fp == fp) {
+              name = substr(line, 42)
+              sub(/^[[:space:]]*"/, "", name)
+              sub(/"[[:space:]]*$/, "", name)
+              print name
+              exit
+            }
+          }
+        }
+      ' "${MAC_STATE}/identities.txt")"
+      if [ -n "$found_name" ]; then
+        resolved_authority="$found_name"
+      fi
+    fi
+
+    if [ -d "$last_arg" ]; then
+      archs="x86_64 arm64"
+      if [ -f "${last_arg}/Contents/MacOS/synapseread-desktop.archs" ]; then
+        archs="$(cat "${last_arg}/Contents/MacOS/synapseread-desktop.archs")"
+      fi
+      first_arch="${archs%% *}"
+      for a in $archs; do
+        cdh="$(hash40 "${seq}:${sign_id}:${a}")"
+        if [ "$sign_id" = "-" ]; then
+          cat > "${state_prefix}.dv.${a}" <<STATE
+Signature=adhoc
+Info.plist entries=20
+TeamIdentifier=not set
+CDHash=${cdh}
+CodeDirectory v=20500 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded
+STATE
+        else
+          flags="0x0(none)"
+          [ "$has_runtime" = true ] && flags="0x10000(runtime)"
+          cat > "${state_prefix}.dv.${a}" <<STATE
+Authority=${resolved_authority}
+Signature size=1234
+Info.plist entries=20
+TeamIdentifier=not set
+CDHash=${cdh}
+CodeDirectory v=20500 size=1 flags=${flags} hashes=1+0 location=embedded
+STATE
+        fi
+      done
+      cp "${state_prefix}.dv.${first_arch}" "${state_prefix}.dv"
+    else
+      if [ "$sign_id" = "-" ]; then
+        cat > "${state_prefix}.dv" <<'STATE'
+Signature=adhoc
+Info.plist entries=20
+TeamIdentifier=not set
+CodeDirectory v=20500 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded
+STATE
+      else
+        flags="0x0(none)"
+        [ "$has_runtime" = true ] && flags="0x10000(runtime)"
+        cat > "${state_prefix}.dv" <<STATE
+Authority=${resolved_authority}
+Signature size=1234
+Info.plist entries=20
+TeamIdentifier=not set
+CodeDirectory v=20500 size=1 flags=${flags} hashes=1+0 location=embedded
+STATE
+      fi
+    fi
+    ;;
+  dv)
+    if [ -n "$arch" ]; then
+      if [ -f "${state_prefix}.dv.${arch}" ]; then
+        cat "${state_prefix}.dv.${arch}" >&2
+        exit 0
+      fi
+      echo "${last_arg}: architecture ${arch} not found" >&2
+      exit 1
+    fi
+    if [ -f "${state_prefix}.dv" ]; then
+      cat "${state_prefix}.dv" >&2
+      exit 0
+    fi
+    echo "${last_arg}: code object is not signed at all" >&2
+    exit 1
+    ;;
+  verify)
+    if [ -f "${state_prefix}.dv" ] && [ ! -f "${state_prefix}.verify_fail" ]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  *)
+    echo "Mock codesign error: unrecognized invocation: $*" >&2
+    exit 1
+    ;;
+esac
+EOF
+
+cat > "$MAC_MOCK_BIN/hdiutil" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+MAC_STATE="${MOCK_MAC_STATE_DIR:?}"
+printf 'hdiutil %s\n' "$*" >> "${MAC_STATE}/calls.log"
+sub="${1:-}"
+shift || true
+case "$sub" in
+  create)
+    srcfolder=""
+    last_arg=""
+    prev=""
+    for arg in "$@"; do
+      last_arg="$arg"
+      if [ "$prev" = "-srcfolder" ]; then
+        srcfolder="$arg"
+      fi
+      prev="$arg"
+    done
+    if [ -n "$srcfolder" ] && [ -d "$srcfolder" ]; then
+      printf 'hdiutil-srcfolder: %s\n' "$(ls -1 "$srcfolder" | tr '\n' ' ')" >> "${MAC_STATE}/calls.log"
+    fi
+    mkdir -p "$(dirname "$last_arg")"
+    tar -cf "$last_arg" -C "$srcfolder" .
+    ;;
+  verify)
+    [ -f "${1:-}" ] && tar -tf "${1:-}" >/dev/null 2>&1
+    ;;
+  attach)
+    if [ -f "${MAC_STATE}/attach_fail" ]; then
+      echo "hdiutil: attach failed (mocked)" >&2
+      exit 1
+    fi
+    mountpoint=""
+    dmg_file=""
+    prev=""
+    for arg in "$@"; do
+      if [ "$prev" = "-mountpoint" ]; then
+        mountpoint="$arg"
+      fi
+      case "$arg" in
+        -*) ;;
+        *)
+          if [ "$prev" != "-mountpoint" ]; then
+            dmg_file="$arg"
+          fi
+          ;;
+      esac
+      prev="$arg"
+    done
+    if [ -z "$mountpoint" ] || [ ! -d "$mountpoint" ] || [ ! -f "$dmg_file" ]; then
+      echo "hdiutil: invalid attach args" >&2
+      exit 1
+    fi
+    tar -xf "$dmg_file" -C "$mountpoint"
+    mkdir -p "${MAC_STATE}/mounted"
+    printf '%s\n' "$dmg_file" > "${MAC_STATE}/mounted/$(basename "$mountpoint")"
+    ;;
+  detach)
+    mountpoint="${1:-}"
+    shift || true
+    is_force=false
+    for arg in "$@"; do
+      if [ "$arg" = "-force" ]; then
+        is_force=true
+      fi
+    done
+    if [ "$is_force" = false ] && [ -f "${MAC_STATE}/detach_normal_fail" ]; then
+      echo "hdiutil: couldn't unmount \"${mountpoint}\" - Resource busy (mocked)" >&2
+      exit 1
+    fi
+    if [ "$is_force" = true ] && [ -f "${MAC_STATE}/detach_force_fail" ]; then
+      echo "hdiutil: force unmount failed for \"${mountpoint}\" (mocked)" >&2
+      exit 1
+    fi
+    if [ -z "$mountpoint" ] || [ ! -d "$mountpoint" ]; then
+      exit 1
+    fi
+    marker="${MAC_STATE}/mounted/$(basename "$mountpoint")"
+    if [ ! -f "$marker" ]; then
+      exit 1
+    fi
+    find "$mountpoint" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    rm -f "$marker"
+    ;;
+  *)
+    echo "Mock hdiutil error: unexpected subcommand '$sub'" >&2
+    exit 1
+    ;;
+esac
+EOF
+
+cat > "$MAC_MOCK_BIN/ditto" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ditto %s\n' "$*" >> "${MOCK_MAC_STATE_DIR:?}/calls.log"
+cp -R "$1" "$2"
+EOF
+
+cat > "$MAC_MOCK_BIN/lipo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'lipo %s\n' "$*" >> "${MOCK_MAC_STATE_DIR:?}/calls.log"
+last_arg=""
+for arg in "$@"; do
+  last_arg="$arg"
+done
+if [ -n "$last_arg" ] && [ -f "${last_arg}.archs" ]; then
+  cat "${last_arg}.archs"
+else
+  echo "x86_64 arm64"
+fi
+EOF
+
+cat > "$MAC_MOCK_BIN/plutil" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'plutil %s\n' "$*" >> "${MOCK_MAC_STATE_DIR:?}/calls.log"
+case "${1:-}" in
+  -lint)
+    [ -f "${2:-}" ]
+    ;;
+  -extract)
+    key="${2:-}"
+    last_arg=""
+    for arg in "$@"; do
+      last_arg="$arg"
+    done
+    awk -F= -v k="$key" '$1 == k { found=1; print substr($0, length(k) + 2); exit } END { if (!found) exit 1 }' "$last_arg"
+    ;;
+  -p)
+    cat "${2:-}"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+
+cat > "$MAC_MOCK_BIN/shasum" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'shasum %s\n' "$*" >> "${MOCK_MAC_STATE_DIR:?}/calls.log"
+last_arg=""
+for arg in "$@"; do
+  last_arg="$arg"
+done
+echo "0000000000000000000000000000000000000000000000000000000000000000  $last_arg"
+EOF
+
+cat > "$MAC_MOCK_BIN/xcrun" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'xcrun %s\n' "$*" >> "${MOCK_MAC_STATE_DIR:?}/calls.log"
+exit 1
+EOF
+
+cat > "$MAC_MOCK_BIN/spctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'spctl %s\n' "$*" >> "${MOCK_MAC_STATE_DIR:?}/calls.log"
+exit 1
+EOF
+
+chmod +x "$MAC_MOCK_BIN"/*
+
+FP_DEFAULT="0123456789ABCDEF0123456789ABCDEF01234567"
+FP_ALT="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+reset_mac_state() {
+  rm -rf "${MAC_STATE}/cs" "${MAC_STATE}/mounted" "$MAC_TARGET_DIR" "$MAC_TMP_DIR"
+  rm -f "${MAC_STATE}/security_fail" "${MAC_STATE}/attach_fail" "${MAC_STATE}/detach_normal_fail" "${MAC_STATE}/detach_force_fail" "${MAC_STATE}/sign_seq"
+  mkdir -p "${MAC_STATE}/cs" "${MAC_STATE}/mounted" "$MAC_TARGET_DIR" "$MAC_TMP_DIR"
+  : > "${MAC_STATE}/calls.log"
+  cat > "${MAC_STATE}/identities.txt" <<IDS
+  1) ${FP_DEFAULT} "SynapseRead Local Signing"
+     1 valid identities found
+IDS
+}
+
+make_fake_app() {
+  local app_dir="$1"
+  local archs="${2:-x86_64 arm64}"
+  mkdir -p "${app_dir}/Contents/MacOS"
+  printf '#!/bin/sh\nexit 0\n' > "${app_dir}/Contents/MacOS/synapseread-desktop"
+  chmod +x "${app_dir}/Contents/MacOS/synapseread-desktop"
+  printf '%s\n' "$archs" > "${app_dir}/Contents/MacOS/synapseread-desktop.archs"
+  cat > "${app_dir}/Contents/Info.plist" <<'PLIST'
+CFBundleIdentifier=app.synapseread.desktop
+NSLocalNetworkUsageDescription=SynapseRead uses your local network only when you choose to share or import books with another device on the same network.
+PLIST
+}
+
+set_cs_state() {
+  local target="$1"
+  local content="$2"
+  local arch="${3:-}"
+  local prefix
+  if [ -d "$target" ]; then
+    prefix="${target}/.mock_codesign"
+  else
+    mkdir -p "${MAC_STATE}/cs"
+    prefix="${MAC_STATE}/cs/$(basename "$target")"
+  fi
+  if [ -n "$arch" ]; then
+    printf '%s\n' "$content" > "${prefix}.dv.${arch}"
+  else
+    printf '%s\n' "$content" > "${prefix}.dv"
+    if [ -d "$target" ] && [ -f "${target}/Contents/MacOS/synapseread-desktop.archs" ]; then
+      for a in $(cat "${target}/Contents/MacOS/synapseread-desktop.archs"); do
+        printf '%s\n' "$content" > "${prefix}.dv.${a}"
+      done
+    fi
+  fi
+}
+
+make_fake_dmg() {
+  local dmg_path="$1"
+  local app_dir="$2"
+  mkdir -p "$(dirname "$dmg_path")"
+  tar -cf "$dmg_path" -C "$(dirname "$app_dir")" "$(basename "$app_dir")"
+}
+
+assert_no_leaked_mounts() {
+  local desc="$1"
+  local remaining_mounts remaining_dirs
+  remaining_mounts="$(find "${MAC_STATE}/mounted" -mindepth 1 | wc -l | tr -d ' ')"
+  remaining_dirs="$(find "$MAC_TMP_DIR" -maxdepth 1 -name 'synapseread-dmg-verify.*' | wc -l | tr -d ' ')"
+  if [ "$remaining_mounts" -ne 0 ] || [ "$remaining_dirs" -ne 0 ]; then
+    echo "[FAIL] ${desc}: mount cleanup leaked (mounts=${remaining_mounts}, dirs=${remaining_dirs})" >&2
+    exit 1
+  fi
+}
+
+run_with_mac_mocks() {
+  PATH="${MAC_MOCK_BIN}:$PATH" \
+    MOCK_MAC_STATE_DIR="$MAC_STATE" \
+    CARGO_TARGET_DIR="$MAC_TARGET_DIR" \
+    TMPDIR="$MAC_TMP_DIR" \
+    APP_VERSION="$APP_VERSION" \
+    "$@"
+}
+
+echo "24. macos-build-signed: --local-sign missing value or flag-like value -> fail without calling pnpm"
+reset_mac_state
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign >/dev/null 2>&1; then
+  echo "[FAIL] Expected --local-sign with missing value to fail" >&2
+  exit 1
+fi
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign --ci >/dev/null 2>&1; then
+  echo "[FAIL] Expected --local-sign --ci to fail" >&2
+  exit 1
+fi
+if grep -q '^pnpm ' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] pnpm must not be called when --local-sign argument validation fails" >&2
+  exit 1
+fi
+
+echo "25. macos-build-signed: --local-sign - -> fail and direct user to --adhoc-sign"
+reset_mac_state
+ERR_25="$TMP_DIR/err25.log"
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign - >/dev/null 2>"$ERR_25"; then
+  echo "[FAIL] Expected --local-sign - to fail" >&2
+  exit 1
+fi
+if ! grep -q -- '--adhoc-sign' "$ERR_25"; then
+  echo "[FAIL] Expected stderr to mention --adhoc-sign:" >&2
+  cat "$ERR_25" >&2
+  exit 1
+fi
+if grep -q '^pnpm ' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] pnpm must not be called for --local-sign -" >&2
+  exit 1
+fi
+
+echo "26. macos-build-signed: mutually exclusive signing mode flags -> fail without calling pnpm"
+for pair in \
+  "--local-sign SynapseRead_Local --allow-unsigned" \
+  "--adhoc-sign --allow-unsigned" \
+  "--local-sign SynapseRead_Local --adhoc-sign"; do
+  reset_mac_state
+  # shellcheck disable=SC2086
+  if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" $pair >/dev/null 2>&1; then
+    echo "[FAIL] Expected mutually exclusive flags ($pair) to fail" >&2
+    exit 1
+  fi
+  if grep -q '^pnpm ' "${MAC_STATE}/calls.log"; then
+    echo "[FAIL] pnpm must not be called when mutually exclusive flags ($pair) are passed" >&2
+    exit 1
+  fi
+done
+
+echo "27. macos-build-signed: --local-sign rejects missing, zero-summary, security-error, partial, and ambiguous identities before pnpm"
+reset_mac_state
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "Missing Identity" >/dev/null 2>&1; then
+  echo "[FAIL] Expected missing Keychain identity to fail" >&2
+  exit 1
+fi
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "SynapseRead Local" >/dev/null 2>&1; then
+  echo "[FAIL] Expected partial certificate name to fail" >&2
+  exit 1
+fi
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "0123456789ABCDEF" >/dev/null 2>&1; then
+  echo "[FAIL] Expected partial fingerprint to fail" >&2
+  exit 1
+fi
+
+printf '     0 valid identities found\n' > "${MAC_STATE}/identities.txt"
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "0 valid identities found" >/dev/null 2>&1; then
+  echo "[FAIL] Expected summary line '0 valid identities found' to be rejected" >&2
+  exit 1
+fi
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "valid identities" >/dev/null 2>&1; then
+  echo "[FAIL] Expected substring of summary line to be rejected" >&2
+  exit 1
+fi
+
+reset_mac_state
+touch "${MAC_STATE}/security_fail"
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "SynapseRead Local Signing" >/dev/null 2>&1; then
+  echo "[FAIL] Expected security tool failure to abort before pnpm" >&2
+  exit 1
+fi
+
+reset_mac_state
+cat > "${MAC_STATE}/identities.txt" <<IDS
+  1) ${FP_DEFAULT} "SynapseRead Local Signing"
+  2) ${FP_ALT} "SynapseRead Local Signing"
+     2 valid identities found
+IDS
+if run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "SynapseRead Local Signing" >/dev/null 2>&1; then
+  echo "[FAIL] Expected duplicate certificate name ambiguity to fail" >&2
+  exit 1
+fi
+if grep -q '^pnpm ' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] pnpm must not be called on any failed identity preflight" >&2
+  exit 1
+fi
+
+run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "$FP_ALT" --target aarch64-apple-darwin >/dev/null
+if ! grep -Fq "codesign --force --deep --options runtime --timestamp=none --sign ${FP_ALT} " "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected explicit fingerprint $FP_ALT to disambiguate duplicate certificate names" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+
+echo "28. macos-build-signed: --local-sign by name or fingerprint resolves same cert fingerprint for .app and .dmg, verifies inner DMG, skips notarization"
+reset_mac_state
+OUT_28="$TMP_DIR/out28.log"
+run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "SynapseRead Local Signing" --ci >"$OUT_28"
+if ! grep -q '^pnpm .*--bundles app' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected pnpm tauri build to receive --bundles app in local-sign mode" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+EXPECTED_APP_28="${MAC_TARGET_DIR}/universal-apple-darwin/release/bundle/macos/SynapseRead.app"
+EXPECTED_DMG_28="${MAC_TARGET_DIR}/universal-apple-darwin/release/bundle/dmg/SynapseRead_${APP_VERSION}_universal.dmg"
+APP_SIGN_LINE="$(grep -n "codesign --force --deep --options runtime --timestamp=none --sign ${FP_DEFAULT} ${EXPECTED_APP_28}" "${MAC_STATE}/calls.log" | head -n 1 | cut -d: -f1 || true)"
+HDIUTIL_CREATE_LINE="$(grep -n '^hdiutil create ' "${MAC_STATE}/calls.log" | head -n 1 | cut -d: -f1 || true)"
+if [ -z "$APP_SIGN_LINE" ] || [ -z "$HDIUTIL_CREATE_LINE" ] || [ "$APP_SIGN_LINE" -ge "$HDIUTIL_CREATE_LINE" ]; then
+  echo "[FAIL] Expected app codesign with fingerprint before hdiutil create (app_sign=$APP_SIGN_LINE, hdiutil=$HDIUTIL_CREATE_LINE)" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+if [ ! -f "$EXPECTED_DMG_28" ]; then
+  echo "[FAIL] Expected DMG at $EXPECTED_DMG_28" >&2
+  exit 1
+fi
+if ! grep -Fq "codesign --force --timestamp=none --sign ${FP_DEFAULT} ${EXPECTED_DMG_28}" "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected DMG to be signed with resolved fingerprint ${FP_DEFAULT}" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+if ! grep -q '^hdiutil attach ' "${MAC_STATE}/calls.log" || ! grep -q '^hdiutil detach ' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected verify-macos-bundle to attach and detach DMG in --local-sign mode" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 28 name build"
+if grep -Eq '^(xcrun|spctl) ' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected no xcrun or spctl calls in --local-sign mode" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+if ! grep -Fq 'All requested macOS bundle checks passed.' "$OUT_28"; then
+  echo "[FAIL] Expected verify-macos-bundle success output in --local-sign mode" >&2
+  cat "$OUT_28" >&2
+  exit 1
+fi
+
+reset_mac_state
+FP_LOWER="$(printf '%s' "$FP_DEFAULT" | tr '[:upper:]' '[:lower:]')"
+run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --local-sign "$FP_LOWER" --target aarch64-apple-darwin >/dev/null
+EXPECTED_APP_28B="${MAC_TARGET_DIR}/aarch64-apple-darwin/release/bundle/macos/SynapseRead.app"
+EXPECTED_DMG_28B="${MAC_TARGET_DIR}/aarch64-apple-darwin/release/bundle/dmg/SynapseRead_${APP_VERSION}_aarch64.dmg"
+if ! grep -Fq "codesign --force --deep --options runtime --timestamp=none --sign ${FP_DEFAULT} ${EXPECTED_APP_28B}" "${MAC_STATE}/calls.log" \
+  || ! grep -Fq "codesign --force --timestamp=none --sign ${FP_DEFAULT} ${EXPECTED_DMG_28B}" "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected lowercase 40-hex fingerprint to normalize to uppercase ${FP_DEFAULT} for .app and .dmg" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 28 fingerprint build"
+
+echo "29. macos-build-signed: --adhoc-sign aarch64 signs app ad hoc (bound), packages DMG, verifies inner app, skips DMG codesign and xcrun"
+reset_mac_state
+run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --adhoc-sign --target aarch64-apple-darwin >/dev/null
+EXPECTED_APP_29="${MAC_TARGET_DIR}/aarch64-apple-darwin/release/bundle/macos/SynapseRead.app"
+EXPECTED_DMG_29="${MAC_TARGET_DIR}/aarch64-apple-darwin/release/bundle/dmg/SynapseRead_${APP_VERSION}_aarch64.dmg"
+if ! grep -Fq "codesign --force --deep --sign - ${EXPECTED_APP_29}" "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected ad hoc codesign --force --deep --sign - on app" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+if grep -q 'codesign .*--options runtime' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected no --options runtime in --adhoc-sign mode" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+if grep -Fq " ${EXPECTED_DMG_29}" <(grep '^codesign .*--sign' "${MAC_STATE}/calls.log" || true); then
+  echo "[FAIL] Expected no codesign --sign on DMG in --adhoc-sign mode" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+if [ ! -f "$EXPECTED_DMG_29" ]; then
+  echo "[FAIL] Expected aarch64 DMG at $EXPECTED_DMG_29" >&2
+  exit 1
+fi
+if grep -q '^xcrun ' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected no xcrun calls in --adhoc-sign mode" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 29 adhoc build"
+
+echo "30. macos-build-signed: --allow-unsigned keeps Tauri-default build behavior"
+reset_mac_state
+run_with_mac_mocks "$SCRIPT_DIR/macos-build-signed.sh" --allow-unsigned >/dev/null 2>&1
+if grep -q '^pnpm .*--bundles' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected no --bundles flag in --allow-unsigned mode" >&2
+  exit 1
+fi
+if grep -Eq '^codesign .*(--sign|-s) ' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected no codesign --sign/-s call in --allow-unsigned mode" >&2
+  exit 1
+fi
+if grep -q '^hdiutil create ' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected no hdiutil create in --allow-unsigned mode" >&2
+  exit 1
+fi
+
+echo "31. verify-macos-bundle: --require-local-signed rejects linker-signed (Info.plist=not bound) app"
+reset_mac_state
+APP_31="$TMP_DIR/app31/SynapseRead.app"
+make_fake_app "$APP_31"
+set_cs_state "$APP_31" $'Signature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\nCDHash=1111111111111111111111111111111111111111\nCodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0 location=embedded'
+OUT_31="$TMP_DIR/out31.log"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_31" --require-local-signed >"$OUT_31" 2>&1; then
+  echo "[FAIL] Expected --require-local-signed to reject linker-signed app" >&2
+  exit 1
+fi
+if ! grep -Fq 'not bound' "$OUT_31"; then
+  echo "[FAIL] Expected failure output to mention 'not bound':" >&2
+  cat "$OUT_31" >&2
+  exit 1
+fi
+
+echo "32. verify-macos-bundle: --require-adhoc-bound rejects linker-signed and local-signed apps"
+reset_mac_state
+APP_32="$TMP_DIR/app32/SynapseRead.app"
+make_fake_app "$APP_32"
+set_cs_state "$APP_32" $'Signature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\nCDHash=1111111111111111111111111111111111111111\nCodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0 location=embedded'
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_32" --require-adhoc-bound >/dev/null 2>&1; then
+  echo "[FAIL] Expected --require-adhoc-bound to reject linker-signed app" >&2
+  exit 1
+fi
+set_cs_state "$APP_32" $'Authority=SynapseRead Local Signing\nInfo.plist entries=20\nTeamIdentifier=not set\nCDHash=2222222222222222222222222222222222222222\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+0 location=embedded'
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_32" --require-adhoc-bound >/dev/null 2>&1; then
+  echo "[FAIL] Expected --require-adhoc-bound to reject non-adhoc local-signed app" >&2
+  exit 1
+fi
+
+echo "33. verify-macos-bundle: passing more than one require flag fails"
+reset_mac_state
+APP_33="$TMP_DIR/app33/SynapseRead.app"
+make_fake_app "$APP_33"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_33" --require-signed --require-local-signed >/dev/null 2>&1; then
+  echo "[FAIL] Expected multiple --require-* flags to fail" >&2
+  exit 1
+fi
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_33" --require-local-signed --require-adhoc-bound >/dev/null 2>&1; then
+  echo "[FAIL] Expected --require-local-signed --require-adhoc-bound to fail" >&2
+  exit 1
+fi
+
+echo "34. verify-macos-bundle: --require-local-signed requires Hardened Runtime and bound Info.plist"
+reset_mac_state
+APP_34="$TMP_DIR/app34/SynapseRead.app"
+make_fake_app "$APP_34"
+set_cs_state "$APP_34" $'Authority=SynapseRead Local Signing\nInfo.plist entries=20\nTeamIdentifier=not set\nCDHash=3333333333333333333333333333333333333333\nCodeDirectory v=20500 size=1 flags=0x0(none) hashes=1+0 location=embedded'
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_34" --require-local-signed >/dev/null 2>&1; then
+  echo "[FAIL] Expected --require-local-signed to fail when Hardened Runtime flag is absent" >&2
+  exit 1
+fi
+set_cs_state "$APP_34" $'Authority=SynapseRead Local Signing\nInfo.plist entries=20\nTeamIdentifier=not set\nCDHash=3333333333333333333333333333333333333333\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+0 location=embedded'
+run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_34" --require-local-signed >/dev/null
+
+echo "35. verify-macos-bundle: --dmg containing linker-signed inner app fails for both --require-adhoc-bound and --require-local-signed"
+reset_mac_state
+APP_35_OUTER="$TMP_DIR/app35_outer/SynapseRead.app"
+APP_35_INNER="$TMP_DIR/app35_inner/SynapseRead.app"
+DMG_35="$TMP_DIR/app35.dmg"
+make_fake_app "$APP_35_OUTER" "arm64"
+make_fake_app "$APP_35_INNER" "arm64"
+set_cs_state "$APP_35_OUTER" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+set_cs_state "$APP_35_INNER" $'Signature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\nCDHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nCodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_35" "$APP_35_INNER"
+OUT_35A="$TMP_DIR/out35a.log"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_35_OUTER" --dmg "$DMG_35" --require-adhoc-bound >"$OUT_35A" 2>&1; then
+  echo "[FAIL] Expected --require-adhoc-bound to reject DMG containing linker-signed inner app" >&2
+  exit 1
+fi
+if ! grep -Fq 'not bound' "$OUT_35A"; then
+  echo "[FAIL] Expected linker-signed DMG failure to mention 'not bound':" >&2
+  cat "$OUT_35A" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 35 adhoc linker-signed dmg"
+
+set_cs_state "$APP_35_OUTER" $'Authority=SynapseRead Local Signing\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=cccccccccccccccccccccccccccccccccccccccc\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+0 location=embedded'
+set_cs_state "$DMG_35" $'Authority=SynapseRead Local Signing\nSignature size=1234\nTeamIdentifier=not set\nCodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+0 location=embedded'
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_35_OUTER" --dmg "$DMG_35" --require-local-signed >/dev/null 2>&1; then
+  echo "[FAIL] Expected --require-local-signed to reject DMG containing linker-signed inner app" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 35 local linker-signed dmg"
+
+echo "36. verify-macos-bundle: rejects same-version different-build DMG (CDHash mismatch, including per-arch) and arch-mismatched DMG"
+reset_mac_state
+APP_36_OUTER="$TMP_DIR/app36_outer/SynapseRead.app"
+APP_36_INNER="$TMP_DIR/app36_inner/SynapseRead.app"
+DMG_36="$TMP_DIR/app36.dmg"
+make_fake_app "$APP_36_OUTER" "x86_64 arm64"
+make_fake_app "$APP_36_INNER" "x86_64 arm64"
+set_cs_state "$APP_36_OUTER" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=1111111111111111111111111111111111111111\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded' "arm64"
+set_cs_state "$APP_36_OUTER" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=2222222222222222222222222222222222222222\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded' "x86_64"
+cp "${APP_36_OUTER}/.mock_codesign.dv.arm64" "${APP_36_OUTER}/.mock_codesign.dv"
+set_cs_state "$APP_36_INNER" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=1111111111111111111111111111111111111111\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded' "arm64"
+set_cs_state "$APP_36_INNER" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=9999999999999999999999999999999999999999\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded' "x86_64"
+cp "${APP_36_INNER}/.mock_codesign.dv.arm64" "${APP_36_INNER}/.mock_codesign.dv"
+make_fake_dmg "$DMG_36" "$APP_36_INNER"
+OUT_36A="$TMP_DIR/out36a.log"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_36_OUTER" --dmg "$DMG_36" --require-universal --require-adhoc-bound >"$OUT_36A" 2>&1; then
+  echo "[FAIL] Expected per-arch CDHash mismatch on x86_64 to fail" >&2
+  exit 1
+fi
+if ! grep -Fq 'CDHash mismatch for architecture x86_64' "$OUT_36A"; then
+  echo "[FAIL] Expected failure message for x86_64 CDHash mismatch:" >&2
+  cat "$OUT_36A" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 36 per-arch cdhash mismatch"
+
+APP_36_THIN="$TMP_DIR/app36_thin/SynapseRead.app"
+DMG_36_THIN="$TMP_DIR/app36_thin.dmg"
+make_fake_app "$APP_36_THIN" "arm64"
+set_cs_state "$APP_36_THIN" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=1111111111111111111111111111111111111111\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_36_THIN" "$APP_36_THIN"
+OUT_36B="$TMP_DIR/out36b.log"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_36_OUTER" --dmg "$DMG_36_THIN" --require-adhoc-bound >"$OUT_36B" 2>&1; then
+  echo "[FAIL] Expected architecture-mismatched DMG to fail" >&2
+  exit 1
+fi
+if ! grep -Fq 'Architecture mismatch' "$OUT_36B"; then
+  echo "[FAIL] Expected architecture mismatch error:" >&2
+  cat "$OUT_36B" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 36 arch mismatch"
+
+echo "37. verify-macos-bundle: cleans up mount directory on attach failure, verify failure, and success"
+reset_mac_state
+APP_37="$TMP_DIR/app37/SynapseRead.app"
+DMG_37="$TMP_DIR/app37.dmg"
+make_fake_app "$APP_37" "arm64"
+set_cs_state "$APP_37" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=4444444444444444444444444444444444444444\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_37" "$APP_37"
+run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_37" --dmg "$DMG_37" --require-adhoc-bound >/dev/null
+assert_no_leaked_mounts "test 37 success"
+
+touch "${MAC_STATE}/attach_fail"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_37" --dmg "$DMG_37" --require-adhoc-bound >/dev/null 2>&1; then
+  echo "[FAIL] Expected attach failure to fail verification" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 37 attach failure"
+
+echo "38. verify-macos-bundle: normal detach fails but force detach succeeds -> passes and cleans up"
+reset_mac_state
+APP_38="$TMP_DIR/app38/SynapseRead.app"
+DMG_38="$TMP_DIR/app38.dmg"
+make_fake_app "$APP_38" "arm64"
+set_cs_state "$APP_38" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=5555555555555555555555555555555555555555\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_38" "$APP_38"
+touch "${MAC_STATE}/detach_normal_fail"
+OUT_38="$TMP_DIR/out38.log"
+run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_38" --dmg "$DMG_38" --require-adhoc-bound >"$OUT_38" 2>&1
+if ! grep -Fq 'All requested macOS bundle checks passed.' "$OUT_38"; then
+  echo "[FAIL] Expected success when force detach recovers cleanup:" >&2
+  cat "$OUT_38" >&2
+  exit 1
+fi
+if ! grep -q '^hdiutil detach .* -force$' "${MAC_STATE}/calls.log"; then
+  echo "[FAIL] Expected fallback hdiutil detach -force call:" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+assert_no_leaked_mounts "test 38 force detach recovery"
+
+echo "39. verify-macos-bundle: both normal and force detach fail when main checks pass -> exits non-zero with mount point and hdiutil error"
+reset_mac_state
+APP_39="$TMP_DIR/app39/SynapseRead.app"
+DMG_39="$TMP_DIR/app39.dmg"
+make_fake_app "$APP_39" "arm64"
+set_cs_state "$APP_39" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=6666666666666666666666666666666666666666\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_39" "$APP_39"
+touch "${MAC_STATE}/detach_normal_fail" "${MAC_STATE}/detach_force_fail"
+OUT_39="$TMP_DIR/out39.log"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_39" --dmg "$DMG_39" --require-adhoc-bound >"$OUT_39" 2>&1; then
+  echo "[FAIL] Expected verify-macos-bundle to fail when both normal and force detach fail" >&2
+  cat "$OUT_39" >&2
+  exit 1
+fi
+if grep -Fq 'All requested macOS bundle checks passed.' "$OUT_39"; then
+  echo "[FAIL] Must not print success banner when detach failed:" >&2
+  cat "$OUT_39" >&2
+  exit 1
+fi
+if ! grep -Fq 'synapseread-dmg-verify.' "$OUT_39" \
+  || ! grep -Fq 'Resource busy (mocked)' "$OUT_39" \
+  || ! grep -Fq 'force unmount failed' "$OUT_39"; then
+  echo "[FAIL] Expected detach error output to include mount point and hdiutil error details:" >&2
+  cat "$OUT_39" >&2
+  exit 1
+fi
+if [ "$(find "${MAC_STATE}/mounted" -mindepth 1 | wc -l | tr -d ' ')" -ne 1 ]; then
+  echo "[FAIL] Expected mount state to remain tracked while unmount failed" >&2
+  exit 1
+fi
+if [ "$(grep -c '^hdiutil detach ' "${MAC_STATE}/calls.log")" -lt 4 ]; then
+  echo "[FAIL] Expected EXIT trap to retry detach while DMG_MOUNTED remained true" >&2
+  cat "${MAC_STATE}/calls.log" >&2
+  exit 1
+fi
+
+echo "40. verify-macos-bundle: main verification failure plus detach failure preserves original error and appends cleanup failure"
+reset_mac_state
+APP_40_OUTER="$TMP_DIR/app40_outer/SynapseRead.app"
+APP_40_INNER="$TMP_DIR/app40_inner/SynapseRead.app"
+DMG_40="$TMP_DIR/app40.dmg"
+make_fake_app "$APP_40_OUTER" "arm64"
+make_fake_app "$APP_40_INNER" "arm64"
+set_cs_state "$APP_40_OUTER" $'Signature=adhoc\nInfo.plist entries=16\nTeamIdentifier=not set\nCDHash=7777777777777777777777777777777777777777\nCodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded'
+set_cs_state "$APP_40_INNER" $'Signature=adhoc\nInfo.plist=not bound\nTeamIdentifier=not set\nCDHash=8888888888888888888888888888888888888888\nCodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0 location=embedded'
+make_fake_dmg "$DMG_40" "$APP_40_INNER"
+touch "${MAC_STATE}/detach_normal_fail" "${MAC_STATE}/detach_force_fail"
+OUT_40="$TMP_DIR/out40.log"
+if run_with_mac_mocks "$SCRIPT_DIR/verify-macos-bundle.sh" --app "$APP_40_OUTER" --dmg "$DMG_40" --require-adhoc-bound >"$OUT_40" 2>&1; then
+  echo "[FAIL] Expected verify-macos-bundle to fail when both main checks and detach fail" >&2
+  exit 1
+fi
+if ! grep -Fq 'not bound' "$OUT_40" \
+  || ! grep -Fq 'synapseread-dmg-verify.' "$OUT_40" \
+  || ! grep -Fq 'force unmount failed' "$OUT_40"; then
+  echo "[FAIL] Expected both original validation failure and detach failure in output:" >&2
+  cat "$OUT_40" >&2
+  exit 1
+fi
+if ! grep -Eq 'Verification failed with [2-9][0-9]* error\(s\)\.' "$OUT_40"; then
+  echo "[FAIL] Expected multiple errors reported (original + cleanup failure):" >&2
+  cat "$OUT_40" >&2
+  exit 1
+fi
+
+echo "All 40 release script regression tests passed."
