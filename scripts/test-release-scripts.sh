@@ -211,6 +211,23 @@ case "$subcmd" in
           exit 1
         fi
 
+        if [ -f "${STATE_DIR}/upload_fail_502_clean" ]; then
+          rm -f "${STATE_DIR}/upload_fail_502_clean"
+          echo "gh: Bad Gateway (HTTP 502)" >&2
+          exit 1
+        fi
+
+        if [ -f "${STATE_DIR}/upload_fail_502_starter" ]; then
+          rm -f "${STATE_DIR}/upload_fail_502_starter"
+          starter_obj="$(jq -c -n --arg name "$asset_name" '{id: 701, name: $name, state: "starter", size: 0, digest: null}')"
+          jq -c --argjson id "$rel_id" --argjson asset "$starter_obj" \
+            'map(if .id == $id then .assets = ((.assets // []) + [$asset]) else . end)' \
+            "${STATE_DIR}/releases.json" > "${STATE_DIR}/releases.tmp"
+          mv "${STATE_DIR}/releases.tmp" "${STATE_DIR}/releases.json"
+          echo "gh: Bad Gateway (HTTP 502)" >&2
+          exit 1
+        fi
+
         existing="$(jq -c --argjson id "$rel_id" --arg name "$asset_name" '[.[] | select(.id == $id) | .assets[]? | select(.name == $name)] | length' "${STATE_DIR}/releases.json")"
         if [ "$existing" -gt 0 ]; then
           echo "gh: Validation Failed: ReleaseAsset already_exists (HTTP 422)" >&2
@@ -247,6 +264,8 @@ export RELEASE_UPLOAD_RETRY_DELAY=0
 reset_state() {
   rm -f "${STATE_DIR}"/ref.json "${STATE_DIR}"/tag_*.json \
     "${STATE_DIR}/upload_fail_500_once" \
+    "${STATE_DIR}/upload_fail_502_clean" \
+    "${STATE_DIR}/upload_fail_502_starter" \
     "${STATE_DIR}/upload_fail_500_then_publish" \
     "${STATE_DIR}/publish_before_first_upload_immutable" \
     "${STATE_DIR}/publish_before_first_upload_mutable"
@@ -517,7 +536,7 @@ if [ "$(grep -c 'POST repos/owner/repo/releases ' "${STATE_DIR}/calls.log")" -ne
   exit 1
 fi
 
-echo "18. release-publish-draft: P1 race (last read draft, published before first write; immutable server rejects 422)"
+echo "18. release-publish-draft: P1 race (last read draft, published before first write; immutable server rejects 422 with zero asset changes)"
 reset_state
 make_release_json 81 true "$SHA_A" > "${STATE_DIR}/releases.json"
 touch "${STATE_DIR}/publish_before_first_upload_immutable"
@@ -530,6 +549,10 @@ fi
 assert_never_used_clobber_or_delete "P1 immutable race"
 if [ "$(grep -c 'POST https://uploads.github.com/repos/owner/repo/releases/81/assets?name=' "${STATE_DIR}/calls.log")" -ne 1 ]; then
   echo "[FAIL] Expected abort immediately on rejected first write without attempting remaining assets" >&2
+  exit 1
+fi
+if [ "$(jq '.[0].assets | length' "${STATE_DIR}/releases.json")" -ne 0 ]; then
+  echo "[FAIL] Expected immutable published release asset list to remain unchanged (length 0)" >&2
   exit 1
 fi
 
@@ -603,4 +626,81 @@ if EVENT_NAME=push REF_NAME="$TAG_NAME" GITHUB_REF="refs/tags/${TAG_NAME}" \
   exit 1
 fi
 
-echo "All 21 release script regression tests passed."
+echo "22. release-publish-draft: P2 conflict on later asset (.app.zip or SHA256SUMS.txt) when .dmg is missing -> zero upload requests"
+reset_state
+ZIP_CONFLICT_ASSETS="$(jq -c -n --arg n2 "$ZIP_NAME" --arg d2 "$OTHER_DIGEST" '[{id:2,name:$n2,state:"uploaded",digest:$d2}]')"
+make_release_json 86 true "$SHA_A" "$ZIP_CONFLICT_ASSETS" > "${STATE_DIR}/releases.json"
+if GITHUB_REPOSITORY="owner/repo" TAG_NAME="$TAG_NAME" BUILD_SHA="$SHA_A" \
+  ASSETS_DIR="$ASSETS_DIR" APP_VERSION="$APP_VERSION" \
+  "$SCRIPT_DIR/release-publish-draft.sh" >/dev/null 2>&1; then
+  echo "[FAIL] Expected later .app.zip digest conflict to fail before uploading .dmg" >&2
+  exit 1
+fi
+assert_no_mutation_or_asset_calls "later .app.zip conflict with missing .dmg"
+
+reset_state
+SUMS_CONFLICT_ASSETS="$(jq -c -n \
+  --arg n1 "$DMG_NAME" --arg d1 "$DMG_DIGEST" \
+  --arg n3 "$SUMS_NAME" --arg d3 "$OTHER_DIGEST" \
+  '[{id:1,name:$n1,state:"uploaded",digest:$d1},{id:3,name:$n3,state:"uploaded",digest:$d3}]')"
+make_release_json 87 true "$SHA_A" "$SUMS_CONFLICT_ASSETS" > "${STATE_DIR}/releases.json"
+if GITHUB_REPOSITORY="owner/repo" TAG_NAME="$TAG_NAME" BUILD_SHA="$SHA_A" \
+  ASSETS_DIR="$ASSETS_DIR" APP_VERSION="$APP_VERSION" \
+  "$SCRIPT_DIR/release-publish-draft.sh" >/dev/null 2>&1; then
+  echo "[FAIL] Expected later SHA256SUMS.txt digest conflict to fail before uploading .app.zip" >&2
+  exit 1
+fi
+assert_no_mutation_or_asset_calls "later SHA256SUMS.txt conflict with missing .app.zip"
+
+echo "23. release-publish-draft: P2 502 -> starter reports draft/asset IDs without retry POST; clean 502 retries cleanly"
+reset_state
+make_release_json 89 true "$SHA_A" > "${STATE_DIR}/releases.json"
+touch "${STATE_DIR}/upload_fail_502_starter"
+ERR_23A="$TMP_DIR/err23a.log"
+if GITHUB_REPOSITORY="owner/repo" TAG_NAME="$TAG_NAME" BUILD_SHA="$SHA_A" \
+  ASSETS_DIR="$ASSETS_DIR" APP_VERSION="$APP_VERSION" \
+  "$SCRIPT_DIR/release-publish-draft.sh" > /dev/null 2> "$ERR_23A"; then
+  echo "[FAIL] Expected 502 leaving starter asset to fail" >&2
+  exit 1
+fi
+assert_never_used_clobber_or_delete "502 leaving starter"
+if [ "$(grep -c 'POST https://uploads.github.com/repos/owner/repo/releases/89/assets?name=' "${STATE_DIR}/calls.log")" -ne 1 ]; then
+  echo "[FAIL] Expected retry precheck to abort on starter asset without issuing a second POST" >&2
+  exit 1
+fi
+if ! grep -q "starter" "$ERR_23A" || ! grep -q "id=89" "$ERR_23A" || ! grep -q "asset id=701" "$ERR_23A"; then
+  echo "[FAIL] Expected starter error to report starter state, release id=89, and asset id=701:" >&2
+  cat "$ERR_23A" >&2
+  exit 1
+fi
+
+reset_state
+STARTER_ZIP_ASSETS="$(jq -c -n --arg n2 "$ZIP_NAME" '[{id:702,name:$n2,state:"starter",size:0,digest:null}]')"
+make_release_json 90 true "$SHA_A" "$STARTER_ZIP_ASSETS" > "${STATE_DIR}/releases.json"
+ERR_23B="$TMP_DIR/err23b.log"
+if GITHUB_REPOSITORY="owner/repo" TAG_NAME="$TAG_NAME" BUILD_SHA="$SHA_A" \
+  ASSETS_DIR="$ASSETS_DIR" APP_VERSION="$APP_VERSION" \
+  "$SCRIPT_DIR/release-publish-draft.sh" > /dev/null 2> "$ERR_23B"; then
+  echo "[FAIL] Expected rerun with existing starter asset on .app.zip to fail before uploading .dmg" >&2
+  exit 1
+fi
+assert_no_mutation_or_asset_calls "rerun with starter asset on later asset"
+if ! grep -q "starter" "$ERR_23B" || ! grep -q "id=90" "$ERR_23B" || ! grep -q "asset id=702" "$ERR_23B"; then
+  echo "[FAIL] Expected rerun starter error to report starter state, release id=90, and asset id=702:" >&2
+  cat "$ERR_23B" >&2
+  exit 1
+fi
+
+reset_state
+make_release_json 91 true "$SHA_A" > "${STATE_DIR}/releases.json"
+touch "${STATE_DIR}/upload_fail_502_clean"
+GITHUB_REPOSITORY="owner/repo" TAG_NAME="$TAG_NAME" BUILD_SHA="$SHA_A" \
+  ASSETS_DIR="$ASSETS_DIR" APP_VERSION="$APP_VERSION" \
+  "$SCRIPT_DIR/release-publish-draft.sh" >/dev/null 2>&1
+assert_never_used_clobber_or_delete "clean 502 retry"
+if [ "$(grep -c 'POST https://uploads.github.com/repos/owner/repo/releases/91/assets?name=' "${STATE_DIR}/calls.log")" -ne 4 ]; then
+  echo "[FAIL] Expected 4 upload POSTs for clean 502 retry (1 failed 502 + 3 succeeded)" >&2
+  exit 1
+fi
+
+echo "All 23 release script regression tests passed."

@@ -54,7 +54,28 @@ openssl base64 -A -in DeveloperIDApplication.p12 | gh secret set APPLE_CERTIFICA
 - **`workflow_dispatch` (signed test build for `#147`):** Run **Release** manually from GitHub Actions with `create_release=false` (whether dispatched from a branch or a `v*` tag) to download a signed, notarized `SynapseRead-<version>-macos-universal` workflow artifact without creating or modifying any GitHub Release. Setting `create_release=true` creates or updates a draft Release only when the built commit matches any existing remote tag/draft and no published Release exists for that tag.
 - **`workflow_dispatch` (unsigned CI smoke test):** Set `allow_unsigned=true` (requires `create_release=false`) when Apple secrets are not configured yet. Unsigned artifacts are labeled `-unsigned` and are not valid for `#147`.
 
-> **Draft Release Protection:** `scripts/release-publish-draft.sh` uploads missing assets directly to the verified draft's Release ID `upload_url` without `--clobber` or asset deletion, skips identical-digest assets, and aborts on digest mismatches or published releases. To guarantee at the GitHub server level that a release cannot receive new or modified assets if someone publishes the draft mid-upload, enable **Release immutability** in **Repository Settings → General → Releases**.
+> **Draft Release Protection:** `scripts/release-publish-draft.sh` validates all three expected assets before writing, uploads missing assets directly to the verified draft's Release ID `upload_url` without `--clobber` or asset deletion, skips identical-digest assets, and aborts on digest mismatches, `starter` placeholders, or published releases. To guarantee at the GitHub server level that a release cannot receive new or modified assets if someone publishes the draft mid-upload, enable **Release immutability** in **Repository Settings → General → Releases**.
+
+### Recovering from Failed Upload (`starter` Assets)
+
+If a transient gateway failure (such as HTTP `502`) leaves an incomplete `state: "starter"` placeholder asset on a draft Release, `scripts/release-publish-draft.sh` refuses to auto-delete it and prints both the draft release ID and the stuck asset ID. Recover manually without discarding your already-signed artifacts:
+
+1. **Confirm the release is still an unpublished draft** (and bound to the expected commit SHA):
+
+   ```sh
+   gh api repos/<owner>/<repo>/releases/<release-id> \
+     --jq '{id, tag_name, draft, target_commitish, assets: [.assets[] | {id, name, state, size, digest}]}'
+   ```
+
+   Verify `"draft": true` and confirm `<asset-id>` has `"state": "starter"`. Never delete assets from a published release.
+
+2. **Delete only the incomplete `starter` asset**:
+
+   ```sh
+   gh api --method DELETE repos/<owner>/<repo>/releases/assets/<asset-id>
+   ```
+
+3. **Rerun using the original build artifacts**: re-run the failed `publish-release` job in the same GitHub Actions workflow run so it downloads the exact `SynapseRead-<version>-macos-universal` artifact from `build-macos` (matching any already-uploaded assets on that draft) rather than rebuilding fresh binaries.
 
 ## Local Signed & Notarized Builds
 
