@@ -17,7 +17,7 @@ Under **`OD-2 Rev 2`** (self-used open-source policy):
 ## 2. Prerequisites
 
 1. **Two Macs on `macOS 15+`**: Designate `Mac A` (initial source) and `Mac B` (initial receiver), plus a fresh macOS user account or VM snapshot for first-prompt `M-perm` checks (`UA-12`).
-2. **Single Source Commit SHA**: Build on one clean `main` commit SHA (record `git rev-parse HEAD`). Never mix two builds from different commits.
+2. **Single Source Commit SHA (`Build 1` baseline)**: Build on one clean `main` commit SHA (record `git rev-parse HEAD`). The **only** exception is **`T-49`**, which temporarily builds a second distinct-`CDHash` package (`Build 2`) on the Mac under test to inspect rebuild permission persistence; restore the verified `Build 1` package on every modified Mac and re-verify matching SHA/`CDHash` across both Macs at the **`M-pack` entry gate** before running core LAN matrix checks.
 3. **Build and Verify the Packaged App** (choose one valid `#147` mode per [MACOS_SIGNING.md](MACOS_SIGNING.md#self-use--open-source-macos-builds-no-apple-developer-account)):
 
    ```sh
@@ -141,22 +141,23 @@ Execute the **Ad hoc bound (`--adhoc-sign`)** arm, execute the **Local self-sign
      - **Local Network (outbound) pre-check**: put the Mac under test in the **receiver** role, connect to the peer Mac, and confirm catalog load succeeds.
      - **Application Firewall (inbound) pre-check**: put the Mac under test in the **source** role (`Firewall ON`, SynapseRead allowed), start sharing, and confirm the peer Mac connects and imports cleanly.
 2. **Rebuild and replace with a strictly different `CDHash`**:
-   - Quit SynapseRead (`⌘Q`).
-   - Build and verify a fresh replacement (`Build 2`) in the same signing mode (`--adhoc-sign` or `--local-sign`) such that its `CDHash` differs from `Build 1` (for example, after a commit or harmless build metadata/comment change).
+   - Archive/keep the original verified `Build 1` `.app`/`.dmg` intact outside `/Applications` so it can be restored after `T-49`, then quit SynapseRead (`⌘Q`).
+   - Build and verify a fresh replacement (`Build 2`) in the same signing mode (`--adhoc-sign` or `--local-sign`) such that its `CDHash` differs from `Build 1` (for example, on a temporary commit or harmless build metadata/comment change; record `BUILD2_SHA`).
    - Replace `/Applications/SynapseRead.app` with `Build 2`, clear any quarantine, and launch `Build 2` from **Finder**.
 3. **Post-replacement pre-connection inspection**:
-   - **Before** clicking Share or Connect, run the collector (`--label T-49-<mode>-post-before-connect`) to confirm **`Build 2 CDHash` ≠ `Build 1 CDHash`**, `Signature integrity = valid`, and initial Firewall rule state; screenshot **System Settings → Privacy & Security → Local Network** and **System Settings → Network → Firewall** to record whether existing toggles/rules survived replacement or disappeared/reset.
+   - **Before** clicking Share or Connect, run the collector (`--label T-49-<mode>-post-before-connect --build-sha "$BUILD2_SHA"`) to confirm **`Build 2 CDHash` ≠ `Build 1 CDHash`**, `Signature integrity = valid`, and initial Firewall rule state; screenshot **System Settings → Privacy & Security → Local Network** and **System Settings → Network → Firewall** to record whether existing toggles/rules survived replacement or disappeared/reset.
 4. **Post-replacement directional checks**:
    - **Local Network (outbound) post-check**: put the Mac under test in the **receiver** role and connect to the peer Mac. Record whether macOS prompts again, succeeds immediately, or fails with `lan_unreachable` until re-enabled.
    - **Application Firewall (inbound) post-check**: put the Mac under test in the **source** role (`Firewall ON`), start sharing, and have the peer Mac connect. Record whether incoming connections succeed, fail, or trigger a firewall prompt, and whether re-allowing in System Settings is required.
 5. **Paid Apple Developer ID arm**: record verbatim as `Deferred / N/A per OD-2 Rev 2 (self-used open-source project without paid Apple Developer account)`.
-6. Record pre-replacement and post-replacement `CDHash`, Local Network, and Firewall outcomes separately for each tested mode in Appendix B.
+6. **Separate build evidence records**: Record `Build 1` (`--label T-49-<mode>-pre`) and `Build 2` (`--label T-49-<mode>-post-before-connect`)—including each build's SHA, `CDHash`, signing mode, `Signature integrity`, Local Network outcome (receiver), and Firewall outcome (source)—as separate evidence artifacts in Appendix B.
+7. **Restore the verified `Build 1` baseline (mandatory before continuing)**: Quit SynapseRead (`⌘Q`), delete `Build 2` from `/Applications/SynapseRead.app`, reinstall the original verified `Build 1` `.app` (from the single target `main` SHA) into `/Applications/SynapseRead.app`, clear quarantine (`xattr -dr com.apple.quarantine /Applications/SynapseRead.app`) if needed, and verify via `scripts/verify-macos-bundle.sh` or collector that the restored app matches `Build 1`'s exact `CDHash`, signing type, and `Signature integrity = valid`. Confirm no Mac remains on `Build 2`.
 
 ### `UA-3` — Local Network Denied: Physical LAN vs Loopback Isolation Check
 
 Because production builds enforce `AddressPolicy::lan_only()` ([`crates/synapse-lan/src/address.rs`](../crates/synapse-lan/src/address.rs#L236-L252)), `127.0.0.1` is rejected before any socket call (`T-57`) and cannot be tested through the Finder UI. Resolve `UA-3` using the two concrete halves below plus ADR 0008 maintainer sign-off:
 
-1. **Physical LAN denial (Finder-launched `.app`)**: Keep `/Applications/SynapseRead.app` launched from **Finder** on the macOS 15+ test Mac with **Local Network** explicitly toggled **OFF** in **System Settings → Privacy & Security → Local Network**, attempt to connect to the peer Mac's physical private LAN IPv4 (`192.168.x.x` / `10.x.x.x` / `172.16-31.x.x`), and record the `lan_unreachable` failure (`--label UA-3-lan-denied` + screenshot).
+1. **Physical LAN denial (Finder-launched `.app`)**: Keep the restored baseline `Build 1` `/Applications/SynapseRead.app` launched from **Finder** on the macOS 15+ test Mac with **Local Network** explicitly toggled **OFF** in **System Settings → Privacy & Security → Local Network**, attempt to connect to the peer Mac's physical private LAN IPv4 (`192.168.x.x` / `10.x.x.x` / `172.16-31.x.x`), and record the `lan_unreachable` failure (`--label UA-3-lan-denied` + screenshot).
 2. **Loopback exemption regression (`synapse-lan`)**: Run and record the `cargo test -p synapse-lan` loopback E2E suite (which exercises real sockets on `127.0.0.1` via test-only `AddressPolicy::loopback_for_tests()`) on the macOS 15+ host.
 3. **Maintainer sign-off**: Record both halves explicitly in Appendix B and mark `UA-3` for maintainer acceptance in ADR 0008 (noting that production `AddressPolicy::lan_only()` intentionally blocks loopback in the packaged app).
 
@@ -164,7 +165,16 @@ Because production builds enforce `AddressPolicy::lan_only()` ([`crates/synapse-
 
 ## 5. Run 2: `M-pack` — Two Physical Macs on LAN + Role Swap
 
-Use Finder-launched `/Applications/SynapseRead.app` on both `Mac A` and `Mac B` with Local Network permission allowed.
+### `M-pack` Entry Baseline Gate (Mandatory Before `T-10`)
+
+Before executing any `M-pack` scenario (`T-10` onward), confirm both Macs are restored to the identical verified `Build 1` package and record their live permission state:
+
+1. **Restore & launch `Build 1` on BOTH Macs**: Ensure any `T-49` replacement (`Build 2`) has been completely replaced with the initial verified `Build 1` bundle from the single target `main` SHA on both `Mac A` and `Mac B`, then launch `/Applications/SynapseRead.app` from **Finder** on both Macs.
+2. **Re-collect both installed bundles at `M-pack` entry**: Run the collector on **both** Macs right before `T-10`:
+   - `Mac A`: `scripts/lan-sync-collect-evidence.sh --role mac-a --label M-pack-entry --build-sha "$BUILD_SHA" --out "$EVIDENCE_DIR"`
+   - `Mac B`: `scripts/lan-sync-collect-evidence.sh --role mac-b --label M-pack-entry --build-sha "$BUILD_SHA" --out "$EVIDENCE_DIR"`
+   - Verify both `M-pack-entry` reports record identical `Build commit SHA` (`$BUILD_SHA`), **identical `CDHash`**, matching valid `Signing type` (`Self-Signed (...)` or `adhoc (bound)`), `Signature integrity = valid`, and `ppid=1` alongside manual Finder launch confirmation.
+3. **Record post-restoration permissions**: Allow **Local Network** permission if prompted after restoring `Build 1`, then capture **System Settings → Privacy & Security → Local Network** (enabled on both Macs) and **System Settings → Network → Firewall** state in Appendix A / Appendix B before starting `T-10`.
 
 ### Listener Lifecycle & Pairing
 
@@ -415,6 +425,7 @@ Swap roles so **`Mac B` shares** via `File ▸ Share Books on This Network…` a
 | `CDHash`               |                          |                            |
 | Launch Method          | Finder (`/Applications`) | Finder (`/Applications`)   |
 | Initial Firewall State |                          |                            |
+| `M-pack` Entry Check   | `--label M-pack-entry`   | `--label M-pack-entry`     |
 
 ### Appendix B: Per-Test Results Template
 
@@ -428,9 +439,10 @@ Leave **Result** blank until the physical two-Mac run completes. Valid values: `
 | `T-42` / `UA-1`            | `Perm`          | `Mac B`   | **Don't Allow** triggers `lan_unreachable` hints; System Settings enable + **Retry** recovery recorded                                                                                    |        |                                                   |                  |
 | `UA-12`                    | `Perm`          | `Mac B`   | Local Network Settings toggle/reset and relaunch requirement recorded on target macOS 15+ build                                                                                           |        |                                                   |                  |
 | `T-43` / `UA-2`            | `Perm`          | `Mac A`   | Source with Local Network denied still serves incoming transfer from allowed `Mac B` (or outcome noted)                                                                                   |        |                                                   |                  |
-| `T-49` / `UA-8` (Ad hoc)   | `Perm`          | `Mac A/B` | Pre-replacement & post-replacement (new `CDHash`) Local Network (receiver) + Firewall (source) observed; Dev ID deferred                                                                  |        |                                                   |                  |
-| `T-49` / `UA-8` (Self-sgn) | `Perm`          | `Mac A/B` | Pre-replacement & post-replacement (new `CDHash`) Local Network (receiver) + Firewall (source) observed (if cert configured)                                                              |        |                                                   |                  |
+| `T-49` / `UA-8` (Ad hoc)   | `Perm`          | `Mac A/B` | Separate `Build 1` & `Build 2` SHA/`CDHash`/integrity + Local Network (receiver) & Firewall (source) outcomes + `Build 1` restored; Dev ID deferred                                       |        |                                                   |                  |
+| `T-49` / `UA-8` (Self-sgn) | `Perm`          | `Mac A/B` | Separate `Build 1` & `Build 2` SHA/`CDHash`/integrity + Local Network (receiver) & Firewall (source) outcomes + `Build 1` restored (if cert configured)                                   |        |                                                   |                  |
 | `UA-3`                     | `Perm`          | `Mac B`   | Finder physical LAN denied (`lan_unreachable`) + `synapse-lan` loopback E2E pass recorded; maintainer sign-off                                                                            |        |                                                   |                  |
+| `M-pack` Entry Check       | `Pack`          | `Mac A/B` | Both Macs re-collected (`--label M-pack-entry`) confirming restored `Build 1` SHA, matching `CDHash`, valid signature integrity, and Finder Launch + Local Network / Firewall state       |        |                                                   |                  |
 | `T-10`                     | `Pack`          | `Mac A`   | `LISTEN` count `0` (launch) -> `1` bound IP (share) -> `0` (stop / red close button `R3-05` / quit)                                                                                       |        |                                                   |                  |
 | `T-08` / `UA-4`            | `Pack`          | `Mac A/B` | Coexists with `0.0.0.0:49319` wildcard; falls back to `49320` when `<lan_ip>:49319` occupied                                                                                              |        |                                                   |                  |
 | `T-12`                     | `Pack`          | `Mac A`   | Declining native `Share Books on This Network` confirmation leaves `0` listeners                                                                                                          |        |                                                   |                  |
