@@ -849,4 +849,100 @@ if run_collector --role mac-b --label bad-explicit-app --executable "$DEV_BIN" -
   exit 1
 fi
 
-echo "All 19 LAN evidence collector tests passed."
+echo "20. --out never blocks on a FIFO and skips existing files, symlinks, and directories atomically"
+reset_state
+cat > "${MOCK_STATE}/codesign.dv" <<'CS'
+Identifier=app.synapseread.desktop
+Signature=adhoc
+Info.plist entries=16
+CodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded
+CS
+echo "20261125T080000" > "${MOCK_STATE}/fixed_date"
+OUT_DIR_20="${TMP_DIR}/evidence_collision_types"
+mkdir -p "$OUT_DIR_20"
+
+# 20a: pre-existing regular file
+printf 'keep-regular\n' > "${OUT_DIR_20}/20261125T080000-mac-a-reg.md"
+STDOUT_20A="$(run_collector --role mac-a --label reg --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 1111111 --out "$OUT_DIR_20" 2>"${TMP_DIR}/err20a.log")"
+if [[ "$(cat "${OUT_DIR_20}/20261125T080000-mac-a-reg.md")" != "keep-regular" ]]; then
+  echo "[FAIL] pre-existing regular file was modified" >&2
+  exit 1
+fi
+if ! diff -u <(printf '%s\n' "$STDOUT_20A") "${OUT_DIR_20}/20261125T080000-mac-a-reg-1.md"; then
+  echo "[FAIL] reg collision fallback -1.md differs from stdout" >&2
+  exit 1
+fi
+
+# 20b: pre-existing valid symlink, dangling symlink, and symlink-to-directory
+printf 'keep-symlink-target\n' > "${TMP_DIR}/sym_target.md"
+ln -s "${TMP_DIR}/sym_target.md" "${OUT_DIR_20}/20261125T080000-mac-a-sym.md"
+STDOUT_20B="$(run_collector --role mac-a --label sym --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 2222222 --out "$OUT_DIR_20" 2>"${TMP_DIR}/err20b.log")"
+if [[ ! -L "${OUT_DIR_20}/20261125T080000-mac-a-sym.md" ]] || [[ "$(cat "${TMP_DIR}/sym_target.md")" != "keep-symlink-target" ]]; then
+  echo "[FAIL] pre-existing symlink or its target was modified" >&2
+  exit 1
+fi
+if ! diff -u <(printf '%s\n' "$STDOUT_20B") "${OUT_DIR_20}/20261125T080000-mac-a-sym-1.md"; then
+  echo "[FAIL] sym collision fallback -1.md differs from stdout" >&2
+  exit 1
+fi
+
+ln -s "${TMP_DIR}/does-not-exist.md" "${OUT_DIR_20}/20261125T080000-mac-a-dangling.md"
+STDOUT_20C="$(run_collector --role mac-a --label dangling --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 3333333 --out "$OUT_DIR_20" 2>"${TMP_DIR}/err20c.log")"
+if [[ ! -L "${OUT_DIR_20}/20261125T080000-mac-a-dangling.md" ]] || [[ -e "${TMP_DIR}/does-not-exist.md" ]]; then
+  echo "[FAIL] dangling symlink should remain untouched" >&2
+  exit 1
+fi
+if ! diff -u <(printf '%s\n' "$STDOUT_20C") "${OUT_DIR_20}/20261125T080000-mac-a-dangling-1.md"; then
+  echo "[FAIL] dangling symlink collision fallback -1.md differs from stdout" >&2
+  exit 1
+fi
+
+mkdir -p "${TMP_DIR}/sym_dir_target"
+ln -s "${TMP_DIR}/sym_dir_target" "${OUT_DIR_20}/20261125T080000-mac-a-sdir.md"
+STDOUT_20D="$(run_collector --role mac-a --label sdir --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 4444444 --out "$OUT_DIR_20" 2>"${TMP_DIR}/err20d.log")"
+if [[ -n "$(ls -A "${TMP_DIR}/sym_dir_target")" ]]; then
+  echo "[FAIL] symlink-to-directory target must remain empty" >&2
+  exit 1
+fi
+if ! diff -u <(printf '%s\n' "$STDOUT_20D") "${OUT_DIR_20}/20261125T080000-mac-a-sdir-1.md"; then
+  echo "[FAIL] symlink-to-directory collision fallback -1.md differs from stdout" >&2
+  exit 1
+fi
+
+# 20c: pre-existing named pipe (FIFO) must fail immediately with EEXIST and never block
+FIFO_PATH="${OUT_DIR_20}/20261125T080000-mac-a-fifo.md"
+mkfifo "$FIFO_PATH"
+run_collector --role mac-a --label fifo --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 5555555 --out "$OUT_DIR_20" \
+  > "${TMP_DIR}/fifo.stdout" 2> "${TMP_DIR}/fifo.stderr" &
+FIFO_CMD_PID=$!
+DEADLINE_20=$(( $(date '+%s') + 5 ))
+while kill -0 "$FIFO_CMD_PID" 2>/dev/null; do
+  if [[ "$(date '+%s')" -ge "$DEADLINE_20" ]]; then
+    kill -9 "$FIFO_CMD_PID" 2>/dev/null || true
+    wait "$FIFO_CMD_PID" 2>/dev/null || true
+    echo "[FAIL] --out blocked on pre-existing FIFO $FIFO_PATH" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+if ! wait "$FIFO_CMD_PID"; then
+  echo "[FAIL] FIFO collision run failed unexpectedly:" >&2
+  cat "${TMP_DIR}/fifo.stderr" >&2
+  exit 1
+fi
+if [[ ! -p "$FIFO_PATH" ]]; then
+  echo "[FAIL] pre-existing FIFO was replaced or removed" >&2
+  exit 1
+fi
+if ! diff -u "${TMP_DIR}/fifo.stdout" "${OUT_DIR_20}/20261125T080000-mac-a-fifo-1.md"; then
+  echo "[FAIL] FIFO collision fallback -1.md differs from stdout" >&2
+  exit 1
+fi
+
+STRAY_TMP="$(find "$OUT_DIR_20" "$OUT_DIR_18" -maxdepth 1 -name '.lan-evidence.tmp.*')"
+if [[ -n "$STRAY_TMP" ]]; then
+  echo "[FAIL] stray temp files left behind: $STRAY_TMP" >&2
+  exit 1
+fi
+
+echo "All 20 LAN evidence collector tests passed."

@@ -886,26 +886,39 @@ write_unique_report() {
     return 1
   fi
 
-  local base="${out_dir%/}/${stamp}-${role}-${label}"
+  local out_base="${out_dir%/}"
+  local base="${out_base}/${stamp}-${role}-${label}"
   local candidate="${base}.md"
   local seq=0
 
-  # Use shell noclobber (O_CREAT|O_EXCL) so concurrent same-second runs never
-  # overwrite an existing report file.
+  # Stage the report in an exclusive regular temp file inside out_dir, then publish
+  # via `ln -n` (link(2)) so pre-existing FIFOs (mkfifo), symlinks, or files fail
+  # immediately without opening or blocking on a FIFO.
+  local tmp_file
+  tmp_file="$(mktemp "${out_base}/.lan-evidence.tmp.XXXXXX")" || {
+    echo "Error: Failed to create temporary report file in '$out_dir'." >&2
+    return 1
+  }
+  if ! printf '%s\n' "$content" > "$tmp_file"; then
+    rm -f "$tmp_file"
+    echo "Error: Failed to write temporary evidence report in '$out_dir'." >&2
+    return 1
+  fi
+
   while true; do
-    if (
-      set -C
-      printf '%s\n' "$content" > "$candidate"
-    ) 2>/dev/null; then
+    if [[ ! -d "$candidate" ]] && ln -n "$tmp_file" "$candidate" 2>/dev/null; then
+      rm -f "$tmp_file"
       printf '%s' "$candidate"
       return 0
     fi
     if [[ ! -e "$candidate" && ! -L "$candidate" ]]; then
+      rm -f "$tmp_file"
       echo "Error: Failed to write evidence report to '$candidate'." >&2
       return 1
     fi
     seq=$((seq + 1))
     if [[ "$seq" -gt 10000 ]]; then
+      rm -f "$tmp_file"
       echo "Error: Too many filename collisions under '$out_dir' for '${stamp}-${role}-${label}'." >&2
       return 1
     fi
