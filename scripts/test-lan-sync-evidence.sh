@@ -369,6 +369,18 @@ fi
 /bin/date "$@"
 EOF
 
+cat > "${MOCK_BIN}/mktemp" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE="${MOCK_STATE:?}"
+if [[ -f "${STATE}/mkdir_before_publish" ]]; then
+  target_dir="$(cat "${STATE}/mkdir_before_publish")"
+  rm -f "${STATE}/mkdir_before_publish"
+  mkdir -p "$target_dir"
+fi
+/usr/bin/mktemp "$@"
+EOF
+
 chmod +x "$MOCK_BIN"/*
 
 reset_state() {
@@ -945,4 +957,84 @@ if [[ -n "$STRAY_TMP" ]]; then
   exit 1
 fi
 
-echo "All 20 LAN evidence collector tests passed."
+echo "21. --out atomically handles pre-existing directory and directory created right before publish"
+reset_state
+cat > "${MOCK_STATE}/codesign.dv" <<'CS'
+Identifier=app.synapseread.desktop
+Signature=adhoc
+Info.plist entries=16
+CodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded
+CS
+echo "20261125T080001" > "${MOCK_STATE}/fixed_date"
+OUT_DIR_21="${TMP_DIR}/evidence_dir_race"
+mkdir -p "$OUT_DIR_21"
+
+# 21a: directory created right before publish (at temp-file creation time inside write_unique_report)
+RACED_DIR_21="${OUT_DIR_21}/20261125T080001-mac-a-dirrace.md"
+EXPECTED_SAVED_21="${OUT_DIR_21}/20261125T080001-mac-a-dirrace-1.md"
+printf '%s\n' "$RACED_DIR_21" > "${MOCK_STATE}/mkdir_before_publish"
+STDOUT_21A="$(run_collector --role mac-a --label dirrace --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 6666666 --out "$OUT_DIR_21" 2>"${TMP_DIR}/err21a.log")"
+SAVED_LINE_21A="$(sed -n 's/^Saved LAN evidence report to: //p' "${TMP_DIR}/err21a.log")"
+if [[ "$SAVED_LINE_21A" != "$EXPECTED_SAVED_21" ]]; then
+  echo "[FAIL] expected Saved path '$EXPECTED_SAVED_21', got '$SAVED_LINE_21A' (stderr: $(cat "${TMP_DIR}/err21a.log"))" >&2
+  exit 1
+fi
+if [[ ! -f "$SAVED_LINE_21A" || -d "$SAVED_LINE_21A" || -L "$SAVED_LINE_21A" ]]; then
+  echo "[FAIL] reported saved path '$SAVED_LINE_21A' is not an actual regular file" >&2
+  exit 1
+fi
+if [[ ! -d "$RACED_DIR_21" || -n "$(ls -A "$RACED_DIR_21")" ]]; then
+  echo "[FAIL] raced directory '$RACED_DIR_21' should remain empty without child links" >&2
+  exit 1
+fi
+if ! diff -u <(printf '%s\n' "$STDOUT_21A") "$SAVED_LINE_21A"; then
+  echo "[FAIL] dirrace fallback -1.md differs from stdout" >&2
+  exit 1
+fi
+
+# 21b: directory created at the exact instant of publish via SYNAPSEREAD_LINK hook
+RACE_LINK="${TMP_DIR}/race-link.sh"
+cat > "$RACE_LINK" <<'RL'
+#!/usr/bin/env bash
+set -euo pipefail
+STATE="${MOCK_STATE:?}"
+src="$1"
+dst="$2"
+if [[ -f "${STATE}/race_mkdir_target" ]]; then
+  target="$(cat "${STATE}/race_mkdir_target")"
+  rm -f "${STATE}/race_mkdir_target"
+  mkdir -p "$target"
+fi
+exec /bin/link "$src" "$dst"
+RL
+chmod +x "$RACE_LINK"
+
+RACED_DIR_21B="${OUT_DIR_21}/20261125T080001-mac-a-linkrace.md"
+EXPECTED_SAVED_21B="${OUT_DIR_21}/20261125T080001-mac-a-linkrace-1.md"
+printf '%s\n' "$RACED_DIR_21B" > "${MOCK_STATE}/race_mkdir_target"
+STDOUT_21B="$(SYNAPSEREAD_LINK="$RACE_LINK" run_collector --role mac-a --label linkrace --app "$APP_DIR" --app-data "${TMP_DIR}/missing-data" --build-sha 7777777 --out "$OUT_DIR_21" 2>"${TMP_DIR}/err21b.log")"
+SAVED_LINE_21B="$(sed -n 's/^Saved LAN evidence report to: //p' "${TMP_DIR}/err21b.log")"
+if [[ "$SAVED_LINE_21B" != "$EXPECTED_SAVED_21B" ]]; then
+  echo "[FAIL] expected Saved path '$EXPECTED_SAVED_21B', got '$SAVED_LINE_21B' (stderr: $(cat "${TMP_DIR}/err21b.log"))" >&2
+  exit 1
+fi
+if [[ ! -f "$SAVED_LINE_21B" || -d "$SAVED_LINE_21B" || -L "$SAVED_LINE_21B" ]]; then
+  echo "[FAIL] reported saved path '$SAVED_LINE_21B' is not an actual regular file" >&2
+  exit 1
+fi
+if [[ ! -d "$RACED_DIR_21B" || -n "$(ls -A "$RACED_DIR_21B")" ]]; then
+  echo "[FAIL] publish-raced directory '$RACED_DIR_21B' should remain empty without child links" >&2
+  exit 1
+fi
+if ! diff -u <(printf '%s\n' "$STDOUT_21B") "$SAVED_LINE_21B"; then
+  echo "[FAIL] linkrace fallback -1.md differs from stdout" >&2
+  exit 1
+fi
+
+STRAY_TMP_21="$(find "$OUT_DIR_21" -maxdepth 1 -name '.lan-evidence.tmp.*')"
+if [[ -n "$STRAY_TMP_21" ]]; then
+  echo "[FAIL] stray temp files left behind under $OUT_DIR_21: $STRAY_TMP_21" >&2
+  exit 1
+fi
+
+echo "All 21 LAN evidence collector tests passed."

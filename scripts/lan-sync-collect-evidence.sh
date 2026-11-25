@@ -27,6 +27,7 @@ Options:
 Environment overrides (for tests):
   SYNAPSEREAD_SOCKETFILTERFW  Override /usr/libexec/ApplicationFirewall/socketfilterfw
   SYNAPSEREAD_WEBKIT_PLIST    Override /System/Library/Frameworks/WebKit.framework/Resources/Info.plist
+  SYNAPSEREAD_LINK            Override /bin/link
 EOF
 }
 
@@ -890,10 +891,12 @@ write_unique_report() {
   local base="${out_base}/${stamp}-${role}-${label}"
   local candidate="${base}.md"
   local seq=0
+  local link_bin="${SYNAPSEREAD_LINK:-/bin/link}"
 
   # Stage the report in an exclusive regular temp file inside out_dir, then publish
-  # via `ln -n` (link(2)) so pre-existing FIFOs (mkfifo), symlinks, or files fail
-  # immediately without opening or blocking on a FIFO.
+  # via macOS `/bin/link` (direct link(2) syscall) so pre-existing FIFOs (mkfifo),
+  # symlinks, regular files, or directories created even at the instant of publish
+  # fail atomically with EEXIST without blocking or linking inside a directory.
   local tmp_file
   tmp_file="$(mktemp "${out_base}/.lan-evidence.tmp.XXXXXX")" || {
     echo "Error: Failed to create temporary report file in '$out_dir'." >&2
@@ -906,7 +909,7 @@ write_unique_report() {
   fi
 
   while true; do
-    if [[ ! -d "$candidate" ]] && ln -n "$tmp_file" "$candidate" 2>/dev/null; then
+    if "$link_bin" "$tmp_file" "$candidate" 2>/dev/null; then
       rm -f "$tmp_file"
       printf '%s' "$candidate"
       return 0
