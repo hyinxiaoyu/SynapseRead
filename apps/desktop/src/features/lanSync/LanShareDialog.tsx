@@ -10,6 +10,7 @@ import {
   formatCountdown,
 } from '@/features/lanSync/lanSyncCopy';
 import { documentFormatLabel } from '@/lib/documentFormats';
+import { documentDisplayName } from '@/lib/documentTitles';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 
 const ACTIVE_SHARE_POLL_MS = 2000;
@@ -91,6 +92,7 @@ function LanShareDialogBody({ onClose }: { onClose: () => void }) {
     if (!query) return documents;
     return documents.filter(
       (doc) =>
+        documentDisplayName(doc).toLowerCase().includes(query) ||
         doc.title.toLowerCase().includes(query) ||
         documentFormatLabel(doc).toLowerCase().includes(query),
     );
@@ -409,7 +411,7 @@ function LanShareDialogBody({ onClose }: { onClose: () => void }) {
                                   onChange={() => toggleBookSelection(doc.id)}
                                 />
                                 <span className="truncate font-medium text-foreground">
-                                  {doc.title}
+                                  {documentDisplayName(doc)}
                                 </span>
                               </span>
                               <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">

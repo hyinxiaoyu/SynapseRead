@@ -1084,6 +1084,34 @@ describe('useStudySyncStore', () => {
       ]);
     });
 
+    it('reports metadata displayTitle, skips redundant writes, and ignores backend errors (#129)', async () => {
+      const docId = await openDocument();
+      const spy = vi.spyOn(backend, 'setDocumentDisplayTitle');
+
+      await state().reportDocumentTitle(docId, 'Pride and Prejudice');
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(state().documents.find((d) => d.id === docId)?.displayTitle).toBe(
+        'Pride and Prejudice',
+      );
+
+      // Identical displayTitle is a no-op.
+      await state().reportDocumentTitle(docId, 'Pride and Prejudice');
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      // Unknown document id is a no-op.
+      await state().reportDocumentTitle('missing-doc', 'Ignored');
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      // Persistence errors do not populate `state.error`.
+      spy.mockRejectedValueOnce(new Error('disk full'));
+      await state().reportDocumentTitle(docId, 'New Title');
+      expect(state().error).toBeNull();
+      expect(state().documents.find((d) => d.id === docId)?.displayTitle).toBe(
+        'Pride and Prejudice',
+      );
+      spy.mockRestore();
+    });
+
     it('restores open tabs, active document, and reading preferences on restart while ignoring unknown document ids', async () => {
       const firstId = await openDocument();
       const secondId = await openDocument();

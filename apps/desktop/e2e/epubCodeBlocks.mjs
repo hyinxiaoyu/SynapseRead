@@ -14,7 +14,7 @@ const frame = `${visibleHost}?.querySelector('iframe')`;
 const frameDocument = `${frame}?.contentDocument`;
 const scroller = `${visibleHost}?.querySelector('.epub-container')`;
 const titleIs = (title) =>
-  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`;
 const chapterIs = (title) =>
   `[...(${visibleHost}?.querySelectorAll('iframe') ?? [])].some((view) => view.contentDocument?.querySelector('h1')?.textContent === ${JSON.stringify(title)})`;
 const excerptEnabled = `![...document.querySelectorAll('button')].find((b) => b.textContent.includes('Excerpt to MindMap')).disabled`;
@@ -380,7 +380,7 @@ export async function epubCodeBlocksFlow(page) {
   await page.openUntil(`${visibleHost} && ${titleIs('sample-code')}`, 'the sample-code EPUB');
   await page.evaluate(`
     [...document.querySelectorAll('[aria-label^="Close "]')]
-      .filter((button) => button.getAttribute('aria-label') !== 'Close sample-code')
+      .filter((button) => button.closest('[data-document-stem]')?.dataset.documentStem !== 'sample-code')
       .forEach((button) => button.click());
   `);
   await page.waitFor(
@@ -876,7 +876,9 @@ export async function epubCodeBlocksFlow(page) {
 
   // Wait past cursor save debounce, close tab, reopen from Recent documents, verify position + highlight + bookmark.
   await new Promise((done) => setTimeout(done, 700));
-  await page.evaluate(`document.querySelector('[aria-label="Close sample-code"]')?.click()`);
+  await page.evaluate(
+    `document.querySelector('[data-document-stem="sample-code"] button[aria-label^="Close"]')?.click()`,
+  );
   await page.waitFor(`!${visibleHost}`, 'sample-code tab to close');
 
   await page.clickButton('Recent documents');
@@ -886,7 +888,7 @@ export async function epubCodeBlocksFlow(page) {
   );
   await page.evaluate(`
     [...document.querySelectorAll('[data-testid="recent-document-item"]')]
-      .find((item) => item.textContent.includes('sample-code'))
+      .find((item) => item.dataset.documentStem === 'sample-code')
       ?.click();
   `);
   await page.waitFor(`${visibleHost} && ${titleIs('sample-code')}`, 'sample-code reopened');

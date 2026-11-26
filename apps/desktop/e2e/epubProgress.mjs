@@ -4,7 +4,7 @@ const visibleViewer = `[...document.querySelectorAll('[data-testid="epub-viewer"
 const frameDocument = `${visibleViewer}?.querySelector('[data-testid="epub-host"] iframe')?.contentDocument`;
 const chapterIs = (title) => `${frameDocument}?.querySelector('h1')?.textContent === '${title}'`;
 const titleIs = (title) =>
-  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`;
 const readout = `${visibleViewer}?.querySelector('[data-testid="reader-footer-readout"]')`;
 
 /** Clicks the footer readout until it shows `kind`, and returns its text. */
@@ -79,7 +79,7 @@ export async function epubProgressFlow(page) {
   await page.clickButton('Recent documents');
   await page.waitFor(
     `[...document.querySelectorAll('[data-testid="recent-documents-menu"] [data-testid="recent-document-item"]')]
-      .some((entry) => entry.textContent.includes('sample-uneven')
+      .some((entry) => entry.dataset.documentStem === 'sample-uneven'
         && entry.textContent.includes(${JSON.stringify(shown)}))`,
     `the Recent list to say ${shown}`,
   );

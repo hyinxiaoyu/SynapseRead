@@ -119,6 +119,8 @@ export function createTauriBackend(): StudyBackend {
       invoke<StudyDocument>('touch_document_opened', { documentId }),
     hideDocumentFromRecent: (documentId) =>
       invoke<StudyDocument>('hide_document_from_recent', { documentId }),
+    setDocumentDisplayTitle: (documentId, displayTitle) =>
+      invoke<StudyDocument>('set_document_display_title', { documentId, displayTitle }),
     verifyDocumentSource: (documentId) =>
       invoke<DocumentSourceStatus>('verify_document_source', { documentId }),
     relinkDocument: (documentId, confirmInPlace) =>

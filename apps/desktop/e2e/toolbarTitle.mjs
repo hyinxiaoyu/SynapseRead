@@ -107,7 +107,7 @@ async function dropTextDocument(page, title, body) {
     );
   })()`);
   await page.waitFor(
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`,
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`,
     `the dropped document "${title}"`,
   );
 }
@@ -133,7 +133,7 @@ async function waitForToolbarTransitions(page) {
  */
 export async function toolbarTitleFlow(page) {
   const titleIs = (title) =>
-    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`;
   const epubVisible = `[...document.querySelectorAll('[data-testid="epub-viewer"]')]
     .some((viewer) => viewer.checkVisibility({ visibilityProperty: true }))`;
 
@@ -141,12 +141,22 @@ export async function toolbarTitleFlow(page) {
   // there is no group of reader controls to clear.
   await checkTitle(page, 'the notebook title', { groups: false });
 
-  await page.openUntil(`${epubVisible} && ${titleIs('sample')}`, 'the sample EPUB');
+  // A short document title stays on the toolbar center at 1440 px.
+  await dropTextDocument(page, 'Short Title', 'Short body.\n');
+  await checkTitle(page, 'the short title at 1440 px');
 
-  for (const width of [1440, 2400]) {
-    await page.setViewport(width, 900);
-    await checkTitle(page, `the EPUB title at ${width} px`);
-  }
+  await page.openUntil(`${epubVisible} && ${titleIs('sample')}`, 'the sample EPUB');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === 'SynapseRead EPUB fixture'`,
+    'the EPUB metadata title in the toolbar',
+  );
+
+  // At 1440 px the EPUB metadata title already needs a slight left shift to clear the
+  // wider trailing controls; at 2400 px it sits on the toolbar center.
+  await page.setViewport(1440, 900);
+  await checkTitle(page, 'the EPUB title at 1440 px', { mode: 'slid' });
+  await page.setViewport(2400, 900);
+  await checkTitle(page, 'the EPUB title at 2400 px');
 
   // Open a long-titled document so all three regimes (centered, slid against the
   // trailing group, and the narrow truncating fallback) are exercised on one title.

@@ -251,6 +251,17 @@ pub fn hide_document_from_recent(
 }
 
 #[tauri::command]
+pub fn set_document_display_title(
+    document_id: String,
+    display_title: Option<String>,
+    state: State<'_, AppState>,
+) -> IpcResult<Document> {
+    Ok(state
+        .database()?
+        .set_document_display_title(&document_id, display_title.as_deref())?)
+}
+
+#[tauri::command]
 pub fn get_workspace_session(state: State<'_, AppState>) -> IpcResult<WorkspaceSession> {
     Ok(state.database()?.get_workspace_session()?)
 }

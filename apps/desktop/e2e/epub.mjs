@@ -45,7 +45,7 @@ const MIN_PER_LINE = 45;
 const MAX_PER_LINE = 78;
 
 /** The picker also offers `sample-uneven.epub`, so this names the book wanted. */
-const sampleTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === 'sample'`;
+const sampleTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === 'sample'`;
 const openEpub = (page) => page.openUntil(`${visibleHost} && ${sampleTitle}`, 'the EPUB');
 
 const statusIs = (value) =>
@@ -119,6 +119,10 @@ export async function epubFlow(page) {
 
   await page.clickButton('Show MindMap');
   await openEpub(page);
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === 'SynapseRead EPUB fixture'`,
+    'the EPUB metadata title in the toolbar',
+  );
   await page.waitFor(chapterIs('Chapter One'), 'the first chapter to render');
   // The hostile content in the fixture must not have run, or even survived.
   const security = await page.evaluate(`(() => {
@@ -277,7 +281,7 @@ export async function epubFlow(page) {
 
   // Reopen from a clean mount, at the saved chapter rather than the first.
   await page.evaluate(
-    `[...document.querySelectorAll('[aria-label^="Close sample"]')].at(2).click()`,
+    `[...document.querySelectorAll('[aria-label="Open documents"] [data-document-stem^="sample"] button[aria-label^="Close"]')].at(2).click()`,
   );
   await page.waitFor(`!${visibleHost}`, 'the tab to close');
   await openEpub(page);

@@ -75,6 +75,7 @@ import { NavigatorEmptyState } from '@/features/reader/navigator/parts';
 import type { OutlineNode } from '@/features/reader/navigator/OutlineTree';
 import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
+import { documentDisplayName } from '@/lib/documentTitles';
 import {
   HistoryButtons,
   ReaderToolbar,
@@ -3139,9 +3140,10 @@ function PdfPages({
           <div className="flex min-w-0 flex-col items-center leading-tight">
             <span
               data-testid="reader-toolbar-title"
+              data-document-stem={document.title}
               className="max-w-full truncate text-xs font-semibold"
             >
-              {document.title}
+              {documentDisplayName(document)}
             </span>
             <form
               className="flex max-w-full min-w-0 items-center gap-1 text-[11px] text-muted-foreground"
@@ -3597,8 +3599,13 @@ function PdfPages({
 const EMPTY_HIGHLIGHTS: readonly ReaderHighlight[] = [];
 
 /** PDF reader: canvas and text layer from pdf.js, virtualized by page. */
-export function PdfViewer({ content, ...props }: DocumentViewerProps<'pdf'>) {
+export function PdfViewer({ content, onDocumentTitle, ...props }: DocumentViewerProps<'pdf'>) {
   const { document } = props;
+  const displayTitle = documentDisplayName(document);
+  const onDocumentTitleRef = useRef(onDocumentTitle);
+  useEffect(() => {
+    onDocumentTitleRef.current = onDocumentTitle;
+  });
   const [opened, setOpened] = useState<{
     engine: PdfDocumentHandle | null;
     error: string | null;
@@ -3615,6 +3622,9 @@ export function PdfViewer({ content, ...props }: DocumentViewerProps<'pdf'>) {
         else {
           engine = handle;
           setOpened({ engine: handle, error: null });
+          void handle.getMetadataTitle?.().then((title) => {
+            if (!cancelled && title) onDocumentTitleRef.current?.(title);
+          });
         }
       })
       .catch((error: unknown) => {
@@ -3631,12 +3641,12 @@ export function PdfViewer({ content, ...props }: DocumentViewerProps<'pdf'>) {
   if (opened.error) {
     return (
       <div role="alert" className="p-6 text-sm text-destructive">
-        Could not open {document.title}: {opened.error}
+        Could not open {displayTitle}: {opened.error}
       </div>
     );
   }
   if (!opened.engine) {
-    return <div className="p-6 text-sm text-muted-foreground">Opening {document.title}…</div>;
+    return <div className="p-6 text-sm text-muted-foreground">Opening {displayTitle}…</div>;
   }
   return <PdfPages engine={opened.engine} {...props} />;
 }

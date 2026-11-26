@@ -236,11 +236,20 @@ export function ToolbarOverflowMenu({ items }: { items: readonly OverflowItem[] 
  * The document title, and under it the chapter being read (Preview's window
  * subtitle). Progress itself lives in the footer under the page.
  */
-export function ToolbarTitle({ title, subtitle }: { title: string; subtitle?: ReactNode }) {
+export function ToolbarTitle({
+  title,
+  stem,
+  subtitle,
+}: {
+  title: string;
+  stem?: string | undefined;
+  subtitle?: ReactNode;
+}) {
   return (
     <div className="flex min-w-0 flex-col items-center leading-tight">
       <span
         data-testid="reader-toolbar-title"
+        data-document-stem={stem}
         className="max-w-full truncate text-xs font-semibold"
       >
         {title}

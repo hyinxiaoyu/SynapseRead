@@ -3,7 +3,7 @@ import { assert } from './harness.mjs';
 const visible = (testId) =>
   `[...document.querySelectorAll('[data-testid="${testId}"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
 const titleIs = (title) =>
-  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`;
 const frame = `${visible('epub-host')}?.querySelector('iframe')`;
 const chapterIs = (title) =>
   `${frame}?.contentDocument?.querySelector('h1')?.textContent === ${JSON.stringify(title)}`;

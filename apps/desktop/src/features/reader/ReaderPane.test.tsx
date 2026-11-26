@@ -430,6 +430,110 @@ describe('ReaderPane tab commands', () => {
     hideSpy.mockRestore();
   });
 
+  it('disambiguates same-named tabs, shows hover and focus tooltips, and updates names on metadata title (#129)', async () => {
+    const now = '2026-01-01T00:00:00Z';
+    act(() => {
+      useStudySyncStore.setState({
+        documents: [
+          {
+            id: 'doc-epub',
+            title: 'sample',
+            displayTitle: null,
+            filePath: '/a/sample.epub',
+            fileHash: 'hash-epub',
+            format: 'epub',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+          {
+            id: 'doc-pdf',
+            title: 'sample',
+            displayTitle: null,
+            filePath: '/b/sample.pdf',
+            fileHash: 'hash-pdf',
+            format: 'pdf',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+        ],
+        openDocumentIds: ['doc-epub', 'doc-pdf'],
+        activeDocumentId: 'doc-epub',
+        documentSourceStatuses: {
+          'doc-epub': {
+            documentId: 'doc-epub',
+            state: 'ok',
+            currentFileHash: 'hash-epub',
+            fileSizeBytes: null,
+          },
+          'doc-pdf': {
+            documentId: 'doc-pdf',
+            state: 'ok',
+            currentFileHash: 'hash-pdf',
+            fileSizeBytes: null,
+          },
+        },
+        pdfLayouts: {
+          'doc-pdf': {
+            displayMode: 'single',
+            zoomMode: 'fit-width',
+            scale: 1,
+            rotation: 0,
+            coverPageAlone: false,
+          },
+        },
+      });
+    });
+
+    render(<ReaderPane />);
+
+    const epubTab = screen.getByRole('tab', { name: 'sample · EPUB' });
+    const pdfTab = screen.getByRole('tab', { name: 'sample · PDF' });
+    expect(epubTab).toHaveAttribute('title', 'sample\nsample.epub');
+    expect(pdfTab).toHaveAttribute('title', 'sample\nsample.pdf');
+
+    // Focusing a tab with the keyboard renders a portal tooltip and wires aria-describedby.
+    act(() => {
+      epubTab.focus();
+    });
+    const tooltip = screen.getByRole('tooltip');
+    expect(tooltip).toHaveTextContent('sample');
+    expect(tooltip).toHaveTextContent('sample.epub');
+    expect(epubTab).toHaveAttribute('aria-describedby', tooltip.id);
+
+    act(() => {
+      epubTab.blur();
+    });
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+
+    // Reporting a metadata title updates the tab, close button, tooltip, and Recent entry.
+    const backend = backendHolder.current!;
+    const setTitleSpy = vi.spyOn(backend, 'setDocumentDisplayTitle').mockResolvedValueOnce({
+      ...useStudySyncStore.getState().documents[0]!,
+      displayTitle: 'SynapseRead EPUB fixture',
+    });
+    await act(async () => {
+      await useStudySyncStore
+        .getState()
+        .reportDocumentTitle('doc-epub', 'SynapseRead EPUB fixture');
+    });
+
+    const renamedTab = screen.getByRole('tab', { name: 'SynapseRead EPUB fixture' });
+    expect(renamedTab).toHaveAttribute('title', 'SynapseRead EPUB fixture\nsample.epub');
+    expect(
+      screen.getByRole('button', { name: 'Close SynapseRead EPUB fixture' }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+    expect(screen.getByTestId('recent-documents-menu')).toHaveTextContent(
+      'SynapseRead EPUB fixture',
+    );
+    setTitleSpy.mockRestore();
+  });
+
   it('stacks workspace notices into the active viewer popover layer and follows tab switches', async () => {
     await openDocuments(['a.txt', 'b.txt']);
     const store = useStudySyncStore.getState;

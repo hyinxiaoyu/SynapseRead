@@ -46,6 +46,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0014_workspace_pane_layout.sql"),
     include_str!("../migrations/0015_card_undo_snapshots.sql"),
     include_str!("../migrations/0016_document_hidden_from_recent.sql"),
+    include_str!("../migrations/0017_document_display_title.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -238,6 +239,24 @@ impl Database {
              SET hidden_from_recent_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
              WHERE id = ?1",
             [document_id],
+        )?;
+        expect_changed(changed, "document", document_id)?;
+        get_document_in_conn(&self.conn, document_id)
+    }
+
+    /// Stores or clears a sanitized single-line metadata display title while
+    /// preserving the file-stem `title`.
+    pub fn set_document_display_title(
+        &self,
+        document_id: &str,
+        display_title: Option<&str>,
+    ) -> CoreResult<Document> {
+        let normalized = display_title
+            .and_then(sanitize_single_line)
+            .map(|title| truncate_chars(&title, ImportLimits::default().max_title_chars));
+        let changed = self.conn.execute(
+            "UPDATE documents SET display_title = ?2 WHERE id = ?1",
+            params![document_id, normalized],
         )?;
         expect_changed(changed, "document", document_id)?;
         get_document_in_conn(&self.conn, document_id)
@@ -2142,7 +2161,8 @@ fn relink_document_in_conn(
                  last_cursor_anchor = NULL,
                  last_progress = NULL,
                  last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-                 hidden_from_recent_at = NULL
+                 hidden_from_recent_at = NULL,
+                 display_title = NULL
              WHERE id = ?1",
             params![document_id, title, file_path, new_hash],
         )?;
@@ -2458,7 +2478,8 @@ fn optional_json_column<T: DeserializeOwned>(
 }
 
 const DOCUMENT_SELECT: &str = "SELECT id, title, file_path, file_hash, format, encoding,
-    last_cursor_anchor, last_opened_at, created_at, last_progress, hidden_from_recent_at FROM documents";
+    last_cursor_anchor, last_opened_at, created_at, last_progress, hidden_from_recent_at,
+    display_title FROM documents";
 
 fn map_document(row: &Row<'_>) -> rusqlite::Result<Document> {
     let format: String = row.get(4)?;
@@ -2474,6 +2495,7 @@ fn map_document(row: &Row<'_>) -> rusqlite::Result<Document> {
         created_at: row.get(8)?,
         last_progress: row.get(9)?,
         hidden_from_recent_at: row.get(10)?,
+        display_title: row.get(11)?,
     })
 }
 
@@ -2652,6 +2674,7 @@ mod tests {
                     "last_opened_at",
                     "last_progress",
                     "hidden_from_recent_at",
+                    "display_title",
                 ],
             ),
             (
@@ -6058,6 +6081,92 @@ mod tests {
         // Unknown document id returns NotFound.
         assert!(matches!(
             reopened.hide_document_from_recent("missing-document"),
+            Err(CoreError::NotFound {
+                entity: "document",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn set_document_display_title_sanitizes_persists_and_clears_only_on_content_relink() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("display-titles.sqlite3");
+        let file = dir.path().join("pg1342-images-3.txt");
+        std::fs::write(&file, "It is a truth universally acknowledged.").unwrap();
+
+        let doc_id = {
+            let db = Database::open(&db_path).unwrap();
+            let doc = db.register_document(&file).unwrap();
+            assert_eq!(doc.title, "pg1342-images-3");
+            assert_eq!(doc.display_title, None);
+
+            // Sanitizes controls, bidi formatting, and multiline input; preserves file stem `title`.
+            let updated = db
+                .set_document_display_title(
+                    &doc.id,
+                    Some("\n\x00\u{202E}  Pride and\u{2066} Prejudice \x1F\nSecond Line"),
+                )
+                .unwrap();
+            assert_eq!(updated.title, "pg1342-images-3");
+            assert_eq!(
+                updated.display_title.as_deref(),
+                Some("Pride and Prejudice")
+            );
+
+            // Truncates at 512 chars with ellipsis.
+            let long_title = "书".repeat(600);
+            let truncated = db
+                .set_document_display_title(&doc.id, Some(&long_title))
+                .unwrap();
+            let stored = truncated.display_title.as_deref().unwrap();
+            assert_eq!(stored.chars().count(), 512);
+            assert!(stored.ends_with('…'));
+
+            // Whitespace / controls-only becomes None (NULL).
+            let blank = db
+                .set_document_display_title(&doc.id, Some(" \n\u{202E}\x00 "))
+                .unwrap();
+            assert_eq!(blank.display_title, None);
+
+            // Setting back to a meaningful title persists across reopen, and None clears it.
+            db.set_document_display_title(&doc.id, Some("Pride and Prejudice"))
+                .unwrap();
+            doc.id
+        };
+
+        let reopened = Database::open(&db_path).unwrap();
+        let loaded = reopened.get_document(&doc_id).unwrap();
+        assert_eq!(loaded.title, "pg1342-images-3");
+        assert_eq!(loaded.display_title.as_deref(), Some("Pride and Prejudice"));
+
+        // Same-hash relink (moved/renamed file) keeps `display_title`.
+        let moved = dir.path().join("renamed-file.txt");
+        std::fs::rename(&file, &moved).unwrap();
+        let same_hash = reopened.relink_document(&doc_id, &moved).unwrap();
+        assert!(!same_hash.content_changed);
+        assert_eq!(same_hash.document.title, "renamed-file");
+        assert_eq!(
+            same_hash.document.display_title.as_deref(),
+            Some("Pride and Prejudice")
+        );
+
+        // Content-changing relink clears `display_title`.
+        std::fs::write(&moved, "A different edition with different bytes.").unwrap();
+        let changed = reopened.relink_document(&doc_id, &moved).unwrap();
+        assert!(changed.content_changed);
+        assert_eq!(changed.document.display_title, None);
+
+        // Passing None explicitly clears `display_title`.
+        reopened
+            .set_document_display_title(&doc_id, Some("Temporary Title"))
+            .unwrap();
+        let cleared = reopened.set_document_display_title(&doc_id, None).unwrap();
+        assert_eq!(cleared.display_title, None);
+
+        // Unknown document id returns NotFound.
+        assert!(matches!(
+            reopened.set_document_display_title("missing-doc", Some("Title")),
             Err(CoreError::NotFound {
                 entity: "document",
                 ..

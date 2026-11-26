@@ -38,6 +38,7 @@ const engineState = vi.hoisted(() => ({
   /** Holds back one page's annotations until the test resolves it. */
   pageAnnotationsGate: new Map<number, Promise<void>>(),
   pageLabels: null as string[] | null,
+  metadataTitle: null as string | null,
   /** Runs added to a page's text, such as a footnote marker. */
   extraRuns: new Map<number, PdfPageText['runs']>(),
 }));
@@ -56,6 +57,7 @@ vi.mock('./pdfEngine', () => ({
       },
       getOutline: async () => engineState.outline,
       getPageLabels: async () => engineState.pageLabels,
+      getMetadataTitle: async () => engineState.metadataTitle,
       getPageAnnotations: async (pageIndex: number): Promise<PdfPageAnnotations> => {
         await engineState.pageAnnotationsGate.get(pageIndex);
         return (
@@ -125,6 +127,7 @@ function Harness({
   chromeHidden = false,
   preferences,
   onPreferencesChange,
+  onDocumentTitle,
 }: {
   store: Store;
   documentId: string;
@@ -132,6 +135,7 @@ function Harness({
   chromeHidden?: boolean;
   preferences?: ReadingPreferences;
   onPreferencesChange?: (patch: Partial<ReadingPreferences>) => void;
+  onDocumentTitle?: (title: string) => void;
 }) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
@@ -178,6 +182,7 @@ function Harness({
       onDeleteAnnotation={(id) => void state.removeAnnotation(id)}
       canUndoAnnotationDelete={state.deletedAnnotationHistory.length > 0}
       onUndoAnnotationDelete={() => void state.undoRemoveAnnotation()}
+      {...(onDocumentTitle ? { onDocumentTitle } : {})}
     />
   );
 }
@@ -235,6 +240,7 @@ describe('PdfViewer', () => {
     engineState.pageAnnotations = new Map();
     engineState.pageAnnotationsGate = new Map();
     engineState.pageLabels = null;
+    engineState.metadataTitle = null;
     engineState.extraRuns = new Map();
     engineState.outline = [
       {
@@ -3126,6 +3132,26 @@ describe('PdfViewer', () => {
       const readout = screen.getByTestId('reader-footer-readout');
       fireEvent.click(readout);
       expect(readout).toHaveTextContent('Page 1 of 5');
+    });
+  });
+
+  describe('metadata title reporting (#129)', () => {
+    it('reports a meaningful PDF metadata title and skips null', async () => {
+      const onDocumentTitle = vi.fn();
+      engineState.metadataTitle = 'Attention Is All You Need';
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} onDocumentTitle={onDocumentTitle} />);
+      expect(await pageElement(0)).toBeInTheDocument();
+      await waitFor(() =>
+        expect(onDocumentTitle).toHaveBeenCalledWith('Attention Is All You Need'),
+      );
+
+      onDocumentTitle.mockClear();
+      engineState.metadataTitle = null;
+      const { store: s2, documentId: d2 } = await setup();
+      render(<Harness store={s2} documentId={d2} onDocumentTitle={onDocumentTitle} />);
+      expect(await pageElement(0)).toBeInTheDocument();
+      expect(onDocumentTitle).not.toHaveBeenCalled();
     });
   });
 });

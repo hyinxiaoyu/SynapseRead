@@ -225,6 +225,7 @@ export interface StudySyncState {
   openDocument(): Promise<void>;
   reopenRecentDocument(documentId: string): Promise<void>;
   hideRecentDocument(documentId: string): Promise<void>;
+  reportDocumentTitle(documentId: string, title: string): Promise<void>;
   /** Reopens the most recently closed tab that is not already open again. */
   reopenClosedDocument(): Promise<void>;
   verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus | null>;
@@ -984,6 +985,22 @@ export function createStudySyncStore(backend: StudyBackend) {
             documents: state.documents.map((doc) => (doc.id === documentId ? updated : doc)),
           }));
         });
+      },
+
+      async reportDocumentTitle(documentId, title) {
+        const current = get().documents.find((doc) => doc.id === documentId);
+        if (!current || current.displayTitle === title) return;
+        try {
+          const updated = await backend.setDocumentDisplayTitle(documentId, title);
+          set((state) => ({
+            // Merge only `displayTitle` so concurrent cursor or Recent updates are not clobbered.
+            documents: state.documents.map((doc) =>
+              doc.id === documentId ? { ...doc, displayTitle: updated.displayTitle ?? null } : doc,
+            ),
+          }));
+        } catch {
+          // Display-title persistence is opportunistic; keep the file-stem fallback on failure.
+        }
       },
 
       async reopenClosedDocument() {

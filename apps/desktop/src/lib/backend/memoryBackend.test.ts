@@ -1386,4 +1386,56 @@ describe('memory backend card delete and restore', () => {
       code: 'not_found',
     });
   });
+
+  it('sets, sanitizes, persists, and clears displayTitle only on content relink', async () => {
+    const original = new TextEncoder().encode('original edition');
+    const revised = new TextEncoder().encode('revised edition');
+    const backend = createMemoryBackend({
+      library: {
+        '/books/pg1342.txt': original,
+        '/books/pg1342-moved.txt': original,
+        '/books/pg1342-v2.txt': revised,
+      },
+    });
+
+    const doc = (await backend.pickDocument())!;
+    expect(doc.title).toBe('pg1342');
+    expect(doc.displayTitle).toBeNull();
+
+    const sanitized = await backend.setDocumentDisplayTitle(
+      doc.id,
+      '\n\u0000\u202E  Pride and\u200E\u2066 Prejudice \u001F\nSecond Line',
+    );
+    expect(sanitized.title).toBe('pg1342');
+    expect(sanitized.displayTitle).toBe('Pride and Prejudice');
+
+    const truncated = await backend.setDocumentDisplayTitle(doc.id, '书'.repeat(600));
+    expect(Array.from(truncated.displayTitle ?? '')).toHaveLength(512);
+    expect(truncated.displayTitle?.endsWith('…')).toBe(true);
+
+    const blank = await backend.setDocumentDisplayTitle(doc.id, ' \n\u202E\u0000 ');
+    expect(blank.displayTitle).toBeNull();
+
+    await backend.setDocumentDisplayTitle(doc.id, 'Pride and Prejudice');
+
+    // Same-hash relink preserves displayTitle.
+    const sameHash = (await backend.relinkDocument(doc.id))!;
+    expect(sameHash.contentChanged).toBe(false);
+    expect(sameHash.document.title).toBe('pg1342-moved');
+    expect(sameHash.document.displayTitle).toBe('Pride and Prejudice');
+
+    // Content-changing relink clears displayTitle.
+    const changed = (await backend.relinkDocument(doc.id))!;
+    expect(changed.contentChanged).toBe(true);
+    expect(changed.document.displayTitle).toBeNull();
+
+    // Explicit null clears displayTitle.
+    await backend.setDocumentDisplayTitle(doc.id, 'Temporary Title');
+    const cleared = await backend.setDocumentDisplayTitle(doc.id, null);
+    expect(cleared.displayTitle).toBeNull();
+
+    await expect(backend.setDocumentDisplayTitle('missing-doc', 'Title')).rejects.toMatchObject({
+      code: 'not_found',
+    });
+  });
 });
