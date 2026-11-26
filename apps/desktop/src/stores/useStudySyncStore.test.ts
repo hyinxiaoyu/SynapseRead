@@ -1084,6 +1084,39 @@ describe('useStudySyncStore', () => {
       ]);
     });
 
+    it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {
+      const bytes = new TextEncoder().encode('drop-hide race');
+      const file = new File([bytes], 'drop-race.txt', { type: 'text/plain' });
+      await state().dropFiles([file]);
+      const docId = state().activeDocumentId as string;
+      state().closeDocument(docId);
+
+      const originalDrop = backend.dropFiles.bind(backend);
+      let releaseDrop!: () => void;
+      const dropGate = new Promise<void>((resolve) => {
+        releaseDrop = resolve;
+      });
+      const dropSpy = vi.spyOn(backend, 'dropFiles').mockImplementationOnce(async (files) => {
+        const result = await originalDrop(files);
+        await dropGate;
+        return result;
+      });
+
+      const dropPromise = state().dropFiles([file]);
+      await vi.waitFor(() => expect(dropSpy).toHaveBeenCalledTimes(1));
+
+      await state().hideRecentDocument(docId);
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).not.toContain(docId);
+
+      releaseDrop();
+      await dropPromise;
+
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).not.toContain(docId);
+      const stored = state().documents.find((doc) => doc.id === docId)!;
+      expect(stored.hiddenFromRecentAt).toBeTruthy();
+      dropSpy.mockRestore();
+    });
+
     it('restores open tabs, active document, and reading preferences on restart while ignoring unknown document ids', async () => {
       const firstId = await openDocument();
       const secondId = await openDocument();

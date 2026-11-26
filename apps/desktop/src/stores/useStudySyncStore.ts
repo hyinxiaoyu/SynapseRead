@@ -512,6 +512,28 @@ export function createStudySyncStore(backend: StudyBackend) {
       return next;
     };
 
+    // The backend executes Recent mutations (`touchDocumentOpened`, `hideDocumentFromRecent`,
+    // registration, relink) in the order they are issued, so a response may only overwrite
+    // Recent fields when no later Recent write for that document was issued.
+    let recentWriteCounter = 0;
+    const latestRecentWrite = new Map<string, number>();
+
+    const issueRecentWrite = (documentId: string): number => {
+      const next = ++recentWriteCounter;
+      latestRecentWrite.set(documentId, next);
+      return next;
+    };
+
+    const isLatestRecentWrite = (documentId: string, writeSeq: number): boolean =>
+      writeSeq >= (latestRecentWrite.get(documentId) ?? 0);
+
+    const pickRecentFields = (
+      document: StudyDocument,
+    ): Pick<StudyDocument, 'lastOpenedAt' | 'hiddenFromRecentAt'> => ({
+      lastOpenedAt: document.lastOpenedAt ?? null,
+      hiddenFromRecentAt: document.hiddenFromRecentAt ?? null,
+    });
+
     const acquireLock = (documentId: string): (() => void) => {
       documentLockEpochs.set(documentId, getDocumentLockEpoch(documentId) + 1);
       const nextCount = (documentLockCounts.get(documentId) ?? 0) + 1;
@@ -604,6 +626,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       error?: unknown,
       epochsAtStart?: ReadonlyMap<string, number>,
       seqsAtStart?: ReadonlyMap<string, number>,
+      recentWriteSeq?: number,
     ) => {
       const committedIds = new Set<string>();
       set((state) => {
@@ -640,7 +663,18 @@ export function createStudySyncStore(backend: StudyBackend) {
             relinkedNonceByDocumentId[document.id] =
               (relinkedNonceByDocumentId[document.id] ?? 0) + 1;
           }
-          documents = [...documents.filter((d) => d.id !== document.id), document];
+          let mergedDocument = document;
+          if (
+            recentWriteSeq === undefined ||
+            recentWriteSeq >= (latestRecentWrite.get(document.id) ?? 0)
+          ) {
+            if (recentWriteSeq !== undefined) {
+              latestRecentWrite.set(document.id, recentWriteSeq);
+            }
+          } else if (existing !== undefined) {
+            mergedDocument = { ...document, ...pickRecentFields(existing) };
+          }
+          documents = [...documents.filter((d) => d.id !== document.id), mergedDocument];
           if (!openDocumentIds.includes(document.id)) {
             openDocumentIds = [...openDocumentIds, document.id];
           }
@@ -679,6 +713,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       error: unknown,
       epochsAtStart: ReadonlyMap<string, number>,
       seqsAtStart: ReadonlyMap<string, number>,
+      recentWriteSeq?: number,
     ) => {
       const hasSeqConflict = opened.some(
         (doc) =>
@@ -687,7 +722,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           getDocumentRefreshSeq(doc.id) !== (seqsAtStart.get(doc.id) ?? 0),
       );
       if (!hasSeqConflict) {
-        applyOpenedDocuments(opened, error, epochsAtStart, seqsAtStart);
+        applyOpenedDocuments(opened, error, epochsAtStart, seqsAtStart, recentWriteSeq);
         return;
       }
       // Another non-lock open, drop, or refresh completed while this picker or
@@ -715,10 +750,11 @@ export function createStudySyncStore(backend: StudyBackend) {
         )
         .map((doc) => byId.get(doc.id) ?? doc);
       if (resolved.length === 0 && (error === undefined || error === null)) return;
-      applyOpenedDocuments(resolved, error, epochsAtStart, reconcileSeqs);
+      applyOpenedDocuments(resolved, error, epochsAtStart, reconcileSeqs, recentWriteSeq);
     };
 
     const openNativeDroppedDocuments = (dropped: readonly StudyDocument[], error?: unknown) => {
+      const recentWriteSeq = ++recentWriteCounter;
       const knownIds = new Set(get().documents.map((doc) => doc.id));
       const hasUnlockedKnownDocument = dropped.some(
         (doc) => knownIds.has(doc.id) && !isDocumentLocked(doc.id),
@@ -727,7 +763,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         // Either all dropped docs are brand new, or every known doc is currently
         // locked (so applyOpenedDocuments skips locked known docs without bumping
         // any refresh sequence and without interfering with in-lock refreshes).
-        applyOpenedDocuments(dropped, error);
+        applyOpenedDocuments(dropped, error, undefined, undefined, recentWriteSeq);
         return;
       }
       // Native drop push events carry no request id and may race with sync or
@@ -755,7 +791,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           )
           .map((doc) => byId.get(doc.id) ?? doc);
         if (resolved.length === 0 && (error === undefined || error === null)) return;
-        applyOpenedDocuments(resolved, error, epochsAtStart, seqsAtStart);
+        applyOpenedDocuments(resolved, error, epochsAtStart, seqsAtStart, recentWriteSeq);
       });
     };
 
@@ -933,10 +969,17 @@ export function createStudySyncStore(backend: StudyBackend) {
       async openDocument() {
         const epochsAtStart = new Map(documentLockEpochs);
         const seqsAtStart = new Map(documentRefreshSeqs);
+        const recentWriteSeq = ++recentWriteCounter;
         await guarded(async () => {
           const document = await backend.pickDocument();
           if (document === null) return;
-          await reconcileAndApplyOpenedDocuments([document], undefined, epochsAtStart, seqsAtStart);
+          await reconcileAndApplyOpenedDocuments(
+            [document],
+            undefined,
+            epochsAtStart,
+            seqsAtStart,
+            recentWriteSeq,
+          );
         });
       },
 
@@ -945,6 +988,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (!get().documents.some((doc) => doc.id === documentId)) return;
         const lockEpoch = getDocumentLockEpoch(documentId);
         const refreshSeq = nextDocumentRefreshSeq(documentId);
+        const recentWriteSeq = issueRecentWrite(documentId);
         await guarded(async () => {
           const [touched, status] = await Promise.all([
             backend.touchDocumentOpened(documentId),
@@ -960,7 +1004,12 @@ export function createStudySyncStore(backend: StudyBackend) {
             return;
           }
           set((state) => ({
-            documents: state.documents.map((doc) => (doc.id === documentId ? touched : doc)),
+            documents: state.documents.map((doc) => {
+              if (doc.id !== documentId) return doc;
+              return isLatestRecentWrite(documentId, recentWriteSeq)
+                ? { ...doc, ...pickRecentFields(touched) }
+                : doc;
+            }),
             documentSourceStatuses: {
               ...state.documentSourceStatuses,
               [documentId]: status,
@@ -978,10 +1027,16 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async hideRecentDocument(documentId) {
         if (!get().documents.some((doc) => doc.id === documentId)) return;
+        const recentWriteSeq = issueRecentWrite(documentId);
         await guarded(async () => {
           const updated = await backend.hideDocumentFromRecent(documentId);
+          if (!isLatestRecentWrite(documentId, recentWriteSeq)) return;
           set((state) => ({
-            documents: state.documents.map((doc) => (doc.id === documentId ? updated : doc)),
+            documents: state.documents.map((doc) =>
+              doc.id === documentId
+                ? { ...doc, hiddenFromRecentAt: updated.hiddenFromRecentAt ?? null }
+                : doc,
+            ),
           }));
         });
       },
@@ -1004,6 +1059,7 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async relinkDocument(documentId, confirmInPlace = false) {
         if (!get().documents.some((doc) => doc.id === documentId)) return null;
+        const recentWriteSeq = issueRecentWrite(documentId);
         let relinked: RelinkDocumentResult | null = null;
         await guarded(async () => {
           const result = await backend.relinkDocument(documentId, confirmInPlace);
@@ -1011,9 +1067,12 @@ export function createStudySyncStore(backend: StudyBackend) {
           relinked = result;
           nextDocumentRefreshSeq(documentId);
           set((state) => ({
-            documents: state.documents.map((doc) =>
-              doc.id === documentId ? result.document : doc,
-            ),
+            documents: state.documents.map((doc) => {
+              if (doc.id !== documentId) return doc;
+              return isLatestRecentWrite(documentId, recentWriteSeq)
+                ? result.document
+                : { ...result.document, ...pickRecentFields(doc) };
+            }),
             documentSourceStatuses: {
               ...state.documentSourceStatuses,
               [documentId]: {
@@ -1037,9 +1096,16 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (files.length === 0) return;
         const epochsAtStart = new Map(documentLockEpochs);
         const seqsAtStart = new Map(documentRefreshSeqs);
+        const recentWriteSeq = ++recentWriteCounter;
         await guarded(async () => {
           const { documents, error } = await backend.dropFiles(files);
-          await reconcileAndApplyOpenedDocuments(documents, error, epochsAtStart, seqsAtStart);
+          await reconcileAndApplyOpenedDocuments(
+            documents,
+            error,
+            epochsAtStart,
+            seqsAtStart,
+            recentWriteSeq,
+          );
         });
       },
 
@@ -1156,6 +1222,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         const lockEpoch = getDocumentLockEpoch(documentId);
         const startedWhileLocked = isDocumentLocked(documentId);
         const refreshSeq = nextDocumentRefreshSeq(documentId);
+        const recentAtStart = latestRecentWrite.get(documentId) ?? 0;
         let refreshed: StudyDocument | null = null;
         await guarded(async () => {
           const documents = await backend.listDocuments();
@@ -1171,9 +1238,13 @@ export function createStudySyncStore(backend: StudyBackend) {
           refreshed = target;
           set((state) => {
             const previous = state.documents.find((doc) => doc.id === documentId);
+            const nextTarget =
+              previous !== undefined && (latestRecentWrite.get(documentId) ?? 0) !== recentAtStart
+                ? { ...target, ...pickRecentFields(previous) }
+                : target;
             const nextDocuments = previous
-              ? state.documents.map((doc) => (doc.id === documentId ? target : doc))
-              : [...state.documents, target];
+              ? state.documents.map((doc) => (doc.id === documentId ? nextTarget : doc))
+              : [...state.documents, nextTarget];
 
             const wasMissing = state.documentSourceStatuses[documentId]?.state === 'missing';
             const filePathChanged = previous !== undefined && previous.filePath !== target.filePath;

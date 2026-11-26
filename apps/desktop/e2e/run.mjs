@@ -16,6 +16,7 @@ import { mindmapFlow } from './mindmap.mjs';
 import { pagingFlow } from './paging.mjs';
 import { pagingModesFlow } from './pagingModes.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
+import { recentListFlow } from './recentList.mjs';
 import { scrollPagingFlow } from './scrollPaging.mjs';
 import { txtFlow } from './txt.mjs';
 import { toolbarTitleFlow } from './toolbarTitle.mjs';
@@ -44,6 +45,7 @@ const FLOWS = {
   mindmap: mindmapFlow,
   paging: pagingFlow,
   'paging-modes': pagingModesFlow,
+  'recent-list': recentListFlow,
   'scroll-paging': scrollPagingFlow,
   'toolbar-title': toolbarTitleFlow,
   'wheel-paging': wheelPagingFlow,

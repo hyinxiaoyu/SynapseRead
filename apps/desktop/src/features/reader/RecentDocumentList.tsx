@@ -32,9 +32,23 @@ export function RecentDocumentList({
   const listRef = useRef<HTMLOListElement>(null);
   const openButtonRefs = useRef(new Map<string, HTMLButtonElement | null>());
   const pendingFocusRef = useRef<{ removedId: string; targetId: string | null } | null>(null);
+  const pendingExpandFocusRef = useRef<string | null>(null);
 
   const hasOverflow = limit !== undefined && documents.length > limit;
   const visibleDocuments = hasOverflow && !showAll ? documents.slice(0, limit) : documents;
+
+  useEffect(() => {
+    if (!showAll) return;
+    const targetId = pendingExpandFocusRef.current;
+    pendingExpandFocusRef.current = null;
+    if (!targetId) return;
+    const targetButton = openButtonRefs.current.get(targetId);
+    if (!targetButton) return;
+    targetButton.focus({ preventScroll: true });
+    if (typeof targetButton.scrollIntoView === 'function') {
+      targetButton.scrollIntoView({ block: 'nearest' });
+    }
+  }, [showAll]);
 
   useEffect(() => {
     const pending = pendingFocusRef.current;
@@ -103,7 +117,11 @@ export function RecentDocumentList({
           <button
             type="button"
             data-testid="recent-documents-show-all"
-            onClick={() => setShowAll(true)}
+            onClick={() => {
+              pendingExpandFocusRef.current =
+                limit !== undefined ? (documents[limit]?.id ?? null) : null;
+              setShowAll(true);
+            }}
             className="w-full rounded px-2 py-1 text-center text-xs font-medium text-muted-foreground transition-colors outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
           >
             Show all ({documents.length})
