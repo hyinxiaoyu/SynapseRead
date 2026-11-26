@@ -4,7 +4,7 @@
 
 ## 1. Purpose and Scope
 
-This runbook translates the pending native two-Mac acceptance matrix in [ADR 0008](adr/0008-lan-book-sync.md#pending-two-mac-finder-acceptance-147-od-2-rev-2) (`#147` / `LS-20`) into an executable checklist across two physical `macOS 15+` Macs (`Mac A` and `Mac B`).
+This runbook provides the two-Mac Finder acceptance checklist for `#147` / `LS-20`. See [ADR 0008 for the recorded results and approved exceptions](adr/0008-lan-book-sync.md#two-mac-finder-validation-evidence).
 
 Under **`OD-2 Rev 2`** (self-used open-source policy):
 
@@ -16,7 +16,7 @@ Under **`OD-2 Rev 2`** (self-used open-source policy):
 
 ## 2. Prerequisites
 
-1. **Two Macs on `macOS 15+`**: Designate `Mac A` (initial source) and `Mac B` (initial receiver), plus a fresh macOS user account or VM snapshot for first-prompt `M-perm` checks (`UA-12`).
+1. **Two physical Macs**: Designate `Mac A` (initial source) and `Mac B` (initial receiver). The original plan uses two macOS 15+ Macs. For the approved V1 mixed-version setup, run the Local Network permission steps on the macOS 15+ host and swap roles in those steps as needed. Run the packaged transfer steps on both Macs. Use a fresh macOS user account or VM snapshot on the permission-test host for first-prompt checks unless the owner accepts the exception.
 2. **Single Source Commit SHA (`Build 1` baseline)**: Build on one clean `main` commit SHA (record `git rev-parse HEAD`). The **only** exception is **`T-49`**, which temporarily builds a second distinct-`CDHash` package (`Build 2`) on the Mac under test to inspect rebuild permission persistence; restore the verified `Build 1` package on every modified Mac and re-verify matching SHA/`CDHash` across both Macs at the **`M-pack` entry gate** before running core LAN matrix checks.
 3. **Build and Verify the Packaged App** (choose one valid `#147` mode per [MACOS_SIGNING.md](MACOS_SIGNING.md#self-use--open-source-macos-builds-no-apple-developer-account)):
 
