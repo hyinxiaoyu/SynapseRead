@@ -373,4 +373,196 @@ export async function tabLabelsFlow(page) {
     `document.querySelectorAll('[aria-label="Open documents"] [role="tab"]').length === 2`,
     'clicking the Close button on the Chinese-named PDF tab to close it',
   );
+
+  // Stage 3: Unbroken 150-char filenames, right-edge clamping, and tablist horizontal scroll tracking at 960x800.
+  await page.evaluate(`
+    [...document.querySelectorAll('[aria-label="Open documents"] button[aria-label^="Close "]')]
+      .forEach((button) => button.click());
+  `);
+  await page.waitFor(
+    `document.querySelectorAll('[aria-label="Open documents"] [role="tab"]').length === 0`,
+    'stage 2 tabs to close',
+  );
+
+  await page.setViewport(960, 800);
+  const longW = 'W'.repeat(150);
+  const longM = 'M'.repeat(150);
+  const fillerNames = [1, 2, 3, 4, 5].map((n) => `scroll-filler-${n}-extra-width.txt`);
+
+  await page.evaluate(`(() => {
+    const transfer = new DataTransfer();
+    const names = [${JSON.stringify(`${longW}.txt`)}, ...${JSON.stringify(fillerNames)}, ${JSON.stringify(`${longM}.txt`)}];
+    for (const name of names) {
+      transfer.items.add(new File(['body of ' + name + '\\n'], name, { type: 'text/plain' }));
+    }
+    document.querySelector('main').dispatchEvent(
+      new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }),
+    );
+  })()`);
+
+  await page.waitFor(
+    `(() => {
+      const tablist = document.querySelector('[aria-label="Open documents"]');
+      const tabs = tablist?.querySelectorAll('[role="tab"]') ?? [];
+      return tabs.length === 7 && tablist.scrollWidth > tablist.clientWidth;
+    })()`,
+    'all 7 tabs to open with a horizontally scrollable tablist',
+  );
+
+  const inspectFocusedTooltip = () =>
+    page.evaluate(`(() => {
+      const active = document.activeElement;
+      const tablist = document.querySelector('[aria-label="Open documents"]');
+      const tooltip = document.querySelector('[role="tooltip"]');
+      if (!(active instanceof HTMLElement) || !tablist || !tooltip) return null;
+      const tabRect = active.getBoundingClientRect();
+      const tRect = tooltip.getBoundingClientRect();
+      const walker = document.createTreeWalker(tooltip, NodeFilter.SHOW_TEXT);
+      const textRects = [];
+      let node;
+      while ((node = walker.nextNode())) {
+        if (!node.data || node.data.trim().length === 0) continue;
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        for (const r of range.getClientRects()) {
+          if (r.width > 0 && r.height > 0) {
+            textRects.push({ left: r.left, top: r.top, right: r.right, bottom: r.bottom });
+          }
+        }
+      }
+      const distinctLines = new Set(textRects.map((r) => Math.round(r.top)));
+      return {
+        innerWidth: window.innerWidth,
+        innerHeight: window.innerHeight,
+        activeAriaLabel: active.getAttribute('aria-label') ?? '',
+        tabRect: { left: tabRect.left, right: tabRect.right, bottom: tabRect.bottom },
+        scrollLeft: tablist.scrollLeft,
+        tooltipText: tooltip.textContent ?? '',
+        tooltipRect: {
+          left: tRect.left,
+          top: tRect.top,
+          right: tRect.right,
+          bottom: tRect.bottom,
+          width: tRect.width,
+        },
+        scrollWidth: tooltip.scrollWidth,
+        clientWidth: tooltip.clientWidth,
+        textRects,
+        lineCount: distinctLines.size,
+      };
+    })()`);
+
+  const assertTooltipWithinBounds = (state, label, { expectMultiline = false } = {}) => {
+    assert(state, `${label}: focused tooltip state missing`);
+    assert(
+      state.tooltipRect.left >= -0.5 &&
+        state.tooltipRect.top >= -0.5 &&
+        state.tooltipRect.right <= state.innerWidth + 0.5 &&
+        state.tooltipRect.bottom <= state.innerHeight + 0.5,
+      `${label}: tooltip rect overflows viewport: ${JSON.stringify(state.tooltipRect)}`,
+    );
+    assert(
+      state.scrollWidth <= state.clientWidth + 1,
+      `${label}: tooltip text overflows box (${state.scrollWidth} > ${state.clientWidth})`,
+    );
+    assert(state.textRects.length > 0, `${label}: expected measured text rects inside tooltip`);
+    for (const r of state.textRects) {
+      assert(
+        r.left >= state.tooltipRect.left - 1 &&
+          r.right <= state.tooltipRect.right + 1 &&
+          r.left >= -0.5 &&
+          r.right <= state.innerWidth + 0.5 &&
+          r.top >= -0.5 &&
+          r.bottom <= state.innerHeight + 0.5,
+        `${label}: text line rect ${JSON.stringify(r)} overflows tooltip ${JSON.stringify(state.tooltipRect)} or viewport`,
+      );
+    }
+    if (expectMultiline) {
+      assert(
+        state.lineCount >= 4,
+        `${label}: expected wrapped multi-line tooltip (>= 4 lines), got ${state.lineCount}`,
+      );
+    }
+  };
+
+  // Case A: Unbroken 150-W filename on tab #0 wraps cleanly without overflowing viewport.
+  await page.evaluate(`(() => {
+    const tab = document.querySelectorAll('[aria-label="Open documents"] [role="tab"]')[0];
+    tab?.focus();
+  })()`);
+  await page.waitFor(
+    `document.querySelector('[role="tooltip"]')?.textContent?.includes(${JSON.stringify(`${longW}.txt`)})`,
+    'tooltip for 150-W tab to render',
+  );
+  await page.evaluate(
+    'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
+  );
+  const caseA = await inspectFocusedTooltip();
+  assert(
+    caseA.tooltipText === `${longW}\n${longW}.txt`,
+    `Case A: expected newline between title and filename, got ${JSON.stringify(caseA.tooltipText)}`,
+  );
+  assertTooltipWithinBounds(caseA, 'Case A (150-W filename)', { expectMultiline: true });
+
+  // Case B: Jump to rightmost tab via End and confirm tooltip clamps within viewport margin.
+  await page.press('End', 'End');
+  await page.waitFor(
+    `document.querySelector('[role="tooltip"]')?.textContent?.includes(${JSON.stringify(`${longM}.txt`)})`,
+    'End key to focus rightmost 150-M tab and open its tooltip',
+  );
+  await page.evaluate(
+    'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
+  );
+  const caseB = await inspectFocusedTooltip();
+  assert(
+    caseB.tabRect.left > 400,
+    `Case B: expected rightmost tab to be near the right edge, got left=${caseB.tabRect.left}`,
+  );
+  assert(
+    caseB.tooltipRect.left >= 7.5 && caseB.tooltipRect.right <= 952.5,
+    `Case B: expected tooltip clamped within [7.5, 952.5], got ${JSON.stringify(caseB.tooltipRect)}`,
+  );
+  assertTooltipWithinBounds(caseB, 'Case B (rightmost tab clamping)', { expectMultiline: true });
+
+  // Case C: Horizontal scrolling of the tablist moves the tooltip with its focused middle tab.
+  await page.evaluate(`(() => {
+    const tablist = document.querySelector('[aria-label="Open documents"]');
+    const middleTab = tablist?.querySelectorAll('[role="tab"]')[3];
+    middleTab?.focus({ preventScroll: true });
+    if (tablist) tablist.scrollLeft = 240;
+  })()`);
+  await page.waitFor(
+    `document.querySelector('[role="tooltip"]')?.textContent?.includes('scroll-filler-3-extra-width.txt')`,
+    'middle tab tooltip to appear at scrollLeft=240',
+  );
+  await page.evaluate(
+    'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
+  );
+  const beforeScroll = await inspectFocusedTooltip();
+  assert(
+    Math.abs(beforeScroll.tooltipRect.left - beforeScroll.tabRect.left) <= 1.5,
+    `Case C before scroll: tooltip (${beforeScroll.tooltipRect.left}) should align with tab (${beforeScroll.tabRect.left})`,
+  );
+
+  await page.evaluate(`(() => {
+    const tablist = document.querySelector('[aria-label="Open documents"]');
+    if (tablist) tablist.scrollLeft = 400;
+  })()`);
+  await page.evaluate(
+    'new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
+  );
+  const afterScroll = await inspectFocusedTooltip();
+  assert(
+    afterScroll.tabRect.left < beforeScroll.tabRect.left - 80,
+    `Case C: expected tab left to shift left by > 80px (${beforeScroll.tabRect.left} -> ${afterScroll.tabRect.left})`,
+  );
+  assert(
+    afterScroll.tooltipRect.left < beforeScroll.tooltipRect.left - 80,
+    `Case C: expected tooltip left to shift with tab (${beforeScroll.tooltipRect.left} -> ${afterScroll.tooltipRect.left})`,
+  );
+  assert(
+    Math.abs(afterScroll.tooltipRect.left - afterScroll.tabRect.left) <= 1.5,
+    `Case C after scroll: tooltip (${afterScroll.tooltipRect.left}) should track tab (${afterScroll.tabRect.left})`,
+  );
+  assertTooltipWithinBounds(afterScroll, 'Case C (scrolled middle tab)');
 }

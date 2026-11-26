@@ -7,7 +7,9 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -45,6 +47,8 @@ import {
 } from '@/types/domain';
 
 export { describeResumeLocation };
+
+const TAB_TOOLTIP_VIEWPORT_MARGIN_PX = 8;
 
 interface TabErrorBoundaryProps {
   document: StudyDocument;
@@ -118,11 +122,9 @@ export function ReaderPane({
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
   const immersive = useStudySyncStore((state) => state.immersive);
   const [recentMenuOpen, setRecentMenuOpen] = useState(false);
-  const [focusedTab, setFocusedTab] = useState<{
-    documentId: string;
-    left: number;
-    top: number;
-  } | null>(null);
+  const [focusedTabId, setFocusedTabId] = useState<string | null>(null);
+  const tablistRef = useRef<HTMLDivElement>(null);
+  const tabTooltipRef = useRef<HTMLDivElement>(null);
   const [viewerLayers, setViewerLayers] = useState<Record<string, HTMLDivElement>>({});
   const chromeTheme = useReaderChromeTheme();
 
@@ -149,9 +151,44 @@ export function ReaderPane({
   const recentDocuments = useMemo(() => selectRecentDocuments(documents), [documents]);
   const tabLabels = useMemo(() => documentTabLabels(openDocuments), [openDocuments]);
   const focusedTabDocument =
-    focusedTab !== null && !immersive
-      ? openDocuments.find((document) => document.id === focusedTab.documentId)
+    focusedTabId !== null && !immersive
+      ? openDocuments.find((document) => document.id === focusedTabId)
       : undefined;
+  const focusedTabTooltipText = focusedTabDocument ? documentTooltip(focusedTabDocument) : null;
+
+  useLayoutEffect(() => {
+    if (!focusedTabDocument || !tabTooltipRef.current) return;
+    const positionTooltip = () => {
+      const tab = window.document.getElementById(`reader-tab-${focusedTabDocument.id}`);
+      const tooltip = tabTooltipRef.current;
+      if (!tab || !tooltip) return;
+      // Measure from the left edge so prior right-edge coordinates never narrow the tooltip.
+      tooltip.style.left = '0px';
+      tooltip.style.top = '0px';
+      const tabRect = tab.getBoundingClientRect();
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const maxLeft = Math.max(
+        TAB_TOOLTIP_VIEWPORT_MARGIN_PX,
+        window.innerWidth - tooltipRect.width - TAB_TOOLTIP_VIEWPORT_MARGIN_PX,
+      );
+      const left = Math.min(Math.max(tabRect.left, TAB_TOOLTIP_VIEWPORT_MARGIN_PX), maxLeft);
+      const maxTop = Math.max(
+        TAB_TOOLTIP_VIEWPORT_MARGIN_PX,
+        window.innerHeight - tooltipRect.height - TAB_TOOLTIP_VIEWPORT_MARGIN_PX,
+      );
+      const top = Math.min(Math.max(tabRect.bottom + 4, TAB_TOOLTIP_VIEWPORT_MARGIN_PX), maxTop);
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${top}px`;
+    };
+    positionTooltip();
+    const tablist = tablistRef.current;
+    tablist?.addEventListener('scroll', positionTooltip, { passive: true });
+    window.addEventListener('resize', positionTooltip);
+    return () => {
+      tablist?.removeEventListener('scroll', positionTooltip);
+      window.removeEventListener('resize', positionTooltip);
+    };
+  }, [focusedTabDocument, focusedTabTooltipText, openDocuments.length]);
   const activeDocument = openDocuments.find((document) => document.id === activeDocumentId);
   const activeViewerLayer =
     activeDocumentId !== null ? (viewerLayers[activeDocumentId] ?? null) : null;
@@ -271,6 +308,7 @@ export function ReaderPane({
         )}
       >
         <div
+          ref={tablistRef}
           role="tablist"
           aria-label="Open documents"
           className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
@@ -309,18 +347,9 @@ export function ReaderPane({
                   tabIndex={isActive ? 0 : -1}
                   className="flex min-w-0 items-center overflow-hidden py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onMouseDown={releaseTabPointerFocus}
-                  onFocus={(event) => {
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    setFocusedTab({
-                      documentId: document.id,
-                      left: rect.left,
-                      top: rect.bottom + 4,
-                    });
-                  }}
+                  onFocus={() => setFocusedTabId(document.id)}
                   onBlur={() => {
-                    setFocusedTab((current) =>
-                      current?.documentId === document.id ? null : current,
-                    );
+                    setFocusedTabId((current) => (current === document.id ? null : current));
                   }}
                   onClick={() => {
                     activateDocument(document.id);
@@ -464,16 +493,16 @@ export function ReaderPane({
             </ReaderPopoverLayer>
           ))}
       </div>
-      {focusedTab &&
-        focusedTabDocument &&
+      {focusedTabDocument &&
+        focusedTabTooltipText !== null &&
         createPortal(
           <div
+            ref={tabTooltipRef}
             role="tooltip"
             id={`reader-tab-tooltip-${focusedTabDocument.id}`}
-            style={{ left: focusedTab.left, top: focusedTab.top }}
-            className="pointer-events-none fixed z-50 max-w-sm rounded-md border bg-background px-2 py-1 text-xs whitespace-pre-line shadow-md"
+            className="pointer-events-none fixed top-0 left-0 z-50 max-w-[min(24rem,calc(100vw-16px))] rounded-md border bg-background px-2 py-1 text-xs whitespace-pre-line [overflow-wrap:anywhere] shadow-md"
           >
-            {documentTooltip(focusedTabDocument)}
+            {focusedTabTooltipText}
           </div>,
           window.document.body,
         )}

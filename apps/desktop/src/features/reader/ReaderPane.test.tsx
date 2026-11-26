@@ -641,6 +641,91 @@ describe('ReaderPane tab commands', () => {
     expect(screen.getAllByRole('button', { name: `Close ${longTitle}` })).toHaveLength(3);
   });
 
+  it('wraps unbroken long filenames and clamps/repositions the keyboard tab tooltip on scroll (#129)', async () => {
+    const unbroken = 'W'.repeat(150);
+    await openDocuments([`${unbroken}.txt`]);
+    const docId = useStudySyncStore.getState().openDocumentIds[0]!;
+
+    const origInnerWidthDesc = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+    let tabLeft = 720;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.id === `reader-tab-${docId}`) {
+          return {
+            left: tabLeft,
+            top: 8,
+            right: tabLeft + 166,
+            bottom: 36,
+            width: 166,
+            height: 28,
+            x: tabLeft,
+            y: 8,
+            toJSON: () => ({}),
+          } as DOMRect;
+        }
+        if (this.getAttribute('role') === 'tooltip') {
+          return {
+            left: 0,
+            top: 0,
+            right: 384,
+            bottom: 80,
+            width: 384,
+            height: 80,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          } as DOMRect;
+        }
+        return {
+          left: 0,
+          top: 0,
+          right: 0,
+          bottom: 0,
+          width: 0,
+          height: 0,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect;
+      });
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: 960,
+    });
+
+    try {
+      render(<ReaderPane />);
+      const tab = screen.getByRole('tab', { name: unbroken });
+      act(() => {
+        tab.focus();
+      });
+
+      const tooltip = screen.getByRole('tooltip');
+      expect(tooltip).toHaveClass(
+        'whitespace-pre-line',
+        '[overflow-wrap:anywhere]',
+        'max-w-[min(24rem,calc(100vw-16px))]',
+      );
+      expect(tooltip.textContent).toBe(`${unbroken}\n${unbroken}.txt`);
+      // 960 - 384 - 8 = 568px
+      expect(tooltip.style.left).toBe('568px');
+      expect(tooltip.style.top).toBe('40px');
+
+      tabLeft = 310;
+      act(() => {
+        fireEvent.scroll(screen.getByRole('tablist'));
+      });
+      expect(tooltip.style.left).toBe('310px');
+    } finally {
+      rectSpy.mockRestore();
+      if (origInnerWidthDesc) {
+        Object.defineProperty(window, 'innerWidth', origInnerWidthDesc);
+      }
+    }
+  });
+
   it('hands focus to the ninth entry when Show all is activated with the keyboard (#126)', async () => {
     const names = Array.from(
       { length: 12 },
