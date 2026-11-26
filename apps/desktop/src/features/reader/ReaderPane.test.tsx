@@ -534,6 +534,208 @@ describe('ReaderPane tab commands', () => {
     setTitleSpy.mockRestore();
   });
 
+  it('hands focus to the ninth entry when Show all is activated with the keyboard (#126)', async () => {
+    const names = Array.from(
+      { length: 12 },
+      (_, index) => `expand-focus-${String(index + 1).padStart(2, '0')}.txt`,
+    );
+    await openDocuments(names);
+    const store = useStudySyncStore.getState;
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    render(<ReaderPane />);
+
+    const showAll = screen.getByTestId('recent-documents-show-all');
+    showAll.focus();
+    expect(showAll).toHaveFocus();
+    act(() => {
+      showAll.click();
+    });
+
+    expect(screen.queryByTestId('recent-documents-show-all')).not.toBeInTheDocument();
+    const list = screen
+      .getByTestId('empty-state-recent-documents')
+      .querySelector('[data-testid="recent-documents-list"]')!;
+    const items = list.querySelectorAll<HTMLButtonElement>('[data-testid="recent-document-item"]');
+    expect(items).toHaveLength(12);
+    // 12..05 are indices 0..7; the 9th entry (index 8) is expand-focus-04.
+    const ninthItem = items[8]!;
+    expect(ninthItem).toHaveTextContent('expand-focus-04');
+    expect(document.activeElement).toBe(ninthItem);
+
+    // Tab order after the 9th item reaches its Remove button, then the 10th item.
+    const buttons = [...list.querySelectorAll<HTMLButtonElement>('button')];
+    const ninthPos = buttons.indexOf(ninthItem);
+    expect(buttons[ninthPos + 1]).toHaveAttribute('data-testid', 'recent-document-remove');
+    expect(buttons[ninthPos + 1]).toHaveAttribute(
+      'aria-label',
+      'Remove expand-focus-04 from Recent',
+    );
+    expect(buttons[ninthPos + 2]).toBe(items[9]);
+  });
+
+  it('keeps Recent lists, backend state, and progress consistent when Remove and Reopen race (#126)', async () => {
+    const progressAnchor: AnchorLocation = {
+      format: 'txt',
+      startByteOffset: 0,
+      endByteOffset: 4,
+      lineIndex: 0,
+    };
+
+    const assertListsAndBackend = async (
+      docId: string,
+      expectedVisible: boolean,
+      expectedProgress: number | null,
+    ) => {
+      const emptyIds = [
+        ...screen
+          .getByTestId('empty-state-recent-documents')
+          .querySelectorAll('[data-testid="recent-document-item"]'),
+      ].map((el) => el.getAttribute('data-document-id'));
+      expect(emptyIds.includes(docId)).toBe(expectedVisible);
+
+      fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+      const menu = screen.getByTestId('recent-documents-menu');
+      const popoverIds = [...menu.querySelectorAll('[data-testid="recent-document-item"]')].map(
+        (el) => el.getAttribute('data-document-id'),
+      );
+      expect(popoverIds.includes(docId)).toBe(expectedVisible);
+      fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+
+      const storeDoc = useStudySyncStore.getState().documents.find((d) => d.id === docId)!;
+      expect(storeDoc.lastProgress ?? null).toBe(expectedProgress);
+      const backendDoc = (await backendHolder.current!.listDocuments()).find(
+        (d) => d.id === docId,
+      )!;
+      expect(backendDoc.lastProgress ?? null).toBe(expectedProgress);
+      expect(
+        backendDoc.hiddenFromRecentAt !== null && backendDoc.hiddenFromRecentAt !== undefined,
+      ).toBe(!expectedVisible);
+    };
+
+    // 1. Late Remove response after Reopen must not re-hide the reopened document.
+    await openDocuments(['race1-keep.txt', 'race1-target.txt']);
+    const store = useStudySyncStore.getState;
+    const [, target1] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const backend = backendHolder.current!;
+    const origHide1 = backend.hideDocumentFromRecent.bind(backend);
+    let releaseHide1!: () => void;
+    const hideGate1 = new Promise<void>((resolve) => {
+      releaseHide1 = resolve;
+    });
+    const hideSpy1 = vi
+      .spyOn(backend, 'hideDocumentFromRecent')
+      .mockImplementationOnce(async (id) => {
+        const row = await origHide1(id);
+        await hideGate1;
+        return row;
+      });
+
+    const view = render(<ReaderPane />);
+    const targetRowRemove = screen
+      .getByTestId('empty-state-recent-documents')
+      .querySelectorAll<HTMLButtonElement>('[data-testid="recent-document-remove"]')[0]!;
+    fireEvent.click(targetRowRemove);
+    await waitFor(() => expect(hideSpy1).toHaveBeenCalledWith(target1));
+
+    await act(async () => {
+      await store().reopenRecentDocument(target1);
+    });
+    act(() => store().closeDocument(target1));
+    releaseHide1();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await assertListsAndBackend(target1, true, null);
+    hideSpy1.mockRestore();
+    view.unmount();
+
+    // 2. Late Reopen response after Remove must not make the removed document reappear.
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    useStudySyncStore.setState(initialState, true);
+    await openDocuments(['race2-keep.txt', 'race2-target.txt']);
+    const [, target2] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const origTouch2 = backend.touchDocumentOpened.bind(backend);
+    let releaseTouch2!: () => void;
+    const touchGate2 = new Promise<void>((resolve) => {
+      releaseTouch2 = resolve;
+    });
+    const touchSpy2 = vi
+      .spyOn(backend, 'touchDocumentOpened')
+      .mockImplementationOnce(async (id) => {
+        const row = await origTouch2(id);
+        await touchGate2;
+        return row;
+      });
+
+    const view2 = render(<ReaderPane />);
+    let reopenPromise!: Promise<void>;
+    act(() => {
+      reopenPromise = store().reopenRecentDocument(target2);
+    });
+    await waitFor(() => expect(touchSpy2).toHaveBeenCalledWith(target2));
+    await act(async () => {
+      await store().hideRecentDocument(target2);
+    });
+    releaseTouch2();
+    await act(async () => {
+      await reopenPromise;
+    });
+    act(() => store().closeDocument(target2));
+
+    await assertListsAndBackend(target2, false, null);
+    touchSpy2.mockRestore();
+    view2.unmount();
+
+    // 3. Delayed Remove response must not overwrite reading progress (0.5) updated meanwhile.
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    useStudySyncStore.setState(initialState, true);
+    await openDocuments(['race3-keep.txt', 'race3-target.txt']);
+    const [, target3] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const origHide3 = backend.hideDocumentFromRecent.bind(backend);
+    let releaseHide3!: () => void;
+    const hideGate3 = new Promise<void>((resolve) => {
+      releaseHide3 = resolve;
+    });
+    const hideSpy3 = vi
+      .spyOn(backend, 'hideDocumentFromRecent')
+      .mockImplementationOnce(async (id) => {
+        const row = await origHide3(id);
+        await hideGate3;
+        return row;
+      });
+
+    render(<ReaderPane />);
+    let hidePromise3!: Promise<void>;
+    act(() => {
+      hidePromise3 = store().hideRecentDocument(target3);
+    });
+    await waitFor(() => expect(hideSpy3).toHaveBeenCalledWith(target3));
+
+    act(() => {
+      store().reportCursor(target3, progressAnchor, 0.5);
+    });
+    await act(async () => {
+      await store().flushCursorWrites(target3);
+    });
+
+    releaseHide3();
+    await act(async () => {
+      await hidePromise3;
+    });
+
+    await assertListsAndBackend(target3, false, 0.5);
+    hideSpy3.mockRestore();
+  });
+
   it('stacks workspace notices into the active viewer popover layer and follows tab switches', async () => {
     await openDocuments(['a.txt', 'b.txt']);
     const store = useStudySyncStore.getState;
