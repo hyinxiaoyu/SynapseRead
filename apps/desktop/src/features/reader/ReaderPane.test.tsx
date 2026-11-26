@@ -542,8 +542,7 @@ describe('ReaderPane tab commands', () => {
     act(() => store().closeDocument(target1));
     releaseHide1();
     await act(async () => {
-      await Promise.resolve();
-      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     await assertListsAndBackend(target1, true, null);
@@ -630,6 +629,197 @@ describe('ReaderPane tab commands', () => {
 
     await assertListsAndBackend(target3, false, 0.5);
     hideSpy3.mockRestore();
+  });
+
+  it('converges Recent lists, backend state, and progress across overlapping picker, cancelled relink, and failed hide (#126)', async () => {
+    const progressAnchor: AnchorLocation = {
+      format: 'txt',
+      startByteOffset: 0,
+      endByteOffset: 4,
+      lineIndex: 0,
+    };
+
+    const assertListsAndBackend = async (
+      docId: string,
+      expectedVisible: boolean,
+      expectedProgress: number | null,
+    ) => {
+      const emptyIds = [
+        ...screen
+          .getByTestId('empty-state-recent-documents')
+          .querySelectorAll('[data-testid="recent-document-item"]'),
+      ].map((el) => el.getAttribute('data-document-id'));
+      expect(emptyIds.includes(docId)).toBe(expectedVisible);
+
+      fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+      const menu = screen.getByTestId('recent-documents-menu');
+      const popoverIds = [...menu.querySelectorAll('[data-testid="recent-document-item"]')].map(
+        (el) => el.getAttribute('data-document-id'),
+      );
+      expect(popoverIds.includes(docId)).toBe(expectedVisible);
+      fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+
+      const storeDoc = useStudySyncStore.getState().documents.find((d) => d.id === docId)!;
+      expect(storeDoc.lastProgress ?? null).toBe(expectedProgress);
+      const backendDoc = (await backendHolder.current!.listDocuments()).find(
+        (d) => d.id === docId,
+      )!;
+      expect(backendDoc.lastProgress ?? null).toBe(expectedProgress);
+      expect(
+        backendDoc.hiddenFromRecentAt !== null && backendDoc.hiddenFromRecentAt !== undefined,
+      ).toBe(!expectedVisible);
+    };
+
+    // 1. Open file picker -> Remove book -> Pick that file & finish registration.
+    await openDocuments(['overlap1-keep.txt', 'overlap1-target.txt']);
+    const store = useStudySyncStore.getState;
+    const [, target1] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const backend = backendHolder.current!;
+    let releasePicker!: () => void;
+    const pickerGate = new Promise<void>((resolve) => {
+      releasePicker = resolve;
+    });
+    const pickSpy = vi.spyOn(backend, 'pickDocument').mockImplementationOnce(async () => {
+      await pickerGate;
+      const pickedFile = new File(['text:overlap1-target.txt'], 'overlap1-target.txt', {
+        type: 'text/plain',
+      });
+      const { documents } = await backend.dropFiles([pickedFile]);
+      return documents[0] ?? null;
+    });
+
+    const view1 = render(<ReaderPane />);
+    let openPromise!: Promise<void>;
+    act(() => {
+      openPromise = store().openDocument();
+    });
+    await waitFor(() => expect(pickSpy).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await store().hideRecentDocument(target1);
+    });
+    act(() => {
+      store().reportCursor(target1, progressAnchor, 0.5);
+    });
+    await act(async () => {
+      await store().flushCursorWrites(target1);
+    });
+
+    releasePicker();
+    await act(async () => {
+      await openPromise;
+    });
+    act(() => store().closeDocument(target1));
+
+    await assertListsAndBackend(target1, true, 0.5);
+    pickSpy.mockRestore();
+    view1.unmount();
+
+    // 2. Remove committed (response delayed) -> Initiate & cancel relink -> Remove response returns.
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    useStudySyncStore.setState(initialState, true);
+    await openDocuments(['overlap2-keep.txt', 'overlap2-target.txt']);
+    const [, target2] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const origHide2 = backend.hideDocumentFromRecent.bind(backend);
+    let releaseHide2!: () => void;
+    const hideGate2 = new Promise<void>((resolve) => {
+      releaseHide2 = resolve;
+    });
+    const hideSpy2 = vi
+      .spyOn(backend, 'hideDocumentFromRecent')
+      .mockImplementationOnce(async (id) => {
+        const row = await origHide2(id);
+        await hideGate2;
+        return row;
+      });
+    const relinkSpy2 = vi.spyOn(backend, 'relinkDocument').mockResolvedValueOnce(null);
+
+    const view2 = render(<ReaderPane />);
+    let hidePromise2!: Promise<void>;
+    act(() => {
+      hidePromise2 = store().hideRecentDocument(target2);
+    });
+    await waitFor(() => expect(hideSpy2).toHaveBeenCalledWith(target2));
+
+    await act(async () => {
+      const relinked = await store().relinkDocument(target2);
+      expect(relinked).toBeNull();
+    });
+    act(() => {
+      store().reportCursor(target2, progressAnchor, 0.5);
+    });
+    await act(async () => {
+      await store().flushCursorWrites(target2);
+    });
+
+    releaseHide2();
+    await act(async () => {
+      await hidePromise2;
+    });
+
+    await assertListsAndBackend(target2, false, 0.5);
+    hideSpy2.mockRestore();
+    relinkSpy2.mockRestore();
+    view2.unmount();
+
+    // 3. Reopen committed (response delayed) -> Subsequent hide fails -> Reopen response returns.
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    useStudySyncStore.setState(initialState, true);
+    await openDocuments(['overlap3-keep.txt', 'overlap3-target.txt']);
+    const [, target3] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    await act(async () => {
+      await store().hideRecentDocument(target3);
+    });
+
+    const origTouch3 = backend.touchDocumentOpened.bind(backend);
+    let releaseTouch3!: () => void;
+    const touchGate3 = new Promise<void>((resolve) => {
+      releaseTouch3 = resolve;
+    });
+    const touchSpy3 = vi
+      .spyOn(backend, 'touchDocumentOpened')
+      .mockImplementationOnce(async (id) => {
+        const row = await origTouch3(id);
+        await touchGate3;
+        return row;
+      });
+    const hideFailSpy3 = vi
+      .spyOn(backend, 'hideDocumentFromRecent')
+      .mockRejectedValueOnce(new Error('database locked'));
+
+    render(<ReaderPane />);
+    let reopenPromise3!: Promise<void>;
+    act(() => {
+      reopenPromise3 = store().reopenRecentDocument(target3);
+    });
+    await waitFor(() => expect(touchSpy3).toHaveBeenCalledWith(target3));
+
+    await act(async () => {
+      await store().hideRecentDocument(target3);
+    });
+    expect(store().error).toContain('database locked');
+
+    act(() => {
+      store().reportCursor(target3, progressAnchor, 0.5);
+    });
+    await act(async () => {
+      await store().flushCursorWrites(target3);
+    });
+
+    releaseTouch3();
+    await act(async () => {
+      await reopenPromise3;
+    });
+    act(() => store().closeDocument(target3));
+
+    await assertListsAndBackend(target3, true, 0.5);
+    touchSpy3.mockRestore();
+    hideFailSpy3.mockRestore();
   });
 
   it('stacks workspace notices into the active viewer popover layer and follows tab switches', async () => {
