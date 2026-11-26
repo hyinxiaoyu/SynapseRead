@@ -3,11 +3,12 @@ import { describe, expect, it } from 'vitest';
 import type { StudyDocument } from '@/types/domain';
 
 import {
+  displayWidth,
   documentDisplayName,
   documentTabLabels,
   documentTooltip,
   fileNameOf,
-  MAX_QUALIFIER_CHARS,
+  MAX_VISIBLE_SUFFIX_WIDTH,
   normalizeMetadataTitle,
   parentFolderOf,
 } from './documentTitles';
@@ -108,7 +109,16 @@ describe('documentTitles', () => {
     }
   });
 
-  it('keeps lone tab labels plain and disambiguates same-named tabs by format, short filename, short folder, and ordinal', () => {
+  it('measures display width counting wide CJK and emoji glyphs as 2 units', () => {
+    expect(displayWidth('· PDF')).toBe(5);
+    expect(displayWidth('· PDF (2)')).toBe(9);
+    expect(displayWidth('· Markdown (2)')).toBe(14);
+    expect(displayWidth('读书')).toBe(4);
+    expect(displayWidth('· 读书读书读书读甲.pdf')).toBe(22);
+    expect(displayWidth('😀')).toBe(2);
+  });
+
+  it('keeps lone tab labels plain and disambiguates same-named tabs within the visible suffix budget', () => {
     const lone = makeDoc({
       id: 'lone',
       title: 'alone',
@@ -141,39 +151,39 @@ describe('documentTitles', () => {
     expect(sampleLabels.get('s-md')?.text).toBe('sample · Markdown');
     expect(new Set([...sampleLabels.values()].map((label) => label.text)).size).toBe(4);
 
-    // Two EPUBs sharing the same dc:title are told apart by short file names (<= MAX_QUALIFIER_CHARS).
-    expect('first.epub'.length).toBeLessThanOrEqual(MAX_QUALIFIER_CHARS);
-    const sameTitleShortEpubs = [
+    // Two PDFs sharing the same title keep short file names (displayWidth <= MAX_VISIBLE_SUFFIX_WIDTH).
+    expect(displayWidth('· second.pdf')).toBeLessThanOrEqual(MAX_VISIBLE_SUFFIX_WIDTH);
+    const sameTitleShortPdfs = [
       makeDoc({
         id: 'e1',
         title: 'first',
         displayTitle: 'Middlemarch',
-        filePath: '/books/first.epub',
-        format: 'epub',
+        filePath: '/books/first.pdf',
+        format: 'pdf',
       }),
       makeDoc({
         id: 'e2',
         title: 'second',
         displayTitle: 'Middlemarch',
-        filePath: '/books/second.epub',
-        format: 'epub',
+        filePath: '/books/second.pdf',
+        format: 'pdf',
       }),
     ];
-    const shortEpubLabels = documentTabLabels(sameTitleShortEpubs);
-    expect(shortEpubLabels.get('e1')).toEqual({
+    const shortPdfLabels = documentTabLabels(sameTitleShortPdfs);
+    expect(shortPdfLabels.get('e1')).toEqual({
       base: 'Middlemarch',
-      suffix: 'first.epub',
-      suffixDisplay: '· first.epub',
-      text: 'Middlemarch · first.epub',
+      suffix: 'first.pdf',
+      suffixDisplay: '· first.pdf',
+      text: 'Middlemarch · first.pdf',
     });
-    expect(shortEpubLabels.get('e2')).toEqual({
+    expect(shortPdfLabels.get('e2')).toEqual({
       base: 'Middlemarch',
-      suffix: 'second.epub',
-      suffixDisplay: '· second.epub',
-      text: 'Middlemarch · second.epub',
+      suffix: 'second.pdf',
+      suffixDisplay: '· second.pdf',
+      text: 'Middlemarch · second.pdf',
     });
 
-    // Long file names (> MAX_QUALIFIER_CHARS) in the same folder skip filename and fall back to `(2)`.
+    // Long file names preserve full filename in `text` while trimming visible suffix to `(2)`.
     const sameTitleLongEpubs = [
       makeDoc({
         id: 'le1',
@@ -195,13 +205,13 @@ describe('documentTitles', () => {
       base: 'Middlemarch',
       suffix: '',
       suffixDisplay: '',
-      text: 'Middlemarch',
+      text: 'Middlemarch · middlemarch-gutenberg.epub',
     });
     expect(longEpubLabels.get('le2')).toEqual({
       base: 'Middlemarch',
       suffix: '(2)',
       suffixDisplay: '(2)',
-      text: 'Middlemarch (2)',
+      text: 'Middlemarch · middlemarch-annotated.epub',
     });
 
     // Same name and format in different short folders are told apart by parent folder.
@@ -220,10 +230,12 @@ describe('documentTitles', () => {
       }),
     ];
     const folderLabels = documentTabLabels(sameFileDifferentDirs);
+    expect(folderLabels.get('f1')?.suffixDisplay).toBe('· work');
+    expect(folderLabels.get('f2')?.suffixDisplay).toBe('· personal');
     expect(folderLabels.get('f1')?.text).toBe('notes · work');
     expect(folderLabels.get('f2')?.text).toBe('notes · personal');
 
-    // Over-long folder names (> 12 code points, counting surrogate pairs as 1) fall back to `(2)`.
+    // Over-long folder names keep full `text` while falling back to visible `(2)`.
     const longDirDocs = [
       makeDoc({
         id: 'ld1',
@@ -239,8 +251,18 @@ describe('documentTitles', () => {
       }),
     ];
     const longDirLabels = documentTabLabels(longDirDocs);
-    expect(longDirLabels.get('ld1')?.text).toBe('notes');
-    expect(longDirLabels.get('ld2')?.text).toBe('notes (2)');
+    expect(longDirLabels.get('ld1')).toEqual({
+      base: 'notes',
+      suffix: '',
+      suffixDisplay: '',
+      text: 'notes · project-alpha-folder',
+    });
+    expect(longDirLabels.get('ld2')).toEqual({
+      base: 'notes',
+      suffix: '(2)',
+      suffixDisplay: '(2)',
+      text: 'notes · project-beta-folder',
+    });
 
     // Identical display name, format, filename, and parent folder fall back to ordinals.
     const identical = [
@@ -255,6 +277,90 @@ describe('documentTitles', () => {
       suffixDisplay: '(2)',
       text: 'dup (2)',
     });
+  });
+
+  it('caps combined format + Chinese filename suffixes within the budget while keeping accessible labels intact (#129)', () => {
+    const sharedTitle =
+      'A remarkably long document title that keeps going well past any tab width limit';
+    const txt = makeDoc({
+      id: 'txt-1',
+      title: sharedTitle,
+      filePath: `/dropped/${sharedTitle}.txt`,
+      format: 'txt',
+    });
+    const pdf1 = makeDoc({
+      id: 'pdf-1',
+      title: '读书读书读书读甲',
+      displayTitle: sharedTitle,
+      filePath: '/dropped/读书读书读书读甲.pdf',
+      format: 'pdf',
+    });
+    const pdf2 = makeDoc({
+      id: 'pdf-2',
+      title: '读书读书读书读乙',
+      displayTitle: sharedTitle,
+      filePath: '/dropped/读书读书读书读乙.pdf',
+      format: 'pdf',
+    });
+
+    const labels = documentTabLabels([txt, pdf1, pdf2]);
+    expect(labels.get('txt-1')).toEqual({
+      base: sharedTitle,
+      suffix: 'TXT',
+      suffixDisplay: '· TXT',
+      text: `${sharedTitle} · TXT`,
+    });
+    expect(labels.get('pdf-1')).toEqual({
+      base: sharedTitle,
+      suffix: 'PDF',
+      suffixDisplay: '· PDF',
+      text: `${sharedTitle} · PDF · 读书读书读书读甲.pdf`,
+    });
+    expect(labels.get('pdf-2')).toEqual({
+      base: sharedTitle,
+      suffix: 'PDF (2)',
+      suffixDisplay: '· PDF (2)',
+      text: `${sharedTitle} · PDF · 读书读书读书读乙.pdf`,
+    });
+    for (const label of labels.values()) {
+      expect(displayWidth(label.suffixDisplay)).toBeLessThanOrEqual(MAX_VISIBLE_SUFFIX_WIDTH);
+    }
+    expect(new Set([...labels.values()].map((l) => l.suffixDisplay)).size).toBe(3);
+
+    // When adding `(2)` to a format qualifier pushes width past the budget (`· Markdown (2)` = 14 > 12),
+    // the colliding Markdown group trims `Markdown` and uses plain ordinals instead.
+    const md1 = makeDoc({
+      id: 'md-1',
+      title: '读书读书读书读甲',
+      displayTitle: sharedTitle,
+      filePath: '/dropped/读书读书读书读甲.md',
+      format: 'txt',
+    });
+    const md2 = makeDoc({
+      id: 'md-2',
+      title: '读书读书读书读乙',
+      displayTitle: sharedTitle,
+      filePath: '/dropped/读书读书读书读乙.md',
+      format: 'txt',
+    });
+    const mdLabels = documentTabLabels([txt, md1, md2]);
+    expect(mdLabels.get('txt-1')?.suffixDisplay).toBe('· TXT');
+    expect(mdLabels.get('md-1')).toEqual({
+      base: sharedTitle,
+      suffix: '',
+      suffixDisplay: '',
+      text: `${sharedTitle} · Markdown · 读书读书读书读甲.md`,
+    });
+    expect(mdLabels.get('md-2')).toEqual({
+      base: sharedTitle,
+      suffix: '(2)',
+      suffixDisplay: '(2)',
+      text: `${sharedTitle} · Markdown · 读书读书读书读乙.md`,
+    });
+    for (const label of mdLabels.values()) {
+      expect(displayWidth(label.suffixDisplay)).toBeLessThanOrEqual(MAX_VISIBLE_SUFFIX_WIDTH);
+    }
+    expect(new Set([...mdLabels.values()].map((l) => l.suffixDisplay)).size).toBe(3);
   });
 
   it('skips ordinals already claimed by another tab title regardless of open order (#129)', () => {

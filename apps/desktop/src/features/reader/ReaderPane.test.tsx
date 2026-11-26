@@ -537,6 +537,110 @@ describe('ReaderPane tab commands', () => {
     setTitleSpy.mockRestore();
   });
 
+  it('renders compact distinct suffixes and preserves full accessible names for long-titled Chinese PDF tabs (#129)', () => {
+    const longTitle =
+      'A remarkably long document title that keeps going well past any tab width limit';
+    const now = '2026-04-01T10:00:00Z';
+    act(() => {
+      useStudySyncStore.setState({
+        documents: [
+          {
+            id: 'doc-txt',
+            title: longTitle,
+            displayTitle: null,
+            filePath: `/dropped/${longTitle}.txt`,
+            fileHash: 'hash-txt',
+            format: 'txt',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+          {
+            id: 'doc-pdf-1',
+            title: '读书读书读书读甲',
+            displayTitle: longTitle,
+            filePath: '/dropped/读书读书读书读甲.pdf',
+            fileHash: 'hash-pdf-1',
+            format: 'pdf',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+          {
+            id: 'doc-pdf-2',
+            title: '读书读书读书读乙',
+            displayTitle: longTitle,
+            filePath: '/dropped/读书读书读书读乙.pdf',
+            fileHash: 'hash-pdf-2',
+            format: 'pdf',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+        ],
+        openDocumentIds: ['doc-txt', 'doc-pdf-1', 'doc-pdf-2'],
+        activeDocumentId: 'doc-txt',
+        documentSourceStatuses: {
+          'doc-txt': {
+            documentId: 'doc-txt',
+            state: 'ok',
+            currentFileHash: 'hash-txt',
+            fileSizeBytes: null,
+          },
+          'doc-pdf-1': {
+            documentId: 'doc-pdf-1',
+            state: 'ok',
+            currentFileHash: 'hash-pdf-1',
+            fileSizeBytes: null,
+          },
+          'doc-pdf-2': {
+            documentId: 'doc-pdf-2',
+            state: 'ok',
+            currentFileHash: 'hash-pdf-2',
+            fileSizeBytes: null,
+          },
+        },
+        pdfLayouts: {
+          'doc-pdf-1': {
+            displayMode: 'single',
+            zoomMode: 'fit-width',
+            scale: 1,
+            rotation: 0,
+            coverPageAlone: false,
+          },
+          'doc-pdf-2': {
+            displayMode: 'single',
+            zoomMode: 'fit-width',
+            scale: 1,
+            rotation: 0,
+            coverPageAlone: false,
+          },
+        },
+      });
+    });
+
+    render(<ReaderPane />);
+
+    const txtTab = screen.getByRole('tab', { name: `${longTitle} · TXT` });
+    const pdfTab1 = screen.getByRole('tab', {
+      name: `${longTitle} · PDF · 读书读书读书读甲.pdf`,
+    });
+    const pdfTab2 = screen.getByRole('tab', {
+      name: `${longTitle} · PDF · 读书读书读书读乙.pdf`,
+    });
+    expect(txtTab.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent('· TXT');
+    expect(pdfTab1.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent('· PDF');
+    expect(pdfTab2.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent(
+      '· PDF (2)',
+    );
+    expect(pdfTab1).toHaveAttribute('title', `${longTitle}\n读书读书读书读甲.pdf`);
+    expect(pdfTab2).toHaveAttribute('title', `${longTitle}\n读书读书读书读乙.pdf`);
+    expect(screen.getAllByRole('button', { name: `Close ${longTitle}` })).toHaveLength(3);
+  });
+
   it('hands focus to the ninth entry when Show all is activated with the keyboard (#126)', async () => {
     const names = Array.from(
       { length: 12 },

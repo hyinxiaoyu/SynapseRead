@@ -307,7 +307,7 @@ export function ReaderPane({
                   }
                   title={tooltipText}
                   tabIndex={isActive ? 0 : -1}
-                  className="flex min-w-0 items-center py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="flex min-w-0 items-center overflow-hidden py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onMouseDown={releaseTabPointerFocus}
                   onFocus={(event) => {
                     const rect = event.currentTarget.getBoundingClientRect();
