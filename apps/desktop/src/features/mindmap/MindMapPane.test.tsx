@@ -237,6 +237,68 @@ describe('MindMapPane', () => {
       fireEvent.keyDown(cardB, { key: ' ', code: 'Space' });
       expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('b');
     });
+
+    it('keeps independent and slow double-clicks from undoing valid targets, and respects intervening explicit changes (#127)', () => {
+      seed([node('a', 40, 40), node('b', 400, 40)], {
+        selectedNodeId: null,
+        nestingTargetNodeId: null,
+      });
+      const inspectNode = vi.fn();
+      useStudySyncStore.setState({ inspectNode });
+      render(<MindMapPane open />);
+
+      // 1. Click A once -> A becomes target. Then immediately perform a separate double-click
+      // on A (starts a new `detail: 1` click sequence): Inspector opens for A and A stays target.
+      fireEvent.click(cardElement('a'), { detail: 1 });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+
+      fireEvent.click(cardElement('a'), { detail: 1 });
+      fireEvent.click(cardElement('a'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('a'));
+      expect(inspectNode).toHaveBeenLastCalledWith('a');
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+
+      // 2. With A as target, a slow double-click on B (> 760 ms between clicks) edits B and
+      // still restores A as the nesting target without relying on a wall-clock timeout.
+      vi.useFakeTimers();
+      try {
+        fireEvent.click(cardElement('b'), { detail: 1 });
+        vi.advanceTimersByTime(760);
+        fireEvent.click(cardElement('b'), { detail: 2 });
+        fireEvent.doubleClick(cardElement('b'));
+        expect(inspectNode).toHaveBeenLastCalledWith('b');
+        expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // 3. With no target, double-clicking B edits B and keeps target null.
+      act(() => useStudySyncStore.getState().setNestingTarget(null));
+      fireEvent.click(cardElement('b'), { detail: 1 });
+      fireEvent.click(cardElement('b'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('b'));
+      expect(inspectNode).toHaveBeenLastCalledWith('b');
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+
+      // 4. An explicit change (e.g. reader clear or Space) between click 1 and dblclick
+      // invalidates the pending click sequence so dblclick does not overwrite newer intent.
+      act(() => useStudySyncStore.getState().selectNode('a'));
+      fireEvent.click(cardElement('b'), { detail: 1 });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('b');
+      act(() => useStudySyncStore.getState().setNestingTarget(null));
+      fireEvent.click(cardElement('b'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('b'));
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+
+      // Same when Space picks A between click 1 on B and dblclick on B.
+      fireEvent.click(cardElement('b'), { detail: 1 });
+      cardElement('a').focus();
+      fireEvent.keyDown(cardElement('a'), { key: ' ', code: 'Space' });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+      fireEvent.click(cardElement('b'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('b'));
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+    });
   });
 
   describe('revealing a new card (#98)', () => {

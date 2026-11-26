@@ -136,8 +136,14 @@ describe('CardNode face content (#118)', () => {
     expect(screen.queryByTestId('card-tags')).toBeNull();
   });
 
-  it('renders a capture thumbnail lazily and falls back gracefully when missing or broken', async () => {
-    const captureUrl = vi.fn(async () => 'data:image/png;base64,iVBORw0KGgo=');
+  it('renders a capture thumbnail lazily inside a fixed-height slot across loading, loaded, and fallback states', async () => {
+    let resolveCapture: (url: string | null) => void = () => {};
+    const captureUrl = vi.fn(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolveCapture = resolve;
+        }),
+    );
     useStudySyncStore.setState({
       captureUrl,
       annotations: [
@@ -172,13 +178,22 @@ describe('CardNode face content (#118)', () => {
     });
     renderCard('node-img', 'card-img', false);
 
+    // Loading state already reserves the fixed h-24 thumbnail slot (#128).
+    const loadingSlot = screen.getByTestId('card-capture-slot');
+    expect(loadingSlot).toHaveAttribute('aria-busy', 'true');
+    expect(loadingSlot.className).toContain('h-24');
+
+    act(() => resolveCapture('data:image/png;base64,iVBORw0KGgo='));
     const img = await screen.findByTestId('card-capture-thumbnail');
     expect(img).toHaveAttribute('src', 'data:image/png;base64,iVBORw0KGgo=');
     expect(img).toHaveAttribute('loading', 'lazy');
+    expect(img.className).toContain('object-contain');
+    expect(screen.getByTestId('card-capture-slot').className).toContain('h-24');
 
-    // A broken image URL falls back gracefully without crashing.
+    // A broken image URL falls back gracefully inside the same fixed-height slot.
     fireEvent.error(img);
     expect(screen.getByTestId('card-capture-fallback')).toHaveTextContent('Capture unavailable');
+    expect(screen.getByTestId('card-capture-slot').className).toContain('h-24');
   });
 
   it('falls back gracefully when captureUrl rejects or returns null', async () => {

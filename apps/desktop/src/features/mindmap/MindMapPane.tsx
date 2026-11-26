@@ -40,8 +40,6 @@ const NODE_TYPES = { card: CardNode };
 type Measured = NonNullable<CardFlowNode['measured']>;
 /** A card's size until React Flow has measured it: `w-60`, about three lines tall. */
 const UNMEASURED_CARD = { width: 240, height: 96 };
-/** Window within which a double-click's preceding click can undo its nesting target change. */
-const DOUBLE_CLICK_GESTURE_MS = 700;
 
 interface CardMenuState {
   nodeId: string;
@@ -93,12 +91,11 @@ export function MindMapPane({
   const saveViewport = useStudySyncStore((state) => state.saveViewport);
 
   const sectionRef = useRef<HTMLElement>(null);
-  const lastClickNestingRef = useRef<{
+  const clickSequenceRef = useRef<{
     nodeId: string;
     previousTarget: string | null;
-    at: number;
+    expectedNonce: number;
   } | null>(null);
-  const suppressEnterSelectRef = useRef(false);
   const [measured, setMeasured] = useState<Record<string, Measured>>({});
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<ReadonlySet<string>>(new Set());
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
@@ -152,37 +149,16 @@ export function MindMapPane({
     [edges, selectedEdgeIds],
   );
 
-  const recordNestingBeforeSelect = useCallback((nodeId: string) => {
-    const now = Date.now();
-    const existing = lastClickNestingRef.current;
-    // Keep the pre-gesture target across the mousedown + click(s) of a double-click.
-    if (existing && existing.nodeId === nodeId && now - existing.at < DOUBLE_CLICK_GESTURE_MS) {
-      return;
-    }
-    lastClickNestingRef.current = {
-      nodeId,
-      previousTarget: useStudySyncStore.getState().nestingTargetNodeId,
-      at: now,
-    };
-  }, []);
-
   const handleSectionKeyDownCapture = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (event.key !== ' ') return;
       if (!(event.target instanceof Element)) return;
       const nodeEl = event.target.closest<HTMLElement>('.react-flow__node[data-id]');
       if (!nodeEl || event.target.closest('button, a, input, textarea, select')) return;
-      // Enter on a focused card invokes Edit Card (`edit.editCard`); prevent React Flow's
-      // own `elementSelectionKeys` handler from also making it the nesting target (#127).
-      if (event.key === 'Enter') {
-        suppressEnterSelectRef.current = true;
-        queueMicrotask(() => {
-          suppressEnterSelectRef.current = false;
-        });
-        return;
-      }
       // Space deliberately selects the focused card as the nesting target, even when an
       // excerpt already selected it (React Flow skips `onNodesChange` for already-selected nodes).
-      if (event.key === ' ' && nodeEl.dataset.id) {
+      if (nodeEl.dataset.id) {
+        clickSequenceRef.current = null;
         selectNode(nodeEl.dataset.id);
       }
     },
@@ -204,15 +180,13 @@ export function MindMapPane({
             hasSizeUpdate = true;
           }
         } else if (change.type === 'select') {
+          // React Flow fires `select` changes on drag start, keyboard Enter, and internal
+          // deselections; keep those visual-only so dragging or editing never alters the
+          // nesting target (#127).
           if (change.selected) {
-            if (suppressEnterSelectRef.current) {
-              setSelectedNode(change.id);
-            } else {
-              recordNestingBeforeSelect(change.id);
-              selectNode(change.id);
-            }
+            setSelectedNode(change.id);
           } else if (useStudySyncStore.getState().selectedNodeId === change.id) {
-            selectNode(null);
+            setSelectedNode(null);
           }
         }
       }
@@ -220,7 +194,7 @@ export function MindMapPane({
         reportNodeSizes(sizeUpdates);
       }
     },
-    [dragNode, recordNestingBeforeSelect, reportNodeSizes, selectNode, setSelectedNode],
+    [dragNode, reportNodeSizes, setSelectedNode],
   );
 
   const onEdgesChange = useCallback(
@@ -349,6 +323,7 @@ export function MindMapPane({
           if (isEditableShortcutTarget(target)) return false;
           const { selectedNodeId: selected, nestingTargetNodeId } = useStudySyncStore.getState();
           if (selected === null && nestingTargetNodeId === null) return false;
+          clickSequenceRef.current = null;
           selectNode(null);
           return true;
         }
@@ -377,24 +352,33 @@ export function MindMapPane({
         // selected, as one an excerpt selected is; a plain click still chooses it.
         onNodeClick={(event, node) => {
           closeContextMenu();
+          // Only the start of a browser click sequence (`detail === 1`, or synthetic `0`)
+          // sets the nesting target. Capture the prior target and mutation nonce so the
+          // paired `dblclick` rolls back only this sequence, with no fixed timeout (#127).
           if (event.detail <= 1) {
-            recordNestingBeforeSelect(node.id);
+            const previousTarget = useStudySyncStore.getState().nestingTargetNodeId;
             selectNode(node.id);
+            clickSequenceRef.current = {
+              nodeId: node.id,
+              previousTarget,
+              expectedNonce: useStudySyncStore.getState().nestingTargetNonce,
+            };
           }
         }}
         // Double-clicking a card opens it for editing in the Inspector without making
-        // it the nesting target (#127). If the preceding click(s) of the double-click
-        // just set this card as the target, restore the prior target.
+        // it the nesting target (#127). Only roll back the `detail === 1` click that
+        // started this exact sequence, and skip rollback if an explicit target change
+        // (Esc, Space, reader clear, etc.) happened in between.
         onNodeDoubleClick={(_event, node) => {
           closeContextMenu();
-          const pending = lastClickNestingRef.current;
-          lastClickNestingRef.current = null;
+          const sequence = clickSequenceRef.current;
+          clickSequenceRef.current = null;
           if (
-            pending &&
-            pending.nodeId === node.id &&
-            Date.now() - pending.at < DOUBLE_CLICK_GESTURE_MS
+            sequence &&
+            sequence.nodeId === node.id &&
+            useStudySyncStore.getState().nestingTargetNonce === sequence.expectedNonce
           ) {
-            setNestingTarget(pending.previousTarget);
+            setNestingTarget(sequence.previousTarget);
           }
           inspectNode(node.id);
         }}
@@ -406,9 +390,12 @@ export function MindMapPane({
           setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
         }}
         onPaneClick={() => {
-          lastClickNestingRef.current = null;
+          clickSequenceRef.current = null;
           closeContextMenu();
           selectNode(null);
+        }}
+        onNodeDragStart={() => {
+          clickSequenceRef.current = null;
         }}
         onNodeDragStop={(_event, node) => void commitNodeLayout(node.id)}
         onMoveEnd={(_event, viewport) => void saveViewport(viewport)}

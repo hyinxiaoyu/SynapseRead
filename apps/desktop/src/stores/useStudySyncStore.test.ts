@@ -299,6 +299,37 @@ describe('useStudySyncStore', () => {
       }
     });
 
+    it('reserves at least thumbnail-inclusive height for capture cards even after an early shorter measurement (#128)', async () => {
+      const documentId = await openDocument();
+      // Create a PDF capture card with a real 1x1 PNG.
+      state().setSelection({
+        documentId,
+        anchor: pdfAnchor as ReaderSelection['anchor'],
+        text: null,
+        imagePng:
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      });
+      await state().excerptSelection();
+      const captureNode = state().nodes[0]!;
+      const savedPos = { x: captureNode.posX, y: captureNode.posY };
+
+      // Simulate an early pre-thumbnail DOM measurement (78 px) before the capture expands to ~148 px.
+      state().reportNodeSizes({ [captureNode.id]: { width: 240, height: 78 } });
+
+      select(documentId, 'Follow-up text root');
+      await state().excerptSelection();
+      const textNode = state().nodes[1]!;
+
+      // Original capture card position stays untouched.
+      expect({ x: state().nodes[0]!.posX, y: state().nodes[0]!.posY }).toEqual(savedPos);
+      // Even when the capture card renders at 148 px (or full 220 px estimate), the text card clears it.
+      const captureBottom = captureNode.posY + 148;
+      const separated =
+        textNode.posX >= captureNode.posX + 240 + ROOT_CARD_GAP ||
+        textNode.posY >= captureBottom + ROOT_CARD_GAP;
+      expect(separated).toBe(true);
+    });
+
     it('asks the canvas to reveal each new card, without making it the nesting target', async () => {
       const documentId = await openDocument();
       const beforeExcerptNonce = state().excerptNonce;

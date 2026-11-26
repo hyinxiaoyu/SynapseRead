@@ -204,6 +204,8 @@ export interface StudySyncState {
    * consecutive excerpts stay separate roots instead of chaining (#96).
    */
   nestingTargetNodeId: string | null;
+  /** Monotonic count of explicit nesting-target mutations, to guard double-click rollback (#127). */
+  nestingTargetNonce: number;
   /** Store -> MindMap: a card to bring into view once the canvas is showing. */
   revealRequest: RevealRequest | null;
   /** Store -> Workspace/Inspector: open Inspector and focus Notes for this card (#119). */
@@ -1077,6 +1079,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       isExcerpting: false,
       selectedNodeId: null,
       nestingTargetNodeId: null,
+      nestingTargetNonce: 0,
       revealRequest: null,
       inspectRequest: null,
       excerptNonce: 0,
@@ -1648,6 +1651,8 @@ export function createStudySyncStore(backend: StudyBackend) {
 
         // Use measured DOM sizes where known; for unmeasured cards (e.g. while the
         // MindMap is collapsed), reserve a conservative bound from their content (#128).
+        // Capture cards always reserve at least their thumbnail-inclusive estimate so an
+        // early measurement before an image loads can never place a later card underneath.
         const effectiveSizes: Record<string, NodeSize> = { ...nodeSizes };
         const captureAnnotationIds = new Set(
           annotations
@@ -1656,14 +1661,23 @@ export function createStudySyncStore(backend: StudyBackend) {
         );
         const cardsById = new Map(cards.map((card) => [card.id, card]));
         for (const node of nodes) {
-          if (effectiveSizes[node.id]) continue;
           const card = cardsById.get(node.cardId);
           if (!card) continue;
-          effectiveSizes[node.id] = estimateCardSize({
-            hasCapture: card.annotationIds.some((id) => captureAnnotationIds.has(id)),
+          const hasCapture = card.annotationIds.some((id) => captureAnnotationIds.has(id));
+          const estimated = estimateCardSize({
+            hasCapture,
             hasNotes: card.markdownNotes.trim() !== '',
             hasTags: card.tags.length > 0,
           });
+          const measured = effectiveSizes[node.id];
+          if (!measured) {
+            effectiveSizes[node.id] = estimated;
+          } else if (hasCapture) {
+            effectiveSizes[node.id] = {
+              width: Math.max(measured.width, estimated.width),
+              height: Math.max(measured.height, estimated.height),
+            };
+          }
         }
         const newSize = estimateCardSize({ hasCapture: selection.imagePng !== null });
         const position = nextNodePosition(nodes, parentNodeId, {
@@ -1896,16 +1910,26 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().jumpRequest?.nonce === nonce) set({ jumpRequest: null });
       },
 
-      selectNode: (nodeId) => set({ selectedNodeId: nodeId, nestingTargetNodeId: nodeId }),
+      selectNode: (nodeId) =>
+        set((state) => ({
+          selectedNodeId: nodeId,
+          nestingTargetNodeId: nodeId,
+          nestingTargetNonce: state.nestingTargetNonce + 1,
+        })),
 
       setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
 
       setNestingTarget(nodeId) {
-        const target =
-          nodeId !== null && get().nodes.some((candidate) => candidate.id === nodeId)
-            ? nodeId
-            : null;
-        set({ nestingTargetNodeId: target });
+        set((state) => {
+          const target =
+            nodeId !== null && state.nodes.some((candidate) => candidate.id === nodeId)
+              ? nodeId
+              : null;
+          return {
+            nestingTargetNodeId: target,
+            nestingTargetNonce: state.nestingTargetNonce + 1,
+          };
+        });
       },
 
       revealNode(nodeId, parentTitle) {
@@ -2058,6 +2082,10 @@ export function createStudySyncStore(backend: StudyBackend) {
             state.nestingTargetNodeId !== null && removedNodeIds.has(state.nestingTargetNodeId)
               ? null
               : state.nestingTargetNodeId,
+          nestingTargetNonce:
+            state.nestingTargetNodeId !== null && removedNodeIds.has(state.nestingTargetNodeId)
+              ? state.nestingTargetNonce + 1
+              : state.nestingTargetNonce,
           revealRequest:
             state.revealRequest && removedNodeIds.has(state.revealRequest.nodeId)
               ? null

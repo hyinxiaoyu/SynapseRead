@@ -495,4 +495,608 @@ export async function mindmapFlow(page) {
     overlapReport.count === 17 && overlapReport.overlaps.length === 0,
     `expected 17 non-overlapping cards after 10 consecutive root excerpts, got ${JSON.stringify(overlapReport)}`,
   );
+
+  // Shared helpers for sections 14–16.
+  const cardByText = (text) => `(() => {
+    const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find((n) =>
+      n.textContent?.includes(${JSON.stringify(text)}),
+    );
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return {
+      id: el.dataset.id,
+      selected: el.classList.contains('selected'),
+      transform: el.style.transform,
+      left: r.left,
+      top: r.top,
+      width: r.width,
+      height: r.height,
+      center: { x: r.left + r.width / 2, y: r.top + r.height / 2 },
+    };
+  })()`;
+
+  const hasEdge = (sourceId, targetId) =>
+    page.evaluate(
+      `Boolean(document.querySelector('[aria-label="Edge from ${sourceId} to ${targetId}"]'))`,
+    );
+
+  const countEdges = () => page.evaluate(`document.querySelectorAll('.react-flow__edge').length`);
+
+  const countOverlaps = () =>
+    page.evaluate(`(() => {
+      const rects = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].map((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          id: el.dataset.id,
+          text: (el.textContent ?? '').trim().slice(0, 24),
+          left: r.left,
+          top: r.top,
+          right: r.right,
+          bottom: r.bottom,
+        };
+      });
+      const overlaps = [];
+      const eps = 0.5;
+      for (let i = 0; i < rects.length; i += 1) {
+        for (let j = i + 1; j < rects.length; j += 1) {
+          const a = rects[i];
+          const b = rects[j];
+          if (
+            a.left < b.right - eps &&
+            a.right > b.left + eps &&
+            a.top < b.bottom - eps &&
+            a.bottom > b.top + eps
+          ) {
+            overlaps.push([a.text, b.text]);
+          }
+        }
+      }
+      return { count: rects.length, overlaps };
+    })()`);
+
+  const excerptAny = async (phrase, expectedTotal) => {
+    await page.selectText(SEGMENT, phrase);
+    await page.waitFor(
+      `!document.querySelector('[data-testid="excerpt-button"]').disabled`,
+      `Excerpt button to enable for ${phrase}`,
+    );
+    await page.evaluate(`document.querySelector('[data-testid="excerpt-button"]').click()`);
+    await page.waitFor(
+      `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === ${expectedTotal}`,
+      `card count to reach ${expectedTotal} after "${phrase}"`,
+    );
+  };
+
+  const panCardIntoView = async (text) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const move = await page.evaluate(`(() => {
+        const pane = document.querySelector('.react-flow')?.getBoundingClientRect();
+        const card = (${cardByText(text)});
+        if (!pane || !card) return null;
+        const margin = 24;
+        const dx = card.left < pane.left + margin
+          ? pane.left + 80 - card.left
+          : card.left + card.width > pane.right - margin
+            ? pane.right - 80 - (card.left + card.width)
+            : 0;
+        const dy = card.top < pane.top + margin
+          ? pane.top + 80 - card.top
+          : card.top + card.height > pane.bottom - margin
+            ? pane.bottom - 80 - (card.top + card.height)
+            : 0;
+        if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return null;
+        // Find an empty point on the React Flow pane to pan from.
+        const candidates = [
+          { x: pane.left + pane.width / 2, y: pane.bottom - 16 },
+          { x: pane.right - 20, y: pane.top + 20 },
+          { x: pane.left + 20, y: pane.top + 20 },
+          { x: pane.left + pane.width / 2, y: pane.top + 16 },
+        ];
+        const start =
+          candidates.find((pt) =>
+            document.elementFromPoint(pt.x, pt.y)?.classList.contains('react-flow__pane'),
+          ) ?? candidates[0];
+        const stepX = Math.max(-240, Math.min(240, dx));
+        const stepY = Math.max(-240, Math.min(240, dy));
+        return { from: start, to: { x: start.x + stepX, y: start.y + stepY } };
+      })()`);
+      if (!move) return;
+      await page.drag(move.from, move.to);
+    }
+  };
+
+  const waitTwoFrames = () =>
+    page.evaluate(
+      `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`,
+    );
+
+  const waitForViewportSettled = async () => {
+    await page.evaluate(`delete window.__lastRfViewport`);
+    await page.waitFor(
+      `(() => {
+        const vp = document.querySelector('.react-flow__viewport')?.style.transform ?? '';
+        const prev = window.__lastRfViewport;
+        window.__lastRfViewport = vp;
+        return prev !== undefined && vp === prev;
+      })()`,
+      'MindMap viewport animation to settle',
+    );
+    await page.evaluate(`delete window.__lastRfViewport`);
+  };
+
+  // 14. Issue #127 (drag blocker): Dragging an unselected card with a real mouse updates
+  // and persists its position without changing the nesting target (from both no-target
+  // and A-is-target states).
+  // Close Inspector first so MindMap has ample horizontal space and section 15 also
+  // verifies double-click reopens Inspector from its collapsed state.
+  if (
+    await page.evaluate(
+      `document.querySelector('button[aria-label="Hide inspector"]')?.getAttribute('aria-pressed') === 'true'`,
+    )
+  ) {
+    await page.clickButton('Hide inspector');
+    await page.waitFor(
+      `document.querySelector('button[aria-label="Show inspector"]')?.getAttribute('aria-pressed') === 'false'`,
+      'Inspector to collapse before drag checks',
+    );
+    await waitTwoFrames();
+  }
+  await waitForViewportSettled();
+  let totalCards = 17;
+  let totalEdges = await countEdges();
+  assert(totalEdges === 1, `expected 1 edge entering section 14, got ${totalEdges}`);
+
+  // 14a. Starting with no nesting target, drag unselected card B ("Filler line 010")
+  // into empty canvas space to the right without colliding with any other card.
+  await panCardIntoView('Filler line 010');
+  await waitForViewportSettled();
+  const cardBBeforeNoTarget = await page.evaluate(cardByText('Filler line 010'));
+  assert(
+    cardBBeforeNoTarget && !cardBBeforeNoTarget.selected,
+    'Filler line 010 should be visible and unselected before dragging',
+  );
+  await page.drag(cardBBeforeNoTarget.center, {
+    x: cardBBeforeNoTarget.center.x + 280,
+    y: cardBBeforeNoTarget.center.y,
+  });
+  await page.waitFor(
+    `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(cardBBeforeNoTarget.transform)}`,
+    'dragged card B transform to move',
+  );
+  const movedTransform1 = (await page.evaluate(cardByText('Filler line 010'))).transform;
+  assert(
+    (await page.evaluate(
+      `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label')`,
+    )) === 'Excerpt to MindMap',
+    'dragging an unselected card must keep Excerpt to MindMap (no nesting target)',
+  );
+  totalCards += 1;
+  await excerptAny('Filler line 012', totalCards);
+  await waitForViewportSettled();
+  assert(
+    (await countEdges()) === totalEdges,
+    'excerpt after dragging unselected card B with no target must remain a root card',
+  );
+  assert(
+    (await page.evaluate(cardByText('Filler line 010'))).transform === movedTransform1,
+    'dragged card B position must remain saved after excerpting',
+  );
+
+  // 14b. Starting with card A ("Filler line 011") as nesting target, drag unselected card B.
+  await panCardIntoView('Filler line 011');
+  await waitForViewportSettled();
+  const cardAInfo = await page.evaluate(cardByText('Filler line 011'));
+  assert(cardAInfo, 'card A (Filler line 011) should be visible');
+  await page.click({ x: cardAInfo.left + 32, y: cardAInfo.center.y });
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label') === 'Excerpt under ‘Filler line 011’'`,
+    'clicking card A to make it the nesting target',
+  );
+  await panCardIntoView('Filler line 010');
+  await waitForViewportSettled();
+  const cardBBeforeATarget = await page.evaluate(cardByText('Filler line 010'));
+  assert(
+    cardBBeforeATarget && !cardBBeforeATarget.selected,
+    'card B should be unselected while card A is selected',
+  );
+  await page.drag(cardBBeforeATarget.center, {
+    x: cardBBeforeATarget.center.x + 40,
+    y: cardBBeforeATarget.center.y - 60,
+  });
+  await page.waitFor(
+    `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(cardBBeforeATarget.transform)}`,
+    'dragged card B transform to update on second drag',
+  );
+  assert(
+    (await page.evaluate(
+      `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label')`,
+    )) === 'Excerpt under ‘Filler line 011’',
+    'dragging unselected card B must keep card A as the nesting target',
+  );
+  totalCards += 1;
+  totalEdges += 1;
+  await excerptAny('Filler line 013', totalCards);
+  await waitForViewportSettled();
+  await page.waitFor(
+    `document.querySelectorAll('.react-flow__edge').length === ${totalEdges}`,
+    'new edge under card A after dragging card B',
+  );
+  const child13 = await page.evaluate(cardByText('Filler line 013'));
+  assert(
+    await hasEdge(cardAInfo.id, child13.id),
+    'excerpt after dragging unselected card B must still nest under card A',
+  );
+
+  // 15. Issue #127 (double-click blockers): independent double-click on A keeps A as target,
+  // slow 760 ms double-click on B keeps A as target, and double-click on B with no target keeps none.
+  const inspectorTitle = () =>
+    page.evaluate(`(() => {
+      const label = [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Title'));
+      return label?.querySelector('input')?.value ?? null;
+    })()`);
+
+  // Clear target first.
+  await page.evaluate(
+    `document.querySelector('[data-testid="clear-nesting-target-button"]')?.click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label') === 'Excerpt to MindMap'`,
+    'target cleared before section 15',
+  );
+
+  // 15a. Click left side of card A, then immediately perform an independent double-click
+  // ~96 px to the right on the same card A: Inspector opens for A and A stays target.
+  await panCardIntoView('Filler line 011');
+  await waitForViewportSettled();
+  const cardAForClick = await page.evaluate(cardByText('Filler line 011'));
+  await page.click({ x: cardAForClick.left + 28, y: cardAForClick.center.y });
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label') === 'Excerpt under ‘Filler line 011’'`,
+    'single click on left of card A to set A as target',
+  );
+  const rightSpot = { x: cardAForClick.left + 124, y: cardAForClick.center.y };
+  await page.multiClick(rightSpot, 2);
+  await page.waitFor(
+    `(() => {
+      const label = [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Title'));
+      return label?.querySelector('input')?.value === 'Filler line 011';
+    })()`,
+    'independent double-click on A to edit A in Inspector',
+  );
+  assert(
+    (await page.evaluate(
+      `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label')`,
+    )) === 'Excerpt under ‘Filler line 011’',
+    'independent double-click on A must keep A as the nesting target',
+  );
+
+  // 15b. With A as target, send a slow double-click (760 ms between click 1 and click 2) on B:
+  // Inspector edits B and the next excerpt still nests under A.
+  await panCardIntoView('Filler line 010');
+  await waitForViewportSettled();
+  const cardBForSlowDbl = await page.evaluate(cardByText('Filler line 010'));
+  await page.mouse('mouseMoved', cardBForSlowDbl.center.x, cardBForSlowDbl.center.y);
+  await page.mouse('mousePressed', cardBForSlowDbl.center.x, cardBForSlowDbl.center.y, 'left', 1);
+  await page.mouse('mouseReleased', cardBForSlowDbl.center.x, cardBForSlowDbl.center.y, 'left', 1);
+  await new Promise((done) => setTimeout(done, 760));
+  await page.mouse('mousePressed', cardBForSlowDbl.center.x, cardBForSlowDbl.center.y, 'left', 2);
+  await page.mouse('mouseReleased', cardBForSlowDbl.center.x, cardBForSlowDbl.center.y, 'left', 2);
+  await page.waitFor(
+    `(() => {
+      const label = [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Title'));
+      return label?.querySelector('input')?.value === 'Filler line 010';
+    })()`,
+    'slow 760 ms double-click on B to edit B in Inspector',
+  );
+  assert(
+    (await page.evaluate(
+      `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label')`,
+    )) === 'Excerpt under ‘Filler line 011’',
+    'slow 760 ms double-click on B must keep A as the nesting target',
+  );
+  totalCards += 1;
+  totalEdges += 1;
+  await excerptAny('Filler line 014', totalCards);
+  await waitForViewportSettled();
+  await page.waitFor(
+    `document.querySelectorAll('.react-flow__edge').length === ${totalEdges}`,
+    'new edge under A after slow double-click on B',
+  );
+  const child14 = await page.evaluate(cardByText('Filler line 014'));
+  assert(
+    await hasEdge(cardAForClick.id, child14.id),
+    'excerpt after slow double-click on B must still nest under A',
+  );
+
+  // 15c. With no target, double-click B: Inspector edits B and the next excerpt is a root card.
+  await page.evaluate(
+    `document.querySelector('[data-testid="clear-nesting-target-button"]')?.click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label') === 'Excerpt to MindMap'`,
+    'target cleared before 15c',
+  );
+  await panCardIntoView('Filler line 010');
+  await waitForViewportSettled();
+  const cardBForRootDbl = await page.evaluate(cardByText('Filler line 010'));
+  await page.multiClick(cardBForRootDbl.center, 2);
+  assert(
+    (await inspectorTitle()) === 'Filler line 010',
+    'double-click on B with no target should open B in Inspector',
+  );
+  assert(
+    (await page.evaluate(
+      `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label')`,
+    )) === 'Excerpt to MindMap',
+    'double-click on B with no target must keep Excerpt to MindMap',
+  );
+  totalCards += 1;
+  await excerptAny('Filler line 015', totalCards);
+  await waitForViewportSettled();
+  assert(
+    (await countEdges()) === totalEdges,
+    'excerpt after double-clicking B with no target must remain a root card',
+  );
+
+  // Close Inspector so Reader and MindMap have plenty of room for section 16.
+  await page.clickButton('Hide inspector');
+
+  // 16. Issue #128 (PDF capture thumbnail blocker): Delaying or failing a PDF capture
+  // thumbnail never lets the capture card grow over a subsequent TXT root card, both
+  // while the MindMap is expanded and while it is collapsed, and preserves saved coordinates.
+  await page.openUntil(
+    `[...document.querySelectorAll('[data-testid="pdf-scroll"]')].some((e) => e.checkVisibility({ visibilityProperty: true })) &&
+     document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === 'sample'`,
+    'sample.pdf for capture thumbnail placement check',
+  );
+  for (const other of ['sample-labels', 'sample-footnotes']) {
+    await page.evaluate(
+      `[...document.querySelectorAll('[aria-label="Close ${other}"]')].forEach((b) => b.click())`,
+    );
+  }
+  await page.waitFor(
+    `document.querySelector('[data-page-index="0"] canvas')?.width > 0`,
+    'sample.pdf page 0 canvas to render',
+  );
+
+  const switchToViewer = async (viewerTestId) => {
+    await page.evaluate(`(() => {
+      const panel = document.querySelector('[data-testid="${viewerTestId}"]')?.closest('[role="tabpanel"]');
+      const tabId = panel?.getAttribute('aria-labelledby');
+      if (tabId) document.getElementById(tabId)?.click();
+    })()`);
+    await page.waitFor(
+      `document.querySelector('[data-testid="${viewerTestId}"]')?.checkVisibility({ visibilityProperty: true })`,
+      `${viewerTestId} tab to become visible`,
+    );
+  };
+
+  const capturePdfArea = async (expectedTotal) => {
+    await switchToViewer('pdf-viewer');
+    await page.clickButton('Capture area');
+    const box = await page.waitFor(
+      `(() => {
+        const surface = document.querySelector('[data-page-index="0"] [data-testid="pdf-capture-surface"]');
+        if (!surface) return null;
+        const r = surface.getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) return null;
+        return {
+          from: { x: r.left + r.width * 0.2, y: r.top + r.height * 0.2 },
+          to: { x: r.left + r.width * 0.5, y: r.top + r.height * 0.35 },
+        };
+      })()`,
+      'PDF capture surface on page 0',
+    );
+    await page.drag(box.from, box.to);
+    await page.waitFor(
+      `!document.querySelector('[data-testid="excerpt-button"]').disabled`,
+      'Excerpt button to enable for PDF capture',
+    );
+    await page.evaluate(`document.querySelector('[data-testid="excerpt-button"]').click()`);
+    await page.waitFor(
+      `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === ${expectedTotal}`,
+      `card count to reach ${expectedTotal} after PDF capture`,
+    );
+  };
+
+  // Install a reversible thumbnail src gate on HTMLImageElement.prototype.
+  await page.evaluate(`(() => {
+    const desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+    window.__origImgSrcDesc = desc;
+    window.__holdThumbnails = false;
+    window.__heldThumbnails = [];
+    Object.defineProperty(HTMLImageElement.prototype, 'src', {
+      configurable: true,
+      enumerable: desc.enumerable,
+      get() {
+        return desc.get.call(this);
+      },
+      set(value) {
+        if (
+          window.__holdThumbnails &&
+          this.dataset?.testid === 'card-capture-thumbnail' &&
+          typeof value === 'string' &&
+          value.startsWith('data:image/png')
+        ) {
+          window.__heldThumbnails.push({ img: this, value });
+          return;
+        }
+        desc.set.call(this, value);
+      },
+    });
+    window.__releaseThumbnails = () => {
+      const descNow = window.__origImgSrcDesc;
+      const pending = window.__heldThumbnails.splice(0);
+      for (const item of pending) descNow.set.call(item.img, item.value);
+      return pending.length;
+    };
+    window.__failThumbnails = () => {
+      const descNow = window.__origImgSrcDesc;
+      const pending = window.__heldThumbnails.splice(0);
+      for (const item of pending) descNow.set.call(item.img, 'data:image/png;base64,invalid');
+      return pending.length;
+    };
+  })()`);
+
+  try {
+    // 16a. MindMap EXPANDED: delay PDF capture thumbnail -> excerpt TXT root -> release -> verify zero overlap & preserved coordinates.
+    await page.evaluate(`window.__holdThumbnails = true`);
+    const idsBefore16a = await page.evaluate(
+      `[...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].map((el) => el.dataset.id)`,
+    );
+    totalCards += 1;
+    await capturePdfArea(totalCards);
+    await page.waitFor(
+      `window.__heldThumbnails.length >= 1`,
+      'delayed capture thumbnail (expanded)',
+    );
+    const capture16a = await page.evaluate(`(() => {
+      const before = new Set(${JSON.stringify(idsBefore16a)});
+      const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find((n) => !before.has(n.dataset.id));
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { id: el.dataset.id, transform: el.style.transform, height: r.height };
+    })()`);
+    assert(capture16a, 'expanded capture card should exist');
+
+    await switchToViewer('txt-viewer');
+    totalCards += 1;
+    await excerptAny('Filler line 016', totalCards);
+
+    await page.evaluate(`window.__releaseThumbnails()`);
+    await page.waitFor(
+      `(() => {
+        const img = document.querySelector('.react-flow__node[data-id="${capture16a.id}"] [data-testid="card-capture-thumbnail"]');
+        return Boolean(img && img.complete && img.naturalHeight > 0);
+      })()`,
+      'expanded capture thumbnail to decode',
+    );
+    await waitTwoFrames();
+
+    const capture16aAfter = await page.evaluate(`(() => {
+      const el = document.querySelector('.react-flow__node[data-id="${capture16a.id}"]');
+      return { transform: el?.style.transform, height: el?.getBoundingClientRect().height };
+    })()`);
+    assert(
+      capture16aAfter.transform === capture16a.transform,
+      `expanded capture card coordinates must not shift: ${capture16a.transform} vs ${capture16aAfter.transform}`,
+    );
+    assert(
+      Math.abs(capture16aAfter.height - capture16a.height) < 2,
+      `expanded capture card height must stay stable across thumbnail load: ${capture16a.height} vs ${capture16aAfter.height}`,
+    );
+    const overlaps16a = await countOverlaps();
+    assert(
+      overlaps16a.overlaps.length === 0,
+      `expected 0 overlaps after expanded delayed PDF thumbnail loads, got ${JSON.stringify(overlaps16a)}`,
+    );
+
+    // 16b. MindMap COLLAPSED: create PDF capture + TXT root while collapsed -> expand -> release -> verify zero overlap & preserved coordinates.
+    await page.clickButton('Hide MindMap');
+    const idsBefore16b = await page.evaluate(
+      `[...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].map((el) => el.dataset.id)`,
+    );
+    totalCards += 1;
+    await capturePdfArea(totalCards);
+    await switchToViewer('txt-viewer');
+    totalCards += 1;
+    await excerptAny('Filler line 017', totalCards);
+
+    await page.clickButton('Show MindMap');
+    await page.waitFor(
+      `(() => {
+        const before = new Set(${JSON.stringify(idsBefore16b)});
+        const added = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].filter((n) => !before.has(n.dataset.id));
+        return added.length === 2 && added.every((n) => n.getBoundingClientRect().height > 0);
+      })()`,
+      'collapsed capture and TXT cards to render when MindMap opens',
+    );
+    const capture16b = await page.evaluate(`(() => {
+      const before = new Set(${JSON.stringify(idsBefore16b)});
+      const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find(
+        (n) => !before.has(n.dataset.id) && !n.textContent?.includes('Filler line 017'),
+      );
+      return el ? { id: el.dataset.id, transform: el.style.transform, height: el.getBoundingClientRect().height } : null;
+    })()`);
+    assert(capture16b, 'collapsed capture card should exist');
+    await page.evaluate(`window.__releaseThumbnails()`);
+    await page.waitFor(
+      `(() => {
+        const img = document.querySelector('.react-flow__node[data-id="${capture16b.id}"] [data-testid="card-capture-thumbnail"]');
+        return Boolean(img && img.complete && img.naturalHeight > 0);
+      })()`,
+      'collapsed capture thumbnail to decode after opening MindMap',
+    );
+    await waitTwoFrames();
+
+    const capture16bAfter = await page.evaluate(
+      `document.querySelector('.react-flow__node[data-id="${capture16b.id}"]')?.style.transform`,
+    );
+    assert(
+      capture16bAfter === capture16b.transform,
+      `collapsed capture card coordinates must not shift: ${capture16b.transform} vs ${capture16bAfter}`,
+    );
+    const overlaps16b = await countOverlaps();
+    assert(
+      overlaps16b.overlaps.length === 0,
+      `expected 0 overlaps after collapsed delayed PDF thumbnail loads, got ${JSON.stringify(overlaps16b)}`,
+    );
+
+    // 16c. Image load FAILURE path: delay PDF capture -> excerpt TXT root -> fail image -> verify fallback, stable height, and zero overlap.
+    const idsBefore16c = await page.evaluate(
+      `[...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].map((el) => el.dataset.id)`,
+    );
+    totalCards += 1;
+    await capturePdfArea(totalCards);
+    await page.waitFor(
+      `window.__heldThumbnails.length >= 1`,
+      'delayed capture thumbnail (failure path)',
+    );
+    const capture16c = await page.evaluate(`(() => {
+      const before = new Set(${JSON.stringify(idsBefore16c)});
+      const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find((n) => !before.has(n.dataset.id));
+      return el ? { id: el.dataset.id, transform: el.style.transform, height: el.getBoundingClientRect().height } : null;
+    })()`);
+    assert(capture16c, 'failure-path capture card should exist');
+
+    await switchToViewer('txt-viewer');
+    totalCards += 1;
+    await excerptAny('Filler line 018', totalCards);
+
+    await page.evaluate(`window.__failThumbnails()`);
+    await page.waitFor(
+      `Boolean(document.querySelector('.react-flow__node[data-id="${capture16c.id}"] [data-testid="card-capture-fallback"]'))`,
+      'capture fallback to render when thumbnail fails to load',
+    );
+    await waitTwoFrames();
+
+    const capture16cAfter = await page.evaluate(`(() => {
+      const el = document.querySelector('.react-flow__node[data-id="${capture16c.id}"]');
+      return { transform: el?.style.transform, height: el?.getBoundingClientRect().height };
+    })()`);
+    assert(
+      capture16cAfter.transform === capture16c.transform,
+      `failed capture card coordinates must not shift: ${capture16c.transform} vs ${capture16cAfter.transform}`,
+    );
+    assert(
+      Math.abs(capture16cAfter.height - capture16c.height) < 2,
+      `failed capture card height must stay stable across fallback: ${capture16c.height} vs ${capture16cAfter.height}`,
+    );
+    const overlaps16c = await countOverlaps();
+    assert(
+      overlaps16c.overlaps.length === 0,
+      `expected 0 overlaps after failed PDF thumbnail fallback, got ${JSON.stringify(overlaps16c)}`,
+    );
+  } finally {
+    await page.evaluate(`(() => {
+      window.__holdThumbnails = false;
+      if (window.__origImgSrcDesc) {
+        Object.defineProperty(HTMLImageElement.prototype, 'src', window.__origImgSrcDesc);
+        delete window.__origImgSrcDesc;
+      }
+      delete window.__heldThumbnails;
+      delete window.__releaseThumbnails;
+      delete window.__failThumbnails;
+    })()`);
+  }
 }
