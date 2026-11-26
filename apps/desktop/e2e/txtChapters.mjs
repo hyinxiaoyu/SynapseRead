@@ -7,7 +7,7 @@ const viewer = `[...document.querySelectorAll('[data-testid="txt-viewer"]')].fin
 const scroller = `${viewer}?.querySelector('[data-testid="txt-scroll"]')`;
 const toolbar = `document.querySelector('[data-testid="unified-toolbar"]')`;
 const titleIs = (title) =>
-  `${toolbar}?.querySelector('[data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+  `${toolbar}?.querySelector('[data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`;
 const subtitle = `${toolbar}?.querySelector('[data-testid="reader-toolbar-subtitle"]')?.textContent ?? null`;
 const subtitleIs = (label) => `${subtitle} === ${JSON.stringify(label)}`;
 /** The heading's row is at the top of the page, give or take a rounding pixel. */

@@ -10,7 +10,7 @@ const toolbar = `document.querySelector('[data-testid="unified-toolbar"]')`;
 const goToBox = `${toolbar}?.querySelector('[data-testid="go-to-input"]')`;
 const pdfPageField = `${toolbar}?.querySelector('input[aria-label="Page number"]')`;
 const titleIs = (title) =>
-  `${toolbar}?.querySelector('[data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+  `${toolbar}?.querySelector('[data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`;
 const subtitle = `${toolbar}?.querySelector('[data-testid="reader-toolbar-subtitle"]')?.textContent`;
 const hasKeyboard = (selector) => `document.activeElement === (${selector})`;
 const sliderText = (viewer) =>

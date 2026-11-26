@@ -7,7 +7,9 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -23,6 +25,7 @@ import { ReaderPopoverLayer, ReaderPopoverSlotProvider } from '@/features/reader
 import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
 import { SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
+import { documentDisplayName, documentTabLabels, documentTooltip } from '@/lib/documentTitles';
 import { cn, describeError } from '@/lib/utils';
 import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 import {
@@ -44,6 +47,8 @@ import {
 } from '@/types/domain';
 
 export { describeResumeLocation };
+
+const TAB_TOOLTIP_VIEWPORT_MARGIN_PX = 8;
 
 interface TabErrorBoundaryProps {
   document: StudyDocument;
@@ -74,7 +79,9 @@ class TabErrorBoundary extends Component<TabErrorBoundaryProps, TabErrorBoundary
         >
           <AlertTriangle className="size-6 text-destructive" />
           <div className="space-y-1">
-            <p className="font-medium text-foreground">Could not render {document.title}</p>
+            <p className="font-medium text-foreground">
+              Could not render {documentDisplayName(document)}
+            </p>
             <p className="max-w-md text-xs text-muted-foreground">{describeError(error)}</p>
           </div>
           <Button variant="outline" size="sm" onClick={onCloseTab}>
@@ -115,6 +122,9 @@ export function ReaderPane({
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
   const immersive = useStudySyncStore((state) => state.immersive);
   const [recentMenuOpen, setRecentMenuOpen] = useState(false);
+  const [focusedTabId, setFocusedTabId] = useState<string | null>(null);
+  const tablistRef = useRef<HTMLDivElement>(null);
+  const tabTooltipRef = useRef<HTMLDivElement>(null);
   const [viewerLayers, setViewerLayers] = useState<Record<string, HTMLDivElement>>({});
   const chromeTheme = useReaderChromeTheme();
 
@@ -139,6 +149,46 @@ export function ReaderPane({
     [openDocumentIds, documents],
   );
   const recentDocuments = useMemo(() => selectRecentDocuments(documents), [documents]);
+  const tabLabels = useMemo(() => documentTabLabels(openDocuments), [openDocuments]);
+  const focusedTabDocument =
+    focusedTabId !== null && !immersive
+      ? openDocuments.find((document) => document.id === focusedTabId)
+      : undefined;
+  const focusedTabTooltipText = focusedTabDocument ? documentTooltip(focusedTabDocument) : null;
+
+  useLayoutEffect(() => {
+    if (!focusedTabDocument || !tabTooltipRef.current) return;
+    const positionTooltip = () => {
+      const tab = window.document.getElementById(`reader-tab-${focusedTabDocument.id}`);
+      const tooltip = tabTooltipRef.current;
+      if (!tab || !tooltip) return;
+      // Measure from the left edge so prior right-edge coordinates never narrow the tooltip.
+      tooltip.style.left = '0px';
+      tooltip.style.top = '0px';
+      const tabRect = tab.getBoundingClientRect();
+      const tooltipRect = tooltip.getBoundingClientRect();
+      const maxLeft = Math.max(
+        TAB_TOOLTIP_VIEWPORT_MARGIN_PX,
+        window.innerWidth - tooltipRect.width - TAB_TOOLTIP_VIEWPORT_MARGIN_PX,
+      );
+      const left = Math.min(Math.max(tabRect.left, TAB_TOOLTIP_VIEWPORT_MARGIN_PX), maxLeft);
+      const maxTop = Math.max(
+        TAB_TOOLTIP_VIEWPORT_MARGIN_PX,
+        window.innerHeight - tooltipRect.height - TAB_TOOLTIP_VIEWPORT_MARGIN_PX,
+      );
+      const top = Math.min(Math.max(tabRect.bottom + 4, TAB_TOOLTIP_VIEWPORT_MARGIN_PX), maxTop);
+      tooltip.style.left = `${left}px`;
+      tooltip.style.top = `${top}px`;
+    };
+    positionTooltip();
+    const tablist = tablistRef.current;
+    tablist?.addEventListener('scroll', positionTooltip, { passive: true });
+    window.addEventListener('resize', positionTooltip);
+    return () => {
+      tablist?.removeEventListener('scroll', positionTooltip);
+      window.removeEventListener('resize', positionTooltip);
+    };
+  }, [focusedTabDocument, focusedTabTooltipText, openDocuments.length]);
   const activeDocument = openDocuments.find((document) => document.id === activeDocumentId);
   const activeViewerLayer =
     activeDocumentId !== null ? (viewerLayers[activeDocumentId] ?? null) : null;
@@ -258,15 +308,26 @@ export function ReaderPane({
         )}
       >
         <div
+          ref={tablistRef}
           role="tablist"
           aria-label="Open documents"
           className="flex min-w-0 flex-1 gap-1 overflow-x-auto"
         >
           {openDocuments.map((document, index) => {
             const isActive = document.id === activeDocumentId;
+            const displayName = documentDisplayName(document);
+            const tabLabel = tabLabels.get(document.id) ?? {
+              base: displayName,
+              suffix: '',
+              suffixDisplay: '',
+              text: displayName,
+            };
+            const tooltipText = documentTooltip(document);
+            const isTooltipShown = focusedTabDocument?.id === document.id;
             return (
               <div
                 key={document.id}
+                data-document-stem={document.title}
                 className={cn(
                   'flex max-w-48 shrink-0 items-center rounded-md text-sm',
                   isActive ? 'bg-accent font-medium' : 'text-muted-foreground hover:bg-accent/60',
@@ -276,23 +337,40 @@ export function ReaderPane({
                   id={`reader-tab-${document.id}`}
                   type="button"
                   role="tab"
+                  aria-label={tabLabel.text}
                   aria-selected={isActive}
                   aria-controls={`reader-tabpanel-${document.id}`}
+                  aria-describedby={
+                    isTooltipShown ? `reader-tab-tooltip-${document.id}` : undefined
+                  }
+                  title={tooltipText}
                   tabIndex={isActive ? 0 : -1}
-                  className="truncate py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="flex min-w-0 items-center overflow-hidden py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onMouseDown={releaseTabPointerFocus}
+                  onFocus={() => setFocusedTabId(document.id)}
+                  onBlur={() => {
+                    setFocusedTabId((current) => (current === document.id ? null : current));
+                  }}
                   onClick={() => {
                     activateDocument(document.id);
                     requestActivePageFocus();
                   }}
                   onKeyDown={(event) => handleTabKeyDown(event, index)}
                 >
-                  {document.title}
+                  <span className="min-w-0 truncate">{tabLabel.base}</span>
+                  {tabLabel.suffixDisplay && (
+                    <span
+                      data-testid="tab-label-suffix"
+                      className="ml-1 shrink-0 whitespace-nowrap text-muted-foreground"
+                    >
+                      {tabLabel.suffixDisplay}
+                    </span>
+                  )}
                 </button>
                 <button
                   type="button"
-                  aria-label={`Close ${document.title}`}
-                  title={`Close ${document.title}`}
+                  aria-label={`Close ${displayName}`}
+                  title={`Close ${displayName}`}
                   className="mr-0.5 flex size-6 shrink-0 items-center justify-center rounded outline-none hover:bg-background focus-visible:ring-2 focus-visible:ring-ring"
                   onMouseDown={releaseTabPointerFocus}
                   onClick={() => {
@@ -415,6 +493,19 @@ export function ReaderPane({
             </ReaderPopoverLayer>
           ))}
       </div>
+      {focusedTabDocument &&
+        focusedTabTooltipText !== null &&
+        createPortal(
+          <div
+            ref={tabTooltipRef}
+            role="tooltip"
+            id={`reader-tab-tooltip-${focusedTabDocument.id}`}
+            className="pointer-events-none fixed top-0 left-0 z-50 max-w-[min(24rem,calc(100vw-16px))] rounded-md border bg-background px-2 py-1 text-xs whitespace-pre-line [overflow-wrap:anywhere] shadow-md"
+          >
+            {focusedTabTooltipText}
+          </div>,
+          window.document.body,
+        )}
     </section>
   );
 }
@@ -483,6 +574,7 @@ function SourceRecoveryDialog({
   onCloseTab: () => void;
 }) {
   const isMissing = status.state === 'missing';
+  const displayTitle = documentDisplayName(document);
   return (
     <div
       role="alert"
@@ -494,8 +586,8 @@ function SourceRecoveryDialog({
       <div className="max-w-lg space-y-1.5">
         <h3 className="font-semibold text-foreground">
           {isMissing
-            ? `${document.title} could not be found at its original location`
-            : `${document.title} has changed on disk`}
+            ? `${displayTitle} could not be found at its original location`
+            : `${displayTitle} has changed on disk`}
         </h3>
         <p className="text-xs text-muted-foreground">
           {isMissing
@@ -617,6 +709,7 @@ function DocumentTab({
   const setSelection = useStudySyncStore((state) => state.setSelection);
   const completeJump = useStudySyncStore((state) => state.completeJump);
   const reportCursor = useStudySyncStore((state) => state.reportCursor);
+  const reportDocumentTitle = useStudySyncStore((state) => state.reportDocumentTitle);
   const immersive = useStudySyncStore((state) => state.immersive);
   const isExcerpting = useStudySyncStore((state) => state.isExcerpting);
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
@@ -693,6 +786,12 @@ function DocumentTab({
   const onExcerptSelection = useCallback(() => {
     void excerptSelection();
   }, [excerptSelection]);
+  const onDocumentTitle = useCallback(
+    (title: string, sourceFileHash: string) => {
+      void reportDocumentTitle(document.id, title, sourceFileHash);
+    },
+    [reportDocumentTitle, document.id],
+  );
   const registerPopoverLayer = useCallback(
     (element: HTMLDivElement | null) => onRegisterPopoverLayer(document.id, element),
     [onRegisterPopoverLayer, document.id],
@@ -715,7 +814,11 @@ function DocumentTab({
   // The viewer reads its layout once, on mount, so it waits for the saved one
   // rather than opening in the default and jumping.
   if (isPdf && !pdfLayout) {
-    return <div className="p-6 text-sm text-muted-foreground">Opening {document.title}…</div>;
+    return (
+      <div className="p-6 text-sm text-muted-foreground">
+        Opening {documentDisplayName(document)}…
+      </div>
+    );
   }
 
   // Safe: the entry is looked up by this document's own format.
@@ -748,6 +851,7 @@ function DocumentTab({
         cardSourceAnnotationIds={cardSourceAnnotationIds}
         onExcerptSelection={onExcerptSelection}
         canExcerpt={!isExcerpting}
+        onDocumentTitle={onDocumentTitle}
       />
       <UnmountSentinel key={`sentinel:${document.id}:${relinkedNonce}`} documentId={document.id} />
     </ReaderPopoverSlotProvider>

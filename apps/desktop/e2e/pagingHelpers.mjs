@@ -5,7 +5,7 @@ export const visible = (testId) =>
 
 export const toolbar = `document.querySelector('[data-testid="unified-toolbar"]')`;
 export const titleIs = (title) =>
-  `${toolbar}?.querySelector('[data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+  `${toolbar}?.querySelector('[data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`;
 export const chapterIs = (title) =>
   `[...(${visible('epub-host')}?.querySelectorAll('iframe') ?? [])].some((view) => view.contentDocument?.querySelector('h1')?.textContent === ${JSON.stringify(title)})`;
 export const pdfPageField = `${toolbar}?.querySelector('input[aria-label="Page number"]')`;

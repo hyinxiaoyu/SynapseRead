@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 
+import { documentDisplayName } from '@/lib/documentTitles';
 import type { DocumentViewerProps } from '@/types/domain';
 
 /**
@@ -20,7 +21,7 @@ export function UnsupportedFormatViewer({
   return (
     <div className="flex h-full items-center justify-center p-6 text-center">
       <div>
-        <h2 className="text-lg font-semibold">{document.title}</h2>
+        <h2 className="text-lg font-semibold">{documentDisplayName(document)}</h2>
         <p className="text-sm text-muted-foreground">Markdown support arrives in V1.1.</p>
       </div>
     </div>

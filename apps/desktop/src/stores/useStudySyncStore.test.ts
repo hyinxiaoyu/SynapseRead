@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createMemoryBackend } from '@/lib/backend/memoryBackend';
 import type { FileDropEvent, StudyBackend } from '@/lib/backend/types';
+import { documentDisplayName } from '@/lib/documentTitles';
 import {
   type Annotation,
   DEFAULT_PDF_LAYOUT,
@@ -1082,6 +1083,149 @@ describe('useStudySyncStore', () => {
         firstId,
         secondId,
       ]);
+    });
+
+    it('reports metadata displayTitle, skips redundant writes, and ignores backend errors (#129)', async () => {
+      const docId = await openDocument();
+      const fileHash = state().documents.find((d) => d.id === docId)!.fileHash;
+      const spy = vi.spyOn(backend, 'setDocumentDisplayTitle');
+
+      await state().reportDocumentTitle(docId, 'Pride and Prejudice', fileHash);
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(state().documents.find((d) => d.id === docId)?.displayTitle).toBe(
+        'Pride and Prejudice',
+      );
+
+      // Identical displayTitle is a no-op.
+      await state().reportDocumentTitle(docId, 'Pride and Prejudice', fileHash);
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      // Mismatched expectedFileHash is a no-op.
+      await state().reportDocumentTitle(docId, 'Stale Hash Title', 'wrong-hash');
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      // Unknown document id is a no-op.
+      await state().reportDocumentTitle('missing-doc', 'Ignored', 'any-hash');
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      // Persistence errors do not populate `state.error`.
+      spy.mockRejectedValueOnce(new Error('disk full'));
+      await state().reportDocumentTitle(docId, 'New Title', fileHash);
+      expect(state().error).toBeNull();
+      expect(state().documents.find((d) => d.id === docId)?.displayTitle).toBe(
+        'Pride and Prejudice',
+      );
+      spy.mockRestore();
+    });
+
+    it('ignores a stale reportDocumentTitle response that committed before relinkDocument changed the source (#129)', async () => {
+      const customBackend = createMemoryBackend({
+        library: {
+          '/t/old-name.txt': new TextEncoder().encode('old content'),
+          '/t/new-name.txt': new TextEncoder().encode('new content'),
+        },
+      });
+      const customStore = createStudySyncStore(customBackend);
+      await customStore.getState().initialize();
+      await customStore.getState().openDocument();
+      const docId = customStore.getState().activeDocumentId as string;
+      const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+      const originalSetTitle = customBackend.setDocumentDisplayTitle.bind(customBackend);
+      let releaseTitle!: () => void;
+      const titleGate = new Promise<void>((resolve) => {
+        releaseTitle = resolve;
+      });
+      let committed = false;
+      const titleSpy = vi
+        .spyOn(customBackend, 'setDocumentDisplayTitle')
+        .mockImplementationOnce(async (id, title, expectedHash) => {
+          const updated = await originalSetTitle(id, title, expectedHash);
+          committed = true;
+          await titleGate;
+          return updated;
+        });
+
+      const reportPromise = customStore
+        .getState()
+        .reportDocumentTitle(docId, 'Old Embedded Title', oldHash);
+      await vi.waitFor(() => expect(committed).toBe(true));
+
+      const relinked = await customStore.getState().relinkDocument(docId, false);
+      expect(relinked?.contentChanged).toBe(true);
+      expect(relinked?.document.fileHash).not.toBe(oldHash);
+
+      releaseTitle();
+      await reportPromise;
+
+      const afterStoreDoc = customStore.getState().documents.find((d) => d.id === docId)!;
+      expect(afterStoreDoc.displayTitle).toBeNull();
+      expect(documentDisplayName(afterStoreDoc)).toBe('new-name');
+      expect(
+        (await customBackend.listDocuments()).find((d) => d.id === docId)?.displayTitle,
+      ).toBeNull();
+
+      const restarted = createStudySyncStore(customBackend);
+      await restarted.getState().initialize();
+      const restartedDoc = restarted.getState().documents.find((d) => d.id === docId)!;
+      expect(restartedDoc.displayTitle).toBeNull();
+      expect(documentDisplayName(restartedDoc)).toBe('new-name');
+      titleSpy.mockRestore();
+    });
+
+    it('rejects a delayed reportDocumentTitle request that executes after relinkDocument changed the source (#129)', async () => {
+      const customBackend = createMemoryBackend({
+        library: {
+          '/t/old-name.txt': new TextEncoder().encode('old content'),
+          '/t/new-name.txt': new TextEncoder().encode('new content'),
+        },
+      });
+      const customStore = createStudySyncStore(customBackend);
+      await customStore.getState().initialize();
+      await customStore.getState().openDocument();
+      const docId = customStore.getState().activeDocumentId as string;
+      const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+      const originalSetTitle = customBackend.setDocumentDisplayTitle.bind(customBackend);
+      let releaseTitle!: () => void;
+      const titleGate = new Promise<void>((resolve) => {
+        releaseTitle = resolve;
+      });
+      const titleSpy = vi
+        .spyOn(customBackend, 'setDocumentDisplayTitle')
+        .mockImplementationOnce(async (id, title, expectedHash) => {
+          await titleGate;
+          return originalSetTitle(id, title, expectedHash);
+        });
+
+      const reportPromise = customStore
+        .getState()
+        .reportDocumentTitle(docId, 'Old Embedded Title', oldHash);
+      await vi.waitFor(() => expect(titleSpy).toHaveBeenCalledTimes(1));
+
+      const relinked = await customStore.getState().relinkDocument(docId, false);
+      expect(relinked?.contentChanged).toBe(true);
+      expect(relinked?.document.fileHash).not.toBe(oldHash);
+
+      releaseTitle();
+      await reportPromise;
+
+      const rejectedResult = await titleSpy.mock.results[0]!.value;
+      expect(rejectedResult).toBeNull();
+
+      const afterStoreDoc = customStore.getState().documents.find((d) => d.id === docId)!;
+      expect(afterStoreDoc.displayTitle).toBeNull();
+      expect(documentDisplayName(afterStoreDoc)).toBe('new-name');
+      expect(
+        (await customBackend.listDocuments()).find((d) => d.id === docId)?.displayTitle,
+      ).toBeNull();
+
+      const restarted = createStudySyncStore(customBackend);
+      await restarted.getState().initialize();
+      const restartedDoc = restarted.getState().documents.find((d) => d.id === docId)!;
+      expect(restartedDoc.displayTitle).toBeNull();
+      expect(documentDisplayName(restartedDoc)).toBe('new-name');
+      titleSpy.mockRestore();
     });
 
     it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {

@@ -66,6 +66,34 @@ export type MemoryFile = Uint8Array | (() => Promise<Uint8Array>);
 
 /** The PNG signature, in base64. */
 const PNG_BASE64_PREFIX = 'iVBORw0KGgo';
+const MAX_DISPLAY_TITLE_CHARS = 512;
+
+function isControlOrBidiChar(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0;
+  return (
+    code <= 0x001f ||
+    (code >= 0x007f && code <= 0x009f) ||
+    code === 0x200e ||
+    code === 0x200f ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
+}
+
+function sanitizeDisplayTitle(raw: string | null): string | null {
+  if (raw === null) return null;
+  for (const line of raw.split(/\r?\n/)) {
+    const cleaned = Array.from(line)
+      .filter((ch) => !isControlOrBidiChar(ch))
+      .join('');
+    const trimmed = cleaned.trim();
+    if (!trimmed) continue;
+    const chars = Array.from(trimmed);
+    if (chars.length <= MAX_DISPLAY_TITLE_CHARS) return trimmed;
+    return `${chars.slice(0, MAX_DISPLAY_TITLE_CHARS - 1).join('')}…`;
+  }
+  return null;
+}
 
 function hashBytes(bytes: Uint8Array): string {
   let h1 = 0x811c9dc5;
@@ -361,6 +389,7 @@ export function createMemoryBackendWithPreview({
       createdAt: timestamp,
       lastProgress: null,
       hiddenFromRecentAt: null,
+      displayTitle: null,
     };
     documents.set(document.id, document);
     return document;
@@ -462,6 +491,19 @@ export function createMemoryBackendWithPreview({
       return updated;
     },
 
+    async setDocumentDisplayTitle(documentId, displayTitle, expectedFileHash) {
+      const existing = require(documents, documentId, 'document');
+      if (existing.fileHash !== expectedFileHash) {
+        return null;
+      }
+      const updated: StudyDocument = {
+        ...existing,
+        displayTitle: sanitizeDisplayTitle(displayTitle),
+      };
+      documents.set(documentId, updated);
+      return updated;
+    },
+
     async verifyDocumentSource(documentId) {
       const existing = require(documents, documentId, 'document');
       const file = files[existing.filePath];
@@ -556,6 +598,7 @@ export function createMemoryBackendWithPreview({
         lastProgress: contentChanged ? null : (existing.lastProgress ?? null),
         lastOpenedAt: monotonicNow(),
         hiddenFromRecentAt: null,
+        displayTitle: contentChanged ? null : (existing.displayTitle ?? null),
       };
       documents.set(documentId, updated);
       return {

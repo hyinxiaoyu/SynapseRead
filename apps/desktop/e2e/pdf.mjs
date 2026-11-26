@@ -22,7 +22,7 @@ const inkOn = (pageIndex) => `(() => {
 
 /** The active tab's title, as the toolbar shows it. */
 const titleIs = (title) =>
-  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === ${JSON.stringify(title)}`;
+  `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === ${JSON.stringify(title)}`;
 const closeTab = (title) =>
   `[...document.querySelectorAll('[aria-label=${JSON.stringify(`Close ${title}`)}]')].forEach((b) => b.click())`;
 /** Every fixture is titled "sample", so the active tab is closed by its own button. */

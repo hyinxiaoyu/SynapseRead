@@ -225,6 +225,7 @@ export interface StudySyncState {
   openDocument(): Promise<void>;
   reopenRecentDocument(documentId: string): Promise<void>;
   hideRecentDocument(documentId: string): Promise<void>;
+  reportDocumentTitle(documentId: string, title: string, expectedFileHash: string): Promise<void>;
   /** Reopens the most recently closed tab that is not already open again. */
   reopenClosedDocument(): Promise<void>;
   verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus | null>;
@@ -496,6 +497,14 @@ export function createStudySyncStore(backend: StudyBackend) {
     /** Monotonic per-document sequence numbers for `refreshDocument` and `refreshBookmarks`. */
     const documentRefreshSeqs = new Map<string, number>();
     const bookmarkRefreshSeqs = new Map<string, number>();
+    /** Monotonic per-document sequence numbers for `reportDocumentTitle` and source relinks. */
+    const documentTitleSeqs = new Map<string, number>();
+
+    const nextDocumentTitleSeq = (documentId: string): number => {
+      const next = (documentTitleSeqs.get(documentId) ?? 0) + 1;
+      documentTitleSeqs.set(documentId, next);
+      return next;
+    };
 
     const isDocumentLocked = (documentId: string): boolean =>
       (documentLockCounts.get(documentId) ?? 0) > 0;
@@ -1253,6 +1262,33 @@ export function createStudySyncStore(backend: StudyBackend) {
         }
       },
 
+      async reportDocumentTitle(documentId, title, expectedFileHash) {
+        const current = get().documents.find((doc) => doc.id === documentId);
+        if (!current || current.fileHash !== expectedFileHash || current.displayTitle === title) {
+          return;
+        }
+        const seq = nextDocumentTitleSeq(documentId);
+        try {
+          const updated = await backend.setDocumentDisplayTitle(
+            documentId,
+            title,
+            expectedFileHash,
+          );
+          if (!updated || documentTitleSeqs.get(documentId) !== seq) return;
+          set((state) => ({
+            // Merge only `displayTitle` when the source fileHash still matches so concurrent
+            // relinks, cursor updates, or Recent changes are never clobbered.
+            documents: state.documents.map((doc) =>
+              doc.id === documentId && doc.fileHash === expectedFileHash
+                ? { ...doc, displayTitle: updated.displayTitle ?? null }
+                : doc,
+            ),
+          }));
+        } catch {
+          // Display-title persistence is opportunistic; keep the file-stem fallback on failure.
+        }
+      },
+
       async reopenClosedDocument() {
         const { closedDocumentIds, openDocumentIds, documents, lockedDocumentIds } = get();
         const documentId = selectReopenableDocumentId(
@@ -1279,6 +1315,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             if (!result) return;
             relinked = result;
             nextDocumentRefreshSeq(documentId);
+            nextDocumentTitleSeq(documentId);
             const applyRecentDirectly = op.isUncontested();
             if (!applyRecentDirectly) op.markOverlapIfNeeded();
             set((state) => ({

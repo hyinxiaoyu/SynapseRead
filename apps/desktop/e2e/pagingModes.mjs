@@ -9,7 +9,7 @@ import { assert } from './harness.mjs';
 const visibleHost = `[...document.querySelectorAll('[data-testid="epub-host"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
 const visibleViewer = `[...document.querySelectorAll('[data-testid="epub-viewer"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
 const strip = `${visibleHost}?.querySelector('.epub-container')`;
-const sampleTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === 'sample'`;
+const sampleTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === 'sample'`;
 
 const translateX = (transform) => {
   if (!transform || transform === 'none') return 0;

@@ -153,6 +153,7 @@ export interface EpubFramePointerUp {
 export interface EpubHandle {
   readonly toc: readonly EpubTocItem[];
   readonly isFixedLayout: boolean;
+  readonly metadataTitle: string | null;
   readonly chapterCount?: number;
   /** Searches one spine chapter (rendered or not) and returns CFI-anchored matches. */
   searchChapter?(
@@ -836,6 +837,10 @@ export async function openEpubDocument(
   const language = (
     book.packaging as unknown as { metadata?: { language?: string } } | undefined
   )?.metadata?.language?.trim();
+  const rawMetadataTitle = (
+    book.packaging as unknown as { metadata?: { title?: unknown } } | undefined
+  )?.metadata?.title;
+  const metadataTitle = typeof rawMetadataTitle === 'string' ? rawMetadataTitle : null;
   const isFixedLayout = metadataLayout === 'pre-paginated';
   let currentPreferences: ReadingPreferences = { ...initialPreferences };
 
@@ -2848,6 +2853,7 @@ export async function openEpubDocument(
   return {
     toc,
     isFixedLayout,
+    metadataTitle,
     chapterCount: spineItems.length,
     async searchChapter(chapterIndex, query, options) {
       if (query.trim() === '') return [];

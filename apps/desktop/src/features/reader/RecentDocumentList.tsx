@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import { describeResumeLocation } from '@/features/reader/resumeLocation';
 import { documentFormatLabel } from '@/lib/documentFormats';
+import { documentDisplayName } from '@/lib/documentTitles';
 import { cn } from '@/lib/utils';
 import type { StudyDocument } from '@/types/domain';
 
@@ -75,42 +76,46 @@ export function RecentDocumentList({
   return (
     <>
       <ol ref={listRef} data-testid="recent-documents-list" className={cn('divide-y', className)}>
-        {visibleDocuments.map((document) => (
-          <li key={document.id} className="group relative flex items-center">
-            <button
-              ref={(element) => {
-                if (element) openButtonRefs.current.set(document.id, element);
-                else openButtonRefs.current.delete(document.id);
-              }}
-              type="button"
-              data-testid="recent-document-item"
-              data-document-id={document.id}
-              data-document-format={document.format}
-              onClick={() => onOpen(document.id)}
-              className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <div className="min-w-0 flex-1">
-                <p className="truncate font-medium text-foreground">{document.title}</p>
-                <p className="truncate text-[11px] text-muted-foreground">
-                  {describeResumeLocation(document)}
-                </p>
-              </div>
-              <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
-                {documentFormatLabel(document)}
-              </span>
-            </button>
-            <button
-              type="button"
-              data-testid="recent-document-remove"
-              aria-label={`Remove ${document.title} from Recent`}
-              title="Remove from Recent"
-              onClick={() => handleRemove(document.id)}
-              className="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity outline-none hover:bg-accent hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <X className="size-3.5" />
-            </button>
-          </li>
-        ))}
+        {visibleDocuments.map((document) => {
+          const displayName = documentDisplayName(document);
+          return (
+            <li key={document.id} className="group relative flex items-center">
+              <button
+                ref={(element) => {
+                  if (element) openButtonRefs.current.set(document.id, element);
+                  else openButtonRefs.current.delete(document.id);
+                }}
+                type="button"
+                data-testid="recent-document-item"
+                data-document-id={document.id}
+                data-document-stem={document.title}
+                data-document-format={document.format}
+                onClick={() => onOpen(document.id)}
+                className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium text-foreground">{displayName}</p>
+                  <p className="truncate text-[11px] text-muted-foreground">
+                    {describeResumeLocation(document)}
+                  </p>
+                </div>
+                <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
+                  {documentFormatLabel(document)}
+                </span>
+              </button>
+              <button
+                type="button"
+                data-testid="recent-document-remove"
+                aria-label={`Remove ${displayName} from Recent`}
+                title="Remove from Recent"
+                onClick={() => handleRemove(document.id)}
+                className="mr-1 flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity outline-none hover:bg-accent hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <X className="size-3.5" />
+              </button>
+            </li>
+          );
+        })}
       </ol>
       {hasOverflow && !showAll && (
         <div className="mt-2 border-t pt-2">

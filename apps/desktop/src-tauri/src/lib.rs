@@ -50,6 +50,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::delete_bookmark,
         commands::db::touch_document_opened,
         commands::db::hide_document_from_recent,
+        commands::db::set_document_display_title,
         commands::db::get_workspace_session,
         commands::db::save_workspace_session,
         commands::db::verify_document_source,

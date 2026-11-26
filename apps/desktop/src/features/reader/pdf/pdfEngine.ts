@@ -7,6 +7,7 @@ import {
 } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
+import { normalizeMetadataTitle } from '@/lib/documentTitles';
 import type { DocumentSource, NormalizedRect } from '@/types/domain';
 
 import {
@@ -89,6 +90,8 @@ export interface PdfDocumentHandle {
   getOutline?(): Promise<readonly PdfOutlineItem[]>;
   /** Printed page labels (`/PageLabels`), one per page, or null when the document has none. */
   getPageLabels?(): Promise<readonly string[] | null>;
+  /** Normalized metadata title (`Info.Title` or XMP `dc:title`), or null if absent/placeholder. */
+  getMetadataTitle?(): Promise<string | null>;
   /** Extracted text runs and normalized rects for a page, whether rendered or not. */
   getPageText?(pageIndex: number): Promise<PdfPageText>;
   /** Internal links, visible embedded annotations, and disclosed unsupported subtypes on a page. */
@@ -296,6 +299,21 @@ export async function openPdfDocument(source: DocumentSource): Promise<PdfDocume
     },
 
     getPageLabels: () => pdf.getPageLabels(),
+
+    async getMetadataTitle() {
+      try {
+        const { info, metadata } = await pdf.getMetadata();
+        const rawInfoTitle = (info as { Title?: unknown } | null | undefined)?.Title;
+        const infoTitle = normalizeMetadataTitle(rawInfoTitle);
+        if (infoTitle) return infoTitle;
+        const rawXmpTitle = (
+          metadata as { get?: (name: string) => unknown } | null | undefined
+        )?.get?.('dc:title');
+        return normalizeMetadataTitle(rawXmpTitle);
+      } catch {
+        return null;
+      }
+    },
 
     getPageText(pageIndex) {
       const cached = getBoundedLru(pageTextCache, pageIndex);

@@ -99,6 +99,7 @@ const engine = vi.hoisted(() => ({
   setReadingMode: vi.fn<(mode: EpubReadingMode) => Promise<void>>(async () => undefined),
   setPreferences: vi.fn(),
   setColumns: vi.fn<(columns: 1 | 2) => void>(),
+  metadataTitle: null as string | null,
 }));
 
 vi.mock('./epubEngine', () => ({
@@ -108,6 +109,9 @@ vi.mock('./epubEngine', () => ({
     },
     get isFixedLayout() {
       return engine.isFixedLayout;
+    },
+    get metadataTitle() {
+      return engine.metadataTitle;
     },
     get chapterCount() {
       return engine.chapters.length;
@@ -254,11 +258,13 @@ function Harness({
   documentId,
   isActive = true,
   chromeHidden = false,
+  onDocumentTitle,
 }: {
   store: Store;
   documentId: string;
   isActive?: boolean;
   chromeHidden?: boolean;
+  onDocumentTitle?: (title: string, sourceFileHash: string) => void;
 }) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
@@ -297,6 +303,7 @@ function Harness({
       onDeleteAnnotation={(id) => void state.removeAnnotation(id)}
       canUndoAnnotationDelete={state.deletedAnnotationHistory.length > 0}
       onUndoAnnotationDelete={() => void state.undoRemoveAnnotation()}
+      {...(onDocumentTitle ? { onDocumentTitle } : {})}
     />
   );
 }
@@ -372,6 +379,7 @@ describe('EpubViewer', () => {
     engine.emitFramePointerUp = () => undefined;
     engine.scrubs = [];
     engine.scrubEnds = [];
+    engine.metadataTitle = null;
     window.localStorage.clear();
     engine.next.mockClear();
     engine.previous.mockClear();
@@ -2961,6 +2969,35 @@ describe('EpubViewer', () => {
       // Failed CFI rejects before recording in `engine.displayed`, so fallback `engine.display()` records `undefined`.
       await waitFor(() => expect(engine.displayed).toEqual([undefined]));
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('metadata title reporting (#129)', () => {
+    it('reports normalized dc:title once loaded and ignores placeholders or null', async () => {
+      const onDocumentTitle = vi.fn();
+      engine.metadataTitle = '  Middlemarch:\nA Study of Provincial Life  ';
+      const { store, documentId } = await setup();
+      const sourceFileHash = store.getState().documents.find((d) => d.id === documentId)?.fileHash;
+      render(<Harness store={store} documentId={documentId} onDocumentTitle={onDocumentTitle} />);
+      await waitFor(() =>
+        expect(onDocumentTitle).toHaveBeenCalledWith(
+          'Middlemarch: A Study of Provincial Life',
+          sourceFileHash,
+        ),
+      );
+
+      onDocumentTitle.mockClear();
+      engine.metadataTitle = 'Untitled';
+      const { store: s2, documentId: d2 } = await setup();
+      render(<Harness store={s2} documentId={d2} onDocumentTitle={onDocumentTitle} />);
+      await waitFor(() => expect(engine.displayed.length).toBeGreaterThan(0));
+      expect(onDocumentTitle).not.toHaveBeenCalled();
+
+      engine.metadataTitle = null;
+      const { store: s3, documentId: d3 } = await setup();
+      render(<Harness store={s3} documentId={d3} onDocumentTitle={onDocumentTitle} />);
+      await waitFor(() => expect(engine.displayed.length).toBeGreaterThan(0));
+      expect(onDocumentTitle).not.toHaveBeenCalled();
     });
   });
 });

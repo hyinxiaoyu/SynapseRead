@@ -1191,6 +1191,55 @@ fn hide_document_from_recent_persists_across_relaunch_and_reopening_clears_it() 
 }
 
 #[test]
+fn set_document_display_title_sanitizes_persists_and_clears_over_ipc() {
+    let h = Harness::new();
+    let doc = h.register("pg1342.txt", "pride and prejudice");
+    assert_eq!(doc["displayTitle"], Value::Null);
+
+    let updated = h.ok(
+        "set_document_display_title",
+        json!({
+            "documentId": doc["id"],
+            "displayTitle": "  Pride and\nPrejudice ",
+            "expectedFileHash": doc["fileHash"],
+        }),
+    );
+    assert_eq!(updated["title"], "pg1342");
+    assert_eq!(updated["displayTitle"], "Pride and");
+
+    // Wrong expectedFileHash is a no-op returning null and leaves the record unchanged.
+    let mismatched = h.ok(
+        "set_document_display_title",
+        json!({
+            "documentId": doc["id"],
+            "displayTitle": "Stale Source Title",
+            "expectedFileHash": "wrong-hash",
+        }),
+    );
+    assert_eq!(mismatched, Value::Null);
+
+    let doc_id = doc["id"].clone();
+    let doc_hash = doc["fileHash"].clone();
+    let Harness { dir, app, .. } = h;
+    drop(app);
+
+    let next = Harness::in_dir(dir);
+    let listed = next.ok("list_documents", json!({}));
+    assert_eq!(listed[0]["title"], "pg1342");
+    assert_eq!(listed[0]["displayTitle"], "Pride and");
+
+    let cleared = next.ok(
+        "set_document_display_title",
+        json!({
+            "documentId": doc_id,
+            "displayTitle": null,
+            "expectedFileHash": doc_hash,
+        }),
+    );
+    assert_eq!(cleared["displayTitle"], Value::Null);
+}
+
+#[test]
 fn menu_item_states_accept_exactly_what_the_frontend_sends() {
     let h = Harness::new();
     // The mock runtime cannot build a native menu, so this checks the wire format and

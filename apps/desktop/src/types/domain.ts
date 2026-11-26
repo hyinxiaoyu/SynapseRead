@@ -73,6 +73,11 @@ export interface StudyDocument {
    * reading; cleared when the file is opened again.
    */
   hiddenFromRecentAt?: string | null;
+  /**
+   * Metadata title reported by the reader (EPUB `dc:title`, PDF `Info.Title`),
+   * leaving the filename stem in `title` available.
+   */
+  displayTitle?: string | null;
 }
 
 export type DocumentSourceState = 'ok' | 'missing' | 'changed';
@@ -559,6 +564,12 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   onExcerptSelection?: () => void;
   /** False while an excerpt is being written. */
   canExcerpt?: boolean;
+  /**
+   * Reports the title the file declares about itself (EPUB dc:title, PDF Info/XMP title),
+   * already normalized, together with the `fileHash` of the source the viewer loaded.
+   * Readers only report; the store decides whether to persist it.
+   */
+  onDocumentTitle?: (title: string, sourceFileHash: string) => void;
 }
 
 const isFiniteNumber = (value: unknown): value is number =>

@@ -90,6 +90,7 @@ import {
 } from '@/features/reader/txt/chapters';
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
+import { documentDisplayName } from '@/lib/documentTitles';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
@@ -1116,10 +1117,12 @@ export function TxtViewer({
     activeSearchRange?.endUnit,
   ]);
 
+  const displayTitle = documentDisplayName(document);
+
   if (load.error) {
     return (
       <div role="alert" className="p-6 text-sm text-destructive">
-        Could not read {document.title}: {load.error}
+        Could not read {displayTitle}: {load.error}
       </div>
     );
   }
@@ -1153,7 +1156,13 @@ export function TxtViewer({
             />
           </>
         }
-        center={<ToolbarTitle title={document.title} subtitle={currentHeading?.label} />}
+        center={
+          <ToolbarTitle
+            title={displayTitle}
+            stem={document.title}
+            subtitle={currentHeading?.label}
+          />
+        }
         trailing={
           <>
             <AppearanceMenu
@@ -1259,7 +1268,7 @@ export function TxtViewer({
                 ref={pageRef}
                 role="document"
                 onClick={openClickedHighlight}
-                aria-label={document.title}
+                aria-label={displayTitle}
                 // Hyphenation needs a language; a text file declares none.
                 lang={window.navigator.language || undefined}
                 className="relative mx-auto w-full"

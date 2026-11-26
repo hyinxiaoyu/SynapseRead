@@ -88,6 +88,7 @@ import { useBackChip } from '@/features/reader/progress/useBackChip';
 import type { FooterReadouts } from '@/features/reader/progress/useFooterReadout';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
+import { documentDisplayName, normalizeMetadataTitle } from '@/lib/documentTitles';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
@@ -286,6 +287,7 @@ export function EpubViewer({
   cardSourceAnnotationIds,
   onExcerptSelection,
   canExcerpt,
+  onDocumentTitle,
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
   const hostRef = useRef<HTMLDivElement>(null);
@@ -434,9 +436,21 @@ export function EpubViewer({
   }, []);
 
   // Callbacks and flags the long-lived engine listeners read at the time they fire.
-  const latest = useRef({ isActive, paged, onSelectionChange, onCursorChange });
+  const latest = useRef({
+    isActive,
+    paged,
+    onSelectionChange,
+    onCursorChange,
+    onDocumentTitle,
+  });
   useEffect(() => {
-    latest.current = { isActive, paged, onSelectionChange, onCursorChange };
+    latest.current = {
+      isActive,
+      paged,
+      onSelectionChange,
+      onCursorChange,
+      onDocumentTitle,
+    };
   });
 
   // ---- Opening, and reporting the reading position -------------------------
@@ -459,6 +473,7 @@ export function EpubViewer({
     if (!host) return;
     let cancelled = false;
     let opened: EpubHandle | null = null;
+    const sourceFileHash = document.fileHash;
     savedProgress.current = document.lastProgress ?? undefined;
     lastReportedProgress.current = savedProgress.current;
 
@@ -495,6 +510,11 @@ export function EpubViewer({
           return;
         }
         opened = engine;
+
+        const metadataTitle = normalizeMetadataTitle(engine.metadataTitle);
+        if (metadataTitle) {
+          latest.current.onDocumentTitle?.(metadataTitle, sourceFileHash);
+        }
 
         let hasSelection = false;
         engine.onSelection((selection) => {
@@ -1702,10 +1722,11 @@ export function EpubViewer({
     },
   });
 
+  const displayTitle = documentDisplayName(document);
   if (error) {
     return (
       <div role="alert" className="p-6 text-sm text-destructive">
-        Could not open {document.title}: {error}
+        Could not open {displayTitle}: {error}
       </div>
     );
   }
@@ -1751,7 +1772,7 @@ export function EpubViewer({
             />
           </>
         }
-        center={<ToolbarTitle title={document.title} subtitle={chapterTitle} />}
+        center={<ToolbarTitle title={displayTitle} stem={document.title} subtitle={chapterTitle} />}
         trailing={
           <>
             <AppearanceMenu

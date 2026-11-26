@@ -430,6 +430,302 @@ describe('ReaderPane tab commands', () => {
     hideSpy.mockRestore();
   });
 
+  it('disambiguates same-named tabs, shows hover and focus tooltips, and updates names on metadata title (#129)', async () => {
+    const now = '2026-01-01T00:00:00Z';
+    act(() => {
+      useStudySyncStore.setState({
+        documents: [
+          {
+            id: 'doc-epub',
+            title: 'sample',
+            displayTitle: null,
+            filePath: '/a/sample.epub',
+            fileHash: 'hash-epub',
+            format: 'epub',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+          {
+            id: 'doc-pdf',
+            title: 'sample',
+            displayTitle: null,
+            filePath: '/b/sample.pdf',
+            fileHash: 'hash-pdf',
+            format: 'pdf',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+        ],
+        openDocumentIds: ['doc-epub', 'doc-pdf'],
+        activeDocumentId: 'doc-epub',
+        documentSourceStatuses: {
+          'doc-epub': {
+            documentId: 'doc-epub',
+            state: 'ok',
+            currentFileHash: 'hash-epub',
+            fileSizeBytes: null,
+          },
+          'doc-pdf': {
+            documentId: 'doc-pdf',
+            state: 'ok',
+            currentFileHash: 'hash-pdf',
+            fileSizeBytes: null,
+          },
+        },
+        pdfLayouts: {
+          'doc-pdf': {
+            displayMode: 'single',
+            zoomMode: 'fit-width',
+            scale: 1,
+            rotation: 0,
+            coverPageAlone: false,
+          },
+        },
+      });
+    });
+
+    render(<ReaderPane />);
+
+    const epubTab = screen.getByRole('tab', { name: 'sample · EPUB' });
+    const pdfTab = screen.getByRole('tab', { name: 'sample · PDF' });
+    expect(epubTab).toHaveAttribute('title', 'sample\nsample.epub');
+    expect(pdfTab).toHaveAttribute('title', 'sample\nsample.pdf');
+    expect(epubTab.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent('· EPUB');
+    expect(pdfTab.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent('· PDF');
+
+    // Focusing a tab with the keyboard renders a portal tooltip and wires aria-describedby.
+    act(() => {
+      epubTab.focus();
+    });
+    const tooltip = screen.getByRole('tooltip');
+    expect(tooltip).toHaveTextContent('sample');
+    expect(tooltip).toHaveTextContent('sample.epub');
+    expect(epubTab).toHaveAttribute('aria-describedby', tooltip.id);
+
+    act(() => {
+      epubTab.blur();
+    });
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+
+    // Reporting a metadata title updates the tab, close button, tooltip, and Recent entry.
+    const backend = backendHolder.current!;
+    const setTitleSpy = vi.spyOn(backend, 'setDocumentDisplayTitle').mockResolvedValueOnce({
+      ...useStudySyncStore.getState().documents[0]!,
+      displayTitle: 'SynapseRead EPUB fixture',
+    });
+    await act(async () => {
+      await useStudySyncStore
+        .getState()
+        .reportDocumentTitle('doc-epub', 'SynapseRead EPUB fixture', 'hash-epub');
+    });
+
+    const renamedTab = screen.getByRole('tab', { name: 'SynapseRead EPUB fixture' });
+    expect(renamedTab.querySelector('[data-testid="tab-label-suffix"]')).toBeNull();
+    expect(renamedTab).toHaveAttribute('title', 'SynapseRead EPUB fixture\nsample.epub');
+    expect(
+      screen.getByRole('button', { name: 'Close SynapseRead EPUB fixture' }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+    expect(screen.getByTestId('recent-documents-menu')).toHaveTextContent(
+      'SynapseRead EPUB fixture',
+    );
+    setTitleSpy.mockRestore();
+  });
+
+  it('renders compact distinct suffixes and preserves full accessible names for long-titled Chinese PDF tabs (#129)', () => {
+    const longTitle =
+      'A remarkably long document title that keeps going well past any tab width limit';
+    const now = '2026-04-01T10:00:00Z';
+    act(() => {
+      useStudySyncStore.setState({
+        documents: [
+          {
+            id: 'doc-txt',
+            title: longTitle,
+            displayTitle: null,
+            filePath: `/dropped/${longTitle}.txt`,
+            fileHash: 'hash-txt',
+            format: 'txt',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+          {
+            id: 'doc-pdf-1',
+            title: '读书读书读书读甲',
+            displayTitle: longTitle,
+            filePath: '/dropped/读书读书读书读甲.pdf',
+            fileHash: 'hash-pdf-1',
+            format: 'pdf',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+          {
+            id: 'doc-pdf-2',
+            title: '读书读书读书读乙',
+            displayTitle: longTitle,
+            filePath: '/dropped/读书读书读书读乙.pdf',
+            fileHash: 'hash-pdf-2',
+            format: 'pdf',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            lastOpenedAt: now,
+            createdAt: now,
+          },
+        ],
+        openDocumentIds: ['doc-txt', 'doc-pdf-1', 'doc-pdf-2'],
+        activeDocumentId: 'doc-txt',
+        documentSourceStatuses: {
+          'doc-txt': {
+            documentId: 'doc-txt',
+            state: 'ok',
+            currentFileHash: 'hash-txt',
+            fileSizeBytes: null,
+          },
+          'doc-pdf-1': {
+            documentId: 'doc-pdf-1',
+            state: 'ok',
+            currentFileHash: 'hash-pdf-1',
+            fileSizeBytes: null,
+          },
+          'doc-pdf-2': {
+            documentId: 'doc-pdf-2',
+            state: 'ok',
+            currentFileHash: 'hash-pdf-2',
+            fileSizeBytes: null,
+          },
+        },
+        pdfLayouts: {
+          'doc-pdf-1': {
+            displayMode: 'single',
+            zoomMode: 'fit-width',
+            scale: 1,
+            rotation: 0,
+            coverPageAlone: false,
+          },
+          'doc-pdf-2': {
+            displayMode: 'single',
+            zoomMode: 'fit-width',
+            scale: 1,
+            rotation: 0,
+            coverPageAlone: false,
+          },
+        },
+      });
+    });
+
+    render(<ReaderPane />);
+
+    const txtTab = screen.getByRole('tab', { name: `${longTitle} · TXT` });
+    const pdfTab1 = screen.getByRole('tab', {
+      name: `${longTitle} · PDF · 读书读书读书读甲.pdf`,
+    });
+    const pdfTab2 = screen.getByRole('tab', {
+      name: `${longTitle} · PDF · 读书读书读书读乙.pdf`,
+    });
+    expect(txtTab.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent('· TXT');
+    expect(pdfTab1.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent('· PDF');
+    expect(pdfTab2.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent(
+      '· PDF (2)',
+    );
+    expect(pdfTab1).toHaveAttribute('title', `${longTitle}\n读书读书读书读甲.pdf`);
+    expect(pdfTab2).toHaveAttribute('title', `${longTitle}\n读书读书读书读乙.pdf`);
+    expect(screen.getAllByRole('button', { name: `Close ${longTitle}` })).toHaveLength(3);
+  });
+
+  it('wraps unbroken long filenames and clamps/repositions the keyboard tab tooltip on scroll (#129)', async () => {
+    const unbroken = 'W'.repeat(150);
+    await openDocuments([`${unbroken}.txt`]);
+    const docId = useStudySyncStore.getState().openDocumentIds[0]!;
+
+    const origInnerWidthDesc = Object.getOwnPropertyDescriptor(window, 'innerWidth');
+    let tabLeft = 720;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.id === `reader-tab-${docId}`) {
+          return {
+            left: tabLeft,
+            top: 8,
+            right: tabLeft + 166,
+            bottom: 36,
+            width: 166,
+            height: 28,
+            x: tabLeft,
+            y: 8,
+            toJSON: () => ({}),
+          } as DOMRect;
+        }
+        if (this.getAttribute('role') === 'tooltip') {
+          return {
+            left: 0,
+            top: 0,
+            right: 384,
+            bottom: 80,
+            width: 384,
+            height: 80,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          } as DOMRect;
+        }
+        return {
+          left: 0,
+          top: 0,
+          right: 0,
+          bottom: 0,
+          width: 0,
+          height: 0,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect;
+      });
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: 960,
+    });
+
+    try {
+      render(<ReaderPane />);
+      const tab = screen.getByRole('tab', { name: unbroken });
+      act(() => {
+        tab.focus();
+      });
+
+      const tooltip = screen.getByRole('tooltip');
+      expect(tooltip).toHaveClass(
+        'whitespace-pre-line',
+        '[overflow-wrap:anywhere]',
+        'max-w-[min(24rem,calc(100vw-16px))]',
+      );
+      expect(tooltip.textContent).toBe(`${unbroken}\n${unbroken}.txt`);
+      // 960 - 384 - 8 = 568px
+      expect(tooltip.style.left).toBe('568px');
+      expect(tooltip.style.top).toBe('40px');
+
+      tabLeft = 310;
+      act(() => {
+        fireEvent.scroll(screen.getByRole('tablist'));
+      });
+      expect(tooltip.style.left).toBe('310px');
+    } finally {
+      rectSpy.mockRestore();
+      if (origInnerWidthDesc) {
+        Object.defineProperty(window, 'innerWidth', origInnerWidthDesc);
+      }
+    }
+  });
+
   it('hands focus to the ninth entry when Show all is activated with the keyboard (#126)', async () => {
     const names = Array.from(
       { length: 12 },

@@ -248,6 +248,10 @@ pub struct Document {
     /// cleared back to `None` when the file is opened again.
     #[serde(default)]
     pub hidden_from_recent_at: Option<String>,
+    /// Optional metadata title reported by the reader (EPUB `dc:title`,
+    /// PDF `Info.Title`), keeping the filename stem in `title` untouched.
+    #[serde(default)]
+    pub display_title: Option<String>,
 }
 
 /// Saved reading position and progress for a document, used as the expected

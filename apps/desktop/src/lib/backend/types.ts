@@ -98,6 +98,15 @@ export interface StudyBackend extends DocumentContentReader {
    * highlights, cards, bookmarks, or reading cursor. Reopening the file restores it.
    */
   hideDocumentFromRecent(documentId: string): Promise<StudyDocument>;
+  /**
+   * Stores or clears a metadata display title for `documentId` only when its
+   * stored `fileHash` still matches `expectedFileHash`; returns `null` when replaced.
+   */
+  setDocumentDisplayTitle(
+    documentId: string,
+    displayTitle: string | null,
+    expectedFileHash: string,
+  ): Promise<StudyDocument | null>;
   verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus>;
   relinkDocument(
     documentId: string,

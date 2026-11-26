@@ -1186,6 +1186,7 @@ function createMemoryLanAdapterInner(
                     createdAt: host.monotonicNow(),
                     lastOpenedAt: null,
                     hiddenFromRecentAt: null,
+                    displayTitle: null,
                   };
                   host.documents.set(created.id, created);
                   targetDoc = created;

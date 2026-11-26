@@ -13,7 +13,7 @@ const strip = `${visibleHost}?.querySelector('.epub-container')`;
 // sit beside `&&` without them.
 const scrollLeft = `(${strip}?.scrollLeft ?? 0)`;
 const visibleScroller = `[...document.querySelectorAll('[data-testid="pdf-scroll"]')].find((e) => e.checkVisibility({ visibilityProperty: true }))`;
-const sampleTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === 'sample'`;
+const sampleTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === 'sample'`;
 const openEpub = (page) => page.openUntil(`${visibleHost} && ${sampleTitle}`, 'the EPUB');
 const pageField = `document.querySelector('[data-testid="unified-toolbar"] input[aria-label="Page number"]')?.value`;
 const chapterIs = (title) =>
