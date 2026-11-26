@@ -954,8 +954,7 @@ export async function mindmapFlow(page) {
       const before = new Set(${JSON.stringify(idsBefore16a)});
       const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find((n) => !before.has(n.dataset.id));
       if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return { id: el.dataset.id, transform: el.style.transform, height: r.height };
+      return { id: el.dataset.id, transform: el.style.transform, height: el.offsetHeight };
     })()`);
     assert(capture16a, 'expanded capture card should exist');
 
@@ -975,15 +974,15 @@ export async function mindmapFlow(page) {
 
     const capture16aAfter = await page.evaluate(`(() => {
       const el = document.querySelector('.react-flow__node[data-id="${capture16a.id}"]');
-      return { transform: el?.style.transform, height: el?.getBoundingClientRect().height };
+      return { transform: el?.style.transform, height: el?.offsetHeight };
     })()`);
     assert(
       capture16aAfter.transform === capture16a.transform,
       `expanded capture card coordinates must not shift: ${capture16a.transform} vs ${capture16aAfter.transform}`,
     );
     assert(
-      Math.abs(capture16aAfter.height - capture16a.height) < 2,
-      `expanded capture card height must stay stable across thumbnail load: ${capture16a.height} vs ${capture16aAfter.height}`,
+      capture16aAfter.height === capture16a.height,
+      `expanded capture card layout height must stay stable across thumbnail load: ${capture16a.height} vs ${capture16aAfter.height}`,
     );
     const overlaps16a = await countOverlaps();
     assert(
@@ -1007,7 +1006,7 @@ export async function mindmapFlow(page) {
       `(() => {
         const before = new Set(${JSON.stringify(idsBefore16b)});
         const added = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].filter((n) => !before.has(n.dataset.id));
-        return added.length === 2 && added.every((n) => n.getBoundingClientRect().height > 0);
+        return added.length === 2 && added.every((n) => n.offsetHeight > 0);
       })()`,
       'collapsed capture and TXT cards to render when MindMap opens',
     );
@@ -1016,7 +1015,7 @@ export async function mindmapFlow(page) {
       const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find(
         (n) => !before.has(n.dataset.id) && !n.textContent?.includes('Filler line 017'),
       );
-      return el ? { id: el.dataset.id, transform: el.style.transform, height: el.getBoundingClientRect().height } : null;
+      return el ? { id: el.dataset.id, transform: el.style.transform, height: el.offsetHeight } : null;
     })()`);
     assert(capture16b, 'collapsed capture card should exist');
     await page.evaluate(`window.__releaseThumbnails()`);
@@ -1029,12 +1028,17 @@ export async function mindmapFlow(page) {
     );
     await waitTwoFrames();
 
-    const capture16bAfter = await page.evaluate(
-      `document.querySelector('.react-flow__node[data-id="${capture16b.id}"]')?.style.transform`,
+    const capture16bAfter = await page.evaluate(`(() => {
+      const el = document.querySelector('.react-flow__node[data-id="${capture16b.id}"]');
+      return { transform: el?.style.transform, height: el?.offsetHeight };
+    })()`);
+    assert(
+      capture16bAfter.transform === capture16b.transform,
+      `collapsed capture card coordinates must not shift: ${capture16b.transform} vs ${capture16bAfter.transform}`,
     );
     assert(
-      capture16bAfter === capture16b.transform,
-      `collapsed capture card coordinates must not shift: ${capture16b.transform} vs ${capture16bAfter}`,
+      capture16bAfter.height === capture16b.height,
+      `collapsed capture card layout height must stay stable across thumbnail load: ${capture16b.height} vs ${capture16bAfter.height}`,
     );
     const overlaps16b = await countOverlaps();
     assert(
@@ -1055,7 +1059,7 @@ export async function mindmapFlow(page) {
     const capture16c = await page.evaluate(`(() => {
       const before = new Set(${JSON.stringify(idsBefore16c)});
       const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find((n) => !before.has(n.dataset.id));
-      return el ? { id: el.dataset.id, transform: el.style.transform, height: el.getBoundingClientRect().height } : null;
+      return el ? { id: el.dataset.id, transform: el.style.transform, height: el.offsetHeight } : null;
     })()`);
     assert(capture16c, 'failure-path capture card should exist');
 
@@ -1072,15 +1076,15 @@ export async function mindmapFlow(page) {
 
     const capture16cAfter = await page.evaluate(`(() => {
       const el = document.querySelector('.react-flow__node[data-id="${capture16c.id}"]');
-      return { transform: el?.style.transform, height: el?.getBoundingClientRect().height };
+      return { transform: el?.style.transform, height: el?.offsetHeight };
     })()`);
     assert(
       capture16cAfter.transform === capture16c.transform,
       `failed capture card coordinates must not shift: ${capture16c.transform} vs ${capture16cAfter.transform}`,
     );
     assert(
-      Math.abs(capture16cAfter.height - capture16c.height) < 2,
-      `failed capture card height must stay stable across fallback: ${capture16c.height} vs ${capture16cAfter.height}`,
+      capture16cAfter.height === capture16c.height,
+      `failed capture card layout height must stay stable across fallback: ${capture16c.height} vs ${capture16cAfter.height}`,
     );
     const overlaps16c = await countOverlaps();
     assert(
