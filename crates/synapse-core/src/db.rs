@@ -244,22 +244,30 @@ impl Database {
         get_document_in_conn(&self.conn, document_id)
     }
 
-    /// Stores or clears a sanitized single-line metadata display title while
-    /// preserving the file-stem `title`.
+    /// Stores or clears a sanitized single-line metadata display title only for
+    /// the file the reader loaded (`id` + `expected_file_hash`), preserving the
+    /// file-stem `title`. Returns `Ok(None)` when the document's `file_hash`
+    /// has changed (for example after a content-changing relink).
     pub fn set_document_display_title(
         &self,
         document_id: &str,
         display_title: Option<&str>,
-    ) -> CoreResult<Document> {
+        expected_file_hash: &str,
+    ) -> CoreResult<Option<Document>> {
         let normalized = display_title
             .and_then(sanitize_single_line)
             .map(|title| truncate_chars(&title, ImportLimits::default().max_title_chars));
         let changed = self.conn.execute(
-            "UPDATE documents SET display_title = ?2 WHERE id = ?1",
-            params![document_id, normalized],
+            "UPDATE documents SET display_title = ?2 WHERE id = ?1 AND file_hash = ?3",
+            params![document_id, normalized, expected_file_hash],
         )?;
-        expect_changed(changed, "document", document_id)?;
-        get_document_in_conn(&self.conn, document_id)
+        if changed == 0 {
+            if self.document_exists(document_id)? {
+                return Ok(None);
+            }
+            return Err(not_found("document", document_id));
+        }
+        Ok(Some(get_document_in_conn(&self.conn, document_id)?))
     }
 
     pub fn list_documents(&self) -> CoreResult<Vec<Document>> {
@@ -6095,7 +6103,7 @@ mod tests {
         let file = dir.path().join("pg1342-images-3.txt");
         std::fs::write(&file, "It is a truth universally acknowledged.").unwrap();
 
-        let doc_id = {
+        let (doc_id, original_hash) = {
             let db = Database::open(&db_path).unwrap();
             let doc = db.register_document(&file).unwrap();
             assert_eq!(doc.title, "pg1342-images-3");
@@ -6106,7 +6114,9 @@ mod tests {
                 .set_document_display_title(
                     &doc.id,
                     Some("\n\x00\u{202E}  Pride and\u{2066} Prejudice \x1F\nSecond Line"),
+                    &doc.file_hash,
                 )
+                .unwrap()
                 .unwrap();
             assert_eq!(updated.title, "pg1342-images-3");
             assert_eq!(
@@ -6117,7 +6127,8 @@ mod tests {
             // Truncates at 512 chars with ellipsis.
             let long_title = "书".repeat(600);
             let truncated = db
-                .set_document_display_title(&doc.id, Some(&long_title))
+                .set_document_display_title(&doc.id, Some(&long_title), &doc.file_hash)
+                .unwrap()
                 .unwrap();
             let stored = truncated.display_title.as_deref().unwrap();
             assert_eq!(stored.chars().count(), 512);
@@ -6125,14 +6136,27 @@ mod tests {
 
             // Whitespace / controls-only becomes None (NULL).
             let blank = db
-                .set_document_display_title(&doc.id, Some(" \n\u{202E}\x00 "))
+                .set_document_display_title(&doc.id, Some(" \n\u{202E}\x00 "), &doc.file_hash)
+                .unwrap()
                 .unwrap();
             assert_eq!(blank.display_title, None);
 
-            // Setting back to a meaningful title persists across reopen, and None clears it.
-            db.set_document_display_title(&doc.id, Some("Pride and Prejudice"))
+            // Setting back to a meaningful title persists across reopen.
+            db.set_document_display_title(&doc.id, Some("Pride and Prejudice"), &doc.file_hash)
+                .unwrap()
                 .unwrap();
-            doc.id
+
+            // Mismatched hash returns Ok(None) and leaves display_title untouched.
+            let mismatch = db
+                .set_document_display_title(&doc.id, Some("Wrong Source"), "deadbeef")
+                .unwrap();
+            assert_eq!(mismatch, None);
+            assert_eq!(
+                db.get_document(&doc.id).unwrap().display_title.as_deref(),
+                Some("Pride and Prejudice")
+            );
+
+            (doc.id, doc.file_hash)
         };
 
         let reopened = Database::open(&db_path).unwrap();
@@ -6151,22 +6175,35 @@ mod tests {
             Some("Pride and Prejudice")
         );
 
-        // Content-changing relink clears `display_title`.
+        // Content-changing relink clears `display_title`, and stale hash write returns None.
         std::fs::write(&moved, "A different edition with different bytes.").unwrap();
         let changed = reopened.relink_document(&doc_id, &moved).unwrap();
         assert!(changed.content_changed);
         assert_eq!(changed.document.display_title, None);
+        let stale_write = reopened
+            .set_document_display_title(&doc_id, Some("Old Edition Title"), &original_hash)
+            .unwrap();
+        assert_eq!(stale_write, None);
+        assert_eq!(reopened.get_document(&doc_id).unwrap().display_title, None);
 
         // Passing None explicitly clears `display_title`.
         reopened
-            .set_document_display_title(&doc_id, Some("Temporary Title"))
+            .set_document_display_title(
+                &doc_id,
+                Some("Temporary Title"),
+                &changed.document.file_hash,
+            )
+            .unwrap()
             .unwrap();
-        let cleared = reopened.set_document_display_title(&doc_id, None).unwrap();
+        let cleared = reopened
+            .set_document_display_title(&doc_id, None, &changed.document.file_hash)
+            .unwrap()
+            .unwrap();
         assert_eq!(cleared.display_title, None);
 
         // Unknown document id returns NotFound.
         assert!(matches!(
-            reopened.set_document_display_title("missing-doc", Some("Title")),
+            reopened.set_document_display_title("missing-doc", Some("Title"), "deadbeef"),
             Err(CoreError::NotFound {
                 entity: "document",
                 ..

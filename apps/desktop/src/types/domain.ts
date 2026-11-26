@@ -566,10 +566,10 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   canExcerpt?: boolean;
   /**
    * Reports the title the file declares about itself (EPUB dc:title, PDF Info/XMP title),
-   * already normalized, at most once per load. Readers only report; the store decides
-   * whether to persist it.
+   * already normalized, together with the `fileHash` of the source the viewer loaded.
+   * Readers only report; the store decides whether to persist it.
    */
-  onDocumentTitle?: (title: string) => void;
+  onDocumentTitle?: (title: string, sourceFileHash: string) => void;
 }
 
 const isFiniteNumber = (value: unknown): value is number =>

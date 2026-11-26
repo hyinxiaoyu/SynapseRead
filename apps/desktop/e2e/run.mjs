@@ -18,6 +18,7 @@ import { pagingModesFlow } from './pagingModes.mjs';
 import { pdfFlow, pdfLayoutFlow, pdfZoomFlow } from './pdf.mjs';
 import { recentListFlow } from './recentList.mjs';
 import { scrollPagingFlow } from './scrollPaging.mjs';
+import { tabLabelsFlow } from './tabLabels.mjs';
 import { txtFlow } from './txt.mjs';
 import { toolbarTitleFlow } from './toolbarTitle.mjs';
 import { txtChaptersFlow } from './txtChapters.mjs';
@@ -47,6 +48,7 @@ const FLOWS = {
   'paging-modes': pagingModesFlow,
   'recent-list': recentListFlow,
   'scroll-paging': scrollPagingFlow,
+  'tab-labels': tabLabelsFlow,
   'toolbar-title': toolbarTitleFlow,
   'wheel-paging': wheelPagingFlow,
 };

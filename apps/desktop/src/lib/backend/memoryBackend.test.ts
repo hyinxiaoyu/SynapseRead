@@ -1402,21 +1402,34 @@ describe('memory backend card delete and restore', () => {
     expect(doc.title).toBe('pg1342');
     expect(doc.displayTitle).toBeNull();
 
-    const sanitized = await backend.setDocumentDisplayTitle(
+    const sanitized = (await backend.setDocumentDisplayTitle(
       doc.id,
       '\n\u0000\u202E  Pride and\u200E\u2066 Prejudice \u001F\nSecond Line',
-    );
+      doc.fileHash,
+    ))!;
     expect(sanitized.title).toBe('pg1342');
     expect(sanitized.displayTitle).toBe('Pride and Prejudice');
 
-    const truncated = await backend.setDocumentDisplayTitle(doc.id, '书'.repeat(600));
+    const truncated = (await backend.setDocumentDisplayTitle(
+      doc.id,
+      '书'.repeat(600),
+      doc.fileHash,
+    ))!;
     expect(Array.from(truncated.displayTitle ?? '')).toHaveLength(512);
     expect(truncated.displayTitle?.endsWith('…')).toBe(true);
 
-    const blank = await backend.setDocumentDisplayTitle(doc.id, ' \n\u202E\u0000 ');
+    const blank = (await backend.setDocumentDisplayTitle(
+      doc.id,
+      ' \n\u202E\u0000 ',
+      doc.fileHash,
+    ))!;
     expect(blank.displayTitle).toBeNull();
 
-    await backend.setDocumentDisplayTitle(doc.id, 'Pride and Prejudice');
+    await backend.setDocumentDisplayTitle(doc.id, 'Pride and Prejudice', doc.fileHash);
+
+    // Mismatched expectedFileHash returns null and keeps existing displayTitle.
+    expect(await backend.setDocumentDisplayTitle(doc.id, 'Stale Title', 'wrong-hash')).toBeNull();
+    expect((await backend.listDocuments())[0]?.displayTitle).toBe('Pride and Prejudice');
 
     // Same-hash relink preserves displayTitle.
     const sameHash = (await backend.relinkDocument(doc.id))!;
@@ -1424,17 +1437,27 @@ describe('memory backend card delete and restore', () => {
     expect(sameHash.document.title).toBe('pg1342-moved');
     expect(sameHash.document.displayTitle).toBe('Pride and Prejudice');
 
-    // Content-changing relink clears displayTitle.
+    // Content-changing relink clears displayTitle, and stale-hash write returns null.
     const changed = (await backend.relinkDocument(doc.id))!;
     expect(changed.contentChanged).toBe(true);
     expect(changed.document.displayTitle).toBeNull();
+    expect(
+      await backend.setDocumentDisplayTitle(doc.id, 'Old File Title', doc.fileHash),
+    ).toBeNull();
+    expect((await backend.listDocuments())[0]?.displayTitle).toBeNull();
 
     // Explicit null clears displayTitle.
-    await backend.setDocumentDisplayTitle(doc.id, 'Temporary Title');
-    const cleared = await backend.setDocumentDisplayTitle(doc.id, null);
+    await backend.setDocumentDisplayTitle(doc.id, 'Temporary Title', changed.document.fileHash);
+    const cleared = (await backend.setDocumentDisplayTitle(
+      doc.id,
+      null,
+      changed.document.fileHash,
+    ))!;
     expect(cleared.displayTitle).toBeNull();
 
-    await expect(backend.setDocumentDisplayTitle('missing-doc', 'Title')).rejects.toMatchObject({
+    await expect(
+      backend.setDocumentDisplayTitle('missing-doc', 'Title', 'any-hash'),
+    ).rejects.toMatchObject({
       code: 'not_found',
     });
   });

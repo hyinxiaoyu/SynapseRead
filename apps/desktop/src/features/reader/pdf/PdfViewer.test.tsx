@@ -135,7 +135,7 @@ function Harness({
   chromeHidden?: boolean;
   preferences?: ReadingPreferences;
   onPreferencesChange?: (patch: Partial<ReadingPreferences>) => void;
-  onDocumentTitle?: (title: string) => void;
+  onDocumentTitle?: (title: string, sourceFileHash: string) => void;
 }) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
@@ -3140,10 +3140,11 @@ describe('PdfViewer', () => {
       const onDocumentTitle = vi.fn();
       engineState.metadataTitle = 'Attention Is All You Need';
       const { store, documentId } = await setup();
+      const sourceFileHash = store.getState().documents.find((d) => d.id === documentId)?.fileHash;
       render(<Harness store={store} documentId={documentId} onDocumentTitle={onDocumentTitle} />);
       expect(await pageElement(0)).toBeInTheDocument();
       await waitFor(() =>
-        expect(onDocumentTitle).toHaveBeenCalledWith('Attention Is All You Need'),
+        expect(onDocumentTitle).toHaveBeenCalledWith('Attention Is All You Need', sourceFileHash),
       );
 
       onDocumentTitle.mockClear();

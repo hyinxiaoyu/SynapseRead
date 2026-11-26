@@ -494,6 +494,8 @@ describe('ReaderPane tab commands', () => {
     const pdfTab = screen.getByRole('tab', { name: 'sample · PDF' });
     expect(epubTab).toHaveAttribute('title', 'sample\nsample.epub');
     expect(pdfTab).toHaveAttribute('title', 'sample\nsample.pdf');
+    expect(epubTab.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent('· EPUB');
+    expect(pdfTab.querySelector('[data-testid="tab-label-suffix"]')).toHaveTextContent('· PDF');
 
     // Focusing a tab with the keyboard renders a portal tooltip and wires aria-describedby.
     act(() => {
@@ -518,10 +520,11 @@ describe('ReaderPane tab commands', () => {
     await act(async () => {
       await useStudySyncStore
         .getState()
-        .reportDocumentTitle('doc-epub', 'SynapseRead EPUB fixture');
+        .reportDocumentTitle('doc-epub', 'SynapseRead EPUB fixture', 'hash-epub');
     });
 
     const renamedTab = screen.getByRole('tab', { name: 'SynapseRead EPUB fixture' });
+    expect(renamedTab.querySelector('[data-testid="tab-label-suffix"]')).toBeNull();
     expect(renamedTab).toHaveAttribute('title', 'SynapseRead EPUB fixture\nsample.epub');
     expect(
       screen.getByRole('button', { name: 'Close SynapseRead EPUB fixture' }),

@@ -3614,6 +3614,7 @@ export function PdfViewer({ content, onDocumentTitle, ...props }: DocumentViewer
   useEffect(() => {
     let cancelled = false;
     let engine: PdfDocumentHandle | null = null;
+    const sourceFileHash = document.fileHash;
     content
       .loadDocumentSource(document)
       .then(openPdfDocument)
@@ -3623,7 +3624,7 @@ export function PdfViewer({ content, onDocumentTitle, ...props }: DocumentViewer
           engine = handle;
           setOpened({ engine: handle, error: null });
           void handle.getMetadataTitle?.().then((title) => {
-            if (!cancelled && title) onDocumentTitleRef.current?.(title);
+            if (!cancelled && title) onDocumentTitleRef.current?.(title, sourceFileHash);
           });
         }
       })

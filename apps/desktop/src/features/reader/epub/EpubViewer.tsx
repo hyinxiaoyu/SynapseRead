@@ -473,6 +473,7 @@ export function EpubViewer({
     if (!host) return;
     let cancelled = false;
     let opened: EpubHandle | null = null;
+    const sourceFileHash = document.fileHash;
     savedProgress.current = document.lastProgress ?? undefined;
     lastReportedProgress.current = savedProgress.current;
 
@@ -512,7 +513,7 @@ export function EpubViewer({
 
         const metadataTitle = normalizeMetadataTitle(engine.metadataTitle);
         if (metadataTitle) {
-          latest.current.onDocumentTitle?.(metadataTitle);
+          latest.current.onDocumentTitle?.(metadataTitle, sourceFileHash);
         }
 
         let hasSelection = false;

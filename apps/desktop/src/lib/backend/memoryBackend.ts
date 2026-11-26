@@ -491,8 +491,11 @@ export function createMemoryBackendWithPreview({
       return updated;
     },
 
-    async setDocumentDisplayTitle(documentId, displayTitle) {
+    async setDocumentDisplayTitle(documentId, displayTitle, expectedFileHash) {
       const existing = require(documents, documentId, 'document');
+      if (existing.fileHash !== expectedFileHash) {
+        return null;
+      }
       const updated: StudyDocument = {
         ...existing,
         displayTitle: sanitizeDisplayTitle(displayTitle),

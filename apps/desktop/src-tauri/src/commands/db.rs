@@ -254,11 +254,14 @@ pub fn hide_document_from_recent(
 pub fn set_document_display_title(
     document_id: String,
     display_title: Option<String>,
+    expected_file_hash: String,
     state: State<'_, AppState>,
-) -> IpcResult<Document> {
-    Ok(state
-        .database()?
-        .set_document_display_title(&document_id, display_title.as_deref())?)
+) -> IpcResult<Option<Document>> {
+    Ok(state.database()?.set_document_display_title(
+        &document_id,
+        display_title.as_deref(),
+        &expected_file_hash,
+    )?)
 }
 
 #[tauri::command]

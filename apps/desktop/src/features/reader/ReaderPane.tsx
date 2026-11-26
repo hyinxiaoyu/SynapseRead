@@ -278,7 +278,12 @@ export function ReaderPane({
           {openDocuments.map((document, index) => {
             const isActive = document.id === activeDocumentId;
             const displayName = documentDisplayName(document);
-            const tabLabel = tabLabels.get(document.id) ?? displayName;
+            const tabLabel = tabLabels.get(document.id) ?? {
+              base: displayName,
+              suffix: '',
+              suffixDisplay: '',
+              text: displayName,
+            };
             const tooltipText = documentTooltip(document);
             const isTooltipShown = focusedTabDocument?.id === document.id;
             return (
@@ -294,6 +299,7 @@ export function ReaderPane({
                   id={`reader-tab-${document.id}`}
                   type="button"
                   role="tab"
+                  aria-label={tabLabel.text}
                   aria-selected={isActive}
                   aria-controls={`reader-tabpanel-${document.id}`}
                   aria-describedby={
@@ -301,7 +307,7 @@ export function ReaderPane({
                   }
                   title={tooltipText}
                   tabIndex={isActive ? 0 : -1}
-                  className="truncate py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="flex min-w-0 items-center py-1 pr-1 pl-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onMouseDown={releaseTabPointerFocus}
                   onFocus={(event) => {
                     const rect = event.currentTarget.getBoundingClientRect();
@@ -322,7 +328,15 @@ export function ReaderPane({
                   }}
                   onKeyDown={(event) => handleTabKeyDown(event, index)}
                 >
-                  {tabLabel}
+                  <span className="min-w-0 truncate">{tabLabel.base}</span>
+                  {tabLabel.suffixDisplay && (
+                    <span
+                      data-testid="tab-label-suffix"
+                      className="ml-1 shrink-0 whitespace-nowrap text-muted-foreground"
+                    >
+                      {tabLabel.suffixDisplay}
+                    </span>
+                  )}
                 </button>
                 <button
                   type="button"
@@ -744,8 +758,8 @@ function DocumentTab({
     void excerptSelection();
   }, [excerptSelection]);
   const onDocumentTitle = useCallback(
-    (title: string) => {
-      void reportDocumentTitle(document.id, title);
+    (title: string, sourceFileHash: string) => {
+      void reportDocumentTitle(document.id, title, sourceFileHash);
     },
     [reportDocumentTitle, document.id],
   );

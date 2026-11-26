@@ -83,12 +83,26 @@ export function normalizeMetadataTitle(raw: unknown): string | null {
   return cleaned;
 }
 
+/** Maximum length (Unicode code points) for a qualifier suffix shown alongside the truncated title. */
+export const MAX_QUALIFIER_CHARS = 12;
+
+export interface TabLabel {
+  /** Human-facing title (truncatable when a tab narrows). */
+  base: string;
+  /** Disambiguating qualifier(s) and/or fallback ordinal without leading separator. */
+  suffix: string;
+  /** Suffix text rendered in a non-shrinking span alongside `base`. */
+  suffixDisplay: string;
+  /** Full accessible label (`aria-label`). */
+  text: string;
+}
+
 /**
  * Computes unique tab labels across `docs` so no two open tabs show the same
- * text, adding format, file name, parent folder, and finally `(2)`/`(3)` only
- * where labels collide.
+ * text, adding format, short file name, short parent folder, and finally
+ * `(2)`/`(3)` only where labels still collide.
  */
-export function documentTabLabels(docs: readonly StudyDocument[]): Map<string, string> {
+export function documentTabLabels(docs: readonly StudyDocument[]): Map<string, TabLabel> {
   const entries = docs.map((doc) => {
     const base = documentDisplayName(doc);
     return { doc, parts: [base] };
@@ -117,7 +131,10 @@ export function documentTabLabels(docs: readonly StudyDocument[]): Map<string, s
     const groups = collisionGroups();
     if (groups.length === 0) break;
     for (const group of groups) {
-      const candidateValues = group.map((index) => getQualifier(entries[index]!.doc).trim());
+      const candidateValues = group.map((index) => {
+        const raw = getQualifier(entries[index]!.doc).trim();
+        return Array.from(raw).length <= MAX_QUALIFIER_CHARS ? raw : '';
+      });
       const nonEmptyValues = candidateValues.filter((value) => value.length > 0);
       if (nonEmptyValues.length === 0) continue;
       const distinctValues = new Set(nonEmptyValues.map((value) => value.toLowerCase()));
@@ -138,39 +155,55 @@ export function documentTabLabels(docs: readonly StudyDocument[]): Map<string, s
     }
   }
 
-  // Fallback for any remaining collisions: append `(2)`, `(3)` in input order.
-  const finalLabels = entries.map((entry) => currentLabel(entry.parts));
-  const used = new Set<string>();
+  // Fallback for any remaining collisions: pre-seed `used` with all base/qualified labels
+  // so generated `(2)`/`(3)` suffixes never collide with an existing document's title.
+  const baseLabels = entries.map((entry) => currentLabel(entry.parts));
+  const used = new Set<string>(baseLabels.map((label) => label.toLowerCase()));
   const finalGroups = new Map<string, number[]>();
-  finalLabels.forEach((label, index) => {
+  baseLabels.forEach((label, index) => {
     const key = label.toLowerCase();
     const bucket = finalGroups.get(key);
     if (bucket) bucket.push(index);
     else finalGroups.set(key, [index]);
   });
 
+  const ordinals = new Array<number | null>(entries.length).fill(null);
   for (const group of finalGroups.values()) {
-    if (group.length === 1) {
-      used.add(finalLabels[group[0]!]!.toLowerCase());
-      continue;
-    }
-    used.add(finalLabels[group[0]!]!.toLowerCase());
+    if (group.length === 1) continue;
     let ordinal = 2;
     for (const index of group.slice(1)) {
-      const base = finalLabels[index]!;
+      const base = baseLabels[index]!;
       while (used.has(`${base} (${ordinal})`.toLowerCase())) {
         ordinal += 1;
       }
-      const next = `${base} (${ordinal})`;
-      finalLabels[index] = next;
-      used.add(next.toLowerCase());
+      ordinals[index] = ordinal;
+      used.add(`${base} (${ordinal})`.toLowerCase());
       ordinal += 1;
     }
   }
 
-  const result = new Map<string, string>();
+  const result = new Map<string, TabLabel>();
   entries.forEach((entry, index) => {
-    result.set(entry.doc.id, finalLabels[index]!);
+    const base = entry.parts[0]!;
+    const qualifier = entry.parts.slice(1).join(' · ');
+    const ordinal = ordinals[index] ?? null;
+    const ordinalSuffix = ordinal === null ? '' : `(${ordinal})`;
+    const suffix =
+      qualifier && ordinalSuffix ? `${qualifier} ${ordinalSuffix}` : qualifier || ordinalSuffix;
+    const suffixDisplay = qualifier ? `· ${suffix}` : ordinalSuffix;
+    const text = qualifier
+      ? ordinalSuffix
+        ? `${base} · ${qualifier} ${ordinalSuffix}`
+        : `${base} · ${qualifier}`
+      : ordinalSuffix
+        ? `${base} ${ordinalSuffix}`
+        : base;
+    result.set(entry.doc.id, {
+      base,
+      suffix,
+      suffixDisplay,
+      text,
+    });
   });
   return result;
 }

@@ -264,7 +264,7 @@ function Harness({
   documentId: string;
   isActive?: boolean;
   chromeHidden?: boolean;
-  onDocumentTitle?: (title: string) => void;
+  onDocumentTitle?: (title: string, sourceFileHash: string) => void;
 }) {
   const state = store();
   const document = state.documents.find((candidate) => candidate.id === documentId);
@@ -2977,9 +2977,13 @@ describe('EpubViewer', () => {
       const onDocumentTitle = vi.fn();
       engine.metadataTitle = '  Middlemarch:\nA Study of Provincial Life  ';
       const { store, documentId } = await setup();
+      const sourceFileHash = store.getState().documents.find((d) => d.id === documentId)?.fileHash;
       render(<Harness store={store} documentId={documentId} onDocumentTitle={onDocumentTitle} />);
       await waitFor(() =>
-        expect(onDocumentTitle).toHaveBeenCalledWith('Middlemarch: A Study of Provincial Life'),
+        expect(onDocumentTitle).toHaveBeenCalledWith(
+          'Middlemarch: A Study of Provincial Life',
+          sourceFileHash,
+        ),
       );
 
       onDocumentTitle.mockClear();

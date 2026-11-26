@@ -1201,12 +1201,25 @@ fn set_document_display_title_sanitizes_persists_and_clears_over_ipc() {
         json!({
             "documentId": doc["id"],
             "displayTitle": "  Pride and\nPrejudice ",
+            "expectedFileHash": doc["fileHash"],
         }),
     );
     assert_eq!(updated["title"], "pg1342");
     assert_eq!(updated["displayTitle"], "Pride and");
 
+    // Wrong expectedFileHash is a no-op returning null and leaves the record unchanged.
+    let mismatched = h.ok(
+        "set_document_display_title",
+        json!({
+            "documentId": doc["id"],
+            "displayTitle": "Stale Source Title",
+            "expectedFileHash": "wrong-hash",
+        }),
+    );
+    assert_eq!(mismatched, Value::Null);
+
     let doc_id = doc["id"].clone();
+    let doc_hash = doc["fileHash"].clone();
     let Harness { dir, app, .. } = h;
     drop(app);
 
@@ -1220,6 +1233,7 @@ fn set_document_display_title_sanitizes_persists_and_clears_over_ipc() {
         json!({
             "documentId": doc_id,
             "displayTitle": null,
+            "expectedFileHash": doc_hash,
         }),
     );
     assert_eq!(cleared["displayTitle"], Value::Null);

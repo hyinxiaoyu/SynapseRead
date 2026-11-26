@@ -7,6 +7,7 @@ import {
   documentTabLabels,
   documentTooltip,
   fileNameOf,
+  MAX_QUALIFIER_CHARS,
   normalizeMetadataTitle,
   parentFolderOf,
 } from './documentTitles';
@@ -107,14 +108,19 @@ describe('documentTitles', () => {
     }
   });
 
-  it('keeps lone tab labels plain and disambiguates same-named tabs by format, filename, folder, and ordinal', () => {
+  it('keeps lone tab labels plain and disambiguates same-named tabs by format, short filename, short folder, and ordinal', () => {
     const lone = makeDoc({
       id: 'lone',
       title: 'alone',
       filePath: '/a/alone.epub',
       format: 'epub',
     });
-    expect(documentTabLabels([lone]).get('lone')).toBe('alone');
+    expect(documentTabLabels([lone]).get('lone')).toEqual({
+      base: 'alone',
+      suffix: '',
+      suffixDisplay: '',
+      text: 'alone',
+    });
 
     // Issue #129 example: sample.txt, sample.pdf, sample.epub, sample.md
     const samples = [
@@ -124,34 +130,81 @@ describe('documentTitles', () => {
       makeDoc({ id: 's-md', title: 'sample', filePath: '/samples/sample.md', format: 'txt' }),
     ];
     const sampleLabels = documentTabLabels(samples);
-    expect(sampleLabels.get('s-txt')).toBe('sample · TXT');
-    expect(sampleLabels.get('s-pdf')).toBe('sample · PDF');
-    expect(sampleLabels.get('s-epub')).toBe('sample · EPUB');
-    expect(sampleLabels.get('s-md')).toBe('sample · Markdown');
-    expect(new Set(sampleLabels.values()).size).toBe(4);
+    expect(sampleLabels.get('s-txt')).toEqual({
+      base: 'sample',
+      suffix: 'TXT',
+      suffixDisplay: '· TXT',
+      text: 'sample · TXT',
+    });
+    expect(sampleLabels.get('s-pdf')?.text).toBe('sample · PDF');
+    expect(sampleLabels.get('s-epub')?.text).toBe('sample · EPUB');
+    expect(sampleLabels.get('s-md')?.text).toBe('sample · Markdown');
+    expect(new Set([...sampleLabels.values()].map((label) => label.text)).size).toBe(4);
 
-    // Two EPUBs sharing the same dc:title are told apart by file name.
-    const sameTitleEpubs = [
+    // Two EPUBs sharing the same dc:title are told apart by short file names (<= MAX_QUALIFIER_CHARS).
+    expect('first.epub'.length).toBeLessThanOrEqual(MAX_QUALIFIER_CHARS);
+    const sameTitleShortEpubs = [
       makeDoc({
         id: 'e1',
+        title: 'first',
+        displayTitle: 'Middlemarch',
+        filePath: '/books/first.epub',
+        format: 'epub',
+      }),
+      makeDoc({
+        id: 'e2',
+        title: 'second',
+        displayTitle: 'Middlemarch',
+        filePath: '/books/second.epub',
+        format: 'epub',
+      }),
+    ];
+    const shortEpubLabels = documentTabLabels(sameTitleShortEpubs);
+    expect(shortEpubLabels.get('e1')).toEqual({
+      base: 'Middlemarch',
+      suffix: 'first.epub',
+      suffixDisplay: '· first.epub',
+      text: 'Middlemarch · first.epub',
+    });
+    expect(shortEpubLabels.get('e2')).toEqual({
+      base: 'Middlemarch',
+      suffix: 'second.epub',
+      suffixDisplay: '· second.epub',
+      text: 'Middlemarch · second.epub',
+    });
+
+    // Long file names (> MAX_QUALIFIER_CHARS) in the same folder skip filename and fall back to `(2)`.
+    const sameTitleLongEpubs = [
+      makeDoc({
+        id: 'le1',
         title: 'middlemarch-gutenberg',
         displayTitle: 'Middlemarch',
         filePath: '/books/middlemarch-gutenberg.epub',
         format: 'epub',
       }),
       makeDoc({
-        id: 'e2',
+        id: 'le2',
         title: 'middlemarch-annotated',
         displayTitle: 'Middlemarch',
         filePath: '/books/middlemarch-annotated.epub',
         format: 'epub',
       }),
     ];
-    const epubLabels = documentTabLabels(sameTitleEpubs);
-    expect(epubLabels.get('e1')).toBe('Middlemarch · middlemarch-gutenberg.epub');
-    expect(epubLabels.get('e2')).toBe('Middlemarch · middlemarch-annotated.epub');
+    const longEpubLabels = documentTabLabels(sameTitleLongEpubs);
+    expect(longEpubLabels.get('le1')).toEqual({
+      base: 'Middlemarch',
+      suffix: '',
+      suffixDisplay: '',
+      text: 'Middlemarch',
+    });
+    expect(longEpubLabels.get('le2')).toEqual({
+      base: 'Middlemarch',
+      suffix: '(2)',
+      suffixDisplay: '(2)',
+      text: 'Middlemarch (2)',
+    });
 
-    // Same name and format in different folders are told apart by parent folder.
+    // Same name and format in different short folders are told apart by parent folder.
     const sameFileDifferentDirs = [
       makeDoc({
         id: 'f1',
@@ -167,8 +220,27 @@ describe('documentTitles', () => {
       }),
     ];
     const folderLabels = documentTabLabels(sameFileDifferentDirs);
-    expect(folderLabels.get('f1')).toBe('notes · work');
-    expect(folderLabels.get('f2')).toBe('notes · personal');
+    expect(folderLabels.get('f1')?.text).toBe('notes · work');
+    expect(folderLabels.get('f2')?.text).toBe('notes · personal');
+
+    // Over-long folder names (> 12 code points, counting surrogate pairs as 1) fall back to `(2)`.
+    const longDirDocs = [
+      makeDoc({
+        id: 'ld1',
+        title: 'notes',
+        filePath: '/project-alpha-folder/notes.txt',
+        format: 'txt',
+      }),
+      makeDoc({
+        id: 'ld2',
+        title: 'notes',
+        filePath: '/project-beta-folder/notes.txt',
+        format: 'txt',
+      }),
+    ];
+    const longDirLabels = documentTabLabels(longDirDocs);
+    expect(longDirLabels.get('ld1')?.text).toBe('notes');
+    expect(longDirLabels.get('ld2')?.text).toBe('notes (2)');
 
     // Identical display name, format, filename, and parent folder fall back to ordinals.
     const identical = [
@@ -176,7 +248,53 @@ describe('documentTitles', () => {
       makeDoc({ id: 'i2', title: 'dup', filePath: '/same/dup.txt', format: 'txt' }),
     ];
     const identicalLabels = documentTabLabels(identical);
-    expect(identicalLabels.get('i1')).toBe('dup');
-    expect(identicalLabels.get('i2')).toBe('dup (2)');
+    expect(identicalLabels.get('i1')?.text).toBe('dup');
+    expect(identicalLabels.get('i2')).toEqual({
+      base: 'dup',
+      suffix: '(2)',
+      suffixDisplay: '(2)',
+      text: 'dup (2)',
+    });
+  });
+
+  it('skips ordinals already claimed by another tab title regardless of open order (#129)', () => {
+    const atlasA = makeDoc({
+      id: 'atlas-1',
+      title: 'Atlas',
+      filePath: '/same/Atlas.pdf',
+      format: 'pdf',
+    });
+    const atlasB = makeDoc({
+      id: 'atlas-2',
+      title: 'Atlas',
+      filePath: '/same/Atlas.pdf',
+      format: 'pdf',
+    });
+    const atlas2 = makeDoc({
+      id: 'atlas-existing-2',
+      title: 'Atlas (2)',
+      filePath: '/same/Atlas (2).pdf',
+      format: 'pdf',
+    });
+
+    // Existing `Atlas (2)` opened last (after the two colliding `Atlas` tabs).
+    const existingLast = documentTabLabels([atlasA, atlasB, atlas2]);
+    expect(existingLast.get('atlas-1')?.text).toBe('Atlas');
+    expect(existingLast.get('atlas-2')?.text).toBe('Atlas (3)');
+    expect(existingLast.get('atlas-existing-2')?.text).toBe('Atlas (2)');
+    expect(new Set([...existingLast.values()].map((l) => l.text.toLowerCase())).size).toBe(3);
+
+    // Existing `Atlas (2)` opened first (and case-insensitive match).
+    const atlas2Lower = makeDoc({
+      id: 'atlas-existing-lower-2',
+      title: 'atlas (2)',
+      filePath: '/same/atlas (2).pdf',
+      format: 'pdf',
+    });
+    const existingFirst = documentTabLabels([atlas2Lower, atlasA, atlasB]);
+    expect(existingFirst.get('atlas-existing-lower-2')?.text).toBe('atlas (2)');
+    expect(existingFirst.get('atlas-1')?.text).toBe('Atlas');
+    expect(existingFirst.get('atlas-2')?.text).toBe('Atlas (3)');
+    expect(new Set([...existingFirst.values()].map((l) => l.text.toLowerCase())).size).toBe(3);
   });
 });
