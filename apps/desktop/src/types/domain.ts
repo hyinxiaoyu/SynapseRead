@@ -68,6 +68,11 @@ export interface StudyDocument {
    * measured it; null or absent when it could not.
    */
   lastProgress?: number | null;
+  /**
+   * Timestamp set when the reader removes this entry from Recent / Continue
+   * reading; cleared when the file is opened again.
+   */
+  hiddenFromRecentAt?: string | null;
 }
 
 export type DocumentSourceState = 'ok' | 'missing' | 'changed';

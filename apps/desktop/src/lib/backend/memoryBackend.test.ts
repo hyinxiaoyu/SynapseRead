@@ -1338,4 +1338,52 @@ describe('memory backend card delete and restore', () => {
     expect(docsWithOriginalHash[0]?.id).toBe(newlyPicked.id);
     expect(docsWithOriginalHash[0]?.filePath).toBe('/local/reregistered.txt');
   });
+
+  it('hides documents from recent while keeping study records and restores on reopen or relink', async () => {
+    const bytes = new TextEncoder().encode('study text');
+    const backend = createMemoryBackend({
+      library: {
+        '/books/study.txt': bytes,
+        '/books/study-moved.txt': bytes,
+      },
+    });
+
+    const doc = (await backend.pickDocument())!;
+    expect(doc.hiddenFromRecentAt).toBeNull();
+
+    const bookmark = await backend.createBookmark({
+      documentId: doc.id,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 4, lineIndex: 0 },
+      label: 'First line',
+    });
+
+    const hidden = await backend.hideDocumentFromRecent(doc.id);
+    expect(typeof hidden.hiddenFromRecentAt).toBe('string');
+    const listed = await backend.listDocuments();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.hiddenFromRecentAt).toBe(hidden.hiddenFromRecentAt);
+    expect((await backend.listBookmarks()).map((b) => b.id)).toEqual([bookmark.id]);
+
+    // touchDocumentOpened clears the flag.
+    const touched = await backend.touchDocumentOpened(doc.id);
+    expect(touched.hiddenFromRecentAt).toBeNull();
+
+    // Hiding again, then dropping the same file restores it.
+    await backend.hideDocumentFromRecent(doc.id);
+    const dropped = await backend.dropFiles([
+      new File([bytes], 'study.txt', { type: 'text/plain' }),
+    ]);
+    expect(dropped.error).toBeNull();
+    expect(dropped.documents[0]?.hiddenFromRecentAt).toBeNull();
+
+    // Hiding again, then relinking clears the flag.
+    await backend.hideDocumentFromRecent(doc.id);
+    const relinked = await backend.relinkDocument(doc.id);
+    expect(relinked?.document.hiddenFromRecentAt).toBeNull();
+
+    // Unknown id fails with not_found.
+    await expect(backend.hideDocumentFromRecent('missing-doc')).rejects.toMatchObject({
+      code: 'not_found',
+    });
+  });
 });

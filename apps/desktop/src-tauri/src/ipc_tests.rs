@@ -1158,6 +1158,39 @@ fn workspace_session_and_touch_document_opened_persist_across_relaunch() {
 }
 
 #[test]
+fn hide_document_from_recent_persists_across_relaunch_and_reopening_clears_it() {
+    let h = Harness::new();
+    let doc = h.register("recent.txt", "recent content");
+    assert_eq!(doc["hiddenFromRecentAt"], Value::Null);
+
+    let hidden = h.ok(
+        "hide_document_from_recent",
+        json!({ "documentId": doc["id"] }),
+    );
+    assert!(hidden["hiddenFromRecentAt"].is_string());
+
+    let listed = h.ok("list_documents", json!({}));
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(
+        listed[0]["hiddenFromRecentAt"],
+        hidden["hiddenFromRecentAt"]
+    );
+
+    let doc_id = doc["id"].clone();
+    let hidden_at = hidden["hiddenFromRecentAt"].clone();
+    let Harness { dir, app, .. } = h;
+    drop(app);
+
+    let next = Harness::in_dir(dir);
+    let listed_after_relaunch = next.ok("list_documents", json!({}));
+    assert_eq!(listed_after_relaunch.as_array().unwrap().len(), 1);
+    assert_eq!(listed_after_relaunch[0]["hiddenFromRecentAt"], hidden_at);
+
+    let touched = next.ok("touch_document_opened", json!({ "documentId": doc_id }));
+    assert_eq!(touched["hiddenFromRecentAt"], Value::Null);
+}
+
+#[test]
 fn menu_item_states_accept_exactly_what_the_frontend_sends() {
     let h = Harness::new();
     // The mock runtime cannot build a native menu, so this checks the wire format and

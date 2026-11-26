@@ -343,6 +343,7 @@ export function createMemoryBackendWithPreview({
         filePath: path,
         fileHash,
         lastOpenedAt: monotonicNow(),
+        hiddenFromRecentAt: null,
       };
       documents.set(touched.id, touched);
       return touched;
@@ -359,6 +360,7 @@ export function createMemoryBackendWithPreview({
       lastOpenedAt: timestamp,
       createdAt: timestamp,
       lastProgress: null,
+      hiddenFromRecentAt: null,
     };
     documents.set(document.id, document);
     return document;
@@ -441,7 +443,21 @@ export function createMemoryBackendWithPreview({
 
     async touchDocumentOpened(documentId) {
       const existing = require(documents, documentId, 'document');
-      const updated: StudyDocument = { ...existing, lastOpenedAt: monotonicNow() };
+      const updated: StudyDocument = {
+        ...existing,
+        lastOpenedAt: monotonicNow(),
+        hiddenFromRecentAt: null,
+      };
+      documents.set(documentId, updated);
+      return updated;
+    },
+
+    async hideDocumentFromRecent(documentId) {
+      const existing = require(documents, documentId, 'document');
+      const updated: StudyDocument = {
+        ...existing,
+        hiddenFromRecentAt: monotonicNow(),
+      };
       documents.set(documentId, updated);
       return updated;
     },
@@ -539,6 +555,7 @@ export function createMemoryBackendWithPreview({
         lastCursorAnchor: contentChanged ? null : existing.lastCursorAnchor,
         lastProgress: contentChanged ? null : (existing.lastProgress ?? null),
         lastOpenedAt: monotonicNow(),
+        hiddenFromRecentAt: null,
       };
       documents.set(documentId, updated);
       return {

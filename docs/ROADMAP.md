@@ -107,6 +107,7 @@ for task IDs, acceptance evidence, and measurements.
       (`leaf` conical backside + rim + specular highlight + subtle bleed,
       `cast-shadow`, `under-shadow`, and a two-page `spine` valley);
       and TXT slides along its vertical reading axis.
+- [x] Bounded Continue reading list and Remove from Recent (`#126`; SQLite migration `0016`).
 
 ## M3: Card operations (after reader experience)
 

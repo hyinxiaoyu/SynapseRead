@@ -243,6 +243,14 @@ pub fn touch_document_opened(
 }
 
 #[tauri::command]
+pub fn hide_document_from_recent(
+    document_id: String,
+    state: State<'_, AppState>,
+) -> IpcResult<Document> {
+    Ok(state.database()?.hide_document_from_recent(&document_id)?)
+}
+
+#[tauri::command]
 pub fn get_workspace_session(state: State<'_, AppState>) -> IpcResult<WorkspaceSession> {
     Ok(state.database()?.get_workspace_session()?)
 }

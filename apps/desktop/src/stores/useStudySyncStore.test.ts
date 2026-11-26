@@ -1064,6 +1064,223 @@ describe('useStudySyncStore', () => {
       expect(recent[0]?.lastOpenedAt).toBeTruthy();
     });
 
+    it('hides documents from selectRecentDocuments while preserving records and restores on reopen', async () => {
+      const firstId = await openDocument();
+      const secondId = await openDocument();
+      await state().addBookmark(firstId, pdfAnchor as ReaderSelection['anchor'], 'Keep me');
+      state().closeDocument(firstId);
+
+      await state().hideRecentDocument(firstId);
+      // Hidden document remains in `documents` and keeps its bookmarks, but disappears from Recent.
+      expect(state().documents.some((doc) => doc.id === firstId)).toBe(true);
+      expect(state().bookmarks.some((bm) => bm.documentId === firstId)).toBe(true);
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toEqual([secondId]);
+
+      // Reopening restores it to Recent.
+      await state().reopenRecentDocument(firstId);
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toEqual([
+        firstId,
+        secondId,
+      ]);
+    });
+
+    it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {
+      const bytes = new TextEncoder().encode('drop-hide race');
+      const file = new File([bytes], 'drop-race.txt', { type: 'text/plain' });
+      await state().dropFiles([file]);
+      const docId = state().activeDocumentId as string;
+      state().closeDocument(docId);
+
+      const originalDrop = backend.dropFiles.bind(backend);
+      let releaseDrop!: () => void;
+      const dropGate = new Promise<void>((resolve) => {
+        releaseDrop = resolve;
+      });
+      let dropCommitted = false;
+      const dropSpy = vi.spyOn(backend, 'dropFiles').mockImplementationOnce(async (files) => {
+        const result = await originalDrop(files);
+        dropCommitted = true;
+        await dropGate;
+        return result;
+      });
+
+      const dropPromise = state().dropFiles([file]);
+      await vi.waitFor(() => expect(dropCommitted).toBe(true));
+
+      await state().hideRecentDocument(docId);
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).not.toContain(docId);
+
+      releaseDrop();
+      await dropPromise;
+
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).not.toContain(docId);
+      const stored = state().documents.find((doc) => doc.id === docId)!;
+      expect(stored.hiddenFromRecentAt).toBeTruthy();
+      dropSpy.mockRestore();
+    });
+
+    it('guards Recent reconciliation reads against newer mutations and converges after delayed cancelled relinks', async () => {
+      const firstId = await openDocument();
+      state().closeDocument(firstId);
+
+      // 1. Overlapped hide finishes before delayed cancelled relink -> cancelled relink converges to DB.
+      const origHide = backend.hideDocumentFromRecent.bind(backend);
+      let releaseHide!: () => void;
+      const hideGate = new Promise<void>((resolve) => {
+        releaseHide = resolve;
+      });
+      const hideSpy = vi
+        .spyOn(backend, 'hideDocumentFromRecent')
+        .mockImplementationOnce(async (id) => {
+          const updated = await origHide(id);
+          await hideGate;
+          return updated;
+        });
+
+      let resolveRelink!: (value: null) => void;
+      const relinkSpy = vi.spyOn(backend, 'relinkDocument').mockImplementationOnce(
+        () =>
+          new Promise<null>((resolve) => {
+            resolveRelink = resolve;
+          }),
+      );
+
+      const hidePromise = state().hideRecentDocument(firstId);
+      await vi.waitFor(() => expect(hideSpy).toHaveBeenCalledWith(firstId));
+
+      const cancelledRelink = state().relinkDocument(firstId);
+      await vi.waitFor(() => expect(relinkSpy).toHaveBeenCalledWith(firstId, false));
+
+      releaseHide();
+      await hidePromise;
+      // Still hidden = false in store because cancelled relink has not finished yet.
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toContain(firstId);
+
+      // Cancelling relink drains active Recent ops and triggers authoritative DB convergence.
+      resolveRelink(null);
+      await cancelledRelink;
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).not.toContain(firstId);
+      hideSpy.mockRestore();
+      relinkSpy.mockRestore();
+
+      // 2. A stale reconcile listDocuments read returning after a newer hide cannot restore visibility.
+      const secondId = await openDocument();
+      state().closeDocument(secondId);
+
+      const origTouch = backend.touchDocumentOpened.bind(backend);
+      let releaseTouch!: () => void;
+      const touchGate = new Promise<void>((resolve) => {
+        releaseTouch = resolve;
+      });
+      const touchSpy = vi
+        .spyOn(backend, 'touchDocumentOpened')
+        .mockImplementationOnce(async (id) => {
+          const updated = await origTouch(id);
+          await touchGate;
+          return updated;
+        });
+      const relinkOverlapSpy = vi.spyOn(backend, 'relinkDocument').mockResolvedValueOnce(null);
+
+      const reopenPromise = state().reopenRecentDocument(secondId);
+      await vi.waitFor(() => expect(touchSpy).toHaveBeenCalledWith(secondId));
+      await state().relinkDocument(secondId);
+
+      // Delay the first reconcile read with the pre-hide unhidden snapshot.
+      const staleSnapshot = (await backend.listDocuments()).map((doc) => ({ ...doc }));
+      let resolveStaleRead!: (docs: StudyDocument[]) => void;
+      const realListDocuments = backend.listDocuments.bind(backend);
+      const listSpy = vi.spyOn(backend, 'listDocuments').mockImplementationOnce(
+        () =>
+          new Promise<StudyDocument[]>((resolve) => {
+            resolveStaleRead = resolve;
+          }),
+      );
+
+      releaseTouch();
+      await vi.waitFor(() => expect(listSpy).toHaveBeenCalledTimes(1));
+
+      // While the first reconcile listDocuments is in flight, hide the document cleanly.
+      const hideAfterPromise = state().hideRecentDocument(secondId);
+      await hideAfterPromise;
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).not.toContain(secondId);
+
+      // Now the stale unhidden read returns late -> must not overwrite the newer hidden state.
+      resolveStaleRead(staleSnapshot);
+      await reopenPromise;
+      state().closeDocument(secondId);
+
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).not.toContain(secondId);
+      expect(
+        (await realListDocuments()).find((doc) => doc.id === secondId)?.hiddenFromRecentAt,
+      ).toBeTruthy();
+
+      touchSpy.mockRestore();
+      relinkOverlapSpy.mockRestore();
+      listSpy.mockRestore();
+
+      // 3. A stale post-unlock reconcile read returning after a newer reopen cannot re-hide the book.
+      const thirdId = await openDocument();
+      state().closeDocument(thirdId);
+
+      const origTouch3 = backend.touchDocumentOpened.bind(backend);
+      let touch3Committed = false;
+      const touchSpy3 = vi
+        .spyOn(backend, 'touchDocumentOpened')
+        .mockImplementationOnce(async (id) => {
+          const updated = await origTouch3(id);
+          touch3Committed = true;
+          return updated;
+        });
+      const origVerify3 = backend.verifyDocumentSource.bind(backend);
+      let releaseVerify3!: () => void;
+      const verifyGate3 = new Promise<void>((resolve) => {
+        releaseVerify3 = resolve;
+      });
+      const verifySpy3 = vi
+        .spyOn(backend, 'verifyDocumentSource')
+        .mockImplementationOnce(async (id) => {
+          await verifyGate3;
+          return origVerify3(id);
+        });
+
+      const pendingReopen3 = state().reopenRecentDocument(thirdId);
+      await vi.waitFor(() => expect(touch3Committed).toBe(true));
+      await state().hideRecentDocument(thirdId);
+
+      const releaseLock3 = state().lockDocument(thirdId);
+      releaseVerify3();
+      await pendingReopen3;
+
+      const staleHiddenSnapshot = (await backend.listDocuments()).map((doc) => ({ ...doc }));
+      let resolvePostUnlockRead!: (docs: StudyDocument[]) => void;
+      const postUnlockListSpy = vi.spyOn(backend, 'listDocuments').mockImplementationOnce(
+        () =>
+          new Promise<StudyDocument[]>((resolve) => {
+            resolvePostUnlockRead = resolve;
+          }),
+      );
+
+      releaseLock3();
+      await vi.waitFor(() => expect(postUnlockListSpy).toHaveBeenCalledTimes(1));
+
+      // A newer reopen completes before the post-unlock reconcile read returns.
+      await state().reopenRecentDocument(thirdId);
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toContain(thirdId);
+
+      resolvePostUnlockRead(staleHiddenSnapshot);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toContain(thirdId);
+      expect(
+        (await realListDocuments()).find((doc) => doc.id === thirdId)?.hiddenFromRecentAt,
+      ).toBeNull();
+
+      touchSpy3.mockRestore();
+      verifySpy3.mockRestore();
+      postUnlockListSpy.mockRestore();
+    });
+
     it('restores open tabs, active document, and reading preferences on restart while ignoring unknown document ids', async () => {
       const firstId = await openDocument();
       const secondId = await openDocument();

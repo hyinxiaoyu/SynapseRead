@@ -244,6 +244,10 @@ pub struct Document {
     /// reader measured it.
     #[serde(default)]
     pub last_progress: Option<f64>,
+    /// Set when the user removes the document from Recent / Continue reading;
+    /// cleared back to `None` when the file is opened again.
+    #[serde(default)]
+    pub hidden_from_recent_at: Option<String>,
 }
 
 /// Saved reading position and progress for a document, used as the expected

@@ -18,10 +18,11 @@ import { isEditableShortcutTarget, useCommands } from '@/features/commands/regis
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { requestActivePageFocus } from '@/features/reader/focusPage';
 import { describeResumeLocation } from '@/features/reader/resumeLocation';
+import { RECENT_EMPTY_STATE_LIMIT, RecentDocumentList } from '@/features/reader/RecentDocumentList';
 import { ReaderPopoverLayer, ReaderPopoverSlotProvider } from '@/features/reader/ReaderNotice';
 import { TOOLBAR_HEIGHT_PX } from '@/features/reader/ReaderToolbar';
 import { viewerRegistry } from '@/features/reader/viewerRegistry';
-import { documentFormatLabel, SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
+import { SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
 import { cn, describeError } from '@/lib/utils';
 import { useDismissOnOutside } from '@/features/reader/useDismissOnOutside';
 import {
@@ -105,6 +106,7 @@ export function ReaderPane({
   const isExcerpting = useStudySyncStore((state) => state.isExcerpting);
   const openDocument = useStudySyncStore((state) => state.openDocument);
   const reopenRecentDocument = useStudySyncStore((state) => state.reopenRecentDocument);
+  const hideRecentDocument = useStudySyncStore((state) => state.hideRecentDocument);
   const reopenClosedDocument = useStudySyncStore((state) => state.reopenClosedDocument);
   const closedDocumentIds = useStudySyncStore((state) => state.closedDocumentIds);
   const lockedDocumentIds = useStudySyncStore((state) => state.lockedDocumentIds);
@@ -214,6 +216,16 @@ export function ReaderPane({
       void reopenRecentDocument(documentId);
     },
     [reopenRecentDocument],
+  );
+
+  const handleRemoveRecent = useCallback(
+    (documentId: string) => {
+      if (recentDocuments.length <= 1 && recentDocuments.some((doc) => doc.id === documentId)) {
+        setRecentMenuOpen(false);
+      }
+      void hideRecentDocument(documentId);
+    },
+    [hideRecentDocument, recentDocuments],
   );
 
   const releaseTabPointerFocus = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
@@ -331,29 +343,12 @@ export function ReaderPane({
             className="absolute top-10 right-2 z-40 w-80 origin-top-right animate-in rounded-md border bg-background p-1.5 shadow-md animation-duration-150 fade-in-0 slide-in-from-top-1 zoom-in-[0.96] motion-reduce:animate-none"
           >
             <p className="px-2 py-1 text-xs font-medium text-muted-foreground">Recent documents</p>
-            <ol data-testid="recent-documents-list" className="max-h-60 divide-y overflow-y-auto">
-              {recentDocuments.map((document) => (
-                <li key={document.id}>
-                  <button
-                    type="button"
-                    data-testid="recent-document-item"
-                    data-document-format={document.format}
-                    onClick={() => handleOpenRecent(document.id)}
-                    className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate font-medium text-foreground">{document.title}</p>
-                      <p className="truncate text-[11px] text-muted-foreground">
-                        {describeResumeLocation(document)}
-                      </p>
-                    </div>
-                    <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
-                      {documentFormatLabel(document)}
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ol>
+            <RecentDocumentList
+              documents={recentDocuments}
+              onOpen={handleOpenRecent}
+              onRemove={handleRemoveRecent}
+              className="max-h-60 overflow-y-auto"
+            />
           </div>
         )}
       </header>
@@ -388,41 +383,27 @@ export function ReaderPane({
           );
         })}
         {!activeDocument && (
-          <div className="flex h-full flex-col items-center justify-center gap-5 p-6 text-center text-sm text-muted-foreground">
-            <p>Open a {SUPPORTED_FORMAT_LIST} file to start reading.</p>
-            {recentDocuments.length > 0 && (
-              <div
-                role="region"
-                aria-label="Recent documents"
-                data-testid="empty-state-recent-documents"
-                className="w-full max-w-md rounded-md border bg-background p-3 text-left shadow-xs"
-              >
-                <p className="mb-2 text-xs font-medium text-muted-foreground">Continue reading</p>
-                <ol data-testid="recent-documents-list" className="divide-y">
-                  {recentDocuments.map((document) => (
-                    <li key={document.id}>
-                      <button
-                        type="button"
-                        data-testid="recent-document-item"
-                        data-document-format={document.format}
-                        onClick={() => handleOpenRecent(document.id)}
-                        className="flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate font-medium text-foreground">{document.title}</p>
-                          <p className="truncate text-[11px] text-muted-foreground">
-                            {describeResumeLocation(document)}
-                          </p>
-                        </div>
-                        <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
-                          {documentFormatLabel(document)}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            )}
+          <div data-testid="reader-empty-state" className="h-full overflow-y-auto">
+            <div className="flex min-h-full flex-col items-center justify-center gap-5 p-6 text-center text-sm text-muted-foreground">
+              <p>Open a {SUPPORTED_FORMAT_LIST} file to start reading.</p>
+              {recentDocuments.length > 0 && (
+                <div
+                  role="region"
+                  aria-label="Recent documents"
+                  data-testid="empty-state-recent-documents"
+                  className="w-full max-w-md rounded-md border bg-background p-3 text-left shadow-xs"
+                >
+                  <p className="mb-2 text-xs font-medium text-muted-foreground">Continue reading</p>
+                  <RecentDocumentList
+                    documents={recentDocuments}
+                    limit={RECENT_EMPTY_STATE_LIMIT}
+                    onOpen={handleOpenRecent}
+                    onRemove={handleRemoveRecent}
+                    className="max-h-[min(28rem,60vh)] overflow-y-auto"
+                  />
+                </div>
+              )}
+            </div>
           </div>
         )}
         {shownNotices &&
