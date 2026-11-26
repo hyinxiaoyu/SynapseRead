@@ -1217,6 +1217,68 @@ describe('useStudySyncStore', () => {
       touchSpy.mockRestore();
       relinkOverlapSpy.mockRestore();
       listSpy.mockRestore();
+
+      // 3. A stale post-unlock reconcile read returning after a newer reopen cannot re-hide the book.
+      const thirdId = await openDocument();
+      state().closeDocument(thirdId);
+
+      const origTouch3 = backend.touchDocumentOpened.bind(backend);
+      let touch3Committed = false;
+      const touchSpy3 = vi
+        .spyOn(backend, 'touchDocumentOpened')
+        .mockImplementationOnce(async (id) => {
+          const updated = await origTouch3(id);
+          touch3Committed = true;
+          return updated;
+        });
+      const origVerify3 = backend.verifyDocumentSource.bind(backend);
+      let releaseVerify3!: () => void;
+      const verifyGate3 = new Promise<void>((resolve) => {
+        releaseVerify3 = resolve;
+      });
+      const verifySpy3 = vi
+        .spyOn(backend, 'verifyDocumentSource')
+        .mockImplementationOnce(async (id) => {
+          await verifyGate3;
+          return origVerify3(id);
+        });
+
+      const pendingReopen3 = state().reopenRecentDocument(thirdId);
+      await vi.waitFor(() => expect(touch3Committed).toBe(true));
+      await state().hideRecentDocument(thirdId);
+
+      const releaseLock3 = state().lockDocument(thirdId);
+      releaseVerify3();
+      await pendingReopen3;
+
+      const staleHiddenSnapshot = (await backend.listDocuments()).map((doc) => ({ ...doc }));
+      let resolvePostUnlockRead!: (docs: StudyDocument[]) => void;
+      const postUnlockListSpy = vi.spyOn(backend, 'listDocuments').mockImplementationOnce(
+        () =>
+          new Promise<StudyDocument[]>((resolve) => {
+            resolvePostUnlockRead = resolve;
+          }),
+      );
+
+      releaseLock3();
+      await vi.waitFor(() => expect(postUnlockListSpy).toHaveBeenCalledTimes(1));
+
+      // A newer reopen completes before the post-unlock reconcile read returns.
+      await state().reopenRecentDocument(thirdId);
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toContain(thirdId);
+
+      resolvePostUnlockRead(staleHiddenSnapshot);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toContain(thirdId);
+      expect(
+        (await realListDocuments()).find((doc) => doc.id === thirdId)?.hiddenFromRecentAt,
+      ).toBeNull();
+
+      touchSpy3.mockRestore();
+      verifySpy3.mockRestore();
+      postUnlockListSpy.mockRestore();
     });
 
     it('restores open tabs, active document, and reading preferences on restart while ignoring unknown document ids', async () => {

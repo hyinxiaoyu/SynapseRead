@@ -644,6 +644,12 @@ export function createStudySyncStore(backend: StudyBackend) {
               ? { lockedDocumentIds: state.lockedDocumentIds.filter((id) => id !== documentId) }
               : state,
           );
+          if (
+            recentNeedsReconcile.has(documentId) &&
+            (recentActiveOps.get(documentId) ?? 0) === 0
+          ) {
+            void reconcileDocumentRecentState([documentId]);
+          }
         } else {
           documentLockCounts.set(documentId, current - 1);
         }
@@ -1181,12 +1187,10 @@ export function createStudySyncStore(backend: StudyBackend) {
             }
             const touched = touchResult.value;
             if (statusResult.status === 'rejected') {
-              if (!isDocumentLocked(documentId)) {
-                if (getDocumentLockEpoch(documentId) === lockEpoch) {
-                  syncTouchedRecentFields(touched);
-                } else {
-                  recentNeedsReconcile.add(documentId);
-                }
+              if (!isDocumentLocked(documentId) && getDocumentLockEpoch(documentId) === lockEpoch) {
+                syncTouchedRecentFields(touched);
+              } else {
+                recentNeedsReconcile.add(documentId);
               }
               throw statusResult.reason;
             }
@@ -1198,7 +1202,7 @@ export function createStudySyncStore(backend: StudyBackend) {
               getDocumentLockEpoch(documentId) !== lockEpoch ||
               getDocumentRefreshSeq(documentId) !== refreshSeq
             ) {
-              op.markOverlapIfNeeded();
+              recentNeedsReconcile.add(documentId);
               return;
             }
             const applyRecentDirectly = op.isUncontested();
