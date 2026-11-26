@@ -311,4 +311,188 @@ export async function mindmapFlow(page) {
   );
   assert(await page.inFocusMode(), 'Undo should keep Focus Mode active');
   await page.clickButton('Exit focus mode');
+
+  // 12. Issue #127: Jump to source (link and context menu) never sets the nesting target;
+  // deliberately clicking a card shows "Excerpt under ‘<title>’" in the toolbar, popover,
+  // and post-excerpt notice, and the reader can clear it without opening MindMap.
+  const expectNoEdges = async (reason) => {
+    const edgeCount = await page.evaluate(`document.querySelectorAll('.react-flow__edge').length`);
+    assert(edgeCount === 0, `${reason}: expected 0 edges, got ${edgeCount}`);
+  };
+  await expectNoEdges('before jump-then-excerpt check');
+
+  // 12a. Jump via the card's link button -> hide MindMap -> excerpt creates a root with no edge.
+  await page.clickButton('Jump to source of quick brown fox');
+  await page.clickButton('Hide MindMap');
+  await page.selectText(SEGMENT, 'Pack my box');
+  await page.waitFor(
+    `(() => {
+      const btn = document.querySelector('[data-testid="excerpt-button"]');
+      return btn && !btn.disabled && btn.getAttribute('aria-label') === 'Excerpt to MindMap';
+    })()`,
+    'Excerpt button to stay root-targeted after Jump to source link',
+  );
+  await page.clickButton('Excerpt to MindMap');
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-added-notice"]')?.textContent?.includes('Added to MindMap')`,
+    'Added to MindMap notice after jump-link excerpt',
+  );
+  await page.clickButton('Show MindMap');
+  await page.waitFor(
+    `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 4`,
+    '4th card after jump-link excerpt',
+  );
+  await expectNoEdges('after Jump to source link and excerpt');
+
+  // 12b. Jump via card context menu -> excerpt creates a root with no edge.
+  await page.evaluate(`(() => {
+    const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find((n) =>
+      n.textContent?.includes('Pack my box'),
+    );
+    const r = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: r.left + r.width / 2,
+      clientY: r.top + r.height / 2,
+    }));
+  })()`);
+  await page.waitFor(
+    `Boolean(document.querySelector('[data-testid="card-context-menu"]'))`,
+    'card context menu before Jump to Source',
+  );
+  await page.evaluate(`(() => {
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find((el) =>
+      el.textContent?.includes('Jump to Source'),
+    );
+    item?.click();
+  })()`);
+  await excerptPhrase('daft zebras', 5);
+  await expectNoEdges('after context menu Jump to Source and excerpt');
+
+  // 12c. Deliberately clicking a card body sets it as nesting target; toolbar, popover,
+  // and notice all name it, and clearing from the reader toolbar works while MindMap is hidden.
+  const packCardCenter = await page.evaluate(`(() => {
+    const el = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find((n) =>
+      n.textContent?.includes('Pack my box'),
+    );
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 3, y: r.top + r.height / 2 };
+  })()`);
+  assert(packCardCenter, 'Pack my box card should be visible');
+  await page.click(packCardCenter);
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label') === 'Excerpt under ‘Pack my box’'`,
+    'toolbar Excerpt button to name the nesting target',
+  );
+  await page.selectText(SEGMENT, 'first section');
+  await page.waitFor(
+    `(() => {
+      const btn = document.querySelector('[data-testid="popover-excerpt"]');
+      const bar = document.querySelector('[data-testid="popover-nesting-target"]');
+      return btn?.getAttribute('aria-label') === 'Excerpt under ‘Pack my box’' &&
+        bar?.textContent?.includes('Pack my box');
+    })()`,
+    'selection popover to name the nesting target',
+  );
+  await page.clickButton('Hide MindMap');
+  await page.evaluate(`document.querySelector('[data-testid="excerpt-button"]')?.click()`);
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-added-notice"]')?.textContent?.includes('Added under ‘Pack my box’')`,
+    'post-excerpt notice to name the parent card',
+  );
+
+  // Clear the nesting target from the reader without opening the MindMap.
+  await page.evaluate(
+    `document.querySelector('[data-testid="clear-nesting-target-button"]')?.click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label') === 'Excerpt to MindMap' &&
+     !document.querySelector('[data-testid="clear-nesting-target-button"]')`,
+    'nesting target to clear from the reader toolbar',
+  );
+  await page.selectText(SEGMENT, 'Filler line 001');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="excerpt-button"]').disabled`,
+    'Excerpt button to enable for Filler line 001',
+  );
+  await page.clickButton('Excerpt to MindMap');
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-added-notice"]')?.textContent?.includes('Added to MindMap')`,
+    'post-excerpt notice to return to Added to MindMap after clearing target',
+  );
+  await page.clickButton('Show MindMap');
+  await page.waitFor(
+    `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length === 7 &&
+     document.querySelectorAll('.react-flow__edge').length === 1`,
+    'nested excerpt to have 1 edge and post-clear excerpt to remain a root',
+  );
+
+  // 13. Issue #128: Ten consecutive root excerpts never overlap and each is fully visible once revealed.
+  const consecutivePhrases = [
+    'Filler line 002',
+    'Filler line 003',
+    'Filler line 004',
+    'Filler line 005',
+    'Filler line 006',
+    'Filler line 007',
+    'Filler line 008',
+    'Filler line 009',
+    'Filler line 010',
+    'Filler line 011',
+  ];
+  let expectedCount = 7;
+  for (const phrase of consecutivePhrases) {
+    expectedCount += 1;
+    await excerptPhrase(phrase, expectedCount);
+    await page.waitFor(
+      `(() => {
+        const pane = document.querySelector('.react-flow')?.getBoundingClientRect();
+        const card = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].find((n) =>
+          n.textContent?.includes(${JSON.stringify(phrase)}),
+        )?.getBoundingClientRect();
+        if (!pane || !card || card.width === 0 || card.height === 0) return false;
+        return card.left >= pane.left - 1 &&
+          card.top >= pane.top - 1 &&
+          card.right <= pane.right + 1 &&
+          card.bottom <= pane.bottom + 1;
+      })()`,
+      `newly excerpted card "${phrase}" to be fully visible once revealed`,
+    );
+  }
+
+  const overlapReport = await page.evaluate(`(() => {
+    const rects = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})].map((el) => {
+      const r = el.getBoundingClientRect();
+      return {
+        text: (el.textContent ?? '').trim().slice(0, 24),
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+      };
+    });
+    const overlaps = [];
+    const eps = 0.5;
+    for (let i = 0; i < rects.length; i += 1) {
+      for (let j = i + 1; j < rects.length; j += 1) {
+        const a = rects[i];
+        const b = rects[j];
+        if (
+          a.left < b.right - eps &&
+          a.right > b.left + eps &&
+          a.top < b.bottom - eps &&
+          a.bottom > b.top + eps
+        ) {
+          overlaps.push([a.text, b.text]);
+        }
+      }
+    }
+    return { count: rects.length, overlaps };
+  })()`);
+  assert(
+    overlapReport.count === 17 && overlapReport.overlaps.length === 0,
+    `expected 17 non-overlapping cards after 10 consecutive root excerpts, got ${JSON.stringify(overlapReport)}`,
+  );
 }

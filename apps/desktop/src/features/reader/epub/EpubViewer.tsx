@@ -287,6 +287,8 @@ export function EpubViewer({
   cardSourceAnnotationIds,
   onExcerptSelection,
   canExcerpt,
+  excerptTargetTitle,
+  onClearExcerptTarget,
   onDocumentTitle,
 }: DocumentViewerProps<'epub'>) {
   const documentId = document.id;
@@ -1843,6 +1845,8 @@ export function EpubViewer({
             boundsRef={readerAreaRef}
             onExcerpt={onExcerptSelection}
             canExcerpt={canExcerpt}
+            excerptTargetTitle={excerptTargetTitle}
+            onClearExcerptTarget={onClearExcerptTarget}
             onReturnFocus={() => hostRef.current?.focus({ preventScroll: true })}
           />
           <LinkPeek

@@ -972,6 +972,8 @@ function PdfPages({
   cardSourceAnnotationIds,
   onExcerptSelection,
   canExcerpt,
+  excerptTargetTitle,
+  onClearExcerptTarget,
 }: { engine: PdfDocumentHandle } & Omit<DocumentViewerProps<'pdf'>, 'content'>) {
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -3383,6 +3385,8 @@ function PdfPages({
             boundsRef={readerAreaRef}
             onExcerpt={onExcerptSelection}
             canExcerpt={canExcerpt}
+            excerptTargetTitle={excerptTargetTitle}
+            onClearExcerptTarget={onClearExcerptTarget}
             onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
           />
           <LinkPeek

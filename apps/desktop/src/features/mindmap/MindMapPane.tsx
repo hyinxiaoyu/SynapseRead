@@ -27,6 +27,7 @@ import { commandDefinition, formatShortcut } from '@/features/commands/commands'
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/commands/registry';
 import { CardNode, type CardFlowNode } from '@/features/mindmap/CardNode';
+import type { NodeSize } from '@/features/mindmap/placement';
 import {
   MIN_REVEAL_ZOOM,
   prefersReducedMotion,
@@ -39,6 +40,8 @@ const NODE_TYPES = { card: CardNode };
 type Measured = NonNullable<CardFlowNode['measured']>;
 /** A card's size until React Flow has measured it: `w-60`, about three lines tall. */
 const UNMEASURED_CARD = { width: 240, height: 96 };
+/** Window within which a double-click's preceding click can undo its nesting target change. */
+const DOUBLE_CLICK_GESTURE_MS = 700;
 
 interface CardMenuState {
   nodeId: string;
@@ -76,7 +79,10 @@ export function MindMapPane({
   const lastDeletionKind = useStudySyncStore((state) => state.deletionOrder.at(-1) ?? null);
   const initialViewport = useStudySyncStore((state) => state.notebook?.viewport);
   const selectNode = useStudySyncStore((state) => state.selectNode);
+  const setSelectedNode = useStudySyncStore((state) => state.setSelectedNode);
+  const setNestingTarget = useStudySyncStore((state) => state.setNestingTarget);
   const inspectNode = useStudySyncStore((state) => state.inspectNode);
+  const reportNodeSizes = useStudySyncStore((state) => state.reportNodeSizes);
   const jumpToNode = useStudySyncStore((state) => state.jumpToNode);
   const removeCard = useStudySyncStore((state) => state.removeCard);
   const undoRemoveCard = useStudySyncStore((state) => state.undoRemoveCard);
@@ -87,6 +93,12 @@ export function MindMapPane({
   const saveViewport = useStudySyncStore((state) => state.saveViewport);
 
   const sectionRef = useRef<HTMLElement>(null);
+  const lastClickNestingRef = useRef<{
+    nodeId: string;
+    previousTarget: string | null;
+    at: number;
+  } | null>(null);
+  const suppressEnterSelectRef = useRef(false);
   const [measured, setMeasured] = useState<Record<string, Measured>>({});
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<ReadonlySet<string>>(new Set());
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
@@ -140,24 +152,75 @@ export function MindMapPane({
     [edges, selectedEdgeIds],
   );
 
+  const recordNestingBeforeSelect = useCallback((nodeId: string) => {
+    const now = Date.now();
+    const existing = lastClickNestingRef.current;
+    // Keep the pre-gesture target across the mousedown + click(s) of a double-click.
+    if (existing && existing.nodeId === nodeId && now - existing.at < DOUBLE_CLICK_GESTURE_MS) {
+      return;
+    }
+    lastClickNestingRef.current = {
+      nodeId,
+      previousTarget: useStudySyncStore.getState().nestingTargetNodeId,
+      at: now,
+    };
+  }, []);
+
+  const handleSectionKeyDownCapture = useCallback(
+    (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (!(event.target instanceof Element)) return;
+      const nodeEl = event.target.closest<HTMLElement>('.react-flow__node[data-id]');
+      if (!nodeEl || event.target.closest('button, a, input, textarea, select')) return;
+      // Enter on a focused card invokes Edit Card (`edit.editCard`); prevent React Flow's
+      // own `elementSelectionKeys` handler from also making it the nesting target (#127).
+      if (event.key === 'Enter') {
+        suppressEnterSelectRef.current = true;
+        queueMicrotask(() => {
+          suppressEnterSelectRef.current = false;
+        });
+        return;
+      }
+      // Space deliberately selects the focused card as the nesting target, even when an
+      // excerpt already selected it (React Flow skips `onNodesChange` for already-selected nodes).
+      if (event.key === ' ' && nodeEl.dataset.id) {
+        selectNode(nodeEl.dataset.id);
+      }
+    },
+    [selectNode],
+  );
+
   const onNodesChange = useCallback(
     (changes: NodeChange<CardFlowNode>[]) => {
+      const sizeUpdates: Record<string, NodeSize> = {};
+      let hasSizeUpdate = false;
       for (const change of changes) {
         if (change.type === 'position' && change.position) {
           dragNode(change.id, change.position.x, change.position.y);
         } else if (change.type === 'dimensions' && change.dimensions) {
           const { dimensions, id } = change;
           setMeasured((current) => ({ ...current, [id]: dimensions }));
+          if (dimensions.width > 0 && dimensions.height > 0) {
+            sizeUpdates[id] = { width: dimensions.width, height: dimensions.height };
+            hasSizeUpdate = true;
+          }
         } else if (change.type === 'select') {
           if (change.selected) {
-            selectNode(change.id);
+            if (suppressEnterSelectRef.current) {
+              setSelectedNode(change.id);
+            } else {
+              recordNestingBeforeSelect(change.id);
+              selectNode(change.id);
+            }
           } else if (useStudySyncStore.getState().selectedNodeId === change.id) {
             selectNode(null);
           }
         }
       }
+      if (hasSizeUpdate) {
+        reportNodeSizes(sizeUpdates);
+      }
     },
-    [dragNode, selectNode],
+    [dragNode, recordNestingBeforeSelect, reportNodeSizes, selectNode, setSelectedNode],
   );
 
   const onEdgesChange = useCallback(
@@ -301,6 +364,7 @@ export function MindMapPane({
       className="relative h-full"
       onFocus={handleSectionFocus}
       onBlur={handleSectionBlur}
+      onKeyDownCapture={handleSectionKeyDownCapture}
     >
       <ReactFlow<CardFlowNode>
         nodes={flowNodes}
@@ -310,22 +374,39 @@ export function MindMapPane({
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         // React Flow reports no change for a click on a card that is already
-        // selected, as one an excerpt selected is; the click still chooses it.
-        onNodeClick={(_event, node) => {
+        // selected, as one an excerpt selected is; a plain click still chooses it.
+        onNodeClick={(event, node) => {
           closeContextMenu();
-          selectNode(node.id);
+          if (event.detail <= 1) {
+            recordNestingBeforeSelect(node.id);
+            selectNode(node.id);
+          }
         }}
+        // Double-clicking a card opens it for editing in the Inspector without making
+        // it the nesting target (#127). If the preceding click(s) of the double-click
+        // just set this card as the target, restore the prior target.
         onNodeDoubleClick={(_event, node) => {
           closeContextMenu();
-          selectNode(node.id);
+          const pending = lastClickNestingRef.current;
+          lastClickNestingRef.current = null;
+          if (
+            pending &&
+            pending.nodeId === node.id &&
+            Date.now() - pending.at < DOUBLE_CLICK_GESTURE_MS
+          ) {
+            setNestingTarget(pending.previousTarget);
+          }
           inspectNode(node.id);
         }}
+        // Right-clicking highlights the card for Edit/Jump/Delete without changing
+        // the nesting target (#127).
         onNodeContextMenu={(event, node) => {
           event.preventDefault();
-          selectNode(node.id);
+          setSelectedNode(node.id);
           setContextMenu({ nodeId: node.id, x: event.clientX, y: event.clientY });
         }}
         onPaneClick={() => {
+          lastClickNestingRef.current = null;
           closeContextMenu();
           selectNode(null);
         }}

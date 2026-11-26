@@ -146,7 +146,19 @@ export function CardNode({ id, data, selected }: NodeProps<CardFlowNode>) {
           size="icon"
           aria-label={`Jump to source of ${card?.title}`}
           className="nodrag -mt-1 -mr-1 size-7 shrink-0"
-          onClick={() => jumpToNode(id)}
+          // Stop propagation so jumping back to source does not select the card as
+          // the parent for later excerpts (#127).
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            jumpToNode(id);
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.stopPropagation();
+            }
+          }}
         >
           <Link2 />
         </Button>
