@@ -164,6 +164,141 @@ describe('MindMapPane', () => {
         stop();
       }
     });
+
+    it('does not set the nesting target on Jump to source link, right-click menu, or double-click (#127)', () => {
+      const linkedCard: NoteCard = {
+        ...card('a'),
+        annotationIds: ['ann-a'],
+      };
+      const jumpToNode = vi.fn();
+      const inspectNode = vi.fn();
+      useStudySyncStore.setState({
+        notebook,
+        nodes: [node('a', 40, 40), node('b', 400, 40)],
+        cards: [linkedCard, card('b')],
+        edges: [],
+        selectedNodeId: 'a',
+        nestingTargetNodeId: null,
+        jumpToNode,
+        inspectNode,
+      });
+      render(<MindMapPane open />);
+
+      // 1. Clicking the Jump to source link on the card jumps without setting nestingTargetNodeId.
+      // React Flow hides unmeasured nodes with `visibility: hidden` in jsdom, so query by aria-label.
+      const jumpButton = document.querySelector(
+        'button[aria-label="Jump to source of Card a"]',
+      ) as HTMLButtonElement;
+      expect(jumpButton).not.toBeNull();
+      fireEvent.mouseDown(jumpButton);
+      fireEvent.click(jumpButton);
+      expect(jumpToNode).toHaveBeenCalledWith('a');
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+
+      // 2. Right-clicking opens the context menu and Jump to Source does not set nestingTargetNodeId.
+      fireEvent.contextMenu(cardElement('a'));
+      const menu = screen.getByRole('menu', { name: 'Card actions' });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+      fireEvent.click(within(menu).getByRole('menuitem', { name: /Jump to Source/i }));
+      expect(jumpToNode).toHaveBeenCalledTimes(2);
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+
+      // 3. Double-clicking (including the browser's preceding click sequence) opens Inspector
+      // without leaving the card as the nesting target.
+      fireEvent.click(cardElement('b'), { detail: 1 });
+      fireEvent.click(cardElement('b'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('b'));
+      expect(inspectNode).toHaveBeenCalledWith('b');
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+
+      // 4. Right-clicking another card preserves an existing deliberately chosen target.
+      fireEvent.click(cardElement('a'), { detail: 1 });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+      fireEvent.contextMenu(cardElement('b'));
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+      expect(useStudySyncStore.getState().selectedNodeId).toBe('b');
+    });
+
+    it('lets Space select a focused card as nesting target while Enter edits without nesting (#127)', () => {
+      seed([node('a', 40, 40), node('b', 400, 40)], {
+        selectedNodeId: 'a',
+        nestingTargetNodeId: null,
+      });
+      const inspectNode = vi.fn();
+      useStudySyncStore.setState({ inspectNode });
+      render(<MindMapPane open />);
+
+      const cardB = cardElement('b');
+      cardB.focus();
+      fireEvent.keyDown(cardB, { key: 'Enter', code: 'Enter' });
+      expect(inspectNode).toHaveBeenCalledWith('b');
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+
+      fireEvent.keyDown(cardB, { key: ' ', code: 'Space' });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('b');
+    });
+
+    it('keeps independent and slow double-clicks from undoing valid targets, and respects intervening explicit changes (#127)', () => {
+      seed([node('a', 40, 40), node('b', 400, 40)], {
+        selectedNodeId: null,
+        nestingTargetNodeId: null,
+      });
+      const inspectNode = vi.fn();
+      useStudySyncStore.setState({ inspectNode });
+      render(<MindMapPane open />);
+
+      // 1. Click A once -> A becomes target. Then immediately perform a separate double-click
+      // on A (starts a new `detail: 1` click sequence): Inspector opens for A and A stays target.
+      fireEvent.click(cardElement('a'), { detail: 1 });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+
+      fireEvent.click(cardElement('a'), { detail: 1 });
+      fireEvent.click(cardElement('a'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('a'));
+      expect(inspectNode).toHaveBeenLastCalledWith('a');
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+
+      // 2. With A as target, a slow double-click on B (> 760 ms between clicks) edits B and
+      // still restores A as the nesting target without relying on a wall-clock timeout.
+      vi.useFakeTimers();
+      try {
+        fireEvent.click(cardElement('b'), { detail: 1 });
+        vi.advanceTimersByTime(760);
+        fireEvent.click(cardElement('b'), { detail: 2 });
+        fireEvent.doubleClick(cardElement('b'));
+        expect(inspectNode).toHaveBeenLastCalledWith('b');
+        expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // 3. With no target, double-clicking B edits B and keeps target null.
+      act(() => useStudySyncStore.getState().setNestingTarget(null));
+      fireEvent.click(cardElement('b'), { detail: 1 });
+      fireEvent.click(cardElement('b'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('b'));
+      expect(inspectNode).toHaveBeenLastCalledWith('b');
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+
+      // 4. An explicit change (e.g. reader clear or Space) between click 1 and dblclick
+      // invalidates the pending click sequence so dblclick does not overwrite newer intent.
+      act(() => useStudySyncStore.getState().selectNode('a'));
+      fireEvent.click(cardElement('b'), { detail: 1 });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('b');
+      act(() => useStudySyncStore.getState().setNestingTarget(null));
+      fireEvent.click(cardElement('b'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('b'));
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+
+      // Same when Space picks A between click 1 on B and dblclick on B.
+      fireEvent.click(cardElement('b'), { detail: 1 });
+      cardElement('a').focus();
+      fireEvent.keyDown(cardElement('a'), { key: ' ', code: 'Space' });
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+      fireEvent.click(cardElement('b'), { detail: 2 });
+      fireEvent.doubleClick(cardElement('b'));
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBe('a');
+    });
   });
 
   describe('revealing a new card (#98)', () => {

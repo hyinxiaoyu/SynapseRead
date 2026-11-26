@@ -308,6 +308,70 @@ describe('StudyWorkspace', () => {
       expect(notice).toBeVisible();
       expect(within(notice).queryByRole('status')).toBeNull();
     });
+
+    it('shows the active nesting target in the reader toolbar and notice, and lets the reader clear it while MindMap is hidden (#127)', async () => {
+      await renderReady();
+      const initialNodeCount = useStudySyncStore.getState().nodes.length;
+      const initialEdgeCount = useStudySyncStore.getState().edges.length;
+      await excerpt();
+      await waitFor(() =>
+        expect(useStudySyncStore.getState().nodes).toHaveLength(initialNodeCount + 1),
+      );
+      const parentNode = useStudySyncStore.getState().nodes.at(-1)!;
+      const parentCard = useStudySyncStore
+        .getState()
+        .cards.find((candidate) => candidate.id === parentNode.cardId)!;
+
+      // Deliberately selecting the card makes it the nesting target even with MindMap collapsed.
+      act(() => useStudySyncStore.getState().selectNode(parentNode.id));
+
+      const excerptBtn = screen.getByTestId('excerpt-button');
+      expect(excerptBtn).toHaveAccessibleName(`Excerpt under ‘${parentCard.title}’`);
+      expect(screen.getByTestId('excerpt-button-wrapper')).toHaveAttribute(
+        'title',
+        expect.stringContaining(`Excerpt under ‘${parentCard.title}’`),
+      );
+
+      // Excerpting while MindMap is hidden announces and shows "Added under ‘<title>’".
+      fireEvent.click(screen.getByRole('button', { name: 'Simulate selection' }));
+      fireEvent.click(excerptBtn);
+
+      await waitFor(() =>
+        expect(screen.getByTestId('excerpt-added-notice')).toHaveTextContent(
+          `Added under ‘${parentCard.title}’`,
+        ),
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId('excerpt-status')).toHaveTextContent(
+          `Added under ‘${parentCard.title}’`,
+        ),
+      );
+      expect(useStudySyncStore.getState().nodes).toHaveLength(initialNodeCount + 2);
+      expect(useStudySyncStore.getState().nodes.at(-1)?.parentNodeId).toBe(parentNode.id);
+      expect(useStudySyncStore.getState().edges).toHaveLength(initialEdgeCount + 1);
+
+      // Reader clears the nesting target directly from the toolbar without opening MindMap.
+      fireEvent.click(screen.getByRole('button', { name: 'Simulate selection' }));
+      const clearBtn = screen.getByTestId('clear-nesting-target-button');
+      expect(clearBtn).toHaveAccessibleName(`Clear nesting target ‘${parentCard.title}’`);
+      fireEvent.click(clearBtn);
+
+      expect(useStudySyncStore.getState().nestingTargetNodeId).toBeNull();
+      // Selection stays alive so the reader can immediately excerpt as a new root.
+      expect(useStudySyncStore.getState().selection).not.toBeNull();
+      expect(screen.getByTestId('excerpt-button')).toHaveAccessibleName('Excerpt to MindMap');
+      expect(screen.queryByTestId('clear-nesting-target-button')).toBeNull();
+
+      fireEvent.click(screen.getByTestId('excerpt-button'));
+      await waitFor(() =>
+        expect(useStudySyncStore.getState().nodes).toHaveLength(initialNodeCount + 3),
+      );
+      expect(useStudySyncStore.getState().nodes.at(-1)?.parentNodeId).toBeNull();
+      expect(useStudySyncStore.getState().edges).toHaveLength(initialEdgeCount + 1);
+      await waitFor(() =>
+        expect(screen.getByTestId('excerpt-added-notice')).toHaveTextContent('Added to MindMap'),
+      );
+    });
   });
 
   describe('card deleted notice (#123)', () => {

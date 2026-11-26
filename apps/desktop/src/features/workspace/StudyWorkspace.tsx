@@ -19,6 +19,7 @@ import { LanImportDialog } from '@/features/lanSync/LanImportDialog';
 import { LanShareDialog } from '@/features/lanSync/LanShareDialog';
 import { LanShareIndicator } from '@/features/lanSync/LanShareIndicator';
 import { MindMapPane } from '@/features/mindmap/MindMapPane';
+import { excerptNoticeText } from '@/features/mindmap/nestingLabel';
 import { useCardDeletedNotice } from '@/features/mindmap/useCardDeletedNotice';
 import { ReaderNotice } from '@/features/reader/ReaderNotice';
 import { ReaderPane } from '@/features/reader/ReaderPane';
@@ -100,6 +101,7 @@ export function StudyWorkspace() {
   const revealRequest = useStudySyncStore((state) => state.revealRequest);
   const inspectRequest = useStudySyncStore((state) => state.inspectRequest);
   const excerptNonce = useStudySyncStore((state) => state.excerptNonce);
+  const lastExcerptParentTitle = useStudySyncStore((state) => state.lastExcerptParentTitle);
   const revealNode = useStudySyncStore((state) => state.revealNode);
   const completeReveal = useStudySyncStore((state) => state.completeReveal);
   const deletedAnnotationCount = useStudySyncStore(
@@ -171,8 +173,8 @@ export function StudyWorkspace() {
   useEffect(() => {
     const statusNode = excerptStatusRef.current;
     if (!statusNode || !ready || excerptNonce === 0) return;
-    return announceInLiveRegion(statusNode, 'Added to MindMap');
-  }, [ready, excerptNonce]);
+    return announceInLiveRegion(statusNode, excerptNoticeText(lastExcerptParentTitle));
+  }, [ready, excerptNonce, lastExcerptParentTitle]);
 
   // The webview's own context menu is a browser's, not the app's: it acts on the
   // document the app is showing. The browser preview keeps it, which is a
@@ -455,7 +457,7 @@ export function StudyWorkspace() {
       }}
       onDismiss={() => completeReveal(pendingReveal.nonce)}
     >
-      Added to MindMap
+      {excerptNoticeText(pendingReveal.parentTitle)}
     </ReaderNotice>
   ) : null;
   const cardDeleted = useCardDeletedNotice();

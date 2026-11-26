@@ -564,6 +564,10 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   onExcerptSelection?: () => void;
   /** False while an excerpt is being written. */
   canExcerpt?: boolean;
+  /** Title of the MindMap card new excerpts will nest under, or `null` for a new root (#127). */
+  excerptTargetTitle?: string | null;
+  /** Clears the active nesting target so later excerpts become new roots (#127). */
+  onClearExcerptTarget?: () => void;
   /**
    * Reports the title the file declares about itself (EPUB dc:title, PDF Info/XMP title),
    * already normalized, together with the `fileHash` of the source the viewer loaded.

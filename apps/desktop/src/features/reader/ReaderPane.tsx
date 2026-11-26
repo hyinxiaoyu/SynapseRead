@@ -17,6 +17,7 @@ import { createPortal } from 'react-dom';
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
 import { isEditableShortcutTarget, useCommands } from '@/features/commands/registry';
+import { excerptActionLabel } from '@/features/mindmap/nestingLabel';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { requestActivePageFocus } from '@/features/reader/focusPage';
 import { describeResumeLocation } from '@/features/reader/resumeLocation';
@@ -32,6 +33,7 @@ import {
   selectBookmarks,
   selectDocumentAnnotations,
   selectHighlights,
+  selectNestingTargetTitle,
   selectRecentDocuments,
   selectReopenableDocumentId,
   useStudySyncStore,
@@ -120,6 +122,10 @@ export function ReaderPane({
   const activateDocument = useStudySyncStore((state) => state.activateDocument);
   const closeDocument = useStudySyncStore((state) => state.closeDocument);
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
+  const setNestingTarget = useStudySyncStore((state) => state.setNestingTarget);
+  const nestingTargetTitle = useStudySyncStore((state) =>
+    selectNestingTargetTitle(state.nodes, state.cards, state.nestingTargetNodeId),
+  );
   const immersive = useStudySyncStore((state) => state.immersive);
   const [recentMenuOpen, setRecentMenuOpen] = useState(false);
   const [focusedTabId, setFocusedTabId] = useState<string | null>(null);
@@ -229,6 +235,7 @@ export function ReaderPane({
     'edit.excerpt': {
       run: () => void excerptSelection(),
       enabled: selection !== null && !isExcerpting,
+      ...(nestingTargetTitle ? { title: excerptActionLabel(nestingTargetTitle) } : {}),
     },
   });
 
@@ -259,6 +266,10 @@ export function ReaderPane({
     },
     [activateDocument, openDocuments],
   );
+
+  const clearNestingTarget = useCallback(() => {
+    setNestingTarget(null);
+  }, [setNestingTarget]);
 
   const handleOpenRecent = useCallback(
     (documentId: string) => {
@@ -410,7 +421,9 @@ export function ReaderPane({
         <ExcerptButton
           hasSelection={selection !== null}
           busy={isExcerpting}
+          nestingTargetTitle={nestingTargetTitle}
           onExcerpt={() => void excerptSelection()}
+          onClearNestingTarget={clearNestingTarget}
         />
         {recentMenuOpen && recentDocuments.length > 0 && (
           <div
@@ -453,6 +466,8 @@ export function ReaderPane({
                 <DocumentTab
                   document={document}
                   isActive={isActive}
+                  nestingTargetTitle={nestingTargetTitle}
+                  onClearNestingTarget={clearNestingTarget}
                   onCloseTab={() => closeDocument(document.id)}
                   onRegisterPopoverLayer={registerViewerLayer}
                 />
@@ -525,33 +540,57 @@ export function excerptUnavailableReason(hasSelection: boolean, busy: boolean): 
 function ExcerptButton({
   hasSelection,
   busy,
+  nestingTargetTitle,
   onExcerpt,
+  onClearNestingTarget,
 }: {
   hasSelection: boolean;
   busy: boolean;
+  nestingTargetTitle: string | null;
   onExcerpt: () => void;
+  onClearNestingTarget: () => void;
 }) {
   const reason = excerptUnavailableReason(hasSelection, busy);
-  const tooltip = commandTooltip('Excerpt to MindMap', 'edit.excerpt');
+  const label = excerptActionLabel(nestingTargetTitle);
+  const tooltip = commandTooltip(label, 'edit.excerpt');
   return (
-    <span
-      title={reason ? `${tooltip}: ${reason}` : tooltip}
-      data-testid="excerpt-button-wrapper"
-      className="inline-flex"
-    >
-      <Button
-        size="sm"
-        variant={reason ? 'ghost' : 'default'}
-        data-testid="excerpt-button"
-        aria-description={reason ?? undefined}
-        disabled={reason !== null}
-        // Keeps the reader's text selection alive through the click in every engine.
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={onExcerpt}
+    <span className="inline-flex shrink-0 items-center">
+      <span
+        title={reason ? `${tooltip}: ${reason}` : tooltip}
+        data-testid="excerpt-button-wrapper"
+        className="inline-flex"
       >
-        <Quote />
-        Excerpt to MindMap
-      </Button>
+        <Button
+          size="sm"
+          variant={reason ? 'ghost' : 'default'}
+          aria-label={label}
+          data-testid="excerpt-button"
+          aria-description={reason ?? undefined}
+          disabled={reason !== null}
+          className={cn(nestingTargetTitle && 'max-w-56 rounded-r-none')}
+          // Keeps the reader's text selection alive through the click in every engine.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={onExcerpt}
+        >
+          <Quote className="shrink-0" />
+          <span className="truncate">{label}</span>
+        </Button>
+      </span>
+      {nestingTargetTitle && (
+        <Button
+          size="icon"
+          variant={reason ? 'outline' : 'secondary'}
+          aria-label={`Clear nesting target ‘${nestingTargetTitle}’`}
+          title={`Clear nesting target ‘${nestingTargetTitle}’ — next excerpt will be a new root`}
+          data-testid="clear-nesting-target-button"
+          className="h-8 w-7 shrink-0 rounded-l-none border-l-0"
+          // Keeps the reader's text selection alive so they can immediately excerpt as a root.
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={onClearNestingTarget}
+        >
+          <X className="size-3.5" />
+        </Button>
+      )}
     </span>
   );
 }
@@ -667,11 +706,15 @@ function UnmountSentinel({ documentId }: { documentId: string }) {
 function DocumentTab({
   document,
   isActive,
+  nestingTargetTitle,
+  onClearNestingTarget,
   onCloseTab,
   onRegisterPopoverLayer,
 }: {
   document: StudyDocument;
   isActive: boolean;
+  nestingTargetTitle: string | null;
+  onClearNestingTarget: () => void;
   onCloseTab: () => void;
   onRegisterPopoverLayer: (documentId: string, element: HTMLDivElement | null) => void;
 }) {
@@ -851,6 +894,8 @@ function DocumentTab({
         cardSourceAnnotationIds={cardSourceAnnotationIds}
         onExcerptSelection={onExcerptSelection}
         canExcerpt={!isExcerpting}
+        excerptTargetTitle={nestingTargetTitle}
+        onClearExcerptTarget={onClearNestingTarget}
         onDocumentTitle={onDocumentTitle}
       />
       <UnmountSentinel key={`sentinel:${document.id}:${relinkedNonce}`} documentId={document.id} />

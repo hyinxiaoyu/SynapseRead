@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 
+import { estimateCardSize, nextNodePosition, type NodeSize } from '@/features/mindmap/placement';
 import { createDefaultBackend, type StudyBackend } from '@/lib/backend';
 import type { MenuItemState, WindowChromeStyle } from '@/lib/backend/types';
 import { flushBeforeClose, hasPendingBeforeCloseFlush } from '@/lib/flushBeforeClose';
@@ -132,10 +133,8 @@ function toIpcError(error: unknown): IpcError {
 
 /** Reopen Closed Tab keeps a bounded history: nobody reopens the 21st-last tab. */
 const MAX_CLOSED_TABS = 20;
-const CHILD_OFFSET_X = 320;
-const SIBLING_OFFSET_Y = 140;
-const ROOT_ORIGIN = { x: 40, y: 40 };
-const ROOT_CASCADE = 36;
+
+export { estimateCardSize, nextNodePosition, type NodeSize };
 
 type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -205,12 +204,18 @@ export interface StudySyncState {
    * consecutive excerpts stay separate roots instead of chaining (#96).
    */
   nestingTargetNodeId: string | null;
+  /** Monotonic count of explicit nesting-target mutations, to guard double-click rollback (#127). */
+  nestingTargetNonce: number;
   /** Store -> MindMap: a card to bring into view once the canvas is showing. */
   revealRequest: RevealRequest | null;
   /** Store -> Workspace/Inspector: open Inspector and focus Notes for this card (#119). */
   inspectRequest: InspectRequest | null;
   /** Monotonic count of successful excerpts, so announcements fire even back-to-back. */
   excerptNonce: number;
+  /** Title of the parent card for the most recent excerpt, or `null` when added as a root (#127). */
+  lastExcerptParentTitle: string | null;
+  /** Latest measured card dimensions reported by the canvas, by node id (#128). */
+  nodeSizes: Record<string, NodeSize>;
   /** MindMap -> Reader: the jump the reader for that document should perform. */
   jumpRequest: JumpRequest | null;
 
@@ -297,12 +302,18 @@ export interface StudySyncState {
 
   /** The reader's own selection on the canvas; it also sets the nesting target. */
   selectNode(nodeId: string | null): void;
+  /** Selects a card visually without changing the nesting target (#127). */
+  setSelectedNode(nodeId: string | null): void;
+  /** Sets or clears the nesting target without changing the selected card (#127). */
+  setNestingTarget(nodeId: string | null): void;
   /** Selects a card without making it the nesting target, and asks the canvas to show it. */
-  revealNode(nodeId: string): void;
+  revealNode(nodeId: string, parentTitle?: string | null): void;
   completeReveal(nonce: number): void;
   /** Selects a card (without changing nesting target) and asks Inspector to open and focus Notes. */
   inspectNode(nodeId: string): void;
   completeInspect(nonce: number): void;
+  /** Records measured DOM card sizes from the canvas for non-overlapping placement (#128). */
+  reportNodeSizes(sizes: Readonly<Record<string, NodeSize>>): void;
   /** Updates position in memory only: called for every frame of a drag. */
   dragNode(nodeId: string, posX: number, posY: number): void;
   /** Persists the node's current layout: called when a drag ends. */
@@ -348,6 +359,8 @@ export interface StudySyncState {
 export interface RevealRequest {
   nonce: number;
   nodeId: string;
+  /** Title of the parent card when this reveal came from nesting an excerpt (#127). */
+  parentTitle?: string | null;
 }
 
 export interface InspectRequest {
@@ -355,38 +368,17 @@ export interface InspectRequest {
   nodeId: string;
 }
 
-const SLOT_EPSILON = 24;
-
-function isSlotOccupied(nodes: readonly MindMapNode[], x: number, y: number): boolean {
-  return nodes.some(
-    (node) => Math.abs(node.posX - x) < SLOT_EPSILON && Math.abs(node.posY - y) < SLOT_EPSILON,
-  );
-}
-
-/**
- * Children stack to the right of their parent; roots cascade from the origin.
- * Picks the first unoccupied slot so deleting a card never causes the next
- * excerpt to land on top of a surviving card (#116).
- */
-export function nextNodePosition(
+/** Resolves the active nesting target card's title, or `null` when none is set (#127). */
+export function selectNestingTargetTitle(
   nodes: readonly MindMapNode[],
-  parentNodeId: string | null,
-): { x: number; y: number } {
-  const parent = parentNodeId ? nodes.find((node) => node.id === parentNodeId) : undefined;
-  if (parent) {
-    const siblings = nodes.filter((node) => node.parentNodeId === parent.id).length;
-    const x = parent.posX + CHILD_OFFSET_X;
-    for (let slot = siblings; ; slot += 1) {
-      const y = parent.posY + slot * SIBLING_OFFSET_Y;
-      if (!isSlotOccupied(nodes, x, y)) return { x, y };
-    }
-  }
-  const roots = nodes.filter((node) => node.parentNodeId === null).length;
-  for (let slot = roots; ; slot += 1) {
-    const x = ROOT_ORIGIN.x + slot * ROOT_CASCADE;
-    const y = ROOT_ORIGIN.y + slot * ROOT_CASCADE;
-    if (!isSlotOccupied(nodes, x, y)) return { x, y };
-  }
+  cards: readonly NoteCard[],
+  nestingTargetNodeId: string | null,
+): string | null {
+  if (!nestingTargetNodeId) return null;
+  const node = nodes.find((candidate) => candidate.id === nestingTargetNodeId);
+  if (!node) return null;
+  const card = cards.find((candidate) => candidate.id === node.cardId);
+  return card?.title ?? null;
 }
 
 export function selectHighlights(
@@ -1087,9 +1079,12 @@ export function createStudySyncStore(backend: StudyBackend) {
       isExcerpting: false,
       selectedNodeId: null,
       nestingTargetNodeId: null,
+      nestingTargetNonce: 0,
       revealRequest: null,
       inspectRequest: null,
       excerptNonce: 0,
+      lastExcerptParentTitle: null,
+      nodeSizes: {},
       jumpRequest: null,
       lanShare: { ...INITIAL_LAN_SHARE_SLICE, snapshot: { ...INITIAL_LAN_SHARE_SNAPSHOT } },
       lanImport: { ...INITIAL_LAN_IMPORT_SLICE },
@@ -1634,13 +1629,61 @@ export function createStudySyncStore(backend: StudyBackend) {
       setSelection: (selection) => set({ selection }),
 
       async excerptSelection() {
-        const { selection, notebook, isExcerpting, nestingTargetNodeId, nodes } = get();
+        const {
+          selection,
+          notebook,
+          isExcerpting,
+          nestingTargetNodeId,
+          nodes,
+          cards,
+          annotations,
+          nodeSizes,
+        } = get();
         if (!selection || !notebook || isExcerpting) return;
 
-        const parentNodeId = nodes.some((node) => node.id === nestingTargetNodeId)
-          ? nestingTargetNodeId
+        const parentNode = nestingTargetNodeId
+          ? nodes.find((node) => node.id === nestingTargetNodeId)
+          : undefined;
+        const parentNodeId = parentNode?.id ?? null;
+        const parentTitleBeforeWrite = parentNode
+          ? (cards.find((card) => card.id === parentNode.cardId)?.title ?? null)
           : null;
-        const position = nextNodePosition(nodes, parentNodeId);
+
+        // Use measured DOM sizes where known; for unmeasured cards (e.g. while the
+        // MindMap is collapsed), reserve a conservative bound from their content (#128).
+        // Capture cards always reserve at least their thumbnail-inclusive estimate so an
+        // early measurement before an image loads can never place a later card underneath.
+        const effectiveSizes: Record<string, NodeSize> = { ...nodeSizes };
+        const captureAnnotationIds = new Set(
+          annotations
+            .filter((annotation) => annotation.excerptImagePath !== null)
+            .map((annotation) => annotation.id),
+        );
+        const cardsById = new Map(cards.map((card) => [card.id, card]));
+        for (const node of nodes) {
+          const card = cardsById.get(node.cardId);
+          if (!card) continue;
+          const hasCapture = card.annotationIds.some((id) => captureAnnotationIds.has(id));
+          const estimated = estimateCardSize({
+            hasCapture,
+            hasNotes: card.markdownNotes.trim() !== '',
+            hasTags: card.tags.length > 0,
+          });
+          const measured = effectiveSizes[node.id];
+          if (!measured) {
+            effectiveSizes[node.id] = estimated;
+          } else if (hasCapture) {
+            effectiveSizes[node.id] = {
+              width: Math.max(measured.width, estimated.width),
+              height: Math.max(measured.height, estimated.height),
+            };
+          }
+        }
+        const newSize = estimateCardSize({ hasCapture: selection.imagePng !== null });
+        const position = nextNodePosition(nodes, parentNodeId, {
+          nodeSizes: effectiveSizes,
+          newSize,
+        });
         set({ isExcerpting: true });
         try {
           const created = await backend.createExcerpt({
@@ -1654,20 +1697,28 @@ export function createStudySyncStore(backend: StudyBackend) {
             posX: position.x,
             posY: position.y,
           });
+          let resolvedParentTitle: string | null = null;
           // Only clear the selection the user excerpted: they may have made a
           // new one while the write was in flight.
-          set((state) => ({
-            annotations: [...state.annotations, created.annotation],
-            cards: [...state.cards, created.card],
-            nodes: [...state.nodes, created.node],
-            edges: created.edge ? [...state.edges, created.edge] : state.edges,
-            selection: state.selection === selection ? null : state.selection,
-            isExcerpting: false,
-            excerptNonce: state.excerptNonce + 1,
-          }));
+          set((state) => {
+            resolvedParentTitle = parentNode
+              ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
+                parentTitleBeforeWrite)
+              : null;
+            return {
+              annotations: [...state.annotations, created.annotation],
+              cards: [...state.cards, created.card],
+              nodes: [...state.nodes, created.node],
+              edges: created.edge ? [...state.edges, created.edge] : state.edges,
+              selection: state.selection === selection ? null : state.selection,
+              isExcerpting: false,
+              excerptNonce: state.excerptNonce + 1,
+              lastExcerptParentTitle: resolvedParentTitle,
+            };
+          });
           // The new card is selected and shown so it can be found, but the
           // nesting target stays whatever the reader chose.
-          get().revealNode(created.node.id);
+          get().revealNode(created.node.id, resolvedParentTitle);
         } catch (error) {
           // The selection stays so the user can retry.
           set({ isExcerpting: false, error: describeError(error) });
@@ -1859,11 +1910,38 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (get().jumpRequest?.nonce === nonce) set({ jumpRequest: null });
       },
 
-      selectNode: (nodeId) => set({ selectedNodeId: nodeId, nestingTargetNodeId: nodeId }),
+      selectNode: (nodeId) =>
+        set((state) => ({
+          selectedNodeId: nodeId,
+          nestingTargetNodeId: nodeId,
+          nestingTargetNonce: state.nestingTargetNonce + 1,
+        })),
 
-      revealNode(nodeId) {
+      setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
+
+      setNestingTarget(nodeId) {
+        set((state) => {
+          const target =
+            nodeId !== null && state.nodes.some((candidate) => candidate.id === nodeId)
+              ? nodeId
+              : null;
+          return {
+            nestingTargetNodeId: target,
+            nestingTargetNonce: state.nestingTargetNonce + 1,
+          };
+        });
+      },
+
+      revealNode(nodeId, parentTitle) {
         revealNonce += 1;
-        set({ selectedNodeId: nodeId, revealRequest: { nonce: revealNonce, nodeId } });
+        set({
+          selectedNodeId: nodeId,
+          revealRequest: {
+            nonce: revealNonce,
+            nodeId,
+            ...(parentTitle ? { parentTitle } : {}),
+          },
+        });
       },
 
       completeReveal(nonce) {
@@ -1878,6 +1956,31 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       completeInspect(nonce) {
         if (get().inspectRequest?.nonce === nonce) set({ inspectRequest: null });
+      },
+
+      reportNodeSizes(sizes) {
+        set((state) => {
+          let changed = false;
+          let next: Record<string, NodeSize> | null = null;
+          for (const [nodeId, size] of Object.entries(sizes)) {
+            if (
+              !Number.isFinite(size.width) ||
+              !Number.isFinite(size.height) ||
+              size.width <= 0 ||
+              size.height <= 0
+            ) {
+              continue;
+            }
+            const existing = state.nodeSizes[nodeId];
+            if (existing && existing.width === size.width && existing.height === size.height) {
+              continue;
+            }
+            next ??= { ...state.nodeSizes };
+            next[nodeId] = { width: size.width, height: size.height };
+            changed = true;
+          }
+          return changed && next ? { nodeSizes: next } : state;
+        });
       },
 
       dragNode(nodeId, posX, posY) {
@@ -1979,6 +2082,10 @@ export function createStudySyncStore(backend: StudyBackend) {
             state.nestingTargetNodeId !== null && removedNodeIds.has(state.nestingTargetNodeId)
               ? null
               : state.nestingTargetNodeId,
+          nestingTargetNonce:
+            state.nestingTargetNodeId !== null && removedNodeIds.has(state.nestingTargetNodeId)
+              ? state.nestingTargetNonce + 1
+              : state.nestingTargetNonce,
           revealRequest:
             state.revealRequest && removedNodeIds.has(state.revealRequest.nodeId)
               ? null
@@ -1987,6 +2094,9 @@ export function createStudySyncStore(backend: StudyBackend) {
             state.inspectRequest && removedNodeIds.has(state.inspectRequest.nodeId)
               ? null
               : state.inspectRequest,
+          nodeSizes: Object.fromEntries(
+            Object.entries(state.nodeSizes).filter(([nodeId]) => !removedNodeIds.has(nodeId)),
+          ),
           deletedCardHistory: [...state.deletedCardHistory, snapshot],
           deletionOrder: [...state.deletionOrder, 'card'],
         }));

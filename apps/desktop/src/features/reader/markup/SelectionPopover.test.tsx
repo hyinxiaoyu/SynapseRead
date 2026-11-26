@@ -15,8 +15,14 @@ const sampleSelection: ReaderSelection = {
   anchor: { format: 'txt', startByteOffset: 4, endByteOffset: 19, lineIndex: 0 },
 };
 
-function Harness() {
-  const boundsRef = createRef<HTMLDivElement>();
+function Harness({
+  excerptTargetTitle = null,
+  onClearExcerptTarget,
+}: {
+  excerptTargetTitle?: string | null;
+  onClearExcerptTarget?: () => void;
+} = {}) {
+  const boundsRef = { current: document.body };
   const [noteOpen, setNoteOpen] = useState(false);
   const annotations = useAnnotationsController({
     documentId: 'doc-1',
@@ -37,13 +43,15 @@ function Harness() {
   };
 
   return (
-    <div ref={boundsRef}>
+    <div>
       <SelectionPopover
         popover={popover}
         annotations={annotations}
         selection={sampleSelection}
         boundsRef={boundsRef}
         onExcerpt={vi.fn()}
+        excerptTargetTitle={excerptTargetTitle}
+        onClearExcerptTarget={onClearExcerptTarget}
         onReturnFocus={vi.fn()}
       />
     </div>
@@ -64,6 +72,32 @@ describe('SelectionPopover', () => {
 
     fireEvent.click(screen.getByTestId('popover-note'));
     expect(noteField.closest('[inert]')).toBeNull();
+  });
+
+  it('names the active nesting target and lets the reader clear it from the popover (#127)', () => {
+    const onClear = vi.fn();
+    const { rerender } = render(
+      <Harness excerptTargetTitle="Quick brown fox" onClearExcerptTarget={onClear} />,
+    );
+
+    const excerptBtn = screen.getByTestId('popover-excerpt');
+    expect(excerptBtn).toHaveAccessibleName('Excerpt under ‘Quick brown fox’');
+    expect(excerptBtn).toHaveAttribute(
+      'title',
+      expect.stringContaining('Excerpt under ‘Quick brown fox’'),
+    );
+
+    const targetRow = screen.getByTestId('popover-nesting-target');
+    expect(targetRow).toHaveTextContent('Under ‘Quick brown fox’');
+
+    const clearBtn = screen.getByTestId('popover-clear-nesting-target');
+    expect(clearBtn).toHaveAccessibleName('Clear nesting target ‘Quick brown fox’');
+    fireEvent.click(clearBtn);
+    expect(onClear).toHaveBeenCalledTimes(1);
+
+    rerender(<Harness excerptTargetTitle={null} onClearExcerptTarget={onClear} />);
+    expect(screen.getByTestId('popover-excerpt')).toHaveAccessibleName('Excerpt to MindMap');
+    expect(screen.queryByTestId('popover-nesting-target')).toBeNull();
   });
 });
 

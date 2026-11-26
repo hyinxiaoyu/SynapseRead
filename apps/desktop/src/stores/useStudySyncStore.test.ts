@@ -13,12 +13,18 @@ import {
 } from '@/types/domain';
 
 import {
+  DEFAULT_CARD_SIZE,
+  ROOT_CARD_GAP,
+  ROOT_COLUMN_MAX_BOTTOM,
+} from '@/features/mindmap/placement';
+import {
   createStudySyncStore,
   DEFAULT_NOTEBOOK_TITLE,
   nextNodePosition,
   selectBookmarks,
   selectDocumentAnnotations,
   selectHighlights,
+  selectNestingTargetTitle,
   selectRecentDocuments,
   selectReopenableDocumentId,
 } from './useStudySyncStore';
@@ -211,6 +217,117 @@ describe('useStudySyncStore', () => {
       await state().excerptSelection();
       expect(state().nodes[1]?.parentNodeId).toBeNull();
       expect(state().edges).toEqual([]);
+    });
+
+    it('tracks parent title for nested excerpts and clears target independently of selection (#127)', async () => {
+      const documentId = await openDocument();
+      select(documentId, 'Topic card');
+      await state().excerptSelection();
+      const parentNode = state().nodes[0];
+      expect(parentNode).toBeDefined();
+      expect(state().lastExcerptParentTitle).toBeNull();
+      expect(state().revealRequest?.parentTitle).toBeUndefined();
+      expect(
+        selectNestingTargetTitle(state().nodes, state().cards, state().nestingTargetNodeId),
+      ).toBeNull();
+
+      // Jumping to source does not set the nesting target.
+      state().jumpToNode(parentNode!.id);
+      expect(state().nestingTargetNodeId).toBeNull();
+
+      // setSelectedNode highlights visually without changing the nesting target.
+      state().setSelectedNode(parentNode!.id);
+      expect(state().selectedNodeId).toBe(parentNode!.id);
+      expect(state().nestingTargetNodeId).toBeNull();
+
+      // Deliberately selecting the card sets the nesting target and resolves its title.
+      state().selectNode(parentNode!.id);
+      expect(
+        selectNestingTargetTitle(state().nodes, state().cards, state().nestingTargetNodeId),
+      ).toBe('Topic card');
+
+      select(documentId, 'Nested detail');
+      await state().excerptSelection();
+      expect(state().lastExcerptParentTitle).toBe('Topic card');
+      expect(state().revealRequest?.parentTitle).toBe('Topic card');
+      expect(state().nodes[1]?.parentNodeId).toBe(parentNode!.id);
+
+      // Clearing the nesting target leaves selectedNodeId intact and makes the next excerpt a root.
+      const childId = state().nodes[1]!.id;
+      expect(state().selectedNodeId).toBe(childId);
+      state().setNestingTarget(null);
+      expect(state().nestingTargetNodeId).toBeNull();
+      expect(state().selectedNodeId).toBe(childId);
+      // Earlier revealRequest retains the parent title captured when that excerpt was created.
+      expect(state().revealRequest?.parentTitle).toBe('Topic card');
+
+      select(documentId, 'Independent root');
+      await state().excerptSelection();
+      expect(state().nodes[2]?.parentNodeId).toBeNull();
+      expect(state().lastExcerptParentTitle).toBeNull();
+      expect(state().revealRequest?.parentTitle).toBeUndefined();
+    });
+
+    it('uses reported DOM sizes and capture estimates so consecutive root excerpts never overlap (#128)', async () => {
+      const documentId = await openDocument();
+      const heights = [56, 180, 92, 220, 64, 140, 78, 160, 60, 110];
+      for (let i = 0; i < heights.length; i += 1) {
+        select(documentId, `Excerpt ${i + 1}`);
+        await state().excerptSelection();
+        const created = state().nodes.at(-1)!;
+        state().reportNodeSizes({ [created.id]: { width: 240, height: heights[i]! } });
+      }
+
+      const placed = state().nodes.map((n, index) => ({
+        x: n.posX,
+        y: n.posY,
+        width: 240,
+        height: heights[index]!,
+      }));
+      expect(placed).toHaveLength(10);
+      for (let i = 0; i < placed.length; i += 1) {
+        for (let j = i + 1; j < placed.length; j += 1) {
+          const a = placed[i]!;
+          const b = placed[j]!;
+          const overlaps =
+            a.x < b.x + b.width &&
+            a.x + a.width > b.x &&
+            a.y < b.y + b.height &&
+            a.y + a.height > b.y;
+          expect(overlaps, `cards ${i} and ${j} must not overlap`).toBe(false);
+        }
+      }
+    });
+
+    it('reserves at least thumbnail-inclusive height for capture cards even after an early shorter measurement (#128)', async () => {
+      const documentId = await openDocument();
+      // Create a PDF capture card with a real 1x1 PNG.
+      state().setSelection({
+        documentId,
+        anchor: pdfAnchor as ReaderSelection['anchor'],
+        text: null,
+        imagePng:
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      });
+      await state().excerptSelection();
+      const captureNode = state().nodes[0]!;
+      const savedPos = { x: captureNode.posX, y: captureNode.posY };
+
+      // Simulate an early pre-thumbnail DOM measurement (78 px) before the capture expands to ~148 px.
+      state().reportNodeSizes({ [captureNode.id]: { width: 240, height: 78 } });
+
+      select(documentId, 'Follow-up text root');
+      await state().excerptSelection();
+      const textNode = state().nodes[1]!;
+
+      // Original capture card position stays untouched.
+      expect({ x: state().nodes[0]!.posX, y: state().nodes[0]!.posY }).toEqual(savedPos);
+      // Even when the capture card renders at 148 px (or full 220 px estimate), the text card clears it.
+      const captureBottom = captureNode.posY + 148;
+      const separated =
+        textNode.posX >= captureNode.posX + 240 + ROOT_CARD_GAP ||
+        textNode.posY >= captureBottom + ROOT_CARD_GAP;
+      expect(separated).toBe(true);
     });
 
     it('asks the canvas to reveal each new card, without making it the nesting target', async () => {
@@ -1745,11 +1862,108 @@ describe('nextNodePosition', () => {
     style: null,
   });
 
-  it('cascades roots so they do not stack exactly', () => {
+  const rectsOverlap = (
+    a: { x: number; y: number; width: number; height: number },
+    b: { x: number; y: number; width: number; height: number },
+  ) => a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+
+  it('places ten consecutive roots without any overlapping rectangles (#128)', () => {
+    const nodes: ReturnType<typeof node>[] = [];
+    for (let i = 0; i < 10; i += 1) {
+      const pos = nextNodePosition(nodes, null);
+      nodes.push(node(`r${i}`, null, pos.x, pos.y));
+    }
+
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = nodes[i]!;
+        const b = nodes[j]!;
+        expect(
+          rectsOverlap(
+            { x: a.posX, y: a.posY, ...DEFAULT_CARD_SIZE },
+            { x: b.posX, y: b.posY, ...DEFAULT_CARD_SIZE },
+          ),
+        ).toBe(false);
+      }
+    }
+    // Wraps to a second column once the first column reaches the height cap.
+    expect(new Set(nodes.map((n) => n.posX)).size).toBeGreaterThanOrEqual(2);
+  });
+
+  it('respects mixed measured card heights and wraps cleanly into columns (#128)', () => {
+    const measuredHeights = [52, 240, 120, 190, 60, 260, 88, 150, 72, 130];
+    const nodes: ReturnType<typeof node>[] = [];
+    const nodeSizes: Record<string, { width: number; height: number }> = {};
+
+    for (let i = 0; i < measuredHeights.length; i += 1) {
+      const pos = nextNodePosition(nodes, null, { nodeSizes });
+      const id = `mixed-${i}`;
+      nodes.push(node(id, null, pos.x, pos.y));
+      nodeSizes[id] = { width: 240, height: measuredHeights[i]! };
+    }
+
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = nodes[i]!;
+        const b = nodes[j]!;
+        const sizeA = nodeSizes[a.id]!;
+        const sizeB = nodeSizes[b.id]!;
+        expect(
+          rectsOverlap(
+            { x: a.posX, y: a.posY, width: sizeA.width, height: sizeA.height },
+            { x: b.posX, y: b.posY, width: sizeB.width, height: sizeB.height },
+          ),
+        ).toBe(false);
+      }
+    }
+    // Second card clears the first card's actual measured height + gap.
+    expect(nodes[1]!.posY).toBe(nodes[0]!.posY + measuredHeights[0]! + ROOT_CARD_GAP);
+    // Third card clears the tall 240px second card without overlapping it.
+    expect(nodes[2]!.posY).toBe(nodes[1]!.posY + measuredHeights[1]! + ROOT_CARD_GAP);
+    expect(nodes[2]!.posY + DEFAULT_CARD_SIZE.height).toBeLessThanOrEqual(ROOT_COLUMN_MAX_BOTTOM);
+  });
+
+  it('never lands on a surviving card after deleting one, and leaves existing positions untouched (#116, #128)', () => {
     const first = nextNodePosition([], null);
-    const second = nextNodePosition([node('a', null)], null);
-    expect(second.x).toBeGreaterThan(first.x);
-    expect(second.y).toBeGreaterThan(first.y);
+    const n1 = node('a', null, first.x, first.y);
+    const second = nextNodePosition([n1], null);
+    const n2 = node('b', null, second.x, second.y);
+    const third = nextNodePosition([n1, n2], null);
+    const n3 = node('c', null, third.x, third.y);
+
+    // Delete middle card `n2`; next root fits cleanly without touching `n1` or `n3`.
+    const replacement = nextNodePosition([n1, n3], null);
+    const candidate = { x: replacement.x, y: replacement.y, ...DEFAULT_CARD_SIZE };
+    expect(rectsOverlap(candidate, { x: n1.posX, y: n1.posY, ...DEFAULT_CARD_SIZE })).toBe(false);
+    expect(rectsOverlap(candidate, { x: n3.posX, y: n3.posY, ...DEFAULT_CARD_SIZE })).toBe(false);
+
+    // Even if `n1` grew tall enough to encroach on the vacated slot, placement skips past `n3`.
+    const tallPlacement = nextNodePosition([n1, n3], null, {
+      nodeSizes: { a: { width: 240, height: 220 }, c: { width: 240, height: 100 } },
+    });
+    const tallCandidate = { x: tallPlacement.x, y: tallPlacement.y, ...DEFAULT_CARD_SIZE };
+    expect(rectsOverlap(tallCandidate, { x: n1.posX, y: n1.posY, width: 240, height: 220 })).toBe(
+      false,
+    );
+    expect(rectsOverlap(tallCandidate, { x: n3.posX, y: n3.posY, width: 240, height: 100 })).toBe(
+      false,
+    );
+  });
+
+  it('avoids existing child subtrees when placing new root cards (#128)', () => {
+    const root = node('r', null, 40, 40);
+    const child = node('c', 'r', 360, 40);
+    // Fill column 0 so root placement moves to column 1 (x = 300), which horizontally overlaps child (x = 360).
+    const filler1 = node('f1', null, 40, 172);
+    const filler2 = node('f2', null, 40, 304);
+    const filler3 = node('f3', null, 40, 436);
+    const placed = nextNodePosition([root, child, filler1, filler2, filler3], null);
+    expect(
+      rectsOverlap(
+        { x: placed.x, y: placed.y, ...DEFAULT_CARD_SIZE },
+        { x: child.posX, y: child.posY, ...DEFAULT_CARD_SIZE },
+      ),
+    ).toBe(false);
   });
 
   it('places children to the right of the parent, below their siblings', () => {
@@ -2057,11 +2271,11 @@ describe('card deletion, undo, and pane layout persistence (#116, #119)', () => 
       return state().nodes.at(-1)!;
     };
 
-    // Three roots at (40,40), (76,76), (112,112).
+    // Three consecutive roots occupy distinct, non-overlapping positions (#128).
     const r1 = await addExcerpt('r1');
     const r2 = await addExcerpt('r2');
     const r3 = await addExcerpt('r3');
-    expect({ x: r3.posX, y: r3.posY }).toEqual({ x: 112, y: 112 });
+    expect(new Set([r1, r2, r3].map((n) => `${n.posX},${n.posY}`)).size).toBe(3);
 
     // Delete middle root r2, then add r4: must not collide with r1 or r3.
     await state().removeCard(r2.cardId);

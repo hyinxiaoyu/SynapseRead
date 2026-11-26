@@ -1,4 +1,4 @@
-import { Copy, Pencil, Quote, StickyNote, Trash2, Underline } from 'lucide-react';
+import { Copy, Pencil, Quote, StickyNote, Trash2, Underline, X } from 'lucide-react';
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
@@ -12,6 +12,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
+import { excerptActionLabel } from '@/features/mindmap/nestingLabel';
 import {
   type AnnotationsController,
   COLOR_TARGET_CLASS,
@@ -98,6 +99,8 @@ export function SelectionPopover({
   boundsRef,
   onExcerpt,
   canExcerpt = true,
+  excerptTargetTitle,
+  onClearExcerptTarget,
   onReturnFocus,
 }: {
   popover: SelectionPopoverController;
@@ -107,6 +110,10 @@ export function SelectionPopover({
   boundsRef: RefObject<HTMLElement | null>;
   onExcerpt?: (() => void) | undefined;
   canExcerpt?: boolean | undefined;
+  /** Title of the MindMap card new excerpts will nest under, or `null` for a new root (#127). */
+  excerptTargetTitle?: string | null | undefined;
+  /** Clears the active nesting target without leaving the reader (#127). */
+  onClearExcerptTarget?: (() => void) | undefined;
   /** Where focus goes when the popover is put away with Esc. */
   onReturnFocus: () => void;
 }) {
@@ -320,6 +327,8 @@ export function SelectionPopover({
 
   const currentColor = annotation ? annotation.color : annotations.activeColor;
   const label = editing ? 'Highlight actions' : 'Selection actions';
+  const normalizedTargetTitle = excerptTargetTitle?.trim() || null;
+  const excerptLabel = excerptActionLabel(normalizedTargetTitle);
 
   return (
     <div
@@ -407,11 +416,9 @@ export function SelectionPopover({
         {!editing && onExcerpt && (
           <PopoverAction
             icon={Quote}
-            label="Excerpt to MindMap"
+            label={excerptLabel}
             title={
-              canExcerpt
-                ? commandTooltip('Excerpt to MindMap', 'edit.excerpt')
-                : 'Saving the last excerpt…'
+              canExcerpt ? commandTooltip(excerptLabel, 'edit.excerpt') : 'Saving the last excerpt…'
             }
             testId="popover-excerpt"
             onClick={() => {
@@ -442,6 +449,31 @@ export function SelectionPopover({
           />
         )}
       </div>
+      {!editing && onExcerpt && normalizedTargetTitle && (
+        <div
+          data-testid="popover-nesting-target"
+          className="flex w-0 min-w-full items-center gap-1.5 border-t px-2 pt-1 pb-0.5 text-[11px] text-muted-foreground"
+        >
+          <span className="min-w-0 flex-1 truncate" title={excerptLabel}>
+            Under <span className="font-medium text-foreground">‘{normalizedTargetTitle}’</span>
+          </span>
+          {onClearExcerptTarget && (
+            <button
+              type="button"
+              aria-label={`Clear nesting target ‘${normalizedTargetTitle}’`}
+              title={`Clear nesting target ‘${normalizedTargetTitle}’ — next excerpt will be a new root`}
+              data-testid="popover-clear-nesting-target"
+              data-popover-control=""
+              tabIndex={-1}
+              onMouseDown={keepSelection}
+              onClick={onClearExcerptTarget}
+              className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <X aria-hidden="true" className="size-3" />
+            </button>
+          )}
+        </div>
+      )}
       {annotation && confirmingDelete && (
         <CardSourceDeleteConfirm
           className="px-2 pt-1.5 pb-1"

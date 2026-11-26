@@ -47,27 +47,44 @@ function CardCaptureThumbnail({ annotationId, alt }: { annotationId: string; alt
     };
   }, [captureUrl, annotationId]);
 
+  // Reserve a fixed-height slot across loading, loaded, and fallback states so async
+  // thumbnail resolution never causes the card to grow over neighboring cards (#128).
   if (state.status === 'missing') {
     return (
-      <p
-        data-testid="card-capture-fallback"
-        className="mt-1.5 rounded border border-dashed bg-muted/60 px-2 py-1 text-[11px] text-muted-foreground"
+      <div
+        data-testid="card-capture-slot"
+        className="mt-1.5 flex h-24 w-full items-center justify-center rounded border border-dashed bg-muted/60 px-2 text-center"
       >
-        Capture unavailable
-      </p>
+        <p data-testid="card-capture-fallback" className="text-[11px] text-muted-foreground">
+          Capture unavailable
+        </p>
+      </div>
     );
   }
-  if (state.status !== 'loaded' || !state.url) return null;
+  if (state.status !== 'loaded' || !state.url) {
+    return (
+      <div
+        data-testid="card-capture-slot"
+        aria-busy="true"
+        className="mt-1.5 flex h-24 w-full items-center justify-center rounded border bg-muted/40"
+      />
+    );
+  }
 
   return (
-    <img
-      data-testid="card-capture-thumbnail"
-      src={state.url}
-      alt={alt}
-      loading="lazy"
-      className="mt-1.5 max-h-24 w-full rounded border bg-white object-contain"
-      onError={() => setState({ status: 'missing', url: null })}
-    />
+    <div
+      data-testid="card-capture-slot"
+      className="mt-1.5 flex h-24 w-full items-center justify-center overflow-hidden rounded border bg-white"
+    >
+      <img
+        data-testid="card-capture-thumbnail"
+        src={state.url}
+        alt={alt}
+        loading="lazy"
+        className="h-full w-full object-contain"
+        onError={() => setState({ status: 'missing', url: null })}
+      />
+    </div>
   );
 }
 
@@ -146,7 +163,19 @@ export function CardNode({ id, data, selected }: NodeProps<CardFlowNode>) {
           size="icon"
           aria-label={`Jump to source of ${card?.title}`}
           className="nodrag -mt-1 -mr-1 size-7 shrink-0"
-          onClick={() => jumpToNode(id)}
+          // Stop propagation so jumping back to source does not select the card as
+          // the parent for later excerpts (#127).
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            jumpToNode(id);
+          }}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+              event.stopPropagation();
+            }
+          }}
         >
           <Link2 />
         </Button>

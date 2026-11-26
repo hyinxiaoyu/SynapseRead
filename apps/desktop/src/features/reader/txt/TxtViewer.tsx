@@ -250,6 +250,8 @@ export function TxtViewer({
   cardSourceAnnotationIds,
   onExcerptSelection,
   canExcerpt,
+  excerptTargetTitle,
+  onClearExcerptTarget,
 }: DocumentViewerProps<'txt'>) {
   const load = useTextStream(content, document.id, document.encoding);
   const { model, rowCount, complete } = load;
@@ -1230,6 +1232,8 @@ export function TxtViewer({
             boundsRef={readerAreaRef}
             onExcerpt={onExcerptSelection}
             canExcerpt={canExcerpt}
+            excerptTargetTitle={excerptTargetTitle}
+            onClearExcerptTarget={onClearExcerptTarget}
             onReturnFocus={() => scrollRef.current?.focus({ preventScroll: true })}
           />
           <ReaderPopoverLayer hidden={chromeHidden}>
