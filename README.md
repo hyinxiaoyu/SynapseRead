@@ -5,12 +5,12 @@ Read on one side, and excerpts become connected cards on an
 infinite mind map on the other. Every card links back to the exact passage it came
 from.
 
-> **Status: Reader experience milestone (R01–R12) complete; V1 LAN Book Sync implemented.**
+> **Status: Reader experience milestone (R01–R12) complete; V1 LAN Book Sync complete (`#132`, `#147`).**
 > PDF, EPUB, and TXT documents support full local reading, search, bookmarks, independent
 > highlights and notes, session restoration, source recovery, and excerpting to the
 > MindMap, verified on macOS (`arm64`, `WKWebView`), alongside session-scoped LAN book sync
-> (local single-Mac baseline checked at `d4e7837`; two-Mac Finder acceptance on local
-> self-signed or ad hoc builds per `OD-2 Rev 2` tracked in `#147`). See the [roadmap](docs/ROADMAP.md),
+> verified across two physical Apple Silicon Macs (`macOS 15.6.1` ↔ `macOS 14.7.6`) using
+> `--adhoc-sign` Finder-launched builds per `OD-2 Rev 2`. See the [roadmap](docs/ROADMAP.md),
 > [reader implementation plan](docs/READER_PLAN.md), and
 > [ADR 0008](docs/adr/0008-lan-book-sync.md).
 
@@ -157,39 +157,51 @@ closes.
 
 - **macOS Local Network permission (macOS 15 and later):** Packaged macOS builds launched
   from Finder require Local Network access on the receiving Mac (per Apple TN3179). If
-  macOS denies access (or the first attempt fails), open **System Settings → Privacy &
-  Security → Local Network**, enable **SynapseRead**, and click **Retry** (relaunch the
-  app if macOS prompts you to do so). Note that dev builds launched from Terminal
-  (`pnpm dev`) inherit Terminal's network access and do not display app-level permission
-  prompts.
+  macOS denies access (or the first attempt fails with `No route to host (os error 65)`),
+  open **System Settings → Privacy & Security → Local Network**, enable **SynapseRead**,
+  and click **Retry** (verified on `macOS 15.6.1` to recover immediately without
+  relaunching; `macOS 15.6.1` provides a per-app toggle with no reset button). Note that
+  dev builds launched from Terminal (`pnpm dev`) inherit Terminal's network access and do
+  not display app-level permission prompts.
 - **macOS Application Firewall:** On the sharing Mac, check **System Settings → Network →
-  Firewall**. Allow incoming connections for **SynapseRead** and make sure **Block all
-  incoming connections** is turned off.
+  Firewall**. When Firewall is enabled and `SynapseRead` is not yet listed, macOS prompts
+  to allow incoming network connections on first share; allow incoming connections for
+  **SynapseRead** (listed as `synapseread-desktop`) and make sure **Block all incoming
+  connections** is turned off. Blocking incoming connections causes the receiver to see
+  `Could not reach the source device`, and re-allowing + **Retry** recovers immediately.
 - **Self-signed or ad hoc builds:** If you copied `SynapseRead.app` between your own Macs,
   clear quarantine once (`xattr -dr com.apple.quarantine /Applications/SynapseRead.app`)
-  or allow it in **System Settings → Privacy & Security → Open Anyway**. After replacing
-  the app with a rebuild, re-enable **SynapseRead** under **System Settings → Privacy &
-  Security → Local Network** and **System Settings → Network → Firewall** if access stops
-  working.
+  or allow it in **System Settings → Privacy & Security → Open Anyway**. While
+  `macOS 15.6.1` was observed to retain existing Local Network and Firewall rules across
+  an `--adhoc-sign` rebuild (`CDHash` change), Apple does not guarantee rebuild
+  persistence for non-Apple-issued identities per TN3179—re-enable **SynapseRead** under
+  **System Settings → Privacy & Security → Local Network** and **System Settings → Network →
+  Firewall** if access stops working after replacing the app.
 - **Same-subnet, VLAN, and VPN constraints:** Sharing binds only to a single
   broadcast-capable private IPv4 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) or
   link-local (`169.254.0.0/16`) interface on ports `49319`–`49328` (default `49319`,
-  advancing on port conflict). Loopback, CGNAT (`100.64.0.0/10`), and VPN/point-to-point
-  (`utun*`) interfaces are excluded. Only connection attempts that reach the sharing
-  listener and are rejected by its subnet/address policy increment the blocked-peer
-  counter and surface a blocked-peer notice in the Share dialog. When VLAN routing, a
-  firewall, or client isolation blocks traffic before it reaches the sharing device, no
-  blocked-peer notice appears on the source — troubleshoot from the receiving device's
-  connection failure instead.
+  advancing on port conflict; verified to coexist with wildcard `0.0.0.0:49319` listeners
+  and fall back to `:49320` on specific-IP conflict). Loopback, CGNAT (`100.64.0.0/10`),
+  and VPN/point-to-point (`utun*`) interfaces are excluded (virtual LAN interfaces such as
+  ZeroTier `feth*` with private IPv4s remain selectable). Only connection attempts that
+  reach the sharing listener and are rejected by its subnet/address policy increment the
+  blocked-peer counter and surface a blocked-peer notice in the Share dialog. When VLAN
+  routing, a firewall, or client isolation blocks traffic before it reaches the sharing
+  device, no blocked-peer notice appears on the source — troubleshoot from the receiving
+  device's connection failure instead.
 - **Guest Wi-Fi and client isolation:** Guest Wi-Fi networks frequently isolate connected
   devices from reaching each other directly. If isolation drops traffic before it reaches
   the sharing listener, the receiver sees a connection failure and the source shows no
   blocked-peer notice; connect both devices to a non-isolated local Wi-Fi or Ethernet
   network.
-- **Network changes while sharing:** While sharing, SynapseRead checks the bound IPv4
-  address every 5 seconds; if that address is no longer present on an eligible interface,
-  sharing stops and shows **Needs attention** (if a network change leaves the same IPv4
-  address active on an eligible interface, the session continues running).
+- **Network changes and sleep while sharing:** While sharing, SynapseRead checks the bound
+  IPv4 address every 5 seconds; if that address is no longer present on an eligible
+  interface, sharing stops and shows **Needs attention** (if a network change leaves the
+  same IPv4 address active on an eligible interface, the session continues running). On
+  Apple Silicon Macs with Power Nap / Wake for Network Access enabled, light sleep may
+  keep active transfers running; if sleep interrupts a transfer or the source app quits,
+  incomplete `.part` staging files are cleaned up automatically so you can reconnect and
+  re-import cleanly.
 
 For the step-by-step two-Mac acceptance protocol and read-only checkpoint evidence collector, see [`docs/LAN_SYNC_VALIDATION.md`](docs/LAN_SYNC_VALIDATION.md).
 

@@ -151,16 +151,17 @@ instances on the same private IPv4 LAN, with zero SQLite schema migrations.
 - [x] User documentation (`README.md`) and single-Mac verification evidence on
       `macOS 15.6.1 (24G90, Apple M4, arm64)` recorded in
       [ADR 0008](adr/0008-lan-book-sync.md).
-- [ ] **Native two-Mac Finder validation (`#147`, `OD-2 Rev 2`):** pending a second
-      physical Mac for `M-pack` and `M-perm` runs on a Finder-launched packaged build
-      signed with a local self-signed certificate (`--local-sign`) or ad hoc with bound
-      `Info.plist` (`--adhoc-sign`); see the
-      [two-Mac validation runbook](LAN_SYNC_VALIDATION.md) covering Local Network privacy
-      prompts/denial/recovery, macOS Application Firewall, packaged-app `T-10` listener
-      lifecycle, multi-format transfers including `T-21`–`T-24`, 5-failure lockout,
-      **Back to catalog**, guest Wi-Fi client isolation, local self-signed vs ad hoc
-      rebuild comparison (Developer ID arm deferred), `WKWebView` clipboard & VoiceOver
-      smoke, and role swap.
+- [x] **Native two-Mac Finder validation (`#147`, `OD-2 Rev 2`):** completed on
+      `macOS 15.6.1 (24G90, Apple M4)` ↔ `macOS 14.7.6 (23H626, Apple M2 Pro)` using
+      identical `--adhoc-sign` (`Info.plist` bound, `CDHash=fb1722...`) Finder-launched
+      builds at `f51fe87`, covering `M-perm` (`T-42`, `T-43`, `T-49` rebuild persistence,
+      `UA-1`–`UA-3`, `UA-12`) and `M-pack` (`T-10` 5-point lifecycle, `T-08` collision,
+      `T-12`, `OD-5`, `T-02`, `T-06`, `T-09`, `R3-04`, `T-46` firewall, `T-15`/`T-28`
+      multi-format offline resume, `T-17`, `T-21`–`T-24`, `>= 1 GB` `T-18`/`T-19`/`R3-01`/`R3-05`/`T-27`/`T-48`,
+      `T-29`–`T-32`, `T-34`–`T-39`, `R3-09`, `T-53`, `T-56`, and `Mac B → Mac A` role swap),
+      with owner-accepted exceptions (`T-44` cached prompt, `T-47` no isolated guest AP,
+      `T-49` Developer ID deferred per `OD-2 Rev 2`, `T-50` no Intel hardware) recorded in
+      [ADR 0008](adr/0008-lan-book-sync.md) and [`docs/LAN_SYNC_VALIDATION.md`](LAN_SYNC_VALIDATION.md).
 
 ## V1.1 and later
 
