@@ -521,20 +521,20 @@ export function createStudySyncStore(backend: StudyBackend) {
       return next;
     };
 
-    // The backend executes Recent mutations (`touchDocumentOpened`, `hideDocumentFromRecent`,
-    // registration, relink) in the order they are issued, so a response may only overwrite
-    // Recent fields when no later Recent write for that document was issued.
-    let recentWriteCounter = 0;
-    const latestRecentWrite = new Map<string, number>();
+    // Native file picking/hashing runs before DB commit, so initiation order does not
+    // equal commit order and cancelled/failed ops can still race. Track per-document
+    // sequences and active overlapping ops, then re-read authoritative Recent fields
+    // from the DB whenever operations overlap before draining.
+    let recentOpCounter = 0;
+    const recentDocSeq = new Map<string, number>();
+    const recentActiveOps = new Map<string, number>();
+    const recentNeedsReconcile = new Set<string>();
 
-    const issueRecentWrite = (documentId: string): number => {
-      const next = ++recentWriteCounter;
-      latestRecentWrite.set(documentId, next);
+    const bumpRecentDocSeq = (documentId: string): number => {
+      const next = ++recentOpCounter;
+      recentDocSeq.set(documentId, next);
       return next;
     };
-
-    const isLatestRecentWrite = (documentId: string, writeSeq: number): boolean =>
-      writeSeq >= (latestRecentWrite.get(documentId) ?? 0);
 
     const pickRecentFields = (
       document: StudyDocument,
@@ -542,6 +542,93 @@ export function createStudySyncStore(backend: StudyBackend) {
       lastOpenedAt: document.lastOpenedAt ?? null,
       hiddenFromRecentAt: document.hiddenFromRecentAt ?? null,
     });
+
+    const reconcileDocumentRecentState = async (documentIds: readonly string[]): Promise<void> => {
+      const targets = [...new Set(documentIds)].filter(
+        (id) =>
+          recentNeedsReconcile.has(id) &&
+          (recentActiveOps.get(id) ?? 0) === 0 &&
+          !isDocumentLocked(id),
+      );
+      if (targets.length === 0) return;
+
+      const readSeqs = new Map<string, number>();
+      for (const id of targets) {
+        readSeqs.set(id, bumpRecentDocSeq(id));
+      }
+
+      let allDocuments: StudyDocument[];
+      try {
+        allDocuments = await backend.listDocuments();
+      } catch {
+        // Leave `recentNeedsReconcile` dirty without clobbering any primary error banner.
+        return;
+      }
+
+      const byId = new Map(allDocuments.map((doc) => [doc.id, doc]));
+      const patches = new Map<string, Pick<StudyDocument, 'lastOpenedAt' | 'hiddenFromRecentAt'>>();
+      for (const id of targets) {
+        if (
+          (recentActiveOps.get(id) ?? 0) !== 0 ||
+          isDocumentLocked(id) ||
+          recentDocSeq.get(id) !== readSeqs.get(id)
+        ) {
+          continue;
+        }
+        recentNeedsReconcile.delete(id);
+        const authoritative = byId.get(id);
+        if (authoritative) {
+          patches.set(id, pickRecentFields(authoritative));
+        }
+      }
+
+      if (patches.size === 0) return;
+      set((state) => ({
+        documents: state.documents.map((doc) => {
+          const patch = patches.get(doc.id);
+          return patch ? { ...doc, ...patch } : doc;
+        }),
+      }));
+    };
+
+    const beginRecentOp = (documentId: string) => {
+      const activeBefore = recentActiveOps.get(documentId) ?? 0;
+      const hadOverlap = activeBefore > 0 || recentNeedsReconcile.has(documentId);
+      if (hadOverlap) {
+        recentNeedsReconcile.add(documentId);
+      }
+      recentActiveOps.set(documentId, activeBefore + 1);
+      const startSeq = bumpRecentDocSeq(documentId);
+      let finished = false;
+
+      const isUncontested = (): boolean =>
+        !hadOverlap &&
+        !recentNeedsReconcile.has(documentId) &&
+        (recentActiveOps.get(documentId) ?? 0) === 1 &&
+        recentDocSeq.get(documentId) === startSeq;
+
+      const markOverlapIfNeeded = (): void => {
+        if (!isUncontested()) {
+          recentNeedsReconcile.add(documentId);
+        }
+      };
+
+      const finish = async (): Promise<void> => {
+        if (finished) return;
+        finished = true;
+        const remaining = (recentActiveOps.get(documentId) ?? 1) - 1;
+        if (remaining <= 0) {
+          recentActiveOps.delete(documentId);
+        } else {
+          recentActiveOps.set(documentId, remaining);
+        }
+        if (remaining <= 0 && recentNeedsReconcile.has(documentId)) {
+          await reconcileDocumentRecentState([documentId]);
+        }
+      };
+
+      return { isUncontested, markOverlapIfNeeded, finish };
+    };
 
     const acquireLock = (documentId: string): (() => void) => {
       documentLockEpochs.set(documentId, getDocumentLockEpoch(documentId) + 1);
@@ -635,8 +722,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       error?: unknown,
       epochsAtStart?: ReadonlyMap<string, number>,
       seqsAtStart?: ReadonlyMap<string, number>,
-      recentWriteSeq?: number,
-    ) => {
+      recentOverlappedIds?: ReadonlySet<string>,
+    ): Set<string> => {
       const committedIds = new Set<string>();
       set((state) => {
         let documents = state.documents;
@@ -673,16 +760,21 @@ export function createStudySyncStore(backend: StudyBackend) {
               (relinkedNonceByDocumentId[document.id] ?? 0) + 1;
           }
           let mergedDocument = document;
-          if (
-            recentWriteSeq === undefined ||
-            recentWriteSeq >= (latestRecentWrite.get(document.id) ?? 0)
-          ) {
-            if (recentWriteSeq !== undefined) {
-              latestRecentWrite.set(document.id, recentWriteSeq);
-            }
-          } else if (existing !== undefined) {
-            mergedDocument = { ...document, ...pickRecentFields(existing) };
+          if (existing !== undefined && existing.fileHash === document.fileHash) {
+            // Re-opening or re-registering unchanged bytes does not alter cursor or progress.
+            mergedDocument = {
+              ...mergedDocument,
+              lastCursorAnchor: existing.lastCursorAnchor,
+              lastProgress: existing.lastProgress ?? null,
+            };
           }
+          if (recentOverlappedIds?.has(document.id)) {
+            if (existing !== undefined) {
+              mergedDocument = { ...mergedDocument, ...pickRecentFields(existing) };
+            }
+            recentNeedsReconcile.add(document.id);
+          }
+          bumpRecentDocSeq(document.id);
           documents = [...documents.filter((d) => d.id !== document.id), mergedDocument];
           if (!openDocumentIds.includes(document.id)) {
             openDocumentIds = [...openDocumentIds, document.id];
@@ -715,6 +807,27 @@ export function createStudySyncStore(backend: StudyBackend) {
         nextDocumentRefreshSeq(id);
       }
       if (committedIds.size > 0) persistSession();
+      return committedIds;
+    };
+
+    const collectRecentOverlappedIds = (
+      docs: readonly StudyDocument[],
+      recentSeqsAtStart?: ReadonlyMap<string, number>,
+      recentActiveAtStart?: ReadonlyMap<string, number>,
+    ): Set<string> => {
+      const overlapped = new Set<string>();
+      for (const doc of docs) {
+        if (
+          (recentActiveAtStart?.get(doc.id) ?? 0) > 0 ||
+          (recentActiveOps.get(doc.id) ?? 0) > 0 ||
+          (recentSeqsAtStart !== undefined &&
+            (recentDocSeq.get(doc.id) ?? 0) !== (recentSeqsAtStart.get(doc.id) ?? 0)) ||
+          recentNeedsReconcile.has(doc.id)
+        ) {
+          overlapped.add(doc.id);
+        }
+      }
+      return overlapped;
     };
 
     const reconcileAndApplyOpenedDocuments = async (
@@ -722,7 +835,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       error: unknown,
       epochsAtStart: ReadonlyMap<string, number>,
       seqsAtStart: ReadonlyMap<string, number>,
-      recentWriteSeq?: number,
+      recentSeqsAtStart?: ReadonlyMap<string, number>,
+      recentActiveAtStart?: ReadonlyMap<string, number>,
     ) => {
       const hasSeqConflict = opened.some(
         (doc) =>
@@ -731,7 +845,24 @@ export function createStudySyncStore(backend: StudyBackend) {
           getDocumentRefreshSeq(doc.id) !== (seqsAtStart.get(doc.id) ?? 0),
       );
       if (!hasSeqConflict) {
-        applyOpenedDocuments(opened, error, epochsAtStart, seqsAtStart, recentWriteSeq);
+        const overlappedIds = collectRecentOverlappedIds(
+          opened,
+          recentSeqsAtStart,
+          recentActiveAtStart,
+        );
+        const committedIds = applyOpenedDocuments(
+          opened,
+          error,
+          epochsAtStart,
+          seqsAtStart,
+          overlappedIds,
+        );
+        const toReconcile = [...overlappedIds].filter(
+          (id) => committedIds.has(id) || (!isDocumentLocked(id) && recentNeedsReconcile.has(id)),
+        );
+        if (toReconcile.length > 0) {
+          await reconcileDocumentRecentState(toReconcile);
+        }
         return;
       }
       // Another non-lock open, drop, or refresh completed while this picker or
@@ -759,11 +890,27 @@ export function createStudySyncStore(backend: StudyBackend) {
         )
         .map((doc) => byId.get(doc.id) ?? doc);
       if (resolved.length === 0 && (error === undefined || error === null)) return;
-      applyOpenedDocuments(resolved, error, epochsAtStart, reconcileSeqs, recentWriteSeq);
+      const overlappedIds = collectRecentOverlappedIds(
+        resolved,
+        recentSeqsAtStart,
+        recentActiveAtStart,
+      );
+      const committedIds = applyOpenedDocuments(
+        resolved,
+        error,
+        epochsAtStart,
+        reconcileSeqs,
+        overlappedIds,
+      );
+      const toReconcile = [...overlappedIds].filter(
+        (id) => committedIds.has(id) || (!isDocumentLocked(id) && recentNeedsReconcile.has(id)),
+      );
+      if (toReconcile.length > 0) {
+        await reconcileDocumentRecentState(toReconcile);
+      }
     };
 
     const openNativeDroppedDocuments = (dropped: readonly StudyDocument[], error?: unknown) => {
-      const recentWriteSeq = ++recentWriteCounter;
       const knownIds = new Set(get().documents.map((doc) => doc.id));
       const hasUnlockedKnownDocument = dropped.some(
         (doc) => knownIds.has(doc.id) && !isDocumentLocked(doc.id),
@@ -772,7 +919,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         // Either all dropped docs are brand new, or every known doc is currently
         // locked (so applyOpenedDocuments skips locked known docs without bumping
         // any refresh sequence and without interfering with in-lock refreshes).
-        applyOpenedDocuments(dropped, error, undefined, undefined, recentWriteSeq);
+        applyOpenedDocuments(dropped, error);
         return;
       }
       // Native drop push events carry no request id and may race with sync or
@@ -788,6 +935,8 @@ export function createStudySyncStore(backend: StudyBackend) {
           seqsAtStart.set(doc.id, nextDocumentRefreshSeq(doc.id));
         }
       }
+      const recentSeqsAtStart = new Map(recentDocSeq);
+      const recentActiveAtStart = new Map(recentActiveOps);
       void guarded(async () => {
         const allDocuments = await backend.listDocuments();
         const byId = new Map(allDocuments.map((doc) => [doc.id, doc]));
@@ -800,7 +949,24 @@ export function createStudySyncStore(backend: StudyBackend) {
           )
           .map((doc) => byId.get(doc.id) ?? doc);
         if (resolved.length === 0 && (error === undefined || error === null)) return;
-        applyOpenedDocuments(resolved, error, epochsAtStart, seqsAtStart, recentWriteSeq);
+        const overlappedIds = collectRecentOverlappedIds(
+          resolved,
+          recentSeqsAtStart,
+          recentActiveAtStart,
+        );
+        const committedIds = applyOpenedDocuments(
+          resolved,
+          error,
+          epochsAtStart,
+          seqsAtStart,
+          overlappedIds,
+        );
+        const toReconcile = [...overlappedIds].filter(
+          (id) => committedIds.has(id) || (!isDocumentLocked(id) && recentNeedsReconcile.has(id)),
+        );
+        if (toReconcile.length > 0) {
+          await reconcileDocumentRecentState(toReconcile);
+        }
       });
     };
 
@@ -978,7 +1144,8 @@ export function createStudySyncStore(backend: StudyBackend) {
       async openDocument() {
         const epochsAtStart = new Map(documentLockEpochs);
         const seqsAtStart = new Map(documentRefreshSeqs);
-        const recentWriteSeq = ++recentWriteCounter;
+        const recentSeqsAtStart = new Map(recentDocSeq);
+        const recentActiveAtStart = new Map(recentActiveOps);
         await guarded(async () => {
           const document = await backend.pickDocument();
           if (document === null) return;
@@ -987,7 +1154,8 @@ export function createStudySyncStore(backend: StudyBackend) {
             undefined,
             epochsAtStart,
             seqsAtStart,
-            recentWriteSeq,
+            recentSeqsAtStart,
+            recentActiveAtStart,
           );
         });
       },
@@ -997,57 +1165,69 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (!get().documents.some((doc) => doc.id === documentId)) return;
         const lockEpoch = getDocumentLockEpoch(documentId);
         const refreshSeq = nextDocumentRefreshSeq(documentId);
-        const recentWriteSeq = issueRecentWrite(documentId);
-        await guarded(async () => {
-          const [touched, status] = await Promise.all([
-            backend.touchDocumentOpened(documentId),
-            backend.verifyDocumentSource(documentId),
-          ]);
-          // A close-and-apply lock or newer open/drop/refresh may have occurred
-          // while awaiting backend I/O, invalidating this snapshot.
-          if (
-            isDocumentLocked(documentId) ||
-            getDocumentLockEpoch(documentId) !== lockEpoch ||
-            getDocumentRefreshSeq(documentId) !== refreshSeq
-          ) {
-            return;
-          }
-          set((state) => ({
-            documents: state.documents.map((doc) => {
-              if (doc.id !== documentId) return doc;
-              return isLatestRecentWrite(documentId, recentWriteSeq)
-                ? { ...doc, ...pickRecentFields(touched) }
-                : doc;
-            }),
-            documentSourceStatuses: {
-              ...state.documentSourceStatuses,
-              [documentId]: status,
-            },
-            openDocumentIds: state.openDocumentIds.includes(documentId)
-              ? state.openDocumentIds
-              : [...state.openDocumentIds, documentId],
-            closedDocumentIds: withoutClosed(state.closedDocumentIds, documentId),
-            activeDocumentId: documentId,
-            selection: state.activeDocumentId === documentId ? state.selection : null,
-          }));
-          persistSession();
-        });
+        const op = beginRecentOp(documentId);
+        try {
+          await guarded(async () => {
+            const [touched, status] = await Promise.all([
+              backend.touchDocumentOpened(documentId),
+              backend.verifyDocumentSource(documentId),
+            ]);
+            // A close-and-apply lock or newer open/drop/refresh may have occurred
+            // while awaiting backend I/O, invalidating this snapshot.
+            if (
+              isDocumentLocked(documentId) ||
+              getDocumentLockEpoch(documentId) !== lockEpoch ||
+              getDocumentRefreshSeq(documentId) !== refreshSeq
+            ) {
+              op.markOverlapIfNeeded();
+              return;
+            }
+            const applyRecentDirectly = op.isUncontested();
+            if (!applyRecentDirectly) op.markOverlapIfNeeded();
+            set((state) => ({
+              documents: state.documents.map((doc) => {
+                if (doc.id !== documentId) return doc;
+                return applyRecentDirectly ? { ...doc, ...pickRecentFields(touched) } : doc;
+              }),
+              documentSourceStatuses: {
+                ...state.documentSourceStatuses,
+                [documentId]: status,
+              },
+              openDocumentIds: state.openDocumentIds.includes(documentId)
+                ? state.openDocumentIds
+                : [...state.openDocumentIds, documentId],
+              closedDocumentIds: withoutClosed(state.closedDocumentIds, documentId),
+              activeDocumentId: documentId,
+              selection: state.activeDocumentId === documentId ? state.selection : null,
+            }));
+            persistSession();
+          });
+        } finally {
+          await op.finish();
+        }
       },
 
       async hideRecentDocument(documentId) {
         if (!get().documents.some((doc) => doc.id === documentId)) return;
-        const recentWriteSeq = issueRecentWrite(documentId);
-        await guarded(async () => {
-          const updated = await backend.hideDocumentFromRecent(documentId);
-          if (!isLatestRecentWrite(documentId, recentWriteSeq)) return;
-          set((state) => ({
-            documents: state.documents.map((doc) =>
-              doc.id === documentId
-                ? { ...doc, hiddenFromRecentAt: updated.hiddenFromRecentAt ?? null }
-                : doc,
-            ),
-          }));
-        });
+        const op = beginRecentOp(documentId);
+        try {
+          await guarded(async () => {
+            const updated = await backend.hideDocumentFromRecent(documentId);
+            if (!op.isUncontested()) {
+              op.markOverlapIfNeeded();
+              return;
+            }
+            set((state) => ({
+              documents: state.documents.map((doc) =>
+                doc.id === documentId
+                  ? { ...doc, hiddenFromRecentAt: updated.hiddenFromRecentAt ?? null }
+                  : doc,
+              ),
+            }));
+          });
+        } finally {
+          await op.finish();
+        }
       },
 
       async reportDocumentTitle(documentId, title, expectedFileHash) {
@@ -1095,37 +1275,43 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async relinkDocument(documentId, confirmInPlace = false) {
         if (!get().documents.some((doc) => doc.id === documentId)) return null;
-        const recentWriteSeq = issueRecentWrite(documentId);
+        const op = beginRecentOp(documentId);
         let relinked: RelinkDocumentResult | null = null;
-        await guarded(async () => {
-          const result = await backend.relinkDocument(documentId, confirmInPlace);
-          if (!result) return;
-          relinked = result;
-          nextDocumentRefreshSeq(documentId);
-          nextDocumentTitleSeq(documentId);
-          set((state) => ({
-            documents: state.documents.map((doc) => {
-              if (doc.id !== documentId) return doc;
-              return isLatestRecentWrite(documentId, recentWriteSeq)
-                ? result.document
-                : { ...result.document, ...pickRecentFields(doc) };
-            }),
-            documentSourceStatuses: {
-              ...state.documentSourceStatuses,
-              [documentId]: {
-                documentId,
-                state: 'ok',
-                currentFileHash: result.document.fileHash,
-                fileSizeBytes: null,
+        try {
+          await guarded(async () => {
+            const result = await backend.relinkDocument(documentId, confirmInPlace);
+            if (!result) return;
+            relinked = result;
+            nextDocumentRefreshSeq(documentId);
+            nextDocumentTitleSeq(documentId);
+            const applyRecentDirectly = op.isUncontested();
+            if (!applyRecentDirectly) op.markOverlapIfNeeded();
+            set((state) => ({
+              documents: state.documents.map((doc) => {
+                if (doc.id !== documentId) return doc;
+                return applyRecentDirectly
+                  ? result.document
+                  : { ...result.document, ...pickRecentFields(doc) };
+              }),
+              documentSourceStatuses: {
+                ...state.documentSourceStatuses,
+                [documentId]: {
+                  documentId,
+                  state: 'ok',
+                  currentFileHash: result.document.fileHash,
+                  fileSizeBytes: null,
+                },
               },
-            },
-            relinkedNonceByDocumentId: {
-              ...state.relinkedNonceByDocumentId,
-              [documentId]: (state.relinkedNonceByDocumentId[documentId] ?? 0) + 1,
-            },
-            selection: state.selection?.documentId === documentId ? null : state.selection,
-          }));
-        });
+              relinkedNonceByDocumentId: {
+                ...state.relinkedNonceByDocumentId,
+                [documentId]: (state.relinkedNonceByDocumentId[documentId] ?? 0) + 1,
+              },
+              selection: state.selection?.documentId === documentId ? null : state.selection,
+            }));
+          });
+        } finally {
+          await op.finish();
+        }
         return relinked;
       },
 
@@ -1133,7 +1319,8 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (files.length === 0) return;
         const epochsAtStart = new Map(documentLockEpochs);
         const seqsAtStart = new Map(documentRefreshSeqs);
-        const recentWriteSeq = ++recentWriteCounter;
+        const recentSeqsAtStart = new Map(recentDocSeq);
+        const recentActiveAtStart = new Map(recentActiveOps);
         await guarded(async () => {
           const { documents, error } = await backend.dropFiles(files);
           await reconcileAndApplyOpenedDocuments(
@@ -1141,7 +1328,8 @@ export function createStudySyncStore(backend: StudyBackend) {
             error,
             epochsAtStart,
             seqsAtStart,
-            recentWriteSeq,
+            recentSeqsAtStart,
+            recentActiveAtStart,
           );
         });
       },
@@ -1259,7 +1447,8 @@ export function createStudySyncStore(backend: StudyBackend) {
         const lockEpoch = getDocumentLockEpoch(documentId);
         const startedWhileLocked = isDocumentLocked(documentId);
         const refreshSeq = nextDocumentRefreshSeq(documentId);
-        const recentAtStart = latestRecentWrite.get(documentId) ?? 0;
+        const recentAtStart = recentDocSeq.get(documentId) ?? 0;
+        const activeAtStart = recentActiveOps.get(documentId) ?? 0;
         let refreshed: StudyDocument | null = null;
         await guarded(async () => {
           const documents = await backend.listDocuments();
@@ -1275,8 +1464,13 @@ export function createStudySyncStore(backend: StudyBackend) {
           refreshed = target;
           set((state) => {
             const previous = state.documents.find((doc) => doc.id === documentId);
+            const hasRecentOverlap =
+              activeAtStart > 0 ||
+              (recentActiveOps.get(documentId) ?? 0) > 0 ||
+              (recentDocSeq.get(documentId) ?? 0) !== recentAtStart ||
+              recentNeedsReconcile.has(documentId);
             const nextTarget =
-              previous !== undefined && (latestRecentWrite.get(documentId) ?? 0) !== recentAtStart
+              previous !== undefined && hasRecentOverlap
                 ? { ...target, ...pickRecentFields(previous) }
                 : target;
             const nextDocuments = previous
