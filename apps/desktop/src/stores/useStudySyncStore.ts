@@ -1696,6 +1696,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             parentNodeId,
             posX: position.x,
             posY: position.y,
+            locationLabel: selection.locationLabel ?? null,
           });
           let resolvedParentTitle: string | null = null;
           // Only clear the selection the user excerpted: they may have made a
@@ -1740,6 +1741,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             note: options?.note ?? null,
             color: options?.color ?? DEFAULT_EXCERPT_COLOR,
             style: options?.style ?? 'highlight',
+            locationLabel: selection.locationLabel ?? null,
           });
           created = saved;
           set((state) => ({

@@ -490,7 +490,7 @@ describe('StudyWorkspace', () => {
 
     vi.useFakeTimers();
     try {
-      fireEvent.click(screen.getByRole('button', { name: 'Jump to this excerpt' }));
+      fireEvent.click(screen.getByRole('button', { name: /^Jump to this excerpt/ }));
       expect(useStudySyncStore.getState().jumpRequest).not.toBeNull();
       expect(highlights.querySelector('.anchor-pulse')).not.toBeNull();
 

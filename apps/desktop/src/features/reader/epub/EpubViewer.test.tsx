@@ -460,10 +460,12 @@ describe('EpubViewer', () => {
       anchor: { format: 'epub', cfiRange: CFI, chapterHref: 'OEBPS/chapter1.xhtml' },
       text: 'quick brown fox',
       imagePng: null,
+      locationLabel: 'One',
     });
 
     await act(() => store.getState().excerptSelection());
     const annotationId = store.getState().annotations[0]?.id as string;
+    expect(store.getState().annotations[0]?.locationLabel).toBe('One');
     await waitFor(() => expect(engine.highlighted.get(annotationId)).toBe(CFI));
     expect(store.getState().cards[0]?.title).toBe('quick brown fox');
     view.unmount();
@@ -2998,6 +3000,29 @@ describe('EpubViewer', () => {
       render(<Harness store={s3} documentId={d3} onDocumentTitle={onDocumentTitle} />);
       await waitFor(() => expect(engine.displayed.length).toBeGreaterThan(0));
       expect(onDocumentTitle).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('selection locationLabel (#125)', () => {
+    it('publishes the TOC chapter title on selection and persists it with the excerpt', async () => {
+      engine.toc = [
+        { id: 'toc-1', label: 'Chapter One: Arrival', href: 'OEBPS/chapter1.xhtml', children: [] },
+        {
+          id: 'toc-2',
+          label: 'Chapter Two: Departure',
+          href: 'OEBPS/chapter2.xhtml',
+          children: [],
+        },
+      ];
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      await opened();
+
+      select();
+      expect(store.getState().selection?.locationLabel).toBe('Chapter One: Arrival');
+
+      await act(() => store.getState().excerptSelection());
+      expect(store.getState().annotations[0]?.locationLabel).toBe('Chapter One: Arrival');
     });
   });
 });

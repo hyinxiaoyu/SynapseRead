@@ -2003,4 +2003,29 @@ describe('TxtViewer', () => {
       }
     });
   });
+
+  describe('selection locationLabel (#125)', () => {
+    it('publishes Line N for plain text and Chapter · Line N when under a heading', async () => {
+      const plain = new TextEncoder().encode('First line\nSecond line\nThird line\n');
+      const first = await setup(plain);
+      const view1 = render(<Harness store={first.store} documentId={first.documentId} />);
+      await selectText('Second line');
+      expect(first.store.getState().selection?.locationLabel).toBe('Line 2');
+      await act(() => first.store.getState().excerptSelection());
+      expect(first.store.getState().annotations[0]?.locationLabel).toBe('Line 2');
+      view1.unmount();
+
+      const chaptered = new TextEncoder().encode(
+        'Chapter 1: Arrival\n\nArrival line 01\nArrival line 02\n\nChapter 2: Departure\n\nDeparture line 01\n',
+      );
+      const second = await setup(chaptered);
+      render(<Harness store={second.store} documentId={second.documentId} />);
+      await selectText('Arrival line 01');
+      expect(second.store.getState().selection?.locationLabel).toBe('Chapter 1: Arrival · Line 3');
+      await act(() => second.store.getState().excerptSelection());
+      expect(second.store.getState().annotations[0]?.locationLabel).toBe(
+        'Chapter 1: Arrival · Line 3',
+      );
+    });
+  });
 });

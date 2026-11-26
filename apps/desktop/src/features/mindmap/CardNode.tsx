@@ -3,6 +3,7 @@ import { Link2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
 import { Button } from '@/components/ui/button';
+import { formatCardSource } from '@/lib/sourceAttribution';
 import { cn } from '@/lib/utils';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 
@@ -99,6 +100,10 @@ export function CardNode({ id, data, selected }: NodeProps<CardFlowNode>) {
     }
     return null;
   });
+  const sourceLabel = useStudySyncStore((state) => {
+    const target = state.cards.find((c) => c.id === data.cardId);
+    return target ? formatCardSource(target, state.annotations, state.documents) : null;
+  });
   const jumpToNode = useStudySyncStore((state) => state.jumpToNode);
   const hasSource = (card?.annotationIds.length ?? 0) > 0;
   const notesPreview = card ? summarizeMarkdownNotes(card.markdownNotes) : '';
@@ -115,6 +120,15 @@ export function CardNode({ id, data, selected }: NodeProps<CardFlowNode>) {
       <Handle type="target" position={Position.Left} />
       <div className="min-w-0 flex-1">
         <p className="line-clamp-3 text-sm font-medium break-words">{card?.title}</p>
+        {hasSource && sourceLabel && (
+          <p
+            data-testid="card-source-attribution"
+            title={sourceLabel}
+            className="mt-1 truncate text-[11px] leading-snug text-muted-foreground"
+          >
+            {sourceLabel}
+          </p>
+        )}
         {captureAnnotationId && (
           <CardCaptureThumbnail
             key={captureAnnotationId}
@@ -161,7 +175,11 @@ export function CardNode({ id, data, selected }: NodeProps<CardFlowNode>) {
         <Button
           variant="ghost"
           size="icon"
-          aria-label={`Jump to source of ${card?.title}`}
+          aria-label={
+            sourceLabel
+              ? `Jump to source of ${card?.title} (${sourceLabel})`
+              : `Jump to source of ${card?.title}`
+          }
           className="nodrag -mt-1 -mr-1 size-7 shrink-0"
           // Stop propagation so jumping back to source does not select the card as
           // the parent for later excerpts (#127).

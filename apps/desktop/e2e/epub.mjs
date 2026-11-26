@@ -94,7 +94,7 @@ const excerpt = async (page, text) => {
   await page.waitFor(excerptEnabled, `selecting "${text}" to enable excerpting`);
   await page.clickButton('Excerpt to MindMap');
   await page.waitFor(
-    `document.querySelector(${JSON.stringify(`[aria-label="Jump to source of ${text}"]`)})`,
+    `document.querySelector(${JSON.stringify(`[aria-label^="Jump to source of ${text} ("]`)})`,
     `a card titled "${text}"`,
   );
   return points;
@@ -223,7 +223,7 @@ export async function epubFlow(page) {
   await excerpt(page, 'final target sentence');
 
   // Jump across chapters: the frame's chapter changes, and the highlight pulses.
-  await page.clickButton('Jump to source of quick brown fox');
+  await page.clickButton('Jump to source of quick brown fox (SynapseRead EPUB fixture · One)');
   await page.waitFor(chapterIs('Chapter One'), 'the jump to change chapter');
   await page.waitFor(`${visibleHost}.querySelector('g.anchor-pulse')`, 'the highlight to pulse');
   await page.waitFor(`!${visibleHost}.querySelector('g.anchor-pulse')`, 'the pulse to end');
@@ -244,7 +244,7 @@ export async function epubFlow(page) {
   // And back: a highlight in the other chapter must repaint when it is shown again.
   // The newest card can sit outside the canvas viewport, where a mouse cannot reach it.
   await page.evaluate(
-    `document.querySelector('[aria-label="Jump to source of final target sentence"]').click()`,
+    `document.querySelector('[aria-label^="Jump to source of final target sentence ("]').click()`,
   );
   await page.waitFor(chapterIs('Chapter Two'), 'the jump back');
   await page.waitFor(`${visibleHost}.querySelector('g.anchor-pulse')`, 'the second pulse');

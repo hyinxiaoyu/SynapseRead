@@ -346,4 +346,112 @@ describe('InspectorPane', () => {
       }
     });
   });
+
+  describe('excerpt source attribution (#125)', () => {
+    it('shows full document title and location for each excerpt and includes it in the jump button label', () => {
+      const jumpToNode = vi.fn();
+      useStudySyncStore.setState({
+        documents: [
+          {
+            id: 'doc-pdf',
+            title: 'kahneman',
+            displayTitle: 'Thinking, Fast and Slow',
+            filePath: '/books/kahneman.pdf',
+            fileHash: 'hash-pdf',
+            format: 'pdf',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+          {
+            id: 'doc-txt',
+            title: 'legacy-notes',
+            displayTitle: null,
+            filePath: '/books/legacy-notes.txt',
+            fileHash: 'hash-txt',
+            format: 'txt',
+            encoding: 'utf-8',
+            lastCursorAnchor: null,
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        annotations: [
+          {
+            id: 'ann-1',
+            documentId: 'doc-pdf',
+            notebookId: 'nb-1',
+            anchor: {
+              format: 'pdf',
+              pageIndex: 40,
+              rects: [{ x: 0.1, y: 0.1, width: 0.4, height: 0.1 }],
+            },
+            excerptText: 'System 1 operates automatically',
+            excerptImagePath: null,
+            note: null,
+            color: '#fde047',
+            style: 'highlight',
+            locationLabel: 'Ch. 3 · p. 41',
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+          {
+            id: 'ann-2',
+            documentId: 'doc-txt',
+            notebookId: 'nb-1',
+            anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 10, lineIndex: 2 },
+            excerptText: 'Legacy note without location label',
+            excerptImagePath: null,
+            note: null,
+            color: '#fde047',
+            style: 'highlight',
+            createdAt: '2026-01-01T00:00:01Z',
+          },
+        ],
+        cards: [
+          {
+            id: 'card-1',
+            notebookId: 'nb-1',
+            title: 'Merged synthesis',
+            markdownNotes: '',
+            tags: [],
+            annotationIds: ['ann-1', 'ann-2'],
+            createdAt: '2026-01-01T00:00:00Z',
+          },
+        ],
+        nodes: [
+          {
+            id: 'node-1',
+            notebookId: 'nb-1',
+            cardId: 'card-1',
+            parentNodeId: null,
+            posX: 40,
+            posY: 40,
+            isCollapsed: false,
+            style: null,
+          },
+        ],
+        selectedNodeId: 'node-1',
+        jumpToNode,
+      });
+
+      render(<InspectorPane open />);
+
+      const sources = screen.getAllByTestId('inspector-excerpt-source');
+      expect(sources).toHaveLength(2);
+      expect(sources[0]).toHaveTextContent('Thinking, Fast and Slow · Ch. 3 · p. 41');
+      expect(sources[0]?.className).not.toContain('truncate');
+      // Older annotation without stored locationLabel still shows the document title.
+      expect(sources[1]).toHaveTextContent('legacy-notes');
+
+      const firstJump = screen.getByRole('button', {
+        name: 'Jump to this excerpt (Thinking, Fast and Slow · Ch. 3 · p. 41)',
+      });
+      const secondJump = screen.getByRole('button', {
+        name: 'Jump to this excerpt (legacy-notes)',
+      });
+      fireEvent.click(firstJump);
+      fireEvent.click(secondJump);
+      expect(jumpToNode).toHaveBeenNthCalledWith(1, 'node-1', 'ann-1');
+      expect(jumpToNode).toHaveBeenNthCalledWith(2, 'node-1', 'ann-2');
+    });
+  });
 });

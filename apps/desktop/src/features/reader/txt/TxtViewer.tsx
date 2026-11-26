@@ -376,11 +376,17 @@ export function TxtViewer({
       }
       hasSelection.current = true;
       setPinnedRows([model.rowAtUnit(startUnit), model.rowAtUnit(endUnit)]);
+      const anchorRow =
+        model.rowAtSourceOffset(selected.anchor.startByteOffset) ?? model.rowAtUnit(startUnit);
+      const heading = model.headings[headingIndexAt(model.headings, anchorRow)] ?? null;
+      const linePart = `Line ${selected.anchor.lineIndex + 1}`;
+      const locationLabel = heading ? `${heading.label} · ${linePart}` : linePart;
       const nextSelection: ReaderSelection = {
         documentId,
         anchor: selected.anchor,
         text: selected.text,
         imagePng: null,
+        locationLabel,
       };
       setActiveSelection(nextSelection);
       onSelectionChange(nextSelection);

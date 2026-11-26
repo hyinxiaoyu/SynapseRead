@@ -31,7 +31,7 @@ export async function txtFlow(page) {
     'the excerpt to paint exactly the selected text',
   );
   await page.waitFor(
-    `document.querySelector('[aria-label="Jump to source of quick brown fox"]')`,
+    `document.querySelector('[aria-label="Jump to source of quick brown fox (sample · Line 6)"]')`,
     'a card for the excerpt',
   );
 
@@ -56,7 +56,7 @@ export async function txtFlow(page) {
   );
 
   // Jump round trip: scrolled back, pulsed, then completed.
-  await page.clickButton('Jump to source of quick brown fox');
+  await page.clickButton('Jump to source of quick brown fox (sample · Line 6)');
   const inView = await page.waitFor(
     `(() => {
       const hit = [...document.querySelectorAll('.anchor-pulse')].find((e) => e.textContent === 'quick brown fox');

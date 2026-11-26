@@ -87,6 +87,7 @@ describe('reading theme contrast (WCAG AA)', () => {
       ['foreground on background', chrome.foreground, chrome.background],
       ['secondary text on background', chrome.mutedForeground, chrome.background],
       ['secondary text on muted', chrome.mutedForeground, chrome.muted],
+      ['secondary text on card', chrome.mutedForeground, chrome.card],
       ['secondary text on accent (hover)', chrome.mutedForeground, chrome.accent],
       ['card text', chrome.cardForeground, chrome.card],
       ['selected segment', chrome.primaryForeground, chrome.primary],

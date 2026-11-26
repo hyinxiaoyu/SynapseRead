@@ -343,6 +343,23 @@ function chapterOfPage(items: readonly OutlineNode<number>[], pageIndex: number)
   return best?.label ?? null;
 }
 
+/** Reader-produced location label for a PDF selection or capture (e.g. `"Ch. 3 · p. 41"`). */
+function formatPdfLocationLabel(
+  firstPageIndex: number,
+  lastPageIndex: number,
+  pageLabels: readonly string[] | null,
+  outlineNodes: readonly OutlineNode<number>[],
+): string {
+  const firstLabel = pageLabelOf(pageLabels, firstPageIndex);
+  const lastLabel = pageLabelOf(pageLabels, lastPageIndex);
+  const pagePart =
+    firstPageIndex !== lastPageIndex && firstLabel !== lastLabel
+      ? `pp. ${firstLabel}–${lastLabel}`
+      : `p. ${firstLabel}`;
+  const chapter = chapterOfPage(outlineNodes, firstPageIndex)?.trim();
+  return chapter ? `${chapter} · ${pagePart}` : pagePart;
+}
+
 const DISPLAY_MODES: readonly SegmentedOption<PdfDisplayMode>[] = [
   {
     value: 'single',
@@ -1345,6 +1362,7 @@ function PdfPages({
         clear();
         return;
       }
+      const lastSpan = spans.at(-1) ?? firstSpan;
       const anchor: PdfAnchor = {
         format: 'pdf',
         pageIndex: firstSpan.pageIndex,
@@ -1356,6 +1374,12 @@ function PdfPages({
         anchor,
         text: texts.join('\n'),
         imagePng: null,
+        locationLabel: formatPdfLocationLabel(
+          firstSpan.pageIndex,
+          lastSpan.pageIndex,
+          pageLabels,
+          outlineNodes,
+        ),
       };
       hasSelection.current = true;
       setCapture(null);
@@ -1369,7 +1393,7 @@ function PdfPages({
       view.removeEventListener('selectionchange', onChange);
       view.removeEventListener('mouseup', onChange);
     };
-  }, [isActive, documentId, onSelectionChange, capture, rotation]);
+  }, [isActive, documentId, onSelectionChange, capture, rotation, pageLabels, outlineNodes]);
 
   const onCapture = useCallback(
     (pageIndex: number, canvas: HTMLCanvasElement, viewportRect: NormalizedRect) => {
@@ -1383,11 +1407,12 @@ function PdfPages({
         anchor: { format: 'pdf', pageIndex, rects: [canonicalRect] },
         text: null,
         imagePng: cropCanvasToPng(canvas, viewportRect),
+        locationLabel: formatPdfLocationLabel(pageIndex, pageIndex, pageLabels, outlineNodes),
       };
       setActiveSelection(nextSelection);
       onSelectionChange(nextSelection);
     },
-    [documentId, highlights.length, onSelectionChange, rotation],
+    [documentId, highlights.length, onSelectionChange, outlineNodes, pageLabels, rotation],
   );
 
   const toggleCaptureMode = () => {

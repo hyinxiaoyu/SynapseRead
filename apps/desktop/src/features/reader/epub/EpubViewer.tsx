@@ -518,6 +518,7 @@ export function EpubViewer({
           latest.current.onDocumentTitle?.(metadataTitle, sourceFileHash);
         }
 
+        const spineTitles = chapterTitlesBySpine(engine);
         let hasSelection = false;
         engine.onSelection((selection) => {
           if (!latest.current.isActive) return;
@@ -530,6 +531,12 @@ export function EpubViewer({
             return;
           }
           hasSelection = true;
+          const spineIndex = engine.spineIndexOf(selection.chapterHref);
+          const locationLabel =
+            findOutlineLabel(engine.toc, selection.chapterHref)?.trim() ||
+            (spineIndex >= 0
+              ? spineTitles[spineIndex]?.trim() || `Chapter ${spineIndex + 1}`
+              : null);
           const nextSelection: ReaderSelection = {
             documentId,
             anchor: {
@@ -539,6 +546,7 @@ export function EpubViewer({
             },
             text: selection.text,
             imagePng: null,
+            locationLabel,
           };
           setActiveSelection(nextSelection);
           latest.current.onSelectionChange(nextSelection);

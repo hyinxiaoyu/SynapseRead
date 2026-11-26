@@ -160,7 +160,7 @@ export async function pdfFlow(page) {
   await page.waitFor(excerptEnabled, 'a capture to enable excerpting');
   await page.clickButton('Excerpt to MindMap');
   await page.waitFor(
-    `document.querySelector('[aria-label="Jump to source of Image excerpt"]')`,
+    `document.querySelector('[aria-label="Jump to source of Figure · Part One · p. 3 (sample · Part One · p. 3)"]')`,
     'a card for the capture',
   );
 
@@ -278,7 +278,11 @@ export async function pdfFlow(page) {
   );
 
   // Jump back to the text excerpt on page 1, from far away.
-  await page.clickButton('Jump to source of quick brown fox');
+  const firstJumpLabel = await page.waitFor(
+    `document.querySelector('[aria-label^="Jump to source of quick brown fox ("]')?.getAttribute('aria-label')`,
+    'jump button for first PDF excerpt',
+  );
+  await page.clickButton(firstJumpLabel);
   const inView = await page.waitFor(
     `(() => {
       const hit = document.querySelector('[data-page-index="0"] .anchor-pulse');

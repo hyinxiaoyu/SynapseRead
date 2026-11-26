@@ -463,6 +463,7 @@ describe('PdfViewer', () => {
       const selection = store.getState().selection;
       expect(selection?.text).toBeNull();
       expect(selection?.imagePng).toBe(PNG);
+      expect(selection?.locationLabel).toBe('Part One · p. 1');
       const anchor = selection?.anchor as PdfAnchor;
       expect(anchor.rects[0]?.x).toBeCloseTo(0.1, 5);
       expect(anchor.rects[0]?.y).toBeCloseTo(0.1, 5);
@@ -474,7 +475,8 @@ describe('PdfViewer', () => {
       await act(() => store.getState().excerptSelection());
       const annotation = store.getState().annotations[0];
       expect(annotation?.excerptImagePath).toBe(`captures/${annotation?.id}.png`);
-      expect(store.getState().cards[0]?.title).toBe('Image excerpt');
+      expect(annotation?.locationLabel).toBe('Part One · p. 1');
+      expect(store.getState().cards[0]?.title).toBe('Figure · Part One · p. 1');
       expect(await store.getState().captureUrl(annotation?.id as string)).toBe(
         `data:image/png;base64,${PNG}`,
       );
@@ -3153,6 +3155,33 @@ describe('PdfViewer', () => {
       render(<Harness store={s2} documentId={d2} onDocumentTitle={onDocumentTitle} />);
       expect(await pageElement(0)).toBeInTheDocument();
       expect(onDocumentTitle).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('selection locationLabel (#125)', () => {
+    it('publishes outline chapter and printed page label for text selections and captures', async () => {
+      engineState.pageLabels = ['i', 'ii', '1', '2', '3'];
+      engineState.outline = [
+        { id: 'o-1', title: 'Preface', pageIndex: 0, children: [] },
+        { id: 'o-2', title: 'Ch. 1', pageIndex: 2, children: [] },
+      ];
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      const page0 = await pageElement(0);
+      const page1 = await pageElement(1);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Page number')).toHaveValue('i');
+      });
+
+      // Single-page selection uses outline chapter + printed page label.
+      const node0 = textNode(page0, 0);
+      select([node0, 0], [node0, 5]);
+      expect(store.getState().selection?.locationLabel).toBe('Preface · p. i');
+
+      // Cross-page selection spans printed page labels.
+      const node1 = textNode(page1, 0);
+      select([node0, 0], [node1, 5]);
+      expect(store.getState().selection?.locationLabel).toBe('Preface · pp. i–ii');
     });
   });
 });

@@ -322,7 +322,7 @@ export async function mindmapFlow(page) {
   await expectNoEdges('before jump-then-excerpt check');
 
   // 12a. Jump via the card's link button -> hide MindMap -> excerpt creates a root with no edge.
-  await page.clickButton('Jump to source of quick brown fox');
+  await page.clickButton('Jump to source of quick brown fox (sample · Line 6)');
   await page.clickButton('Hide MindMap');
   await page.selectText(SEGMENT, 'Pack my box');
   await page.waitFor(
@@ -1103,4 +1103,98 @@ export async function mindmapFlow(page) {
       delete window.__failThumbnails;
     })()`);
   }
+
+  // 17. Issue #125: Cards and Inspector Excerpts show which document and place each card
+  // came from across multiple documents without opening the Inspector or inspecting anchors.
+  await page.openUntil(visibleText('Arrival line 01'), 'sample-chapters.txt for #125');
+  await page.selectText(SEGMENT, 'Arrival line 01');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="excerpt-button"]').disabled`,
+    'Excerpt button to enable for sample-chapters.txt',
+  );
+  await page.evaluate(`document.querySelector('[data-testid="excerpt-button"]').click()`);
+  await page.waitFor(
+    `[...document.querySelectorAll('[data-testid="card-source-attribution"]')].some(
+      (el) => el.textContent?.includes('sample-chapters') && el.textContent?.includes('Line 17'),
+    )`,
+    'second document card face to show document title and chapter/line location',
+  );
+
+  // Both documents' cards show their source on the card face while Inspector stays closed.
+  const attributionState = await page.evaluate(`(() => {
+    const cards = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})];
+    const foxCard = cards.find((n) => n.textContent?.includes('quick brown fox'));
+    const arrivalCard = cards.find((n) => n.textContent?.includes('Arrival line 01'));
+    const captureCard = cards.find((n) => n.textContent?.includes('Figure ·'));
+    const describe = (node) => {
+      if (!node) return null;
+      const src = node.querySelector('[data-testid="card-source-attribution"]');
+      const btn = node.querySelector('button[aria-label^="Jump to source of"]');
+      const style = src ? getComputedStyle(src) : null;
+      return {
+        source: src?.textContent ?? null,
+        titleAttr: src?.getAttribute('title') ?? null,
+        jumpLabel: btn?.getAttribute('aria-label') ?? null,
+        truncated: Boolean(
+          style &&
+            style.overflow === 'hidden' &&
+            style.textOverflow === 'ellipsis' &&
+            style.whiteSpace === 'nowrap',
+        ),
+      };
+    };
+    return {
+      inspectorOpen:
+        document.querySelector('button[aria-label="Hide inspector"]')?.getAttribute('aria-pressed') ===
+        'true',
+      fox: describe(foxCard),
+      arrival: describe(arrivalCard),
+      capture: describe(captureCard),
+    };
+  })()`);
+  assert(
+    !attributionState.inspectorOpen,
+    'Inspector should still be closed when checking card faces',
+  );
+  assert(
+    attributionState.fox?.source === 'sample · Line 6' &&
+      attributionState.fox.truncated &&
+      attributionState.fox.jumpLabel === 'Jump to source of quick brown fox (sample · Line 6)',
+    `unexpected sample.txt card attribution: ${JSON.stringify(attributionState.fox)}`,
+  );
+  assert(
+    attributionState.arrival?.source === 'sample-chapters · CHAPTER I: ARRIVAL · Line 17' &&
+      attributionState.arrival.truncated &&
+      attributionState.arrival.titleAttr === 'sample-chapters · CHAPTER I: ARRIVAL · Line 17' &&
+      attributionState.arrival.jumpLabel ===
+        'Jump to source of Arrival line 01 (sample-chapters · CHAPTER I: ARRIVAL · Line 17)',
+    `unexpected sample-chapters.txt card attribution: ${JSON.stringify(attributionState.arrival)}`,
+  );
+  assert(
+    Boolean(attributionState.capture?.source?.includes('p. 1')) &&
+      attributionState.capture?.truncated,
+    `unexpected PDF capture card attribution: ${JSON.stringify(attributionState.capture)}`,
+  );
+  await page.assertContrast(
+    '[data-testid="card-source-attribution"]',
+    'card source attribution line',
+  );
+
+  // Opening the Inspector on the second document's card shows the full source in Excerpts.
+  await page.clickButton('Show inspector');
+  await page.waitFor(
+    `document.querySelector('[data-testid="inspector-excerpt-source"]')?.textContent === 'sample-chapters · CHAPTER I: ARRIVAL · Line 17'`,
+    'Inspector excerpt row to show full document title and location',
+  );
+  const inspectorJumpLabel = await page.evaluate(
+    `document.querySelector('[data-testid="inspector-excerpt-row"] button')?.getAttribute('aria-label')`,
+  );
+  assert(
+    inspectorJumpLabel === 'Jump to this excerpt (sample-chapters · CHAPTER I: ARRIVAL · Line 17)',
+    `unexpected Inspector jump button label: ${inspectorJumpLabel}`,
+  );
+  await page.assertContrast(
+    '[data-testid="inspector-excerpt-source"]',
+    'Inspector excerpt source attribution',
+  );
 }

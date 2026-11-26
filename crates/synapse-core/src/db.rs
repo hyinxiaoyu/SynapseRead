@@ -47,9 +47,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0015_card_undo_snapshots.sql"),
     include_str!("../migrations/0016_document_hidden_from_recent.sql"),
     include_str!("../migrations/0017_document_display_title.sql"),
+    include_str!("../migrations/0018_annotation_location_label.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
+const LOCATION_LABEL_MAX_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -745,10 +747,11 @@ impl Database {
         }
 
         let anchor_type = input.anchor.format().as_str();
+        let location_label = normalize_location_label(input.location_label.as_deref());
         tx.execute(
             "INSERT INTO annotations (id, document_id, notebook_id, anchor_type,
-                 anchor_payload_json, excerpt_text, excerpt_image_path, color)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 anchor_payload_json, excerpt_text, excerpt_image_path, color, location_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 annotation_id,
                 input.document_id,
@@ -758,6 +761,7 @@ impl Database {
                 input.excerpt_text,
                 image_path,
                 input.color,
+                location_label,
             ],
         )?;
 
@@ -767,7 +771,7 @@ impl Database {
             params![
                 card_id,
                 input.notebook_id,
-                card_title(input.excerpt_text.as_deref())
+                card_title(input.excerpt_text.as_deref(), location_label.as_deref())
             ],
         )?;
         tx.execute(
@@ -890,11 +894,13 @@ impl Database {
             .as_deref()
             .map(str::trim)
             .filter(|note| !note.is_empty());
+        let location_label = normalize_location_label(input.location_label.as_deref());
         let anchor_type = input.anchor.format().as_str();
         tx.execute(
             "INSERT INTO annotations (id, document_id, notebook_id, anchor_type,
-                 anchor_payload_json, excerpt_text, excerpt_image_path, note, color, style)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 anchor_payload_json, excerpt_text, excerpt_image_path, note, color, style,
+                 location_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 annotation_id,
                 input.document_id,
@@ -906,6 +912,7 @@ impl Database {
                 normalized_note,
                 input.color.trim(),
                 input.style.as_str(),
+                location_label,
             ],
         )?;
 
@@ -2302,11 +2309,22 @@ fn expect_changed(changed: usize, entity: &'static str, id: &str) -> CoreResult<
 }
 
 /// First line of the excerpt, shortened on a character boundary.
-fn card_title(excerpt_text: Option<&str>) -> String {
-    let first_line = excerpt_text
-        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
-        .unwrap_or("Image excerpt");
-    truncate_label(first_line)
+/// Captures without text use `"Figure · <location>"` when a location label is known (#125).
+fn card_title(excerpt_text: Option<&str>, location_label: Option<&str>) -> String {
+    if let Some(first_line) =
+        excerpt_text.and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+    {
+        return truncate_label(first_line);
+    }
+    match location_label {
+        Some(label) => truncate_label(&format!("Figure · {label}")),
+        None => "Image excerpt".to_owned(),
+    }
+}
+
+fn normalize_location_label(raw: Option<&str>) -> Option<String> {
+    raw.and_then(sanitize_single_line)
+        .map(|label| truncate_chars(&label, LOCATION_LABEL_MAX_CHARS))
 }
 
 fn truncate_label(text: &str) -> String {
@@ -2519,7 +2537,7 @@ fn map_notebook(row: &Row<'_>) -> rusqlite::Result<StudyNotebook> {
 }
 
 const ANNOTATION_SELECT: &str = "SELECT id, document_id, notebook_id, anchor_payload_json,
-    excerpt_text, excerpt_image_path, note, color, created_at, style FROM annotations";
+    excerpt_text, excerpt_image_path, note, color, created_at, style, location_label FROM annotations";
 
 fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
     Ok(Annotation {
@@ -2532,6 +2550,7 @@ fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
         note: row.get(6)?,
         color: row.get(7)?,
         style: AnnotationStyle::from_column(&row.get::<_, String>(9)?),
+        location_label: row.get(10)?,
         created_at: row.get(8)?,
     })
 }
@@ -2653,6 +2672,7 @@ mod tests {
             parent_node_id,
             pos_x: 10.0,
             pos_y: 20.0,
+            location_label: None,
         }
     }
 
@@ -2704,6 +2724,7 @@ mod tests {
                     "note",
                     "style",
                     "deleted_at",
+                    "location_label",
                 ],
             ),
             (
@@ -2894,6 +2915,7 @@ mod tests {
                 note: None,
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::Highlight,
+                location_label: None,
             };
             db.create_annotation(&annotation(txt_anchor())).unwrap();
             assert!(matches!(
@@ -3447,6 +3469,7 @@ mod tests {
             parent_node_id: None,
             pos_x: 0.0,
             pos_y: 0.0,
+            location_label: None,
         }
     }
 
@@ -3673,10 +3696,15 @@ mod tests {
     #[test]
     fn long_titles_are_cut_on_character_boundaries() {
         let long = "汉".repeat(200);
-        let title = card_title(Some(&long));
+        let title = card_title(Some(&long), None);
         assert_eq!(title.chars().count(), CARD_TITLE_MAX_CHARS);
         assert!(title.ends_with('…'));
-        assert_eq!(card_title(Some("\n\n  second line \nx")), "second line");
+        assert_eq!(
+            card_title(Some("\n\n  second line \nx"), None),
+            "second line"
+        );
+        assert_eq!(card_title(None, Some("p. 12")), "Figure · p. 12");
+        assert_eq!(card_title(None, None), "Image excerpt");
     }
 
     #[test]
@@ -5124,6 +5152,7 @@ mod tests {
                 note: Some("  standalone note  ".to_owned()),
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::Highlight,
+                location_label: None,
             })
             .unwrap();
         assert_eq!(standalone.note.as_deref(), Some("standalone note"));
@@ -5265,6 +5294,7 @@ mod tests {
                 note: Some("preserved note".to_owned()),
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::default(),
+                location_label: None,
             })
             .unwrap();
 
@@ -5341,6 +5371,7 @@ mod tests {
             parent_node_id: parent_node_id.map(str::to_owned),
             pos_x: 10.0,
             pos_y: 20.0,
+            location_label: None,
         }
     }
 
@@ -5730,6 +5761,7 @@ mod tests {
                 parent_node_id: None,
                 pos_x: 10.0,
                 pos_y: 20.0,
+                location_label: None,
             })
             .unwrap();
 
@@ -6015,6 +6047,7 @@ mod tests {
                     parent_node_id: None,
                     pos_x: 10.0,
                     pos_y: 20.0,
+                    location_label: None,
                 })
                 .unwrap();
             let bookmark = db
@@ -6209,5 +6242,148 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn annotation_location_label_sanitizes_persists_names_captures_and_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("location-labels.sqlite3");
+
+        // 1. Seed a schema-v17 database with a pre-existing annotation (no location_label column).
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            for (version, sql) in (1_u32..).zip(&MIGRATIONS[..17]) {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.pragma_update(None, "user_version", version).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.execute(
+                "INSERT INTO documents (id, title, file_path, file_hash, format, encoding)
+                 VALUES ('doc-old', 'old-book', '/tmp/old-book.txt', 'hash-old', 'txt', 'utf-8')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO study_notebooks (id, title) VALUES ('nb-1', 'Study')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO annotations (id, document_id, notebook_id, anchor_type, anchor_payload_json, excerpt_text, color)
+                 VALUES ('ann-old', 'doc-old', 'nb-1', 'txt',
+                     '{\"format\":\"txt\",\"startByteOffset\":0,\"endByteOffset\":4,\"lineIndex\":0}',
+                     'legacy excerpt', '#fde047')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 2. Opening migrates to the latest schema and reads legacy annotations with `location_label: None`.
+        let mut db = Database::open(&db_path).unwrap();
+        assert_eq!(db.schema_version().unwrap() as usize, MIGRATIONS.len());
+        let initial_graph = db.load_notebook_graph("nb-1").unwrap();
+        assert_eq!(initial_graph.annotations.len(), 1);
+        assert_eq!(initial_graph.annotations[0].id, "ann-old");
+        assert_eq!(initial_graph.annotations[0].location_label, None);
+
+        // 3. New excerpts sanitize control chars / newlines and cap length.
+        let txt_file = dir.path().join("notes.txt");
+        std::fs::write(&txt_file, "hello world").unwrap();
+        let txt_doc = db.register_document(&txt_file).unwrap();
+        let long_label = format!("  \u{202E}{}\nsecond line", "章".repeat(200));
+        let excerpt = db
+            .create_excerpt(&CreateExcerptInput {
+                document_id: txt_doc.id.clone(),
+                notebook_id: "nb-1".to_owned(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("hello".to_owned()),
+                excerpt_image_png: None,
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+                location_label: Some(long_label),
+            })
+            .unwrap();
+        let stored_label = excerpt.annotation.location_label.as_deref().unwrap();
+        assert_eq!(stored_label.chars().count(), LOCATION_LABEL_MAX_CHARS);
+        assert!(stored_label.ends_with('…'));
+        assert!(!stored_label.contains('\u{202E}'));
+
+        // Blank / control-only labels normalize to None.
+        let blank_ann = db
+            .create_annotation(&CreateAnnotationInput {
+                document_id: txt_doc.id.clone(),
+                notebook_id: "nb-1".to_owned(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("hello".to_owned()),
+                excerpt_image_png: None,
+                note: None,
+                color: "#fde047".to_owned(),
+                style: AnnotationStyle::Highlight,
+                location_label: Some("  \u{0007}\t\n  ".to_owned()),
+            })
+            .unwrap();
+        assert_eq!(blank_ann.location_label, None);
+
+        // 4. Captures use `"Figure · <label>"` when location_label is present, else `"Image excerpt"`.
+        let pdf_file = dir.path().join("book.pdf");
+        std::fs::write(&pdf_file, "pdf bytes").unwrap();
+        let pdf_doc = db.register_document(&pdf_file).unwrap();
+        let pdf_anchor = AnchorLocation::Pdf {
+            page_index: 11,
+            rects: vec![NormalizedRect {
+                x: 0.1,
+                y: 0.1,
+                width: 0.4,
+                height: 0.3,
+            }],
+            page_spans: None,
+        };
+        let capture_with_label = db
+            .create_excerpt(&CreateExcerptInput {
+                document_id: pdf_doc.id.clone(),
+                notebook_id: "nb-1".to_owned(),
+                anchor: pdf_anchor.clone(),
+                excerpt_text: None,
+                excerpt_image_png: Some(PNG_BASE64.to_owned()),
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 10.0,
+                pos_y: 20.0,
+                location_label: Some("p. 12".to_owned()),
+            })
+            .unwrap();
+        assert_eq!(capture_with_label.card.title, "Figure · p. 12");
+        assert_eq!(
+            capture_with_label.annotation.location_label.as_deref(),
+            Some("p. 12")
+        );
+
+        let capture_without_label = db
+            .create_excerpt(&CreateExcerptInput {
+                document_id: pdf_doc.id.clone(),
+                notebook_id: "nb-1".to_owned(),
+                anchor: pdf_anchor,
+                excerpt_text: None,
+                excerpt_image_png: Some(PNG_BASE64.to_owned()),
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 30.0,
+                pos_y: 40.0,
+                location_label: None,
+            })
+            .unwrap();
+        assert_eq!(capture_without_label.card.title, "Image excerpt");
+        assert_eq!(capture_without_label.annotation.location_label, None);
+
+        // 5. Soft-delete + restore preserves location_label.
+        db.delete_annotation(&capture_with_label.annotation.id)
+            .unwrap();
+        let restored = db
+            .restore_annotation(&capture_with_label.annotation.id)
+            .unwrap();
+        assert_eq!(restored.annotation.location_label.as_deref(), Some("p. 12"));
     }
 }

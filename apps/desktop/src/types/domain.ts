@@ -146,6 +146,8 @@ export interface Annotation {
   note?: string | null;
   color: string;
   style: AnnotationStyle;
+  /** Optional human-readable location reported by the reader at creation time (#125). */
+  locationLabel?: string | null;
   createdAt: string;
 }
 
@@ -163,6 +165,8 @@ export interface CreateAnnotationInput {
   note: string | null;
   color: string;
   style: AnnotationStyle;
+  /** Optional human-readable location reported by the reader (#125). */
+  locationLabel?: string | null;
 }
 
 export interface AnnotationPatch {
@@ -229,6 +233,8 @@ export interface CreateExcerptInput {
   parentNodeId: string | null;
   posX: number;
   posY: number;
+  /** Optional human-readable location reported by the reader (#125). */
+  locationLabel?: string | null;
 }
 
 export interface CreatedExcerpt {
@@ -476,6 +482,8 @@ export interface ReaderSelection {
   text: string | null;
   /** A base64 PNG for an area capture, held in memory until it is excerpted. */
   imagePng: string | null;
+  /** Optional human-readable location within the document (e.g. `"Ch. 3 · p. 41"`, `"Line 6"`). */
+  locationLabel?: string | null;
 }
 
 /** A request for a reader to scroll to an anchor and pulse-highlight it. */

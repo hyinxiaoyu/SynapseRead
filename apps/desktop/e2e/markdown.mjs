@@ -25,7 +25,7 @@ export async function markdownFlow(page) {
     'the Markdown excerpt to paint exactly the selected text',
   );
   await page.waitFor(
-    `document.querySelector('[aria-label="Jump to source of plain text"]')`,
+    `document.querySelector('[aria-label^="Jump to source of plain text ("]')`,
     'a card for the Markdown excerpt',
   );
 }

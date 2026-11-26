@@ -1461,4 +1461,82 @@ describe('memory backend card delete and restore', () => {
       code: 'not_found',
     });
   });
+
+  it('sanitizes and persists annotation locationLabel and names capture cards (#125)', async () => {
+    const backend = createMemoryBackend({
+      library: {
+        '/books/notes.txt': new TextEncoder().encode('hello world'),
+        '/books/slides.pdf': new TextEncoder().encode('%PDF-1.7'),
+      },
+    });
+    const txt = (await backend.pickDocument())!;
+    const pdf = (await backend.pickDocument())!;
+    const nb = await backend.createNotebook('Study');
+
+    const excerpt = await backend.createExcerpt({
+      documentId: txt.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+      excerptText: 'hello',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 0,
+      posY: 0,
+      locationLabel: '  \u202EChapter 1 · Line 1\nsecond line  ',
+    });
+    expect(excerpt.annotation.locationLabel).toBe('Chapter 1 · Line 1');
+    expect(excerpt.card.title).toBe('hello');
+
+    const capture = await backend.createExcerpt({
+      documentId: pdf.id,
+      notebookId: nb.id,
+      anchor: {
+        format: 'pdf',
+        pageIndex: 11,
+        rects: [{ x: 0.1, y: 0.1, width: 0.4, height: 0.3 }],
+      },
+      excerptText: null,
+      excerptImagePng: 'iVBORw0KGgo=',
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 20,
+      posY: 30,
+      locationLabel: 'p. 12',
+    });
+    expect(capture.annotation.locationLabel).toBe('p. 12');
+    expect(capture.card.title).toBe('Figure · p. 12');
+
+    const captureWithoutLabel = await backend.createExcerpt({
+      documentId: pdf.id,
+      notebookId: nb.id,
+      anchor: {
+        format: 'pdf',
+        pageIndex: 11,
+        rects: [{ x: 0.1, y: 0.1, width: 0.4, height: 0.3 }],
+      },
+      excerptText: null,
+      excerptImagePng: 'iVBORw0KGgo=',
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 40,
+      posY: 50,
+    });
+    expect(captureWithoutLabel.annotation.locationLabel).toBeNull();
+    expect(captureWithoutLabel.card.title).toBe('Image excerpt');
+
+    const truncated = await backend.createAnnotation({
+      documentId: txt.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 6, endByteOffset: 11, lineIndex: 0 },
+      excerptText: 'world',
+      excerptImagePng: null,
+      note: null,
+      color: '#fde047',
+      style: 'highlight',
+      locationLabel: '章'.repeat(200),
+    });
+    expect(Array.from(truncated.locationLabel ?? '')).toHaveLength(160);
+    expect(truncated.locationLabel?.endsWith('…')).toBe(true);
+  });
 });

@@ -67,6 +67,8 @@ export type MemoryFile = Uint8Array | (() => Promise<Uint8Array>);
 /** The PNG signature, in base64. */
 const PNG_BASE64_PREFIX = 'iVBORw0KGgo';
 const MAX_DISPLAY_TITLE_CHARS = 512;
+const MAX_LOCATION_LABEL_CHARS = 160;
+const CARD_TITLE_MAX_CHARS = 80;
 
 function isControlOrBidiChar(ch: string): boolean {
   const code = ch.codePointAt(0) ?? 0;
@@ -80,19 +82,42 @@ function isControlOrBidiChar(ch: string): boolean {
   );
 }
 
-function sanitizeDisplayTitle(raw: string | null): string | null {
-  if (raw === null) return null;
+function truncateChars(text: string, maxChars: number): string {
+  const chars = Array.from(text);
+  if (chars.length <= maxChars) return text;
+  return `${chars.slice(0, maxChars - 1).join('')}…`;
+}
+
+function sanitizeSingleLine(raw: string | null | undefined, maxChars: number): string | null {
+  if (raw == null) return null;
   for (const line of raw.split(/\r?\n/)) {
     const cleaned = Array.from(line)
       .filter((ch) => !isControlOrBidiChar(ch))
       .join('');
     const trimmed = cleaned.trim();
     if (!trimmed) continue;
-    const chars = Array.from(trimmed);
-    if (chars.length <= MAX_DISPLAY_TITLE_CHARS) return trimmed;
-    return `${chars.slice(0, MAX_DISPLAY_TITLE_CHARS - 1).join('')}…`;
+    return truncateChars(trimmed, maxChars);
   }
   return null;
+}
+
+function sanitizeDisplayTitle(raw: string | null): string | null {
+  return sanitizeSingleLine(raw, MAX_DISPLAY_TITLE_CHARS);
+}
+
+function sanitizeLocationLabel(raw: string | null | undefined): string | null {
+  return sanitizeSingleLine(raw, MAX_LOCATION_LABEL_CHARS);
+}
+
+function defaultCardTitle(excerptText: string | null, locationLabel: string | null): string {
+  const firstLine = excerptText
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (firstLine) return truncateChars(firstLine, CARD_TITLE_MAX_CHARS);
+  return locationLabel
+    ? truncateChars(`Figure · ${locationLabel}`, CARD_TITLE_MAX_CHARS)
+    : 'Image excerpt';
 }
 
 function hashBytes(bytes: Uint8Array): string {
@@ -691,6 +716,7 @@ export function createMemoryBackendWithPreview({
 
       const annotationId = crypto.randomUUID();
       if (input.excerptImagePng !== null) captures.set(annotationId, input.excerptImagePng);
+      const locationLabel = sanitizeLocationLabel(input.locationLabel);
       const annotation: Annotation = {
         id: annotationId,
         documentId: input.documentId,
@@ -701,12 +727,13 @@ export function createMemoryBackendWithPreview({
         note: null,
         color: input.color,
         style: 'highlight',
+        locationLabel,
         createdAt: now(),
       };
       const card: NoteCard = {
         id: crypto.randomUUID(),
         notebookId: input.notebookId,
-        title: input.excerptText?.trim().split('\n')[0]?.slice(0, 80) || 'Image excerpt',
+        title: defaultCardTitle(input.excerptText, locationLabel),
         markdownNotes: '',
         tags: [],
         annotationIds: [annotation.id],
@@ -776,6 +803,7 @@ export function createMemoryBackendWithPreview({
         note: trimmedNote,
         color: input.color.trim(),
         style: input.style,
+        locationLabel: sanitizeLocationLabel(input.locationLabel),
         createdAt: now(),
       };
       annotations.set(annotation.id, annotation);

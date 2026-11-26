@@ -827,7 +827,7 @@ export async function epubCodeBlocksFlow(page) {
   await page.waitFor(excerptEnabled, 'Excerpt to MindMap enabled for code selection');
   await page.clickButton('Excerpt to MindMap');
   await page.waitFor(
-    `document.querySelector(${JSON.stringify(`[aria-label="Jump to source of ${excerptTarget}"]`)})`,
+    `document.querySelector(${JSON.stringify(`[aria-label^="Jump to source of ${excerptTarget} ("]`)})`,
     'MindMap card created from <pre> selection',
   );
   await page.waitFor(
