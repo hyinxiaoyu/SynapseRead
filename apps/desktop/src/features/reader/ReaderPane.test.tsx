@@ -1334,6 +1334,191 @@ describe('ReaderPane tab commands', () => {
     verifySpy2b.mockRestore();
   });
 
+  it('reconciles deferred Recent state after document lock release in either completion order (#126)', async () => {
+    const importedAnchor: AnchorLocation = {
+      format: 'txt',
+      startByteOffset: 4,
+      endByteOffset: 10,
+      lineIndex: 0,
+    };
+
+    const assertListsAndBackend = async (
+      docId: string,
+      expectedVisible: boolean,
+      expectedProgress: number | null,
+      expectedAnchor: AnchorLocation,
+    ) => {
+      const emptyIds = [
+        ...screen
+          .getByTestId('empty-state-recent-documents')
+          .querySelectorAll('[data-testid="recent-document-item"]'),
+      ].map((el) => el.getAttribute('data-document-id'));
+      expect(emptyIds.includes(docId)).toBe(expectedVisible);
+
+      fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+      const menu = screen.getByTestId('recent-documents-menu');
+      const popoverIds = [...menu.querySelectorAll('[data-testid="recent-document-item"]')].map(
+        (el) => el.getAttribute('data-document-id'),
+      );
+      expect(popoverIds.includes(docId)).toBe(expectedVisible);
+      fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+
+      const storeDoc = useStudySyncStore.getState().documents.find((d) => d.id === docId)!;
+      expect(storeDoc.lastProgress ?? null).toBe(expectedProgress);
+      expect(storeDoc.lastCursorAnchor).toEqual(expectedAnchor);
+      const backendDoc = (await backendHolder.current!.listDocuments()).find(
+        (d) => d.id === docId,
+      )!;
+      expect(backendDoc.lastProgress ?? null).toBe(expectedProgress);
+      expect(backendDoc.lastCursorAnchor).toEqual(expectedAnchor);
+      expect(
+        backendDoc.hiddenFromRecentAt !== null && backendDoc.hiddenFromRecentAt !== undefined,
+      ).toBe(!expectedVisible);
+    };
+
+    // 1. Recent op finishes while locked (outer lock + nested closeDocumentAndFlush + refreshDocument),
+    //    then final lock release triggers deferred reconciliation without reopening the tab or clobbering progress.
+    await openDocuments(['lock-order1-keep.txt', 'lock-order1-target.txt']);
+    const store = useStudySyncStore.getState;
+    const [, target1] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const backend = backendHolder.current!;
+    const origTouch1 = backend.touchDocumentOpened.bind(backend);
+    let touchCommitted1 = false;
+    const touchSpy1 = vi
+      .spyOn(backend, 'touchDocumentOpened')
+      .mockImplementationOnce(async (id) => {
+        const updated = await origTouch1(id);
+        touchCommitted1 = true;
+        return updated;
+      });
+    const origVerify1 = backend.verifyDocumentSource.bind(backend);
+    let releaseVerify1!: () => void;
+    const verifyGate1 = new Promise<void>((resolve) => {
+      releaseVerify1 = resolve;
+    });
+    const verifySpy1 = vi
+      .spyOn(backend, 'verifyDocumentSource')
+      .mockImplementationOnce(async (id) => {
+        await verifyGate1;
+        return origVerify1(id);
+      });
+
+    const view1 = render(<ReaderPane />);
+    let reopenPromise1!: Promise<void>;
+    act(() => {
+      reopenPromise1 = store().reopenRecentDocument(target1);
+    });
+    await waitFor(() => expect(touchCommitted1).toBe(true));
+
+    await act(async () => {
+      await store().hideRecentDocument(target1);
+    });
+
+    let releaseLock1!: () => void;
+    act(() => {
+      releaseLock1 = store().lockDocument(target1);
+    });
+    await act(async () => {
+      await store().closeDocumentAndFlush(target1);
+    });
+    expect(store().lockedDocumentIds).toContain(target1);
+    expect(store().openDocumentIds).not.toContain(target1);
+
+    releaseVerify1();
+    await act(async () => {
+      await reopenPromise1;
+    });
+    expect(store().openDocumentIds).not.toContain(target1);
+
+    await backend.updateDocumentCursor(target1, importedAnchor, 0.85);
+    await act(async () => {
+      await store().refreshDocument(target1);
+    });
+    expect(store().documents.find((d) => d.id === target1)?.lastProgress).toBe(0.85);
+
+    act(() => {
+      releaseLock1();
+    });
+    await waitFor(() => {
+      const doc = store().documents.find((d) => d.id === target1);
+      expect(doc?.hiddenFromRecentAt).toBeTruthy();
+    });
+
+    expect(store().lockedDocumentIds).not.toContain(target1);
+    expect(store().openDocumentIds).not.toContain(target1);
+    await assertListsAndBackend(target1, false, 0.85, importedAnchor);
+    touchSpy1.mockRestore();
+    verifySpy1.mockRestore();
+    view1.unmount();
+
+    // 2. Final lock releases while reopenRecentDocument is still active, then reopenRecentDocument drains and reconciles.
+    useStudySyncStore.setState(initialState, true);
+    await openDocuments(['lock-order2-keep.txt', 'lock-order2-target.txt']);
+    const [, target2] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const origTouch2 = backend.touchDocumentOpened.bind(backend);
+    let touchCommitted2 = false;
+    const touchSpy2 = vi
+      .spyOn(backend, 'touchDocumentOpened')
+      .mockImplementationOnce(async (id) => {
+        const updated = await origTouch2(id);
+        touchCommitted2 = true;
+        return updated;
+      });
+    const origVerify2 = backend.verifyDocumentSource.bind(backend);
+    let releaseVerify2!: () => void;
+    const verifyGate2 = new Promise<void>((resolve) => {
+      releaseVerify2 = resolve;
+    });
+    const verifySpy2 = vi
+      .spyOn(backend, 'verifyDocumentSource')
+      .mockImplementationOnce(async (id) => {
+        await verifyGate2;
+        return origVerify2(id);
+      });
+
+    render(<ReaderPane />);
+    let reopenPromise2!: Promise<void>;
+    act(() => {
+      reopenPromise2 = store().reopenRecentDocument(target2);
+    });
+    await waitFor(() => expect(touchCommitted2).toBe(true));
+
+    await act(async () => {
+      await store().hideRecentDocument(target2);
+    });
+
+    let releaseLock2!: () => void;
+    act(() => {
+      releaseLock2 = store().lockDocument(target2);
+    });
+    await act(async () => {
+      await store().closeDocumentAndFlush(target2);
+    });
+    await backend.updateDocumentCursor(target2, importedAnchor, 0.85);
+    await act(async () => {
+      await store().refreshDocument(target2);
+    });
+
+    act(() => {
+      releaseLock2();
+    });
+    expect(store().lockedDocumentIds).not.toContain(target2);
+
+    releaseVerify2();
+    await act(async () => {
+      await reopenPromise2;
+    });
+
+    expect(store().openDocumentIds).not.toContain(target2);
+    await assertListsAndBackend(target2, false, 0.85, importedAnchor);
+    touchSpy2.mockRestore();
+    verifySpy2.mockRestore();
+  });
+
   it('stacks workspace notices into the active viewer popover layer and follows tab switches', async () => {
     await openDocuments(['a.txt', 'b.txt']);
     const store = useStudySyncStore.getState;
