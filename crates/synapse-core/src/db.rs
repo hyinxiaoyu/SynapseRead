@@ -45,6 +45,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0013_markdown_as_text.sql"),
     include_str!("../migrations/0014_workspace_pane_layout.sql"),
     include_str!("../migrations/0015_card_undo_snapshots.sql"),
+    include_str!("../migrations/0016_document_hidden_from_recent.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
@@ -218,16 +219,28 @@ impl Database {
 
     pub fn touch_document_opened(&self, document_id: &str) -> CoreResult<Document> {
         let changed = self.conn.execute(
-            "UPDATE documents SET last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+            "UPDATE documents
+             SET last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 hidden_from_recent_at = NULL
              WHERE id = ?1",
             [document_id],
         )?;
         expect_changed(changed, "document", document_id)?;
-        Ok(self.conn.query_row(
-            &format!("{DOCUMENT_SELECT} WHERE id = ?1"),
+        get_document_in_conn(&self.conn, document_id)
+    }
+
+    /// Hides a document from the Recent / Continue reading lists without
+    /// modifying its annotations, cards, bookmarks, or reading cursor.
+    /// Opening or relinking the document clears the flag again.
+    pub fn hide_document_from_recent(&self, document_id: &str) -> CoreResult<Document> {
+        let changed = self.conn.execute(
+            "UPDATE documents
+             SET hidden_from_recent_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+             WHERE id = ?1",
             [document_id],
-            map_document,
-        )?)
+        )?;
+        expect_changed(changed, "document", document_id)?;
+        get_document_in_conn(&self.conn, document_id)
     }
 
     pub fn list_documents(&self) -> CoreResult<Vec<Document>> {
@@ -1936,7 +1949,8 @@ fn upsert_document_with_hash(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
          ON CONFLICT (file_hash) DO UPDATE SET
              file_path = excluded.file_path,
-             last_opened_at = excluded.last_opened_at",
+             last_opened_at = excluded.last_opened_at,
+             hidden_from_recent_at = NULL",
         params![
             new_id(),
             title,
@@ -2127,7 +2141,8 @@ fn relink_document_in_conn(
                  file_hash = ?4,
                  last_cursor_anchor = NULL,
                  last_progress = NULL,
-                 last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 hidden_from_recent_at = NULL
              WHERE id = ?1",
             params![document_id, title, file_path, new_hash],
         )?;
@@ -2136,7 +2151,8 @@ fn relink_document_in_conn(
             "UPDATE documents SET
                  title = ?2,
                  file_path = ?3,
-                 last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+                 last_opened_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                 hidden_from_recent_at = NULL
              WHERE id = ?1",
             params![document_id, title, file_path],
         )?;
@@ -2442,7 +2458,7 @@ fn optional_json_column<T: DeserializeOwned>(
 }
 
 const DOCUMENT_SELECT: &str = "SELECT id, title, file_path, file_hash, format, encoding,
-    last_cursor_anchor, last_opened_at, created_at, last_progress FROM documents";
+    last_cursor_anchor, last_opened_at, created_at, last_progress, hidden_from_recent_at FROM documents";
 
 fn map_document(row: &Row<'_>) -> rusqlite::Result<Document> {
     let format: String = row.get(4)?;
@@ -2457,6 +2473,7 @@ fn map_document(row: &Row<'_>) -> rusqlite::Result<Document> {
         last_opened_at: row.get(7)?,
         created_at: row.get(8)?,
         last_progress: row.get(9)?,
+        hidden_from_recent_at: row.get(10)?,
     })
 }
 
@@ -2634,6 +2651,7 @@ mod tests {
                     "created_at",
                     "last_opened_at",
                     "last_progress",
+                    "hidden_from_recent_at",
                 ],
             ),
             (
@@ -5938,5 +5956,112 @@ mod tests {
         assert!(db.is_sole_connection());
         assert!(external_file.exists());
         assert_eq!(std::fs::read(&external_file).unwrap(), b"%PDF-1.7 precious");
+    }
+
+    #[test]
+    fn hide_document_from_recent_persists_preserves_study_records_and_clears_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("recent-hide.sqlite3");
+        let file = dir.path().join("study.txt");
+        std::fs::write(&file, "hello study world").unwrap();
+
+        let (doc_id, annotation_id, bookmark_id, card_id, notebook_id) = {
+            let mut db = Database::open(&db_path).unwrap();
+            let doc = db.register_document(&file).unwrap();
+            assert_eq!(doc.hidden_from_recent_at, None);
+
+            db.update_document_cursor(&doc.id, &txt_anchor(), Some(0.4))
+                .unwrap();
+            let notebook = db.create_notebook("Study").unwrap();
+            let created = db
+                .create_excerpt(&CreateExcerptInput {
+                    document_id: doc.id.clone(),
+                    notebook_id: notebook.id.clone(),
+                    anchor: txt_anchor(),
+                    excerpt_text: Some("hello".to_owned()),
+                    excerpt_image_png: None,
+                    color: "#fde047".to_owned(),
+                    parent_node_id: None,
+                    pos_x: 10.0,
+                    pos_y: 20.0,
+                })
+                .unwrap();
+            let bookmark = db
+                .create_bookmark(&CreateBookmarkInput {
+                    document_id: doc.id.clone(),
+                    anchor: txt_anchor(),
+                    label: Some("Start".to_owned()),
+                })
+                .unwrap();
+
+            let hidden = db.hide_document_from_recent(&doc.id).unwrap();
+            assert!(hidden.hidden_from_recent_at.is_some());
+
+            // list_documents keeps the row and all study records stay untouched.
+            let docs = db.list_documents().unwrap();
+            assert_eq!(docs.len(), 1);
+            assert_eq!(docs[0].hidden_from_recent_at, hidden.hidden_from_recent_at);
+            assert_eq!(docs[0].last_cursor_anchor, Some(txt_anchor()));
+            assert_eq!(docs[0].last_progress, Some(0.4));
+
+            let graph = db.load_notebook_graph(&notebook.id).unwrap();
+            assert_eq!(graph.annotations.len(), 1);
+            assert_eq!(graph.annotations[0].id, created.annotation.id);
+            assert_eq!(graph.cards.len(), 1);
+            assert_eq!(graph.cards[0].id, created.card.id);
+            let bookmarks = db.list_bookmarks().unwrap();
+            assert_eq!(bookmarks.len(), 1);
+            assert_eq!(bookmarks[0].id, bookmark.id);
+
+            (
+                doc.id,
+                created.annotation.id,
+                bookmark.id,
+                created.card.id,
+                notebook.id,
+            )
+        };
+
+        // Flag persists across database reopen and study records remain intact.
+        let reopened = Database::open(&db_path).unwrap();
+        let docs = reopened.list_documents().unwrap();
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].hidden_from_recent_at.is_some());
+        let graph = reopened.load_notebook_graph(&notebook_id).unwrap();
+        assert_eq!(graph.annotations.len(), 1);
+        assert_eq!(graph.annotations[0].id, annotation_id);
+        assert_eq!(graph.cards.len(), 1);
+        assert_eq!(graph.cards[0].id, card_id);
+        let bookmarks = reopened.list_bookmarks().unwrap();
+        assert_eq!(bookmarks.len(), 1);
+        assert_eq!(bookmarks[0].id, bookmark_id);
+
+        // touch_document_opened clears the flag.
+        let touched = reopened.touch_document_opened(&doc_id).unwrap();
+        assert_eq!(touched.hidden_from_recent_at, None);
+
+        // Hiding again, then re-registering the same file clears the flag.
+        let hidden_again = reopened.hide_document_from_recent(&doc_id).unwrap();
+        assert!(hidden_again.hidden_from_recent_at.is_some());
+        let registered_again = reopened.register_document(&file).unwrap();
+        assert_eq!(registered_again.id, doc_id);
+        assert_eq!(registered_again.hidden_from_recent_at, None);
+
+        // Hiding again, then relinking clears the flag.
+        let hidden_before_relink = reopened.hide_document_from_recent(&doc_id).unwrap();
+        assert!(hidden_before_relink.hidden_from_recent_at.is_some());
+        let moved = dir.path().join("study-moved.txt");
+        std::fs::rename(&file, &moved).unwrap();
+        let relinked = reopened.relink_document(&doc_id, &moved).unwrap();
+        assert_eq!(relinked.document.hidden_from_recent_at, None);
+
+        // Unknown document id returns NotFound.
+        assert!(matches!(
+            reopened.hide_document_from_recent("missing-document"),
+            Err(CoreError::NotFound {
+                entity: "document",
+                ..
+            })
+        ));
     }
 }

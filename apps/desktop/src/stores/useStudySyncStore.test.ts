@@ -1064,6 +1064,26 @@ describe('useStudySyncStore', () => {
       expect(recent[0]?.lastOpenedAt).toBeTruthy();
     });
 
+    it('hides documents from selectRecentDocuments while preserving records and restores on reopen', async () => {
+      const firstId = await openDocument();
+      const secondId = await openDocument();
+      await state().addBookmark(firstId, pdfAnchor as ReaderSelection['anchor'], 'Keep me');
+      state().closeDocument(firstId);
+
+      await state().hideRecentDocument(firstId);
+      // Hidden document remains in `documents` and keeps its bookmarks, but disappears from Recent.
+      expect(state().documents.some((doc) => doc.id === firstId)).toBe(true);
+      expect(state().bookmarks.some((bm) => bm.documentId === firstId)).toBe(true);
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toEqual([secondId]);
+
+      // Reopening restores it to Recent.
+      await state().reopenRecentDocument(firstId);
+      expect(selectRecentDocuments(state().documents).map((doc) => doc.id)).toEqual([
+        firstId,
+        secondId,
+      ]);
+    });
+
     it('restores open tabs, active document, and reading preferences on restart while ignoring unknown document ids', async () => {
       const firstId = await openDocument();
       const secondId = await openDocument();

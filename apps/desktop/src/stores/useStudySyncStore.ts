@@ -224,6 +224,7 @@ export interface StudySyncState {
 
   openDocument(): Promise<void>;
   reopenRecentDocument(documentId: string): Promise<void>;
+  hideRecentDocument(documentId: string): Promise<void>;
   /** Reopens the most recently closed tab that is not already open again. */
   reopenClosedDocument(): Promise<void>;
   verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus | null>;
@@ -413,14 +414,16 @@ export function selectBookmarks(bookmarks: readonly Bookmark[], documentId: stri
   return bookmarks.filter((bookmark) => bookmark.documentId === documentId);
 }
 
-/** Most recently opened documents first, falling back to `createdAt`. */
+/** Most recently opened documents first (excluding hidden entries), falling back to `createdAt`. */
 export function selectRecentDocuments(documents: readonly StudyDocument[]): StudyDocument[] {
-  return [...documents].sort((a, b) => {
-    const aTime = a.lastOpenedAt ?? a.createdAt;
-    const bTime = b.lastOpenedAt ?? b.createdAt;
-    if (aTime !== bTime) return bTime.localeCompare(aTime);
-    return b.id.localeCompare(a.id);
-  });
+  return documents
+    .filter((document) => !document.hiddenFromRecentAt)
+    .sort((a, b) => {
+      const aTime = a.lastOpenedAt ?? a.createdAt;
+      const bTime = b.lastOpenedAt ?? b.createdAt;
+      if (aTime !== bTime) return bTime.localeCompare(aTime);
+      return b.id.localeCompare(a.id);
+    });
 }
 
 /** The closed-tab stack without a tab that is open again. */
@@ -970,6 +973,16 @@ export function createStudySyncStore(backend: StudyBackend) {
             selection: state.activeDocumentId === documentId ? state.selection : null,
           }));
           persistSession();
+        });
+      },
+
+      async hideRecentDocument(documentId) {
+        if (!get().documents.some((doc) => doc.id === documentId)) return;
+        await guarded(async () => {
+          const updated = await backend.hideDocumentFromRecent(documentId);
+          set((state) => ({
+            documents: state.documents.map((doc) => (doc.id === documentId ? updated : doc)),
+          }));
         });
       },
 

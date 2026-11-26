@@ -93,6 +93,11 @@ export interface StudyBackend extends DocumentContentReader {
     progress?: number,
   ): Promise<void>;
   touchDocumentOpened(documentId: string): Promise<StudyDocument>;
+  /**
+   * Hides a document from Recent / Continue reading without altering its notes,
+   * highlights, cards, bookmarks, or reading cursor. Reopening the file restores it.
+   */
+  hideDocumentFromRecent(documentId: string): Promise<StudyDocument>;
   verifyDocumentSource(documentId: string): Promise<DocumentSourceStatus>;
   relinkDocument(
     documentId: string,

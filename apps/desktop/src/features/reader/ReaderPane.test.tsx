@@ -318,6 +318,118 @@ describe('ReaderPane tab commands', () => {
     expect(labels.toSorted()).toEqual(['Markdown', 'TXT']);
   });
 
+  it('bounds Continue reading in a safe scroll container and expands all 50 recent entries (#126)', async () => {
+    const names = Array.from(
+      { length: 50 },
+      (_, index) => `overflow-book-${String(index + 1).padStart(2, '0')}.txt`,
+    );
+    await openDocuments(names);
+    const store = useStudySyncStore.getState;
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    render(<ReaderPane />);
+
+    const emptyWrapper = screen.getByTestId('reader-empty-state');
+    expect(emptyWrapper).toHaveClass('h-full', 'overflow-y-auto');
+    expect(
+      screen.getByText('Open a PDF, EPUB, TXT, or Markdown file to start reading.'),
+    ).toBeInTheDocument();
+
+    const recentRegion = screen.getByTestId('empty-state-recent-documents');
+    const list = recentRegion.querySelector('[data-testid="recent-documents-list"]');
+    expect(list).toHaveClass('max-h-[min(28rem,60vh)]', 'overflow-y-auto');
+
+    const initialTitles = [
+      ...recentRegion.querySelectorAll('[data-testid="recent-document-item"] p.font-medium'),
+    ].map((node) => node.textContent);
+    expect(initialTitles).toEqual([
+      'overflow-book-50',
+      'overflow-book-49',
+      'overflow-book-48',
+      'overflow-book-47',
+      'overflow-book-46',
+      'overflow-book-45',
+      'overflow-book-44',
+      'overflow-book-43',
+    ]);
+
+    const showAll = screen.getByTestId('recent-documents-show-all');
+    expect(showAll).toHaveTextContent('Show all (50)');
+    fireEvent.click(showAll);
+
+    expect(screen.queryByTestId('recent-documents-show-all')).not.toBeInTheDocument();
+    const expandedTitles = [
+      ...recentRegion.querySelectorAll('[data-testid="recent-document-item"] p.font-medium'),
+    ].map((node) => node.textContent);
+    expect(expandedTitles).toHaveLength(50);
+    expect(expandedTitles[0]).toBe('overflow-book-50');
+    expect(expandedTitles[49]).toBe('overflow-book-01');
+  });
+
+  it('removes entries from empty state and popover while preserving study records and moving focus (#126)', async () => {
+    await openDocuments(['recent-one.txt', 'recent-two.txt', 'recent-three.txt']);
+    const store = useStudySyncStore.getState;
+    const [firstId, secondId, thirdId] = store().openDocumentIds as [string, string, string];
+    await store().addBookmark(
+      secondId,
+      { format: 'txt', startByteOffset: 0, endByteOffset: 4, lineIndex: 0 },
+      'Keep bookmark',
+    );
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const backend = backendHolder.current!;
+    const hideSpy = vi.spyOn(backend, 'hideDocumentFromRecent');
+
+    render(<ReaderPane />);
+
+    // Recency order: three (idx 0), two (idx 1), one (idx 2).
+    const removeButtons = screen.getAllByTestId('recent-document-remove');
+    expect(removeButtons).toHaveLength(3);
+    removeButtons[1]!.focus();
+    fireEvent.click(removeButtons[1]!);
+
+    await waitFor(() => expect(hideSpy).toHaveBeenCalledWith(secondId));
+    await waitFor(() => expect(screen.getAllByTestId('recent-document-item')).toHaveLength(2));
+    // Focus moves to the row that slid into index 1 (`recent-one`).
+    expect(
+      screen
+        .getAllByTestId('recent-document-item')
+        .find((el) => el.getAttribute('data-document-id') === firstId),
+    ).toHaveFocus();
+    // Study records (bookmarks) stay untouched.
+    expect(store().bookmarks.some((bm) => bm.documentId === secondId)).toBe(true);
+
+    // Removing the last visible row moves focus to the previous row (`recent-three`).
+    const remainingRemove = screen.getAllByTestId('recent-document-remove');
+    remainingRemove[1]!.focus();
+    fireEvent.click(remainingRemove[1]!);
+    await waitFor(() => expect(screen.getAllByTestId('recent-document-item')).toHaveLength(1));
+    expect(
+      screen
+        .getAllByTestId('recent-document-item')
+        .find((el) => el.getAttribute('data-document-id') === thirdId),
+    ).toHaveFocus();
+
+    // Reopening restores the hidden document back to Recent.
+    await act(async () => {
+      await store().reopenRecentDocument(secondId);
+    });
+    expect(store().openDocumentIds).toEqual([secondId]);
+
+    // While a tab is open, the Recent popover shows both restored docs and keeps open on removal.
+    fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+    const popover = screen.getByTestId('recent-documents-menu');
+    expect(popover.querySelectorAll('[data-testid="recent-document-item"]')).toHaveLength(2);
+    const popoverRemoves = popover.querySelectorAll('[data-testid="recent-document-remove"]');
+    fireEvent.click(popoverRemoves[0]!);
+    await waitFor(() =>
+      expect(popover.querySelectorAll('[data-testid="recent-document-item"]')).toHaveLength(1),
+    );
+    expect(screen.getByTestId('recent-documents-menu')).toBeInTheDocument();
+
+    hideSpy.mockRestore();
+  });
+
   it('stacks workspace notices into the active viewer popover layer and follows tab switches', async () => {
     await openDocuments(['a.txt', 'b.txt']);
     const store = useStudySyncStore.getState;
