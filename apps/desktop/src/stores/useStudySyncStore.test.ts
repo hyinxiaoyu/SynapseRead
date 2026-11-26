@@ -1345,6 +1345,76 @@ describe('useStudySyncStore', () => {
       titleSpy.mockRestore();
     });
 
+    it('keeps locationLabel on same-hash rename and clears active + undoable labels immediately on content-changing relink (#125)', async () => {
+      const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+      const revisedBytes = new TextEncoder().encode('Revised content without old chapter.\n');
+      const customBackend = createMemoryBackend({
+        library: {
+          '/t/original.txt': originalBytes,
+          '/t/renamed.txt': originalBytes,
+          '/t/revised.txt': revisedBytes,
+        },
+      });
+      const customStore = createStudySyncStore(customBackend);
+      await customStore.getState().initialize();
+      await customStore.getState().openDocument();
+      const docId = customStore.getState().activeDocumentId as string;
+
+      customStore.getState().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+        text: 'Old chapter',
+        imagePng: null,
+        locationLabel: 'Old chapter · Line 1',
+      });
+      await customStore.getState().excerptSelection();
+      const activeAnnId = customStore.getState().annotations[0]!.id;
+
+      customStore.getState().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 12, endByteOffset: 20, lineIndex: 1 },
+        text: 'Line one',
+        imagePng: null,
+        locationLabel: 'Old chapter · Line 2',
+      });
+      await customStore.getState().excerptSelection();
+      const deletedAnnId = customStore.getState().annotations[1]!.id;
+      await customStore.getState().removeAnnotation(deletedAnnId);
+
+      // Same-hash relink (rename) keeps locationLabel intact.
+      const renamed = await customStore.getState().relinkDocument(docId, false);
+      expect(renamed?.contentChanged).toBe(false);
+      expect(
+        customStore.getState().annotations.find((a) => a.id === activeAnnId)?.locationLabel,
+      ).toBe('Old chapter · Line 1');
+
+      // Content-changing relink clears locationLabel immediately in live state and undo history.
+      const revised = await customStore.getState().relinkDocument(docId, false);
+      expect(revised?.contentChanged).toBe(true);
+      expect(
+        customStore.getState().annotations.find((a) => a.id === activeAnnId)?.locationLabel,
+      ).toBeNull();
+      expect(
+        customStore.getState().deletedAnnotationHistory[0]?.annotation.locationLabel,
+      ).toBeNull();
+
+      // Undoing the deleted annotation restores it with locationLabel cleared.
+      await customStore.getState().undoRemoveAnnotation();
+      expect(
+        customStore.getState().annotations.find((a) => a.id === deletedAnnId)?.locationLabel,
+      ).toBeNull();
+
+      // Reopening the workspace keeps both annotations cleared to document-title-only attribution.
+      const reopened = createStudySyncStore(customBackend);
+      await reopened.getState().initialize();
+      expect(
+        reopened.getState().annotations.find((a) => a.id === activeAnnId)?.locationLabel,
+      ).toBeNull();
+      expect(
+        reopened.getState().annotations.find((a) => a.id === deletedAnnId)?.locationLabel,
+      ).toBeNull();
+    });
+
     it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {
       const bytes = new TextEncoder().encode('drop-hide race');
       const file = new File([bytes], 'drop-race.txt', { type: 'text/plain' });

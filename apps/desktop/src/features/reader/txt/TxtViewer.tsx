@@ -91,6 +91,7 @@ import {
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { documentDisplayName } from '@/lib/documentTitles';
+import { formatLocationWithSuffix } from '@/lib/sourceAttribution';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
@@ -380,7 +381,7 @@ export function TxtViewer({
         model.rowAtSourceOffset(selected.anchor.startByteOffset) ?? model.rowAtUnit(startUnit);
       const heading = model.headings[headingIndexAt(model.headings, anchorRow)] ?? null;
       const linePart = `Line ${selected.anchor.lineIndex + 1}`;
-      const locationLabel = heading ? `${heading.label} · ${linePart}` : linePart;
+      const locationLabel = formatLocationWithSuffix(heading?.label, linePart);
       const nextSelection: ReaderSelection = {
         documentId,
         anchor: selected.anchor,

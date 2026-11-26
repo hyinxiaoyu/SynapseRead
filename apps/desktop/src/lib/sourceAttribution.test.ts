@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatAnnotationSource, formatCardSource } from '@/lib/sourceAttribution';
+import {
+  formatAnnotationSource,
+  formatCardSource,
+  formatLocationWithSuffix,
+  MAX_LOCATION_LABEL_CHARS,
+} from '@/lib/sourceAttribution';
 import type { Annotation, NoteCard, StudyDocument } from '@/types/domain';
 
 function makeDoc(overrides: Partial<StudyDocument> = {}): StudyDocument {
@@ -87,5 +92,22 @@ describe('sourceAttribution (#125)', () => {
       formatCardSource({ annotationIds: ['ann-1', 'ann-2'] }, [ann1, ann2], [doc1, doc2]),
     ).toBe('Thinking, Fast and Slow · Ch. 3 · p. 41 (+1)');
     expect(formatCardSource({ annotationIds: [] }, [ann1], [doc1])).toBeNull();
+  });
+
+  it('reserves space for page/line suffixes when truncating long headings (#125)', () => {
+    const longHeading = '汉'.repeat(170);
+    const single = formatLocationWithSuffix(longHeading, 'p. i');
+    expect(Array.from(single).length).toBe(MAX_LOCATION_LABEL_CHARS);
+    expect(single.endsWith('… · p. i')).toBe(true);
+
+    const range = formatLocationWithSuffix(longHeading, 'pp. A (#1)–A (#2)');
+    expect(Array.from(range).length).toBe(MAX_LOCATION_LABEL_CHARS);
+    expect(range.endsWith('… · pp. A (#1)–A (#2)')).toBe(true);
+
+    // Flattens embedded newlines and strips bidi controls so Core's sanitizer never drops the suffix.
+    expect(formatLocationWithSuffix('Part 1\n\u202ESubtitle', 'p. 12')).toBe(
+      'Part 1 Subtitle · p. 12',
+    );
+    expect(formatLocationWithSuffix(null, 'p. i')).toBe('p. i');
   });
 });

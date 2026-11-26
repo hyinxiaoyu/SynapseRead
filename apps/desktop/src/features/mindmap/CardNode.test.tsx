@@ -3,7 +3,8 @@ import { type NodeProps, ReactFlowProvider } from '@xyflow/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InspectorPane } from '@/features/inspector/InspectorPane';
-import { useStudySyncStore } from '@/stores/useStudySyncStore';
+import { createMemoryBackend } from '@/lib/backend/memoryBackend';
+import { createStudySyncStore, useStudySyncStore } from '@/stores/useStudySyncStore';
 
 import { type CardFlowNode, CardNode, summarizeMarkdownNotes } from './CardNode';
 
@@ -210,6 +211,78 @@ describe('CardNode source', () => {
     expect(
       screen.getByRole('button', { name: 'Jump to source of Older excerpt (legacy-notes)' }),
     ).toBeVisible();
+  });
+
+  it('immediately clears stale location on content-changing relink across CardNode, Inspector, reopen, and Undo (#125)', async () => {
+    const originalBytes = new TextEncoder().encode('Old chapter\nFirst claim\nSecond claim\n');
+    const revisedBytes = new TextEncoder().encode('Revised document without the old chapter.\n');
+    const customBackend = createMemoryBackend({
+      library: {
+        '/books/original.txt': originalBytes,
+        '/books/renamed.txt': originalBytes,
+        '/books/revised.txt': revisedBytes,
+      },
+    });
+    const customStore = createStudySyncStore(customBackend);
+    await customStore.getState().initialize();
+    await customStore.getState().openDocument();
+    const docId = customStore.getState().activeDocumentId as string;
+
+    customStore.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+      text: 'Old chapter',
+      imagePng: null,
+      locationLabel: 'Old chapter · Line 1',
+    });
+    await customStore.getState().excerptSelection();
+    const firstNode = customStore.getState().nodes[0]!;
+    customStore.getState().selectNode(firstNode.id);
+
+    const syncGlobal = (source = customStore) => {
+      const s = source.getState();
+      useStudySyncStore.setState({
+        documents: s.documents,
+        annotations: s.annotations,
+        cards: s.cards,
+        nodes: s.nodes,
+        selectedNodeId: s.selectedNodeId,
+      });
+    };
+    syncGlobal();
+
+    renderCard(firstNode.id, firstNode.cardId, true);
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent(
+      'original · Old chapter · Line 1',
+    );
+    expect(screen.getByTestId('inspector-excerpt-source')).toHaveTextContent(
+      'original · Old chapter · Line 1',
+    );
+
+    // Same-hash relink (rename) keeps location intact with the new title.
+    await act(async () => {
+      await customStore.getState().relinkDocument(docId, false);
+      syncGlobal();
+    });
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent(
+      'renamed · Old chapter · Line 1',
+    );
+    expect(screen.getByTestId('inspector-excerpt-source')).toHaveTextContent(
+      'renamed · Old chapter · Line 1',
+    );
+
+    // Content-changing relink immediately drops the stale location everywhere.
+    await act(async () => {
+      await customStore.getState().relinkDocument(docId, false);
+      syncGlobal();
+    });
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent('revised');
+    expect(screen.getByTestId('card-source-attribution').textContent).not.toContain('Old chapter');
+    expect(screen.getByTestId('inspector-excerpt-source')).toHaveTextContent('revised');
+    expect(
+      screen.getByRole('button', { name: 'Jump to source of Old chapter (revised)' }),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Jump to this excerpt (revised)' })).toBeVisible();
   });
 });
 

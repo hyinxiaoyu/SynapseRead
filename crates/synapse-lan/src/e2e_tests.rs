@@ -2610,7 +2610,7 @@ async fn e2e_relink_after_preview_and_mid_execute_blocks_position_and_bookmarks(
     .expect("plan A");
 
     {
-        let db = receiver.db.lock().expect("lock");
+        let mut db = receiver.db.lock().expect("lock");
         let relinked = db
             .relink_document(&dst_doc.id, &dst_txt_v2)
             .expect("relink to v2");
@@ -2661,7 +2661,7 @@ async fn e2e_relink_after_preview_and_mid_execute_blocks_position_and_bookmarks(
     // --- Path B: relink in the race window BETWEEN verify_document_file and DB writes ---
     {
         // Restore v1 so preview and file verification both succeed cleanly.
-        let db = receiver.db.lock().expect("lock");
+        let mut db = receiver.db.lock().expect("lock");
         db.relink_document(&dst_doc.id, &dst_txt_v1)
             .expect("relink back to v1");
     }
@@ -2681,7 +2681,7 @@ async fn e2e_relink_after_preview_and_mid_execute_blocks_position_and_bookmarks(
     let v2_for_hook = dst_txt_v2.clone();
     let hooks = ExecuteTestHooks {
         before_metadata_writes: Some(Arc::new(move |_book_id, doc_id| {
-            let db = db_for_hook.lock().expect("lock");
+            let mut db = db_for_hook.lock().expect("lock");
             db.relink_document(doc_id, &v2_for_hook)
                 .expect("mid-execute relink to v2");
         })),

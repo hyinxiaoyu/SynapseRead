@@ -22,6 +22,7 @@ export type {
   MemoryLanTestController,
 };
 import { formatForPath } from '@/lib/documentFormats';
+import { MAX_LOCATION_LABEL_CHARS } from '@/lib/sourceAttribution';
 import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
 import sampleCodeEpubUrl from '../../../../../fixtures/documents/sample-code.epub?url&no-inline';
 import sampleLabelsPdfUrl from '../../../../../fixtures/documents/sample-labels.pdf?url&no-inline';
@@ -67,7 +68,6 @@ export type MemoryFile = Uint8Array | (() => Promise<Uint8Array>);
 /** The PNG signature, in base64. */
 const PNG_BASE64_PREFIX = 'iVBORw0KGgo';
 const MAX_DISPLAY_TITLE_CHARS = 512;
-const MAX_LOCATION_LABEL_CHARS = 160;
 const CARD_TITLE_MAX_CHARS = 80;
 
 function isControlOrBidiChar(ch: string): boolean {
@@ -626,6 +626,22 @@ export function createMemoryBackendWithPreview({
         displayTitle: contentChanged ? null : (existing.displayTitle ?? null),
       };
       documents.set(documentId, updated);
+      if (contentChanged) {
+        // Clear stale location labels for this document, including soft-deleted rows (#125).
+        for (const [id, ann] of annotations) {
+          if (ann.documentId === documentId) {
+            annotations.set(id, { ...ann, locationLabel: null });
+          }
+        }
+        for (const [id, entry] of deletedAnnotations) {
+          if (entry.annotation.documentId === documentId) {
+            deletedAnnotations.set(id, {
+              ...entry,
+              annotation: { ...entry.annotation, locationLabel: null },
+            });
+          }
+        }
+      }
       return {
         document: updated,
         contentChanged,

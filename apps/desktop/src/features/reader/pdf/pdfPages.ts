@@ -44,6 +44,44 @@ export function pageLabelOf(labels: readonly string[] | null, pageIndex: number)
   return labels?.[pageIndex] ?? String(pageIndex + 1);
 }
 
+/** Whether `label` appears on more than one page in `labels`. */
+function isDuplicatePageLabel(labels: readonly string[] | null, label: string): boolean {
+  if (!labels) return false;
+  let count = 0;
+  for (const candidate of labels) {
+    if (candidate === label) {
+      count += 1;
+      if (count > 1) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Formats one page endpoint for location labels, appending the reader's `#n` physical
+ * page number whenever the printed label is shared by multiple pages (#125).
+ */
+export function formatPdfPageEndpoint(labels: readonly string[] | null, pageIndex: number): string {
+  const label = pageLabelOf(labels, pageIndex);
+  return isDuplicatePageLabel(labels, label) ? `${label} (#${pageIndex + 1})` : label;
+}
+
+/**
+ * Formats a single-page or cross-page PDF location (`p. …` or `pp. …–…`).
+ * Uses physical page indices to decide single vs. multi-page so duplicate printed labels
+ * never collapse a cross-page selection into one page (#125).
+ */
+export function formatPdfPageRange(
+  labels: readonly string[] | null,
+  firstPageIndex: number,
+  lastPageIndex: number,
+): string {
+  const first = formatPdfPageEndpoint(labels, firstPageIndex);
+  if (firstPageIndex === lastPageIndex) return `p. ${first}`;
+  const last = formatPdfPageEndpoint(labels, lastPageIndex);
+  return `pp. ${first}–${last}`;
+}
+
 /** `#5` or `(5)`: the physical page, whatever the printed labels say. */
 const PHYSICAL_PAGE = /^(?:#\s*(\d+)|\(\s*(\d+)\s*\))$/;
 

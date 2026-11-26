@@ -1320,6 +1320,18 @@ export function createStudySyncStore(backend: StudyBackend) {
                   ? result.document
                   : { ...result.document, ...pickRecentFields(doc) };
               }),
+              ...(result.contentChanged
+                ? {
+                    annotations: state.annotations.map((ann) =>
+                      ann.documentId === documentId ? { ...ann, locationLabel: null } : ann,
+                    ),
+                    deletedAnnotationHistory: state.deletedAnnotationHistory.map((entry) =>
+                      entry.annotation.documentId === documentId
+                        ? { ...entry, annotation: { ...entry.annotation, locationLabel: null } }
+                        : entry,
+                    ),
+                  }
+                : {}),
               documentSourceStatuses: {
                 ...state.documentSourceStatuses,
                 [documentId]: {

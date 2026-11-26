@@ -456,10 +456,11 @@ impl Database {
     /// bookmarks, and MindMap cards attached.
     ///
     /// Rejects format changes and hash collisions with another registered document.
-    /// When `file_hash` changes, `last_cursor_anchor` is cleared so stale offsets
-    /// are never silently applied on reopen.
+    /// When `file_hash` changes, `last_cursor_anchor`, `last_progress`, `display_title`,
+    /// and existing annotations' `location_label` (including soft-deleted rows) are
+    /// cleared atomically so stale positions are never attributed to the new edition.
     pub fn relink_document(
-        &self,
+        &mut self,
         document_id: &str,
         new_path: &Path,
     ) -> CoreResult<RelinkDocumentResult> {
@@ -467,7 +468,10 @@ impl Database {
         let new_hash = hash_document_for_relink(existing.format, new_path)?;
         let _publish_lease = self.acquire_publish_shared_lock()?;
         ensure_existing_regular_file(new_path)?;
-        relink_document_in_conn(&self.conn, document_id, new_path, &new_hash)
+        let tx = self.conn.transaction()?;
+        let result = relink_document_in_conn(&tx, document_id, new_path, &new_hash)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     /// Commits a document relink inside a transaction using a `new_hash` computed
@@ -2139,15 +2143,15 @@ fn insert_imported_document_row(
 }
 
 fn relink_document_in_conn(
-    conn: &Connection,
+    tx: &Transaction<'_>,
     document_id: &str,
     new_path: &Path,
     new_hash: &str,
 ) -> CoreResult<RelinkDocumentResult> {
-    let existing = get_document_in_conn(conn, document_id)?;
+    let existing = get_document_in_conn(tx, document_id)?;
     let _format = validate_relink_format(existing.format, new_path)?;
 
-    let duplicate_id: Option<String> = conn
+    let duplicate_id: Option<String> = tx
         .query_row(
             "SELECT id FROM documents WHERE file_hash = ?1 AND id != ?2",
             params![new_hash, document_id],
@@ -2168,7 +2172,7 @@ fn relink_document_in_conn(
         .unwrap_or_else(|| file_path.clone().into_owned());
 
     if content_changed {
-        conn.execute(
+        tx.execute(
             "UPDATE documents SET
                  title = ?2,
                  file_path = ?3,
@@ -2181,8 +2185,14 @@ fn relink_document_in_conn(
              WHERE id = ?1",
             params![document_id, title, file_path, new_hash],
         )?;
+        // Old chapter/page/line labels no longer describe the revised file, including
+        // soft-deleted annotations that can still be restored via Undo (#125).
+        tx.execute(
+            "UPDATE annotations SET location_label = NULL WHERE document_id = ?1",
+            params![document_id],
+        )?;
     } else {
-        conn.execute(
+        tx.execute(
             "UPDATE documents SET
                  title = ?2,
                  file_path = ?3,
@@ -2194,7 +2204,7 @@ fn relink_document_in_conn(
     }
 
     Ok(RelinkDocumentResult {
-        document: get_document_in_conn(conn, document_id)?,
+        document: get_document_in_conn(tx, document_id)?,
         content_changed,
         previous_file_hash: existing.file_hash,
     })
@@ -2932,7 +2942,7 @@ mod tests {
     #[test]
     fn markdown_document_relinks_to_another_text_file() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Database::open_in_memory().unwrap();
+        let mut db = Database::open_in_memory().unwrap();
         let original = dir.path().join("notes.md");
         std::fs::write(&original, "# Notes\n").unwrap();
         let document = db.register_document(&original).unwrap();
@@ -6087,7 +6097,7 @@ mod tests {
         };
 
         // Flag persists across database reopen and study records remain intact.
-        let reopened = Database::open(&db_path).unwrap();
+        let mut reopened = Database::open(&db_path).unwrap();
         let docs = reopened.list_documents().unwrap();
         assert_eq!(docs.len(), 1);
         assert!(docs[0].hidden_from_recent_at.is_some());
@@ -6192,7 +6202,7 @@ mod tests {
             (doc.id, doc.file_hash)
         };
 
-        let reopened = Database::open(&db_path).unwrap();
+        let mut reopened = Database::open(&db_path).unwrap();
         let loaded = reopened.get_document(&doc_id).unwrap();
         assert_eq!(loaded.title, "pg1342-images-3");
         assert_eq!(loaded.display_title.as_deref(), Some("Pride and Prejudice"));
@@ -6385,5 +6395,158 @@ mod tests {
             .restore_annotation(&capture_with_label.annotation.id)
             .unwrap();
         assert_eq!(restored.annotation.location_label.as_deref(), Some("p. 12"));
+    }
+
+    #[test]
+    fn relink_clears_annotation_location_labels_only_when_content_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("relink-locations.sqlite3");
+        let original = dir.path().join("original.txt");
+        let other = dir.path().join("other.txt");
+        std::fs::write(&original, "Old chapter\nLine one\nLine two\n").unwrap();
+        std::fs::write(&other, "Unrelated book content\n").unwrap();
+
+        let (doc_id, nb_id, active_id, deleted_id, other_ann_id) = {
+            let mut db = Database::open(&db_path).unwrap();
+            let doc = db.register_document(&original).unwrap();
+            let other_doc = db.register_document(&other).unwrap();
+            let nb = db.create_notebook("Study").unwrap();
+
+            let active = db
+                .create_excerpt(&CreateExcerptInput {
+                    document_id: doc.id.clone(),
+                    notebook_id: nb.id.clone(),
+                    anchor: txt_anchor(),
+                    excerpt_text: Some("Old chapter".to_owned()),
+                    excerpt_image_png: None,
+                    color: "#fde047".to_owned(),
+                    parent_node_id: None,
+                    pos_x: 0.0,
+                    pos_y: 0.0,
+                    location_label: Some("Old chapter · Line 1".to_owned()),
+                })
+                .unwrap();
+            let to_delete = db
+                .create_excerpt(&CreateExcerptInput {
+                    document_id: doc.id.clone(),
+                    notebook_id: nb.id.clone(),
+                    anchor: txt_anchor(),
+                    excerpt_text: Some("Line one".to_owned()),
+                    excerpt_image_png: None,
+                    color: "#fde047".to_owned(),
+                    parent_node_id: None,
+                    pos_x: 10.0,
+                    pos_y: 20.0,
+                    location_label: Some("Old chapter · Line 2".to_owned()),
+                })
+                .unwrap();
+            let other_excerpt = db
+                .create_excerpt(&CreateExcerptInput {
+                    document_id: other_doc.id.clone(),
+                    notebook_id: nb.id.clone(),
+                    anchor: txt_anchor(),
+                    excerpt_text: Some("Unrelated".to_owned()),
+                    excerpt_image_png: None,
+                    color: "#fde047".to_owned(),
+                    parent_node_id: None,
+                    pos_x: 30.0,
+                    pos_y: 40.0,
+                    location_label: Some("Other · Line 1".to_owned()),
+                })
+                .unwrap();
+
+            // Soft-delete one annotation before relinking.
+            db.delete_annotation(&to_delete.annotation.id).unwrap();
+
+            // 1. Same-hash rename preserves location_label on active and soft-deleted rows.
+            let renamed = dir.path().join("renamed.txt");
+            std::fs::rename(&original, &renamed).unwrap();
+            let same_hash = db.relink_document(&doc.id, &renamed).unwrap();
+            assert!(!same_hash.content_changed);
+            let after_rename = db.load_notebook_graph(&nb.id).unwrap();
+            assert_eq!(
+                after_rename
+                    .annotations
+                    .iter()
+                    .find(|a| a.id == active.annotation.id)
+                    .unwrap()
+                    .location_label
+                    .as_deref(),
+                Some("Old chapter · Line 1")
+            );
+
+            // 2. Content-changing relink clears location_label for this document (including soft-deleted),
+            //    leaving unrelated documents untouched.
+            let revised = dir.path().join("revised.txt");
+            std::fs::write(&revised, "Completely rewritten edition.\n").unwrap();
+            let changed = db.relink_document(&doc.id, &revised).unwrap();
+            assert!(changed.content_changed);
+
+            let after_change = db.load_notebook_graph(&nb.id).unwrap();
+            assert_eq!(
+                after_change
+                    .annotations
+                    .iter()
+                    .find(|a| a.id == active.annotation.id)
+                    .unwrap()
+                    .location_label,
+                None
+            );
+            assert_eq!(
+                after_change
+                    .annotations
+                    .iter()
+                    .find(|a| a.id == other_excerpt.annotation.id)
+                    .unwrap()
+                    .location_label
+                    .as_deref(),
+                Some("Other · Line 1")
+            );
+
+            // Restoring the soft-deleted annotation after content-changing relink returns None.
+            let restored = db.restore_annotation(&to_delete.annotation.id).unwrap();
+            assert_eq!(restored.annotation.location_label, None);
+
+            (
+                doc.id,
+                nb.id,
+                active.annotation.id,
+                to_delete.annotation.id,
+                other_excerpt.annotation.id,
+            )
+        };
+
+        // 3. Reopening the database preserves the cleared labels and the unrelated doc's label.
+        let reopened = Database::open(&db_path).unwrap();
+        assert_eq!(reopened.get_document(&doc_id).unwrap().title, "revised");
+        let graph = reopened.load_notebook_graph(&nb_id).unwrap();
+        assert_eq!(
+            graph
+                .annotations
+                .iter()
+                .find(|a| a.id == active_id)
+                .unwrap()
+                .location_label,
+            None
+        );
+        assert_eq!(
+            graph
+                .annotations
+                .iter()
+                .find(|a| a.id == deleted_id)
+                .unwrap()
+                .location_label,
+            None
+        );
+        assert_eq!(
+            graph
+                .annotations
+                .iter()
+                .find(|a| a.id == other_ann_id)
+                .unwrap()
+                .location_label
+                .as_deref(),
+            Some("Other · Line 1")
+        );
     }
 }

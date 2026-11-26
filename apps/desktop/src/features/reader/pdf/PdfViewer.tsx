@@ -76,6 +76,7 @@ import type { OutlineNode } from '@/features/reader/navigator/OutlineTree';
 import { useNavigator } from '@/features/reader/navigator/useNavigator';
 import { PULSE_MS } from '@/features/reader/pulse';
 import { documentDisplayName } from '@/lib/documentTitles';
+import { formatLocationWithSuffix } from '@/lib/sourceAttribution';
 import {
   HistoryButtons,
   ReaderToolbar,
@@ -152,6 +153,7 @@ import {
 } from './pdfGeometry';
 import { isNoteMarker, linkLabel, textNearDestination } from './pdfLinkPeek';
 import {
+  formatPdfPageRange,
   normalizePageLabels,
   pageLabelOf,
   pagesInSpread,
@@ -350,14 +352,9 @@ function formatPdfLocationLabel(
   pageLabels: readonly string[] | null,
   outlineNodes: readonly OutlineNode<number>[],
 ): string {
-  const firstLabel = pageLabelOf(pageLabels, firstPageIndex);
-  const lastLabel = pageLabelOf(pageLabels, lastPageIndex);
-  const pagePart =
-    firstPageIndex !== lastPageIndex && firstLabel !== lastLabel
-      ? `pp. ${firstLabel}–${lastLabel}`
-      : `p. ${firstLabel}`;
-  const chapter = chapterOfPage(outlineNodes, firstPageIndex)?.trim();
-  return chapter ? `${chapter} · ${pagePart}` : pagePart;
+  const pagePart = formatPdfPageRange(pageLabels, firstPageIndex, lastPageIndex);
+  const chapter = chapterOfPage(outlineNodes, firstPageIndex);
+  return formatLocationWithSuffix(chapter, pagePart);
 }
 
 const DISPLAY_MODES: readonly SegmentedOption<PdfDisplayMode>[] = [

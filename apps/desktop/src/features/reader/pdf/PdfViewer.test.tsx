@@ -1,8 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { type NodeProps, ReactFlowProvider } from '@xyflow/react';
 import { useMemo } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
+import { InspectorPane } from '@/features/inspector/InspectorPane';
+import { type CardFlowNode, CardNode } from '@/features/mindmap/CardNode';
 import { SEARCH_HIGHLIGHT_ID } from '@/features/reader/DocumentSearch';
 import { PAGE_TURN_ANIMATION_ID, SCRUB_IDLE_MS } from '@/features/reader/paging/pageTurn';
 import { PULSE_MS } from '@/features/reader/pulse';
@@ -13,6 +16,7 @@ import {
   selectBookmarks,
   selectDocumentAnnotations,
   selectHighlights,
+  useStudySyncStore,
 } from '@/stores/useStudySyncStore';
 import {
   DEFAULT_READING_PREFERENCES,
@@ -3159,7 +3163,7 @@ describe('PdfViewer', () => {
   });
 
   describe('selection locationLabel (#125)', () => {
-    it('publishes outline chapter and printed page label for text selections and captures', async () => {
+    it('publishes outline chapter and printed page label for text selections and persists Roman numeral ranges', async () => {
       engineState.pageLabels = ['i', 'ii', '1', '2', '3'];
       engineState.outline = [
         { id: 'o-1', title: 'Preface', pageIndex: 0, children: [] },
@@ -3178,10 +3182,126 @@ describe('PdfViewer', () => {
       select([node0, 0], [node0, 5]);
       expect(store.getState().selection?.locationLabel).toBe('Preface · p. i');
 
-      // Cross-page selection spans printed page labels.
+      // Cross-page Roman numeral range persists accurately.
       const node1 = textNode(page1, 0);
       select([node0, 0], [node1, 5]);
       expect(store.getState().selection?.locationLabel).toBe('Preface · pp. i–ii');
+      await act(() => store.getState().excerptSelection());
+      expect(store.getState().annotations[0]?.locationLabel).toBe('Preface · pp. i–ii');
+    });
+
+    it('disambiguates duplicate printed page labels with #n for single-page and cross-page excerpts', async () => {
+      engineState.pageLabels = ['A', 'A', 'B', 'C', 'D'];
+      engineState.outline = [];
+      const { store, documentId } = await setup();
+      render(<Harness store={store} documentId={documentId} />);
+      const page0 = await pageElement(0);
+      const page1 = await pageElement(1);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Page number')).toHaveValue('A');
+      });
+
+      // Single-page excerpt on a duplicated printed label includes `#1`.
+      const node0 = textNode(page0, 0);
+      select([node0, 0], [node0, 5]);
+      expect(store.getState().selection?.locationLabel).toBe('p. A (#1)');
+      await act(() => store.getState().excerptSelection());
+      expect(store.getState().annotations[0]?.locationLabel).toBe('p. A (#1)');
+
+      // Cross-page excerpt from first A to second A stays a range (`pp. A (#1)–A (#2)`), never `p. A`.
+      const node1 = textNode(page1, 0);
+      select([node0, 0], [node1, 5]);
+      const crossAnchor = store.getState().selection?.anchor as PdfAnchor;
+      expect(crossAnchor.pageSpans).toHaveLength(2);
+      expect(store.getState().selection?.locationLabel).toBe('pp. A (#1)–A (#2)');
+      await act(() => store.getState().excerptSelection());
+      expect(store.getState().annotations[1]?.locationLabel).toBe('pp. A (#1)–A (#2)');
+    });
+
+    it('preserves full page numbers in persisted labels, Inspector, and jump labels under a 170-char outline title', async () => {
+      const longTitle = '汉'.repeat(170);
+      engineState.pageLabels = ['i', 'ii', '1', '2', '3'];
+      engineState.outline = [{ id: 'o-long', title: longTitle, pageIndex: 0, children: [] }];
+      const { store, documentId } = await setup();
+      const viewer = render(<Harness store={store} documentId={documentId} />);
+      const page0 = await pageElement(0);
+      const page1 = await pageElement(1);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Page number')).toHaveValue('i');
+      });
+
+      // 1. Single-page text excerpt on printed page `i`.
+      const node0 = textNode(page0, 0);
+      select([node0, 0], [node0, 5]);
+      await act(() => store.getState().excerptSelection());
+      const singleAnn = store.getState().annotations[0]!;
+      expect(Array.from(singleAnn.locationLabel ?? '').length).toBeLessThanOrEqual(160);
+      expect(singleAnn.locationLabel?.endsWith('… · p. i')).toBe(true);
+
+      // 2. Cross-page text excerpt across `i`–`ii`.
+      const node1 = textNode(page1, 0);
+      select([node0, 0], [node1, 5]);
+      await act(() => store.getState().excerptSelection());
+      const crossAnn = store.getState().annotations[1]!;
+      expect(Array.from(crossAnn.locationLabel ?? '').length).toBeLessThanOrEqual(160);
+      expect(crossAnn.locationLabel?.endsWith('… · pp. i–ii')).toBe(true);
+
+      // 3. Area capture on printed page `i`.
+      fireEvent.click(screen.getByRole('button', { name: 'Capture area' }));
+      const surface = screen.getAllByTestId('pdf-capture-surface')[0] as HTMLElement;
+      surface.getBoundingClientRect = () =>
+        ({ left: 100, top: 200, width: 400, height: 600 }) as DOMRect;
+      fireEvent.pointerDown(surface, { clientX: 140, clientY: 260, pointerId: 1 });
+      fireEvent.pointerMove(surface, { clientX: 300, clientY: 500, pointerId: 1 });
+      fireEvent.pointerUp(surface, { clientX: 300, clientY: 500, pointerId: 1 });
+      await act(() => store.getState().excerptSelection());
+      const captureAnn = store.getState().annotations[2]!;
+      expect(Array.from(captureAnn.locationLabel ?? '').length).toBeLessThanOrEqual(160);
+      expect(captureAnn.locationLabel?.endsWith('… · p. i')).toBe(true);
+      viewer.unmount();
+
+      // Verify CardNode, InspectorPane, and both jump buttons preserve the full page suffix.
+      const prevGlobal = useStudySyncStore.getState();
+      try {
+        for (const [index, expectedSuffix] of [
+          [0, '· p. i'],
+          [1, '· pp. i–ii'],
+          [2, '· p. i'],
+        ] as const) {
+          const node = store.getState().nodes[index]!;
+          useStudySyncStore.setState({
+            documents: store.getState().documents,
+            annotations: store.getState().annotations,
+            cards: store.getState().cards,
+            nodes: store.getState().nodes,
+            selectedNodeId: node.id,
+          });
+          const cardProps = {
+            id: node.id,
+            data: { cardId: node.cardId },
+            selected: false,
+          } as NodeProps<CardFlowNode>;
+          const view = render(
+            <ReactFlowProvider>
+              <CardNode {...cardProps} />
+              <InspectorPane open />
+            </ReactFlowProvider>,
+          );
+          expect(screen.getByTestId('card-source-attribution').textContent).toContain(
+            expectedSuffix,
+          );
+          expect(screen.getByTestId('inspector-excerpt-source').textContent).toContain(
+            expectedSuffix,
+          );
+          const cardJump = screen.getByRole('button', { name: /^Jump to source of / });
+          const inspectorJump = screen.getByRole('button', { name: /^Jump to this excerpt / });
+          expect(cardJump.getAttribute('aria-label')).toContain(expectedSuffix);
+          expect(inspectorJump.getAttribute('aria-label')).toContain(expectedSuffix);
+          view.unmount();
+        }
+      } finally {
+        useStudySyncStore.setState(prevGlobal, true);
+      }
     });
   });
 });

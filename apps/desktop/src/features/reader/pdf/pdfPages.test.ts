@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  formatPdfPageEndpoint,
+  formatPdfPageRange,
   normalizePageLabels,
   pageLabelOf,
   pagesInSpread,
@@ -100,5 +102,22 @@ describe('page labels', () => {
       expect(resolvePageInput(input, labels, 6)).toBeNull();
     }
     expect(resolvePageInput('0', null, 6)).toBeNull();
+  });
+
+  it('formats single and cross-page ranges, disambiguating duplicate printed labels (#125)', () => {
+    // Normal Roman numeral labels stay concise without physical page suffixes.
+    expect(formatPdfPageEndpoint(labels, 0)).toBe('i');
+    expect(formatPdfPageRange(labels, 0, 0)).toBe('p. i');
+    expect(formatPdfPageRange(labels, 0, 1)).toBe('pp. i–ii');
+    expect(formatPdfPageRange(null, 0, 2)).toBe('pp. 1–3');
+
+    // Duplicate printed labels ("A, A, B, C, D") disambiguate matching endpoints with `#n`
+    // and never collapse a cross-page selection into a single page.
+    const dup = normalizePageLabels(['A', 'A', 'B', 'C', 'D'], 5);
+    expect(formatPdfPageRange(dup, 0, 0)).toBe('p. A (#1)');
+    expect(formatPdfPageRange(dup, 1, 1)).toBe('p. A (#2)');
+    expect(formatPdfPageRange(dup, 2, 2)).toBe('p. B');
+    expect(formatPdfPageRange(dup, 0, 1)).toBe('pp. A (#1)–A (#2)');
+    expect(formatPdfPageRange(dup, 0, 2)).toBe('pp. A (#1)–B');
   });
 });

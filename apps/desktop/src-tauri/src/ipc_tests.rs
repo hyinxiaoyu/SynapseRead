@@ -1337,6 +1337,39 @@ fn annotation_location_label_round_trips_and_names_capture_cards_over_ipc() {
             .iter()
             .any(|a| a["id"] == omitted["id"] && a["locationLabel"] == Value::Null)
     );
+
+    // Content-changing relink over IPC clears locationLabel for active and soft-deleted annotations.
+    h.ok(
+        "delete_annotation",
+        json!({ "annotationId": annotated["id"] }),
+    );
+    std::fs::write(h.dir.path().join("book.txt"), "completely revised text").unwrap();
+    let relinked = h.ok(
+        "relink_document",
+        json!({ "documentId": txt["id"], "confirmInPlace": true }),
+    );
+    assert_eq!(relinked["contentChanged"], true);
+
+    let after_relink = h.ok(
+        "load_notebook_graph",
+        json!({ "notebookId": notebook["id"] }),
+    );
+    let after_annotations = after_relink["annotations"].as_array().unwrap();
+    assert!(
+        after_annotations
+            .iter()
+            .any(|a| a["id"] == created["annotation"]["id"] && a["locationLabel"] == Value::Null)
+    );
+    assert!(
+        after_annotations.iter().any(
+            |a| a["id"] == capture["annotation"]["id"] && a["locationLabel"] == "Ch. 3 · p. 12"
+        )
+    );
+    let restored = h.ok(
+        "restore_annotation",
+        json!({ "annotationId": annotated["id"] }),
+    );
+    assert_eq!(restored["annotation"]["locationLabel"], Value::Null);
 }
 
 #[test]

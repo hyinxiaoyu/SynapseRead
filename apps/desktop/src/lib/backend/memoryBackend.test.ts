@@ -1539,4 +1539,63 @@ describe('memory backend card delete and restore', () => {
     expect(Array.from(truncated.locationLabel ?? '')).toHaveLength(160);
     expect(truncated.locationLabel?.endsWith('…')).toBe(true);
   });
+
+  it('preserves annotation locationLabel on same-hash relink and clears active + soft-deleted labels on content-changed relink (#125)', async () => {
+    const originalBytes = new TextEncoder().encode('Old chapter\nLine 1\nLine 2\n');
+    const revisedBytes = new TextEncoder().encode('Completely revised text.\n');
+    const backend = createMemoryBackend({
+      library: {
+        '/books/original.txt': originalBytes,
+        '/books/renamed.txt': originalBytes,
+        '/books/revised.txt': revisedBytes,
+      },
+    });
+    const doc = (await backend.pickDocument())!;
+    const nb = await backend.createNotebook('Study');
+    const active = await backend.createExcerpt({
+      documentId: doc.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+      excerptText: 'Old chapter',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 0,
+      posY: 0,
+      locationLabel: 'Old chapter · Line 1',
+    });
+    const toDelete = await backend.createExcerpt({
+      documentId: doc.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 12, endByteOffset: 18, lineIndex: 1 },
+      excerptText: 'Line 1',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 10,
+      posY: 20,
+      locationLabel: 'Old chapter · Line 2',
+    });
+    await backend.deleteAnnotation(toDelete.annotation.id);
+
+    // Same-hash rename preserves locationLabel.
+    const sameHash = (await backend.relinkDocument(doc.id))!;
+    expect(sameHash.contentChanged).toBe(false);
+    expect(sameHash.document.title).toBe('renamed');
+    const afterRename = await backend.loadNotebookGraph(nb.id);
+    expect(afterRename.annotations.find((a) => a.id === active.annotation.id)?.locationLabel).toBe(
+      'Old chapter · Line 1',
+    );
+
+    // Content-changing relink clears both active and soft-deleted locationLabel values.
+    const changed = (await backend.relinkDocument(doc.id))!;
+    expect(changed.contentChanged).toBe(true);
+    expect(changed.document.title).toBe('revised');
+    const afterChange = await backend.loadNotebookGraph(nb.id);
+    expect(
+      afterChange.annotations.find((a) => a.id === active.annotation.id)?.locationLabel,
+    ).toBeNull();
+    const restored = await backend.restoreAnnotation(toDelete.annotation.id);
+    expect(restored.annotation.locationLabel).toBeNull();
+  });
 });
