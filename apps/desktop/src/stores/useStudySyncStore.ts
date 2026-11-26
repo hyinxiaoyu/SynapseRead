@@ -1157,12 +1157,40 @@ export function createStudySyncStore(backend: StudyBackend) {
         const lockEpoch = getDocumentLockEpoch(documentId);
         const refreshSeq = nextDocumentRefreshSeq(documentId);
         const op = beginRecentOp(documentId);
+        const syncTouchedRecentFields = (touched: StudyDocument) => {
+          if (!op.isUncontested()) {
+            op.markOverlapIfNeeded();
+            return;
+          }
+          set((state) => ({
+            documents: state.documents.map((doc) =>
+              doc.id === documentId ? { ...doc, ...pickRecentFields(touched) } : doc,
+            ),
+          }));
+        };
         try {
           await guarded(async () => {
-            const [touched, status] = await Promise.all([
+            // Let both promises settle so an early verification failure never ends the Recent
+            // operation before an in-flight `touchDocumentOpened` finishes committing.
+            const [touchResult, statusResult] = await Promise.allSettled([
               backend.touchDocumentOpened(documentId),
               backend.verifyDocumentSource(documentId),
             ]);
+            if (touchResult.status === 'rejected') {
+              throw touchResult.reason;
+            }
+            const touched = touchResult.value;
+            if (statusResult.status === 'rejected') {
+              if (!isDocumentLocked(documentId)) {
+                if (getDocumentLockEpoch(documentId) === lockEpoch) {
+                  syncTouchedRecentFields(touched);
+                } else {
+                  recentNeedsReconcile.add(documentId);
+                }
+              }
+              throw statusResult.reason;
+            }
+            const status = statusResult.value;
             // A close-and-apply lock or newer open/drop/refresh may have occurred
             // while awaiting backend I/O, invalidating this snapshot.
             if (

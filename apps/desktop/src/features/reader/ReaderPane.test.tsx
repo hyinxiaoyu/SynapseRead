@@ -822,6 +822,222 @@ describe('ReaderPane tab commands', () => {
     hideFailSpy3.mockRestore();
   });
 
+  it('syncs Recent state when reopenRecentDocument fails source verification in either completion order (#126)', async () => {
+    const progressAnchor: AnchorLocation = {
+      format: 'txt',
+      startByteOffset: 0,
+      endByteOffset: 4,
+      lineIndex: 0,
+    };
+
+    const assertListsAndBackend = async (
+      docId: string,
+      expectedVisible: boolean,
+      expectedProgress: number | null,
+    ) => {
+      const emptyIds = [
+        ...screen
+          .getByTestId('empty-state-recent-documents')
+          .querySelectorAll('[data-testid="recent-document-item"]'),
+      ].map((el) => el.getAttribute('data-document-id'));
+      expect(emptyIds.includes(docId)).toBe(expectedVisible);
+
+      fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+      const menu = screen.getByTestId('recent-documents-menu');
+      const popoverIds = [...menu.querySelectorAll('[data-testid="recent-document-item"]')].map(
+        (el) => el.getAttribute('data-document-id'),
+      );
+      expect(popoverIds.includes(docId)).toBe(expectedVisible);
+      fireEvent.click(screen.getByTestId('recent-documents-toggle'));
+
+      const storeDoc = useStudySyncStore.getState().documents.find((d) => d.id === docId)!;
+      expect(storeDoc.lastProgress ?? null).toBe(expectedProgress);
+      const backendDoc = (await backendHolder.current!.listDocuments()).find(
+        (d) => d.id === docId,
+      )!;
+      expect(backendDoc.lastProgress ?? null).toBe(expectedProgress);
+      expect(
+        backendDoc.hiddenFromRecentAt !== null && backendDoc.hiddenFromRecentAt !== undefined,
+      ).toBe(!expectedVisible);
+    };
+
+    // 1. Verify fails before pending touchDocumentOpened commits, with concurrent hide in between.
+    await openDocuments(['verify-order1-keep.txt', 'verify-order1-target.txt']);
+    const store = useStudySyncStore.getState;
+    const [, target1] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const backend = backendHolder.current!;
+    const origTouch1 = backend.touchDocumentOpened.bind(backend);
+    let releaseTouch1!: () => void;
+    const touchGate1 = new Promise<void>((resolve) => {
+      releaseTouch1 = resolve;
+    });
+    const touchSpy1 = vi
+      .spyOn(backend, 'touchDocumentOpened')
+      .mockImplementationOnce(async (id) => {
+        await touchGate1;
+        return origTouch1(id);
+      });
+    let releaseVerify1!: () => void;
+    const verifyGate1 = new Promise<void>((resolve) => {
+      releaseVerify1 = resolve;
+    });
+    const verifySpy1 = vi
+      .spyOn(backend, 'verifyDocumentSource')
+      .mockImplementationOnce(async () => {
+        await verifyGate1;
+        throw new Error('source unreadable');
+      });
+
+    const view1 = render(<ReaderPane />);
+    let reopenPromise1!: Promise<void>;
+    act(() => {
+      reopenPromise1 = store().reopenRecentDocument(target1);
+    });
+    await waitFor(() => {
+      expect(touchSpy1).toHaveBeenCalledWith(target1);
+      expect(verifySpy1).toHaveBeenCalledWith(target1);
+    });
+
+    await act(async () => {
+      await store().hideRecentDocument(target1);
+    });
+    act(() => {
+      store().reportCursor(target1, progressAnchor, 0.5);
+    });
+    await act(async () => {
+      await store().flushCursorWrites(target1);
+    });
+
+    // Reject verification while touchDocumentOpened is still pending, then let touch commit.
+    releaseVerify1();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    releaseTouch1();
+    await act(async () => {
+      await reopenPromise1;
+    });
+
+    expect(store().error).toContain('source unreadable');
+    expect(store().openDocumentIds).not.toContain(target1);
+    await assertListsAndBackend(target1, true, 0.5);
+    touchSpy1.mockRestore();
+    verifySpy1.mockRestore();
+    view1.unmount();
+
+    // 2a. touchDocumentOpened commits first on a hidden doc (no overlap), then verification fails.
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    useStudySyncStore.setState(initialState, true);
+    await openDocuments(['verify-order2a-keep.txt', 'verify-order2a-target.txt']);
+    const [, target2a] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    await act(async () => {
+      await store().hideRecentDocument(target2a);
+    });
+    act(() => {
+      store().reportCursor(target2a, progressAnchor, 0.5);
+    });
+    await act(async () => {
+      await store().flushCursorWrites(target2a);
+    });
+
+    const origTouch2a = backend.touchDocumentOpened.bind(backend);
+    let touchCommitted2a = false;
+    const touchSpy2a = vi
+      .spyOn(backend, 'touchDocumentOpened')
+      .mockImplementationOnce(async (id) => {
+        const updated = await origTouch2a(id);
+        touchCommitted2a = true;
+        return updated;
+      });
+    let releaseVerify2a!: () => void;
+    const verifyGate2a = new Promise<void>((resolve) => {
+      releaseVerify2a = resolve;
+    });
+    const verifySpy2a = vi
+      .spyOn(backend, 'verifyDocumentSource')
+      .mockImplementationOnce(async () => {
+        await verifyGate2a;
+        throw new Error('verify failed after touch');
+      });
+
+    const view2a = render(<ReaderPane />);
+    let reopenPromise2a!: Promise<void>;
+    act(() => {
+      reopenPromise2a = store().reopenRecentDocument(target2a);
+    });
+    await waitFor(() => expect(touchCommitted2a).toBe(true));
+
+    releaseVerify2a();
+    await act(async () => {
+      await reopenPromise2a;
+    });
+
+    expect(store().error).toContain('verify failed after touch');
+    expect(store().openDocumentIds).not.toContain(target2a);
+    await assertListsAndBackend(target2a, true, 0.5);
+    touchSpy2a.mockRestore();
+    verifySpy2a.mockRestore();
+    view2a.unmount();
+
+    // 2b. touchDocumentOpened commits first, concurrent hide commits second, then verification fails.
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+    useStudySyncStore.setState(initialState, true);
+    await openDocuments(['verify-order2b-keep.txt', 'verify-order2b-target.txt']);
+    const [, target2b] = store().openDocumentIds as [string, string];
+    for (const id of [...store().openDocumentIds]) act(() => store().closeDocument(id));
+
+    const origTouch2b = backend.touchDocumentOpened.bind(backend);
+    let touchCommitted2b = false;
+    const touchSpy2b = vi
+      .spyOn(backend, 'touchDocumentOpened')
+      .mockImplementationOnce(async (id) => {
+        const updated = await origTouch2b(id);
+        touchCommitted2b = true;
+        return updated;
+      });
+    let releaseVerify2b!: () => void;
+    const verifyGate2b = new Promise<void>((resolve) => {
+      releaseVerify2b = resolve;
+    });
+    const verifySpy2b = vi
+      .spyOn(backend, 'verifyDocumentSource')
+      .mockImplementationOnce(async () => {
+        await verifyGate2b;
+        throw new Error('verify failed after overlap');
+      });
+
+    render(<ReaderPane />);
+    let reopenPromise2b!: Promise<void>;
+    act(() => {
+      reopenPromise2b = store().reopenRecentDocument(target2b);
+    });
+    await waitFor(() => expect(touchCommitted2b).toBe(true));
+
+    await act(async () => {
+      await store().hideRecentDocument(target2b);
+    });
+    act(() => {
+      store().reportCursor(target2b, progressAnchor, 0.5);
+    });
+    await act(async () => {
+      await store().flushCursorWrites(target2b);
+    });
+
+    releaseVerify2b();
+    await act(async () => {
+      await reopenPromise2b;
+    });
+
+    expect(store().error).toContain('verify failed after overlap');
+    expect(store().openDocumentIds).not.toContain(target2b);
+    await assertListsAndBackend(target2b, false, 0.5);
+    touchSpy2b.mockRestore();
+    verifySpy2b.mockRestore();
+  });
+
   it('stacks workspace notices into the active viewer popover layer and follows tab switches', async () => {
     await openDocuments(['a.txt', 'b.txt']);
     const store = useStudySyncStore.getState;
