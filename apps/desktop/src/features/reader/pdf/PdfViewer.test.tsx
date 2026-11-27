@@ -42,6 +42,7 @@ const engineState = vi.hoisted(() => ({
   /** Holds back one page's annotations until the test resolves it. */
   pageAnnotationsGate: new Map<number, Promise<void>>(),
   pageLabels: null as string[] | null,
+  pageLabelsGate: null as (() => Promise<void>) | null,
   metadataTitle: null as string | null,
   /** Runs added to a page's text, such as a footnote marker. */
   extraRuns: new Map<number, PdfPageText['runs']>(),
@@ -60,7 +61,12 @@ vi.mock('./pdfEngine', () => ({
         return engineState.usesRealWorker;
       },
       getOutline: async () => engineState.outline,
-      getPageLabels: async () => engineState.pageLabels,
+      getPageLabels: async () => {
+        if (engineState.pageLabelsGate) {
+          await engineState.pageLabelsGate();
+        }
+        return engineState.pageLabels;
+      },
       getMetadataTitle: async () => engineState.metadataTitle,
       getPageAnnotations: async (pageIndex: number): Promise<PdfPageAnnotations> => {
         await engineState.pageAnnotationsGate.get(pageIndex);
@@ -244,6 +250,7 @@ describe('PdfViewer', () => {
     engineState.pageAnnotations = new Map();
     engineState.pageAnnotationsGate = new Map();
     engineState.pageLabels = null;
+    engineState.pageLabelsGate = null;
     engineState.metadataTitle = null;
     engineState.extraRuns = new Map();
     engineState.outline = [
@@ -3301,6 +3308,157 @@ describe('PdfViewer', () => {
         }
       } finally {
         useStudySyncStore.setState(prevGlobal, true);
+      }
+    });
+
+    it('refreshes a pending PDF capture when delayed pageLabels arrive, preserving PNG/rect and ignoring cancelled captures (#125)', async () => {
+      let releaseLabels!: () => void;
+      const labelsGate = new Promise<void>((resolve) => {
+        releaseLabels = resolve;
+      });
+      engineState.outline = [];
+      engineState.pageLabels = ['i', 'ii', '1', '2', '3'];
+      engineState.pageLabelsGate = () => labelsGate;
+
+      const { backend, store, documentId } = await setup();
+      const viewer = render(<Harness store={store} documentId={documentId} />);
+      await pageElement(0);
+
+      // Complete an area capture on physical page 1 BEFORE printed page labels resolve.
+      fireEvent.click(screen.getByRole('button', { name: 'Capture area' }));
+      const surface = screen.getAllByTestId('pdf-capture-surface')[0] as HTMLElement;
+      surface.getBoundingClientRect = () =>
+        ({ left: 100, top: 200, width: 400, height: 600 }) as DOMRect;
+      fireEvent.pointerDown(surface, { clientX: 140, clientY: 260, pointerId: 1 });
+      fireEvent.pointerMove(surface, { clientX: 300, clientY: 500, pointerId: 1 });
+      fireEvent.pointerUp(surface, { clientX: 300, clientY: 500, pointerId: 1 });
+
+      const initialSelection = store.getState().selection;
+      expect(initialSelection?.imagePng).toBe(PNG);
+      expect(initialSelection?.locationLabel).toBe('p. 1');
+
+      // Now printed page labels arrive (`['i', 'ii', '1', '2', '3']`): page input shows `i`
+      // and the pending capture refreshes to `p. i` while keeping the exact PNG and anchor.
+      await act(async () => {
+        releaseLabels();
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(screen.getByLabelText('Page number')).toHaveValue('i');
+      });
+      await waitFor(() => {
+        expect(store.getState().selection?.locationLabel).toBe('p. i');
+      });
+      expect(store.getState().selection?.imagePng).toBe(initialSelection?.imagePng);
+      expect(store.getState().selection?.anchor).toEqual(initialSelection?.anchor);
+
+      // Saving persists `p. i` in the backend and displays it in Inspector & CardNode.
+      await act(() => store.getState().excerptSelection());
+      const notebookId = store.getState().notebook!.id;
+      const persistedGraph = await backend.loadNotebookGraph(notebookId);
+      expect(persistedGraph.annotations[0]?.locationLabel).toBe('p. i');
+      expect(persistedGraph.cards[0]?.title).toBe('Figure · p. i');
+      viewer.unmount();
+
+      const prevGlobal = useStudySyncStore.getState();
+      try {
+        const node = store.getState().nodes[0]!;
+        useStudySyncStore.setState({
+          documents: store.getState().documents,
+          annotations: store.getState().annotations,
+          cards: store.getState().cards,
+          nodes: store.getState().nodes,
+          selectedNodeId: node.id,
+        });
+        const cardProps = {
+          id: node.id,
+          data: { cardId: node.cardId },
+          selected: false,
+        } as NodeProps<CardFlowNode>;
+        const ui = render(
+          <ReactFlowProvider>
+            <CardNode {...cardProps} />
+            <InspectorPane open />
+          </ReactFlowProvider>,
+        );
+        expect(screen.getByTestId('inspector-excerpt-source')).toHaveTextContent('book · p. i');
+        expect(screen.getByTestId('card-source-attribution')).toHaveTextContent('book · p. i');
+        ui.unmount();
+      } finally {
+        useStudySyncStore.setState(prevGlobal, true);
+      }
+    });
+
+    it('does not resurrect a cancelled capture when delayed pageLabels arrive, and uses physical page numbers when a PDF has no printed labels (#125)', async () => {
+      // 1. Cancelled capture must stay null when delayed labels arrive.
+      {
+        let releaseLabels!: () => void;
+        const labelsGate = new Promise<void>((resolve) => {
+          releaseLabels = resolve;
+        });
+        engineState.outline = [];
+        engineState.pageLabels = ['i', 'ii', '1', '2', '3'];
+        engineState.pageLabelsGate = () => labelsGate;
+
+        const { store, documentId } = await setup();
+        const viewer = render(<Harness store={store} documentId={documentId} />);
+        await pageElement(0);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Capture area' }));
+        const surface = screen.getAllByTestId('pdf-capture-surface')[0] as HTMLElement;
+        surface.getBoundingClientRect = () =>
+          ({ left: 100, top: 200, width: 400, height: 600 }) as DOMRect;
+        fireEvent.pointerDown(surface, { clientX: 140, clientY: 260, pointerId: 1 });
+        fireEvent.pointerMove(surface, { clientX: 300, clientY: 500, pointerId: 1 });
+        fireEvent.pointerUp(surface, { clientX: 300, clientY: 500, pointerId: 1 });
+        expect(store.getState().selection?.locationLabel).toBe('p. 1');
+
+        // Cancel the capture before labels arrive.
+        fireEvent.click(screen.getByRole('button', { name: 'Capture area' }));
+        expect(store.getState().selection).toBeNull();
+
+        await act(async () => {
+          releaseLabels();
+          await Promise.resolve();
+        });
+        await waitFor(() => {
+          expect(screen.getByLabelText('Page number')).toHaveValue('i');
+        });
+        expect(store.getState().selection).toBeNull();
+        viewer.unmount();
+      }
+
+      // 2. A PDF without printed page labels (`null`) keeps the physical page label `p. 1`.
+      {
+        let releaseLabels!: () => void;
+        const labelsGate = new Promise<void>((resolve) => {
+          releaseLabels = resolve;
+        });
+        engineState.outline = [];
+        engineState.pageLabels = null;
+        engineState.pageLabelsGate = () => labelsGate;
+
+        const { backend, store, documentId } = await setup();
+        const viewer = render(<Harness store={store} documentId={documentId} />);
+        await pageElement(0);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Capture area' }));
+        const surface = screen.getAllByTestId('pdf-capture-surface')[0] as HTMLElement;
+        surface.getBoundingClientRect = () =>
+          ({ left: 100, top: 200, width: 400, height: 600 }) as DOMRect;
+        fireEvent.pointerDown(surface, { clientX: 140, clientY: 260, pointerId: 1 });
+        fireEvent.pointerMove(surface, { clientX: 300, clientY: 500, pointerId: 1 });
+        fireEvent.pointerUp(surface, { clientX: 300, clientY: 500, pointerId: 1 });
+
+        await act(async () => {
+          releaseLabels();
+          await Promise.resolve();
+        });
+        await act(() => store.getState().excerptSelection());
+        const persisted = await backend.loadNotebookGraph(store.getState().notebook!.id);
+        expect(persisted.annotations[0]?.locationLabel).toBe('p. 1');
+        expect(persisted.cards[0]?.title).toBe('Figure · p. 1');
+        viewer.unmount();
       }
     });
   });

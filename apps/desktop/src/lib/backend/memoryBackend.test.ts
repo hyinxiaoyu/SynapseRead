@@ -1597,5 +1597,36 @@ describe('memory backend card delete and restore', () => {
     ).toBeNull();
     const restored = await backend.restoreAnnotation(toDelete.annotation.id);
     expect(restored.annotation.locationLabel).toBeNull();
+
+    // Stale expectedFileHash from before relink is rejected on createExcerpt and createAnnotation.
+    await expect(
+      backend.createExcerpt({
+        documentId: doc.id,
+        notebookId: nb.id,
+        anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+        excerptText: 'stale',
+        excerptImagePng: null,
+        color: '#fde047',
+        parentNodeId: null,
+        posX: 0,
+        posY: 0,
+        locationLabel: 'Old chapter · Line 1',
+        expectedFileHash: doc.fileHash,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_anchor' });
+    await expect(
+      backend.createAnnotation({
+        documentId: doc.id,
+        notebookId: nb.id,
+        anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+        excerptText: 'stale',
+        excerptImagePng: null,
+        note: null,
+        color: '#fde047',
+        style: 'highlight',
+        locationLabel: 'Old chapter · Line 1',
+        expectedFileHash: doc.fileHash,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_anchor' });
   });
 });

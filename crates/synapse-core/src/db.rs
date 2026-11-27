@@ -416,7 +416,7 @@ impl Database {
 
         if let Some(anchor) = &next.anchor {
             anchor.validate()?;
-            check_anchor_matches_document(&tx, document_id, anchor)?;
+            check_anchor_matches_document(&tx, document_id, anchor, None)?;
         }
         if let Some(progress) = next.progress
             && (!progress.is_finite() || !(0.0..=1.0).contains(&progress))
@@ -745,7 +745,12 @@ impl Database {
         image_path: Option<&str>,
     ) -> CoreResult<CreatedExcerpt> {
         let tx = self.conn.transaction()?;
-        check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
+        check_anchor_matches_document(
+            &tx,
+            &input.document_id,
+            &input.anchor,
+            input.expected_file_hash.as_deref(),
+        )?;
         if let Some(parent_id) = &input.parent_node_id {
             check_node_in_notebook(&tx, parent_id, &input.notebook_id)?;
         }
@@ -890,7 +895,12 @@ impl Database {
         image_path: Option<&str>,
     ) -> CoreResult<Annotation> {
         let tx = self.conn.transaction()?;
-        check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
+        check_anchor_matches_document(
+            &tx,
+            &input.document_id,
+            &input.anchor,
+            input.expected_file_hash.as_deref(),
+        )?;
         check_notebook_exists(&tx, &input.notebook_id)?;
 
         let normalized_note = input
@@ -1512,7 +1522,7 @@ impl Database {
     pub fn create_bookmark(&mut self, input: &CreateBookmarkInput) -> CoreResult<Bookmark> {
         input.anchor.validate()?;
         let tx = self.conn.transaction()?;
-        check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
+        check_anchor_matches_document(&tx, &input.document_id, &input.anchor, None)?;
 
         let label = normalize_bookmark_label(
             input.label.as_deref(),
@@ -2225,12 +2235,13 @@ fn check_anchor_matches_document(
     tx: &Transaction<'_>,
     document_id: &str,
     anchor: &AnchorLocation,
+    expected_file_hash: Option<&str>,
 ) -> CoreResult<()> {
-    let format: String = tx
+    let (format, current_hash): (String, String) = tx
         .query_row(
-            "SELECT format FROM documents WHERE id = ?1",
+            "SELECT format, file_hash FROM documents WHERE id = ?1",
             [document_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
         .ok_or_else(|| not_found("document", document_id))?;
@@ -2239,6 +2250,13 @@ fn check_anchor_matches_document(
             "{} anchor on a {format} document",
             anchor.format().as_str()
         )));
+    }
+    if let Some(expected) = expected_file_hash
+        && expected != current_hash
+    {
+        return Err(CoreError::InvalidAnchor(
+            "the document changed since this selection was made".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -2683,6 +2701,7 @@ mod tests {
             pos_x: 10.0,
             pos_y: 20.0,
             location_label: None,
+            expected_file_hash: None,
         }
     }
 
@@ -2926,6 +2945,7 @@ mod tests {
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::Highlight,
                 location_label: None,
+                expected_file_hash: None,
             };
             db.create_annotation(&annotation(txt_anchor())).unwrap();
             assert!(matches!(
@@ -3480,6 +3500,7 @@ mod tests {
             pos_x: 0.0,
             pos_y: 0.0,
             location_label: None,
+            expected_file_hash: None,
         }
     }
 
@@ -5163,6 +5184,7 @@ mod tests {
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::Highlight,
                 location_label: None,
+                expected_file_hash: None,
             })
             .unwrap();
         assert_eq!(standalone.note.as_deref(), Some("standalone note"));
@@ -5305,6 +5327,7 @@ mod tests {
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::default(),
                 location_label: None,
+                expected_file_hash: None,
             })
             .unwrap();
 
@@ -5382,6 +5405,7 @@ mod tests {
             pos_x: 10.0,
             pos_y: 20.0,
             location_label: None,
+            expected_file_hash: None,
         }
     }
 
@@ -5772,6 +5796,7 @@ mod tests {
                 pos_x: 10.0,
                 pos_y: 20.0,
                 location_label: None,
+                expected_file_hash: None,
             })
             .unwrap();
 
@@ -6058,6 +6083,7 @@ mod tests {
                     pos_x: 10.0,
                     pos_y: 20.0,
                     location_label: None,
+                    expected_file_hash: None,
                 })
                 .unwrap();
             let bookmark = db
@@ -6314,6 +6340,7 @@ mod tests {
                 pos_x: 0.0,
                 pos_y: 0.0,
                 location_label: Some(long_label),
+                expected_file_hash: None,
             })
             .unwrap();
         let stored_label = excerpt.annotation.location_label.as_deref().unwrap();
@@ -6333,6 +6360,7 @@ mod tests {
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::Highlight,
                 location_label: Some("  \u{0007}\t\n  ".to_owned()),
+                expected_file_hash: None,
             })
             .unwrap();
         assert_eq!(blank_ann.location_label, None);
@@ -6363,6 +6391,7 @@ mod tests {
                 pos_x: 10.0,
                 pos_y: 20.0,
                 location_label: Some("p. 12".to_owned()),
+                expected_file_hash: None,
             })
             .unwrap();
         assert_eq!(capture_with_label.card.title, "Figure · p. 12");
@@ -6383,6 +6412,7 @@ mod tests {
                 pos_x: 30.0,
                 pos_y: 40.0,
                 location_label: None,
+                expected_file_hash: None,
             })
             .unwrap();
         assert_eq!(capture_without_label.card.title, "Image excerpt");
@@ -6424,6 +6454,7 @@ mod tests {
                     pos_x: 0.0,
                     pos_y: 0.0,
                     location_label: Some("Old chapter · Line 1".to_owned()),
+                    expected_file_hash: None,
                 })
                 .unwrap();
             let to_delete = db
@@ -6438,6 +6469,7 @@ mod tests {
                     pos_x: 10.0,
                     pos_y: 20.0,
                     location_label: Some("Old chapter · Line 2".to_owned()),
+                    expected_file_hash: None,
                 })
                 .unwrap();
             let other_excerpt = db
@@ -6452,6 +6484,7 @@ mod tests {
                     pos_x: 30.0,
                     pos_y: 40.0,
                     location_label: Some("Other · Line 1".to_owned()),
+                    expected_file_hash: None,
                 })
                 .unwrap();
 
@@ -6547,6 +6580,61 @@ mod tests {
                 .location_label
                 .as_deref(),
             Some("Other · Line 1")
+        );
+
+        // 4. Stale expected_file_hash is rejected in both create_excerpt and create_annotation.
+        let mut reopened_mut = reopened;
+        let current_hash = reopened_mut.get_document(&doc_id).unwrap().file_hash;
+        assert!(matches!(
+            reopened_mut.create_excerpt(&CreateExcerptInput {
+                document_id: doc_id.clone(),
+                notebook_id: nb_id.clone(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("stale".to_owned()),
+                excerpt_image_png: None,
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+                location_label: Some("Old chapter · Line 1".to_owned()),
+                expected_file_hash: Some("stale-hash".to_owned()),
+            }),
+            Err(CoreError::InvalidAnchor(_))
+        ));
+        assert!(matches!(
+            reopened_mut.create_annotation(&CreateAnnotationInput {
+                document_id: doc_id.clone(),
+                notebook_id: nb_id.clone(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("stale".to_owned()),
+                excerpt_image_png: None,
+                note: None,
+                color: "#fde047".to_owned(),
+                style: AnnotationStyle::Highlight,
+                location_label: Some("Old chapter · Line 1".to_owned()),
+                expected_file_hash: Some("stale-hash".to_owned()),
+            }),
+            Err(CoreError::InvalidAnchor(_))
+        ));
+        // Matching expected_file_hash succeeds.
+        let fresh = reopened_mut
+            .create_excerpt(&CreateExcerptInput {
+                document_id: doc_id,
+                notebook_id: nb_id,
+                anchor: txt_anchor(),
+                excerpt_text: Some("fresh".to_owned()),
+                excerpt_image_png: None,
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+                location_label: Some("Revised · Line 1".to_owned()),
+                expected_file_hash: Some(current_hash),
+            })
+            .unwrap();
+        assert_eq!(
+            fresh.annotation.location_label.as_deref(),
+            Some("Revised · Line 1")
         );
     }
 }

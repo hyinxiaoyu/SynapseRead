@@ -547,6 +547,7 @@ export function EpubViewer({
             text: selection.text,
             imagePng: null,
             locationLabel,
+            sourceFileHash,
           };
           setActiveSelection(nextSelection);
           latest.current.onSelectionChange(nextSelection);

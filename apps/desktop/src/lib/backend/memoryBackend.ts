@@ -722,6 +722,9 @@ export function createMemoryBackendWithPreview({
           `${input.anchor.format} anchor on a ${document.format} document`,
         );
       }
+      if (input.expectedFileHash != null && input.expectedFileHash !== document.fileHash) {
+        throw fail('invalid_anchor', 'the document changed since this selection was made');
+      }
       if (input.parentNodeId) require(nodes, input.parentNodeId, 'node');
       if (!input.excerptText?.trim() && input.excerptImagePng === null) {
         throw fail('invalid_anchor', 'an excerpt needs text or a captured image');
@@ -791,6 +794,9 @@ export function createMemoryBackendWithPreview({
           'invalid_anchor',
           `${input.anchor.format} anchor on a ${document.format} document`,
         );
+      }
+      if (input.expectedFileHash != null && input.expectedFileHash !== document.fileHash) {
+        throw fail('invalid_anchor', 'the document changed since this selection was made');
       }
       if (!input.color.trim()) {
         throw fail('invalid_anchor', 'an annotation needs a highlight color');

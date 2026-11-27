@@ -604,6 +604,7 @@ async fn e2e_missing_file_restore_preserves_md_extension_and_study_data() {
                 pos_x: 10.0,
                 pos_y: 20.0,
                 location_label: None,
+                expected_file_hash: None,
             })
             .expect("create excerpt");
         db.create_bookmark(&CreateBookmarkInput {
@@ -3800,6 +3801,7 @@ async fn e2e_concurrent_missing_markdown_records_preserve_md_and_markdown_extens
                     pos_y: 0.0,
                     parent_node_id: None,
                     location_label: None,
+                    expected_file_hash: None,
                 })
                 .expect("excerpt");
                 std::fs::remove_file(&md_path).expect("delete md to make it missing");

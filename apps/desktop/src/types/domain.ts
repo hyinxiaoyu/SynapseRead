@@ -167,6 +167,8 @@ export interface CreateAnnotationInput {
   style: AnnotationStyle;
   /** Optional human-readable location reported by the reader (#125). */
   locationLabel?: string | null;
+  /** File hash when the selection was made; core rejects stale writes after a content-changing relink (#125). */
+  expectedFileHash?: string | null;
 }
 
 export interface AnnotationPatch {
@@ -235,6 +237,8 @@ export interface CreateExcerptInput {
   posY: number;
   /** Optional human-readable location reported by the reader (#125). */
   locationLabel?: string | null;
+  /** File hash when the selection was made; core rejects stale writes after a content-changing relink (#125). */
+  expectedFileHash?: string | null;
 }
 
 export interface CreatedExcerpt {
@@ -484,6 +488,8 @@ export interface ReaderSelection {
   imagePng: string | null;
   /** Optional human-readable location within the document (e.g. `"Ch. 3 · p. 41"`, `"Line 6"`). */
   locationLabel?: string | null;
+  /** File hash of the source loaded in the reader when this selection was created (#125). */
+  sourceFileHash?: string;
 }
 
 /** A request for a reader to scroll to an anchor and pulse-highlight it. */

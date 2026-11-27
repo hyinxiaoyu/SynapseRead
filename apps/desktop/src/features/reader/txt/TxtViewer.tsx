@@ -257,6 +257,8 @@ export function TxtViewer({
   const load = useTextStream(content, document.id, document.encoding);
   const { model, rowCount, complete } = load;
   const documentId = document.id;
+  // Snapshot the source hash this text stream was opened from (#125).
+  const [sourceFileHash] = useState(document.fileHash);
   const scrollRef = useRef<HTMLDivElement>(null);
   const readerAreaRef = useRef<HTMLDivElement>(null);
 
@@ -388,6 +390,7 @@ export function TxtViewer({
         text: selected.text,
         imagePng: null,
         locationLabel,
+        sourceFileHash,
       };
       setActiveSelection(nextSelection);
       onSelectionChange(nextSelection);
@@ -398,7 +401,7 @@ export function TxtViewer({
       view.removeEventListener('selectionchange', onChange);
       view.removeEventListener('mouseup', onChange);
     };
-  }, [isActive, model, documentId, onSelectionChange]);
+  }, [isActive, model, documentId, sourceFileHash, onSelectionChange]);
 
   // ---- Reopen at the last reading position ---------------------------------
 

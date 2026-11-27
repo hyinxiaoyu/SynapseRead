@@ -455,12 +455,14 @@ describe('EpubViewer', () => {
     await opened();
 
     select();
+    const expectedHash = store.getState().documents.find((d) => d.id === documentId)?.fileHash;
     expect(store.getState().selection).toEqual({
       documentId,
       anchor: { format: 'epub', cfiRange: CFI, chapterHref: 'OEBPS/chapter1.xhtml' },
       text: 'quick brown fox',
       imagePng: null,
       locationLabel: 'One',
+      sourceFileHash: expectedHash,
     });
 
     await act(() => store.getState().excerptSelection());

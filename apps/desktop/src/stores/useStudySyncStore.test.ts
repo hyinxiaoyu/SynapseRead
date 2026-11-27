@@ -1415,6 +1415,303 @@ describe('useStudySyncStore', () => {
       ).toBeNull();
     });
 
+    it('reconciles late excerpt response arriving after content-changing relink, and rejects stale excerpt submitted after relink (#125)', async () => {
+      const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+      const revisedBytes = new TextEncoder().encode('Completely rewritten document.\n');
+
+      // Order 1: old excerpt commits in backend BEFORE relink, but its response arrives AFTER relink.
+      {
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        const origCreateExcerpt = customBackend.createExcerpt.bind(customBackend);
+        let releaseExcerptResponse!: () => void;
+        let excerptCommitted!: () => void;
+        const excerptCommittedPromise = new Promise<void>((resolve) => {
+          excerptCommitted = resolve;
+        });
+        const responseGate = new Promise<void>((resolve) => {
+          releaseExcerptResponse = resolve;
+        });
+        const excerptSpy = vi
+          .spyOn(customBackend, 'createExcerpt')
+          .mockImplementationOnce(async (input) => {
+            const result = await origCreateExcerpt(input);
+            excerptCommitted();
+            await responseGate;
+            return result;
+          });
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+        const excerptPromise = customStore.getState().excerptSelection();
+        await excerptCommittedPromise;
+
+        // Relink commits and completes in UI before the excerpt response returns.
+        const relinked = await customStore.getState().relinkDocument(docId, false);
+        expect(relinked?.contentChanged).toBe(true);
+
+        // Now deliver the late excerpt response (whose snapshot still carried the old locationLabel).
+        releaseExcerptResponse();
+        await excerptPromise;
+        excerptSpy.mockRestore();
+
+        // Live store state and reloaded workspace must both have locationLabel === null.
+        expect(customStore.getState().annotations).toHaveLength(1);
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations).toHaveLength(1);
+        expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
+      }
+
+      // Order 2: relink commits in backend BEFORE the old excerpt reaches backend -> backend rejects it.
+      {
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        const origCreateExcerpt = customBackend.createExcerpt.bind(customBackend);
+        let allowExcerptWrite!: () => void;
+        let excerptStarted!: () => void;
+        const excerptStartedPromise = new Promise<void>((resolve) => {
+          excerptStarted = resolve;
+        });
+        const writeGate = new Promise<void>((resolve) => {
+          allowExcerptWrite = resolve;
+        });
+        const excerptSpy = vi
+          .spyOn(customBackend, 'createExcerpt')
+          .mockImplementationOnce(async (input) => {
+            excerptStarted();
+            await writeGate;
+            return origCreateExcerpt(input);
+          });
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+        const excerptPromise = customStore.getState().excerptSelection();
+        await excerptStartedPromise;
+
+        // Relink commits first, changing the document hash in backend.
+        const relinked = await customStore.getState().relinkDocument(docId, false);
+        expect(relinked?.contentChanged).toBe(true);
+
+        // Now let the stale excerpt reach backend; expectedFileHash mismatch rejects it.
+        allowExcerptWrite();
+        await excerptPromise;
+        excerptSpy.mockRestore();
+
+        expect(customStore.getState().annotations).toHaveLength(0);
+        expect(customStore.getState().cards).toHaveLength(0);
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations).toHaveLength(0);
+      }
+
+      // Order 3: same-hash relink (rename) overlapping with excerpt still succeeds and preserves locationLabel.
+      {
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/renamed.txt': originalBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const hash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        const origCreateExcerpt = customBackend.createExcerpt.bind(customBackend);
+        let releaseExcerptResponse!: () => void;
+        let excerptCommitted!: () => void;
+        const excerptCommittedPromise = new Promise<void>((resolve) => {
+          excerptCommitted = resolve;
+        });
+        const responseGate = new Promise<void>((resolve) => {
+          releaseExcerptResponse = resolve;
+        });
+        vi.spyOn(customBackend, 'createExcerpt').mockImplementationOnce(async (input) => {
+          const result = await origCreateExcerpt(input);
+          excerptCommitted();
+          await responseGate;
+          return result;
+        });
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: hash,
+        });
+        const excerptPromise = customStore.getState().excerptSelection();
+        await excerptCommittedPromise;
+
+        const renamed = await customStore.getState().relinkDocument(docId, false);
+        expect(renamed?.contentChanged).toBe(false);
+        releaseExcerptResponse();
+        await excerptPromise;
+
+        expect(customStore.getState().annotations[0]?.locationLabel).toBe('Old chapter · Line 1');
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations[0]?.locationLabel).toBe('Old chapter · Line 1');
+      }
+    });
+
+    it('reconciles late updateAnnotation, createAnnotation, and undoRemoveAnnotation responses after content-changing relink (#125)', async () => {
+      const originalBytes = new TextEncoder().encode('Old chapter\nLine one\nLine two\n');
+      const revisedBytes = new TextEncoder().encode('Revised file.\n');
+      const customBackend = createMemoryBackend({
+        library: {
+          '/t/original.txt': originalBytes,
+          '/t/revised.txt': revisedBytes,
+        },
+      });
+      const customStore = createStudySyncStore(customBackend);
+      await customStore.getState().initialize();
+      await customStore.getState().openDocument();
+      const docId = customStore.getState().activeDocumentId as string;
+      const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+      // Seed two annotations: one to update, one to delete+undo.
+      customStore.getState().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+        text: 'Old chapter',
+        imagePng: null,
+        locationLabel: 'Old chapter · Line 1',
+        sourceFileHash: oldHash,
+      });
+      const toUpdate = (await customStore.getState().createAnnotationFromSelection())!;
+
+      customStore.getState().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 12, endByteOffset: 20, lineIndex: 1 },
+        text: 'Line one',
+        imagePng: null,
+        locationLabel: 'Old chapter · Line 2',
+        sourceFileHash: oldHash,
+      });
+      const toUndo = (await customStore.getState().createAnnotationFromSelection())!;
+      await customStore.getState().removeAnnotation(toUndo.id);
+
+      // Hold responses for updateAnnotation, restoreAnnotation, and a new createAnnotation until after relink.
+      const origUpdate = customBackend.updateAnnotation.bind(customBackend);
+      const origRestore = customBackend.restoreAnnotation.bind(customBackend);
+      const origCreate = customBackend.createAnnotation.bind(customBackend);
+      let releaseAll!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseAll = resolve;
+      });
+      let updateCommitted!: () => void;
+      let restoreCommitted!: () => void;
+      let createCommitted!: () => void;
+      const allCommitted = Promise.all([
+        new Promise<void>((r) => {
+          updateCommitted = r;
+        }),
+        new Promise<void>((r) => {
+          restoreCommitted = r;
+        }),
+        new Promise<void>((r) => {
+          createCommitted = r;
+        }),
+      ]);
+
+      vi.spyOn(customBackend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+        const res = await origUpdate(id, patch);
+        updateCommitted();
+        await gate;
+        return res;
+      });
+      vi.spyOn(customBackend, 'restoreAnnotation').mockImplementationOnce(async (id) => {
+        const res = await origRestore(id);
+        restoreCommitted();
+        await gate;
+        return res;
+      });
+      vi.spyOn(customBackend, 'createAnnotation').mockImplementationOnce(async (input) => {
+        const res = await origCreate(input);
+        createCommitted();
+        await gate;
+        return res;
+      });
+
+      customStore.getState().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 21, endByteOffset: 29, lineIndex: 2 },
+        text: 'Line two',
+        imagePng: null,
+        locationLabel: 'Old chapter · Line 3',
+        sourceFileHash: oldHash,
+      });
+
+      const updatePromise = customStore
+        .getState()
+        .updateAnnotation(toUpdate.id, { note: 'kept note', color: null });
+      const undoPromise = customStore.getState().undoRemoveAnnotation();
+      const createPromise = customStore.getState().createAnnotationFromSelection();
+      await allCommitted;
+
+      // Content-changing relink commits in backend and clears all location labels.
+      const relinked = await customStore.getState().relinkDocument(docId, false);
+      expect(relinked?.contentChanged).toBe(true);
+
+      // Deliver all three late responses.
+      releaseAll();
+      const [, , createdLate] = await Promise.all([updatePromise, undoPromise, createPromise]);
+      expect(createdLate?.locationLabel).toBeNull();
+
+      // Every annotation in live state has locationLabel: null while preserving the note edit.
+      const liveAnnotations = customStore.getState().annotations;
+      expect(liveAnnotations).toHaveLength(3);
+      expect(liveAnnotations.find((a) => a.id === toUpdate.id)?.note).toBe('kept note');
+      for (const ann of liveAnnotations) {
+        expect(ann.locationLabel).toBeNull();
+      }
+
+      // Reloaded workspace agrees.
+      const reopened = createStudySyncStore(customBackend);
+      await reopened.getState().initialize();
+      expect(reopened.getState().annotations).toHaveLength(3);
+      for (const ann of reopened.getState().annotations) {
+        expect(ann.locationLabel).toBeNull();
+      }
+    });
+
     it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {
       const bytes = new TextEncoder().encode('drop-hide race');
       const file = new File([bytes], 'drop-race.txt', { type: 'text/plain' });

@@ -450,6 +450,10 @@ pub struct CreateAnnotationInput {
     /// Optional human-readable location reported by the reader (#125).
     #[serde(default)]
     pub location_label: Option<String>,
+    /// File hash the selection was made against; when present, core rejects the
+    /// write if the document was relinked to different bytes in the meantime (#125).
+    #[serde(default)]
+    pub expected_file_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -526,6 +530,10 @@ pub struct CreateExcerptInput {
     /// Optional human-readable location reported by the reader (#125).
     #[serde(default)]
     pub location_label: Option<String>,
+    /// File hash the selection was made against; when present, core rejects the
+    /// write if the document was relinked to different bytes in the meantime (#125).
+    #[serde(default)]
+    pub expected_file_hash: Option<String>,
 }
 
 /// The rows created by one "Excerpt to MindMap" action.

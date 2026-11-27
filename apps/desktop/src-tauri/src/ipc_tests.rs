@@ -1370,6 +1370,50 @@ fn annotation_location_label_round_trips_and_names_capture_cards_over_ipc() {
         json!({ "annotationId": annotated["id"] }),
     );
     assert_eq!(restored["annotation"]["locationLabel"], Value::Null);
+
+    // Stale expectedFileHash from before relink is rejected on create_excerpt and create_annotation.
+    let stale_excerpt_err = h
+        .call(
+            "create_excerpt",
+            json!({
+                "input": {
+                    "documentId": txt["id"],
+                    "notebookId": notebook["id"],
+                    "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 5, "lineIndex": 0 },
+                    "excerptText": "hello",
+                    "excerptImagePng": null,
+                    "color": "#fde047",
+                    "parentNodeId": null,
+                    "posX": 0.0,
+                    "posY": 0.0,
+                    "locationLabel": "Old chapter · Line 1",
+                    "expectedFileHash": txt["fileHash"],
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(stale_excerpt_err["code"], "invalid_anchor");
+
+    let stale_ann_err = h
+        .call(
+            "create_annotation",
+            json!({
+                "input": {
+                    "documentId": txt["id"],
+                    "notebookId": notebook["id"],
+                    "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 5, "lineIndex": 0 },
+                    "excerptText": "hello",
+                    "excerptImagePng": null,
+                    "note": null,
+                    "color": "#fde047",
+                    "style": "highlight",
+                    "locationLabel": "Old chapter · Line 1",
+                    "expectedFileHash": txt["fileHash"],
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(stale_ann_err["code"], "invalid_anchor");
 }
 
 #[test]

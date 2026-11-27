@@ -962,6 +962,7 @@ function restoreStageSlots(stage: HTMLElement): void {
 
 function PdfPages({
   engine,
+  sourceFileHash,
   document,
   isActive,
   chromeHidden = false,
@@ -988,7 +989,10 @@ function PdfPages({
   canExcerpt,
   excerptTargetTitle,
   onClearExcerptTarget,
-}: { engine: PdfDocumentHandle } & Omit<DocumentViewerProps<'pdf'>, 'content'>) {
+}: { engine: PdfDocumentHandle; sourceFileHash: string } & Omit<
+  DocumentViewerProps<'pdf'>,
+  'content'
+>) {
   const documentId = document.id;
   const scrollRef = useRef<HTMLDivElement>(null);
   const readerAreaRef = useRef<HTMLDivElement>(null);
@@ -1313,6 +1317,32 @@ function PdfPages({
   // ---- Selection -----------------------------------------------------------
 
   const hasSelection = useRef(false);
+  const selectionTokenRef = useRef(0);
+  const activeSelectionRef = useRef<{ token: number; selection: ReaderSelection } | null>(null);
+
+  const publishSelection = useCallback(
+    (nextSelection: ReaderSelection) => {
+      selectionTokenRef.current += 1;
+      activeSelectionRef.current = {
+        token: selectionTokenRef.current,
+        selection: nextSelection,
+      };
+      setActiveSelection(nextSelection);
+      onSelectionChange(nextSelection);
+    },
+    [onSelectionChange],
+  );
+
+  const dropSelection = useCallback(
+    (notify: boolean) => {
+      selectionTokenRef.current += 1;
+      activeSelectionRef.current = null;
+      setActiveSelection(null);
+      if (notify) onSelectionChange(null);
+    },
+    [onSelectionChange],
+  );
+
   useLayoutEffect(() => {
     const root = scrollRef.current;
     if (!root) return;
@@ -1322,7 +1352,7 @@ function PdfPages({
     if (!isActive) {
       if (selection?.anchorNode && root.contains(selection.anchorNode)) selection.removeAllRanges();
       hasSelection.current = false;
-      setActiveSelection(null);
+      dropSelection(false);
       return;
     }
 
@@ -1330,8 +1360,7 @@ function PdfPages({
       if (!hasSelection.current) return;
       hasSelection.current = false;
       setPinnedPages([]);
-      setActiveSelection(null);
-      onSelectionChange(null);
+      dropSelection(true);
     };
     const onChange = () => {
       const current = view.getSelection();
@@ -1377,12 +1406,12 @@ function PdfPages({
           pageLabels,
           outlineNodes,
         ),
+        sourceFileHash,
       };
       hasSelection.current = true;
       setCapture(null);
       setPinnedPages(spans.map((span) => span.pageIndex));
-      setActiveSelection(nextSelection);
-      onSelectionChange(nextSelection);
+      publishSelection(nextSelection);
     };
     view.addEventListener('selectionchange', onChange);
     view.addEventListener('mouseup', onChange);
@@ -1390,7 +1419,17 @@ function PdfPages({
       view.removeEventListener('selectionchange', onChange);
       view.removeEventListener('mouseup', onChange);
     };
-  }, [isActive, documentId, onSelectionChange, capture, rotation, pageLabels, outlineNodes]);
+  }, [
+    isActive,
+    documentId,
+    sourceFileHash,
+    publishSelection,
+    dropSelection,
+    capture,
+    rotation,
+    pageLabels,
+    outlineNodes,
+  ]);
 
   const onCapture = useCallback(
     (pageIndex: number, canvas: HTMLCanvasElement, viewportRect: NormalizedRect) => {
@@ -1405,11 +1444,19 @@ function PdfPages({
         text: null,
         imagePng: cropCanvasToPng(canvas, viewportRect),
         locationLabel: formatPdfLocationLabel(pageIndex, pageIndex, pageLabels, outlineNodes),
+        sourceFileHash,
       };
-      setActiveSelection(nextSelection);
-      onSelectionChange(nextSelection);
+      publishSelection(nextSelection);
     },
-    [documentId, highlights.length, onSelectionChange, outlineNodes, pageLabels, rotation],
+    [
+      documentId,
+      sourceFileHash,
+      highlights.length,
+      publishSelection,
+      outlineNodes,
+      pageLabels,
+      rotation,
+    ],
   );
 
   const toggleCaptureMode = () => {
@@ -1417,14 +1464,60 @@ function PdfPages({
     if (capture) {
       setCapture(null);
       hasSelection.current = false;
-      setActiveSelection(null);
-      onSelectionChange(null);
+      dropSelection(true);
     }
     setCaptureMode(!captureMode);
   };
 
   // Excerpting adds a highlight, which then replaces the box.
   const visibleCapture = capture?.highlightCount === highlights.length ? capture : null;
+
+  // When printed page labels or outline sections finish loading while a selection or
+  // capture is still live, recompute its locationLabel in place without losing the
+  // original PNG, rectangle, or sourceFileHash (#125).
+  useEffect(() => {
+    if (!isActive || !hasSelection.current || canExcerpt === false) return;
+    const current = activeSelectionRef.current;
+    if (
+      !current ||
+      current.selection.documentId !== documentId ||
+      current.selection.sourceFileHash !== sourceFileHash
+    ) {
+      return;
+    }
+    const anchor = asPdfAnchor(current.selection.anchor);
+    if (!anchor) return;
+    if (current.selection.imagePng !== null) {
+      if (
+        !visibleCapture ||
+        visibleCapture.pageIndex !== anchor.pageIndex ||
+        anchor.rects[0] !== visibleCapture.rect
+      ) {
+        return;
+      }
+    }
+    const firstPage = anchor.pageSpans?.[0]?.pageIndex ?? anchor.pageIndex;
+    const lastPage = anchor.pageSpans?.at(-1)?.pageIndex ?? anchor.pageIndex;
+    const nextLabel = formatPdfLocationLabel(firstPage, lastPage, pageLabels, outlineNodes);
+    if (nextLabel === current.selection.locationLabel) return;
+    if (activeSelectionRef.current?.token !== current.token) return;
+    const refreshed: ReaderSelection = {
+      ...current.selection,
+      locationLabel: nextLabel,
+    };
+    activeSelectionRef.current = { token: current.token, selection: refreshed };
+    setActiveSelection(refreshed);
+    onSelectionChange(refreshed);
+  }, [
+    isActive,
+    canExcerpt,
+    documentId,
+    sourceFileHash,
+    visibleCapture,
+    pageLabels,
+    outlineNodes,
+    onSelectionChange,
+  ]);
 
   /**
    * Moves the pane down to `offset`. A paged mode shows one row at a time, so the
@@ -2066,10 +2159,9 @@ function PdfPages({
     scrollRef.current?.ownerDocument.getSelection()?.removeAllRanges();
     hasSelection.current = false;
     setPinnedPages([]);
-    setActiveSelection(null);
     setCapture(null);
-    onSelectionChange(null);
-  }, [onSelectionChange]);
+    dropSelection(true);
+  }, [dropSelection]);
 
   const prevHighlightCount = useRef(highlights.length);
   useEffect(() => {
@@ -3634,8 +3726,9 @@ export function PdfViewer({ content, onDocumentTitle, ...props }: DocumentViewer
   });
   const [opened, setOpened] = useState<{
     engine: PdfDocumentHandle | null;
+    sourceFileHash: string;
     error: string | null;
-  }>({ engine: null, error: null });
+  }>({ engine: null, sourceFileHash: document.fileHash, error: null });
 
   useEffect(() => {
     let cancelled = false;
@@ -3648,14 +3741,14 @@ export function PdfViewer({ content, onDocumentTitle, ...props }: DocumentViewer
         if (cancelled) handle.destroy();
         else {
           engine = handle;
-          setOpened({ engine: handle, error: null });
+          setOpened({ engine: handle, sourceFileHash, error: null });
           void handle.getMetadataTitle?.().then((title) => {
             if (!cancelled && title) onDocumentTitleRef.current?.(title, sourceFileHash);
           });
         }
       })
       .catch((error: unknown) => {
-        if (!cancelled) setOpened({ engine: null, error: describeError(error) });
+        if (!cancelled) setOpened({ engine: null, sourceFileHash, error: describeError(error) });
       });
     return () => {
       cancelled = true;
@@ -3675,5 +3768,5 @@ export function PdfViewer({ content, onDocumentTitle, ...props }: DocumentViewer
   if (!opened.engine) {
     return <div className="p-6 text-sm text-muted-foreground">Opening {displayTitle}…</div>;
   }
-  return <PdfPages engine={opened.engine} {...props} />;
+  return <PdfPages engine={opened.engine} sourceFileHash={opened.sourceFileHash} {...props} />;
 }
