@@ -493,10 +493,20 @@ export function createStudySyncStore(backend: StudyBackend) {
     const documentTitleSeqs = new Map<string, number>();
     /** Monotonic per-document counter incremented whenever a content-changing relink commits (#125). */
     const documentContentEpochs = new Map<string, number>();
+    /** Monotonic per-annotation save sequence numbers issued when `updateAnnotation` starts (#125). */
+    const annotationUpdateSeqs = new Map<string, number>();
+    /** Highest `updateAnnotation` sequence number successfully applied to store state per annotation (#125). */
+    const appliedAnnotationUpdateSeqs = new Map<string, number>();
 
     const nextDocumentTitleSeq = (documentId: string): number => {
       const next = (documentTitleSeqs.get(documentId) ?? 0) + 1;
       documentTitleSeqs.set(documentId, next);
+      return next;
+    };
+
+    const nextAnnotationUpdateSeq = (annotationId: string): number => {
+      const next = (annotationUpdateSeqs.get(annotationId) ?? 0) + 1;
+      annotationUpdateSeqs.set(annotationId, next);
       return next;
     };
 
@@ -1941,6 +1951,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         const { notebook, annotations } = get();
         const existing = annotations.find((candidate) => candidate.id === annotationId);
         const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
+        const updateSeq = nextAnnotationUpdateSeq(annotationId);
         await guarded(async () => {
           const updated = await backend.updateAnnotation(annotationId, patch);
           const reconciled =
@@ -1954,18 +1965,29 @@ export function createStudySyncStore(backend: StudyBackend) {
               : null;
           let needsBackendRefresh = false;
           set((state) => {
-            if (!reconciled) {
-              return {
-                annotations: state.annotations.map((candidate) =>
-                  candidate.id === annotationId ? updated : candidate,
-                ),
-              };
-            }
-            const final = resolveAnnotationForState(state, reconciled);
+            const current = state.annotations.find((candidate) => candidate.id === annotationId);
+            if (!current) return state;
+            const final = reconciled
+              ? resolveAnnotationForState(state, reconciled)
+              : { annotation: updated, stale: false };
             needsBackendRefresh = final.stale;
+            const lastAppliedSeq = appliedAnnotationUpdateSeqs.get(annotationId) ?? 0;
+            // If a newer save already applied to UI state, preserve its note, color, and
+            // style and merge only the verified `locationLabel` (#125).
+            const nextLocationLabel = final.annotation.locationLabel ?? null;
+            const nextAnnotation: Annotation =
+              updateSeq < lastAppliedSeq
+                ? (current.locationLabel ?? null) === nextLocationLabel
+                  ? current
+                  : { ...current, locationLabel: nextLocationLabel }
+                : final.annotation;
+            if (updateSeq > lastAppliedSeq) {
+              appliedAnnotationUpdateSeqs.set(annotationId, updateSeq);
+            }
+            if (nextAnnotation === current) return state;
             return {
               annotations: state.annotations.map((candidate) =>
-                candidate.id === annotationId ? final.annotation : candidate,
+                candidate.id === annotationId ? nextAnnotation : candidate,
               ),
             };
           });

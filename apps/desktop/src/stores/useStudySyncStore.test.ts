@@ -2259,6 +2259,168 @@ describe('useStudySyncStore', () => {
       }
     });
 
+    it('guards overlapping pre-relink updateAnnotation responses against both succeeding and failing newer saves (#125)', async () => {
+      // 1) Pre-relink save ("Older note") commits first with delayed response -> content-changing
+      // relink -> newer save ("Newest note", new color & style) succeeds -> delayed older response
+      // arrives and must NOT roll back the newer note, color, or style while keeping locationLabel null.
+      {
+        const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+        const revisedBytes = new TextEncoder().encode('Revised file.\n');
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+        const created = (await customStore.getState().createAnnotationFromSelection())!;
+
+        const origUpdate = customBackend.updateAnnotation.bind(customBackend);
+        let releaseFirstSave!: () => void;
+        let firstSaveCommitted!: () => void;
+        const firstSaveGate = new Promise<void>((r) => {
+          releaseFirstSave = r;
+        });
+        const waitFirstSaveCommitted = new Promise<void>((r) => {
+          firstSaveCommitted = r;
+        });
+
+        vi.spyOn(customBackend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+          const result = await origUpdate(id, patch);
+          firstSaveCommitted();
+          await firstSaveGate;
+          return result;
+        });
+
+        // Start pre-relink save ("Older note") and pause its response after backend commit.
+        const firstSavePromise = customStore.getState().updateAnnotation(created.id, {
+          note: 'Older note',
+          color: '#f59e0b',
+          style: 'highlight',
+        });
+        await waitFirstSaveCommitted;
+
+        // Complete content-changing relink, then save "Newest note" with updated color & style.
+        const relinked = await customStore.getState().relinkDocument(docId, false);
+        expect(relinked?.contentChanged).toBe(true);
+
+        await customStore.getState().updateAnnotation(created.id, {
+          note: 'Newest note',
+          color: '#22c55e',
+          style: 'underline',
+        });
+        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
+        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
+        expect(customStore.getState().annotations[0]?.style).toBe('underline');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        // Deliver the older pre-relink save response: newer note/color/style must remain intact.
+        releaseFirstSave();
+        await firstSavePromise;
+
+        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
+        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
+        expect(customStore.getState().annotations[0]?.style).toBe('underline');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations[0]?.note).toBe('Newest note');
+        expect(reopened.getState().annotations[0]?.color).toBe('#22c55e');
+        expect(reopened.getState().annotations[0]?.style).toBe('underline');
+        expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
+      }
+
+      // 2) Pre-relink save ("Older note") commits first with delayed response -> content-changing
+      // relink -> newer save FAILS -> delayed first response arrives and MUST still apply
+      // "Older note" with locationLabel: null, matching the backend.
+      {
+        const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+        const revisedBytes = new TextEncoder().encode('Revised file.\n');
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+        const created = (await customStore.getState().createAnnotationFromSelection())!;
+
+        const origUpdate = customBackend.updateAnnotation.bind(customBackend);
+        let releaseFirstSave!: () => void;
+        let firstSaveCommitted!: () => void;
+        const firstSaveGate = new Promise<void>((r) => {
+          releaseFirstSave = r;
+        });
+        const waitFirstSaveCommitted = new Promise<void>((r) => {
+          firstSaveCommitted = r;
+        });
+
+        vi.spyOn(customBackend, 'updateAnnotation')
+          .mockImplementationOnce(async (id, patch) => {
+            const result = await origUpdate(id, patch);
+            firstSaveCommitted();
+            await firstSaveGate;
+            return result;
+          })
+          .mockRejectedValueOnce({ code: 'io', message: 'disk full' });
+
+        const firstSavePromise = customStore.getState().updateAnnotation(created.id, {
+          note: 'Older note',
+          color: null,
+        });
+        await waitFirstSaveCommitted;
+
+        const relinked = await customStore.getState().relinkDocument(docId, false);
+        expect(relinked?.contentChanged).toBe(true);
+
+        // Newer save fails in backend and must not advance the applied save sequence.
+        await customStore.getState().updateAnnotation(created.id, {
+          note: 'Failed note',
+          color: null,
+        });
+        expect(customStore.getState().annotations[0]?.note).toBeNull();
+
+        // Deliver the earlier succeeded save response: "Older note" applies with cleared locationLabel.
+        releaseFirstSave();
+        await firstSavePromise;
+
+        expect(customStore.getState().annotations[0]?.note).toBe('Older note');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations[0]?.note).toBe('Older note');
+        expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
+      }
+    });
+
     it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {
       const bytes = new TextEncoder().encode('drop-hide race');
       const file = new File([bytes], 'drop-race.txt', { type: 'text/plain' });
