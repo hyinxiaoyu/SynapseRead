@@ -2608,8 +2608,9 @@ describe('useStudySyncStore', () => {
         expect(reopened.getState().annotations[0]?.note).toBe('Saved note');
         expect(reopened.getState().annotations[0]?.color).toBe('#22c55e');
 
-        // 4b) If delete fails after queued edits succeed across a relink, rollback keeps the
-        // updated note & color and clears locationLabel.
+        // 4b) Queued edits -> delete -> immediate undo (before queued saves finish) ->
+        // queued saves finish -> delete fails and rolls back: live UI and reloaded workspace
+        // must both keep the updated note, color, and cleared locationLabel.
         let releaseSecondNote!: () => void;
         let secondNoteCommitted!: () => void;
         const secondNoteGate = new Promise<void>((r) => {
@@ -2644,16 +2645,26 @@ describe('useStudySyncStore', () => {
           color: '#3b82f6',
         });
         const failedDeletePromise = customStore.getState().removeAnnotation(created.id);
+        // Trigger immediate Undo while queued saves and delete are still pending, consuming
+        // `deletedAnnotationHistory` before the queued edits finish.
+        const immediateUndoPromise = customStore.getState().undoRemoveAnnotation();
 
         releaseSecondNote();
-        await Promise.all([secondNotePromise, secondColorPromise, failedDeletePromise]);
+        await Promise.all([
+          secondNotePromise,
+          secondColorPromise,
+          failedDeletePromise,
+          immediateUndoPromise,
+        ]);
 
+        expect(customStore.getState().annotations).toHaveLength(1);
         expect(customStore.getState().annotations[0]?.note).toBe('After undo note');
         expect(customStore.getState().annotations[0]?.color).toBe('#3b82f6');
         expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
 
         const reopenedAfterFailedDelete = createStudySyncStore(customBackend);
         await reopenedAfterFailedDelete.getState().initialize();
+        expect(reopenedAfterFailedDelete.getState().annotations).toHaveLength(1);
         expect(reopenedAfterFailedDelete.getState().annotations[0]?.note).toBe('After undo note');
         expect(reopenedAfterFailedDelete.getState().annotations[0]?.color).toBe('#3b82f6');
         expect(reopenedAfterFailedDelete.getState().annotations[0]?.locationLabel).toBeNull();

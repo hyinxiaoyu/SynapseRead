@@ -465,11 +465,17 @@ export function createStudySyncStore(backend: StudyBackend) {
   let preferencesWriteChain: Promise<void> = Promise.resolve();
 
   return create<StudySyncState>((set, get) => {
+    interface PendingAnnotationDelete {
+      promise: Promise<void>;
+      /** Latest annotation snapshot for rollback if `deleteAnnotation` fails after queued edits (#125). */
+      snapshot: Annotation;
+    }
+
     /**
      * Deletes still on their way to the backend, by annotation or card id. Undo
      * waits for one, so a quick ⌘Z cannot reach the backend before the delete it undoes.
      */
-    const pendingDeletes = new Map<string, Promise<void>>();
+    const pendingDeletes = new Map<string, PendingAnnotationDelete>();
     const pendingCardDeletes = new Map<string, Promise<void>>();
     /** In-flight `updateDocumentCursor` writes, by document id. */
     const pendingCursorWrites = new Map<string, Set<Promise<void>>>();
@@ -594,7 +600,18 @@ export function createStudySyncStore(backend: StudyBackend) {
         let present = false;
         set((state) => {
           const current = state.annotations.find((candidate) => candidate.id === annotationId);
+          const pendingDelete = pendingDeletes.get(annotationId);
           if (!current) {
+            if (pendingDelete) {
+              stale = hasStateDocumentContentChanged(state, documentId, versionBeforeLoad);
+              const nextLocationLabel = stale ? null : (fetched.locationLabel ?? null);
+              pendingDelete.snapshot =
+                pendingDelete.snapshot.locationLabel === nextLocationLabel
+                  ? pendingDelete.snapshot
+                  : { ...pendingDelete.snapshot, locationLabel: nextLocationLabel };
+              latest = pendingDelete.snapshot;
+              present = true;
+            }
             return state;
           }
           present = true;
@@ -1944,6 +1961,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           const { notebook, annotations, deletedAnnotationHistory } = get();
           const existing =
             annotations.find((candidate) => candidate.id === annotationId) ??
+            pendingDeletes.get(annotationId)?.snapshot ??
             deletedAnnotationHistory.find((entry) => entry.annotation.id === annotationId)
               ?.annotation;
           const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
@@ -1964,6 +1982,12 @@ export function createStudySyncStore(backend: StudyBackend) {
                 ? resolveAnnotationForState(state, reconciled)
                 : { annotation: updated, stale: false };
               needsBackendRefresh = final.stale;
+              // Always keep an in-flight delete's rollback snapshot up to date, even if
+              // an immediate Undo already popped `deletedAnnotationHistory` (#125).
+              const pendingDelete = pendingDeletes.get(annotationId);
+              if (pendingDelete) {
+                pendingDelete.snapshot = final.annotation;
+              }
               const current = state.annotations.find((candidate) => candidate.id === annotationId);
               if (current) {
                 return {
@@ -1976,8 +2000,6 @@ export function createStudySyncStore(backend: StudyBackend) {
                 (entry) => entry.annotation.id === annotationId,
               );
               if (!inHistory) return state;
-              // Keep the optimistic delete snapshot current so a failed delete rollback
-              // restores the latest persisted edit rather than pre-queue fields (#125).
               return {
                 deletedAnnotationHistory: state.deletedAnnotationHistory.map((entry) =>
                   entry.annotation.id === annotationId
@@ -2035,6 +2057,10 @@ export function createStudySyncStore(backend: StudyBackend) {
               : card,
           ),
         }));
+        const pendingDelete: PendingAnnotationDelete = {
+          promise: Promise.resolve(),
+          snapshot: removed,
+        };
         const deleting = guarded(
           async () => {
             // Drain any queued edits for this annotation before soft-deleting it so those
@@ -2044,9 +2070,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           },
           () => {
             set((state) => {
-              const latestRemoved =
-                state.deletedAnnotationHistory.find((entry) => entry.annotation.id === removed.id)
-                  ?.annotation ?? removed;
+              const latestRemoved = pendingDelete.snapshot;
               const restoredAnnotation = hasStateDocumentContentChanged(
                 state,
                 latestRemoved.documentId,
@@ -2054,12 +2078,19 @@ export function createStudySyncStore(backend: StudyBackend) {
               )
                 ? { ...latestRemoved, locationLabel: null }
                 : latestRemoved;
+              const wasInHistory = state.deletedAnnotationHistory.some(
+                (entry) => entry.annotation.id === removed.id,
+              );
               return {
                 annotations: [...state.annotations, restoredAnnotation],
-                deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
-                  (entry) => entry.annotation.id !== removed.id,
-                ),
-                deletionOrder: withoutLastDeletion(state.deletionOrder, 'annotation'),
+                deletedAnnotationHistory: wasInHistory
+                  ? state.deletedAnnotationHistory.filter(
+                      (entry) => entry.annotation.id !== removed.id,
+                    )
+                  : state.deletedAnnotationHistory,
+                deletionOrder: wasInHistory
+                  ? withoutLastDeletion(state.deletionOrder, 'annotation')
+                  : state.deletionOrder,
                 cards: state.cards.map((card) => {
                   const index = removedFromCards.get(card.id);
                   if (index === undefined || card.annotationIds.includes(annotationId)) return card;
@@ -2071,9 +2102,10 @@ export function createStudySyncStore(backend: StudyBackend) {
             });
           },
         );
-        pendingDeletes.set(annotationId, deleting);
+        pendingDelete.promise = deleting;
+        pendingDeletes.set(annotationId, pendingDelete);
         await deleting;
-        if (pendingDeletes.get(annotationId) === deleting) {
+        if (pendingDeletes.get(annotationId) === pendingDelete) {
           pendingDeletes.delete(annotationId);
         }
       },
@@ -2084,11 +2116,12 @@ export function createStudySyncStore(backend: StudyBackend) {
         const annotationId = last.annotation.id;
         const documentId = last.annotation.documentId;
         const versionAtStart = getDocumentVersion(documentId);
+        const pendingDelete = pendingDeletes.get(annotationId);
         set((state) => ({
           deletedAnnotationHistory: state.deletedAnnotationHistory.slice(0, -1),
           deletionOrder: withoutLastDeletion(state.deletionOrder, 'annotation'),
         }));
-        await pendingDeletes.get(annotationId);
+        await pendingDelete?.promise;
         // The delete failed and was rolled back: the highlight is already back.
         if (get().annotations.some((annotation) => annotation.id === annotationId)) return null;
 
@@ -2132,9 +2165,10 @@ export function createStudySyncStore(backend: StudyBackend) {
           },
           () => {
             set((state) => {
+              const baseAnnotation = pendingDelete?.snapshot ?? last.annotation;
               const rolledBack = hasStateDocumentContentChanged(state, documentId, versionAtStart)
-                ? { ...last, annotation: { ...last.annotation, locationLabel: null } }
-                : last;
+                ? { ...last, annotation: { ...baseAnnotation, locationLabel: null } }
+                : { ...last, annotation: baseAnnotation };
               return {
                 deletedAnnotationHistory: [...state.deletedAnnotationHistory, rolledBack],
                 deletionOrder: [...state.deletionOrder, 'annotation'],
