@@ -479,6 +479,60 @@ describe('EpubViewer', () => {
     await waitFor(() => expect(engine.highlighted.get(annotationId)).toBe(CFI));
   });
 
+  it('uses resolved chapterLabel and refuses to guess among shared-XHTML #fragment TOC entries (#125)', async () => {
+    const { store, documentId } = await setup();
+    engine.toc = [
+      {
+        id: 'ch1',
+        label: 'Chapter One: Arrival',
+        href: 'OEBPS/chapter1.xhtml#arrival',
+        children: [],
+      },
+      {
+        id: 'ch2',
+        label: 'Chapter Two: Departure',
+        href: 'OEBPS/chapter1.xhtml#departure',
+        children: [],
+      },
+    ];
+    render(<Harness store={store} documentId={documentId} />);
+    await opened();
+
+    // When the engine resolves the second chapter's fragment, Viewer preserves it.
+    act(() =>
+      engine.emitSelection({
+        cfiRange: CFI,
+        chapterHref: 'OEBPS/chapter1.xhtml',
+        text: 'Departure passage',
+        chapterLabel: 'Chapter Two: Departure',
+      }),
+    );
+    expect(store.getState().selection?.locationLabel).toBe('Chapter Two: Departure');
+    await act(() => store.getState().excerptSelection());
+    expect(store.getState().annotations[0]?.locationLabel).toBe('Chapter Two: Departure');
+
+    // When the engine explicitly reports null (unresolvable fragment), Viewer does not guess Arrival.
+    act(() =>
+      engine.emitSelection({
+        cfiRange: FAR_CFI,
+        chapterHref: 'OEBPS/chapter1.xhtml',
+        text: 'Ambiguous passage',
+        chapterLabel: null,
+      }),
+    );
+    expect(store.getState().selection?.locationLabel).toBeNull();
+
+    // Even if chapterLabel is omitted, fallback refuses to guess the first fragment entry.
+    act(() =>
+      engine.emitSelection({
+        cfiRange: FAR_CFI,
+        chapterHref: 'OEBPS/chapter1.xhtml',
+        text: 'Fallback passage',
+      }),
+    );
+    expect(store.getState().selection?.locationLabel).toBeNull();
+  });
+
   it('clears the selection when the frame reports it collapsed', async () => {
     const { store, documentId } = await setup();
     render(<Harness store={store} documentId={documentId} />);

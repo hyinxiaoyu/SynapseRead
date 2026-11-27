@@ -500,32 +500,46 @@ export function createStudySyncStore(backend: StudyBackend) {
       return next;
     };
 
-    const getDocumentVersion = (documentId: string) => ({
+    interface DocumentContentVersion {
+      fileHash: string | null;
+      epoch: number;
+    }
+
+    const getDocumentVersion = (documentId: string): DocumentContentVersion => ({
       fileHash: get().documents.find((doc) => doc.id === documentId)?.fileHash ?? null,
       epoch: documentContentEpochs.get(documentId) ?? 0,
     });
 
+    const hasStateDocumentContentChanged = (
+      state: Pick<StudySyncState, 'documents'>,
+      documentId: string,
+      atStart: DocumentContentVersion,
+    ): boolean => {
+      const fileHash = state.documents.find((doc) => doc.id === documentId)?.fileHash ?? null;
+      const epoch = documentContentEpochs.get(documentId) ?? 0;
+      return epoch !== atStart.epoch || fileHash !== atStart.fileHash;
+    };
+
     const hasDocumentContentChanged = (
       documentId: string,
-      atStart: { fileHash: string | null; epoch: number },
-    ): boolean => {
-      const current = getDocumentVersion(documentId);
-      return current.epoch !== atStart.epoch || current.fileHash !== atStart.fileHash;
-    };
+      atStart: DocumentContentVersion,
+    ): boolean => hasStateDocumentContentChanged(get(), documentId, atStart);
 
     /**
      * When a content-changing relink completed while an annotation write was in flight,
      * prefer the backend's current annotation row so stale `locationLabel` snapshots never
-     * reappear in UI state (#125).
+     * reappear in UI state (#125). Returns the verified document version alongside the
+     * annotation so the final `set(...)` callback can re-check synchronously against any
+     * relink that landed during the `await` microtask boundary.
      */
     const reconcileAnnotationWithBackend = async (
       notebookId: string,
       annotation: Annotation,
       documentId: string,
-      versionAtStart: { fileHash: string | null; epoch: number },
-    ): Promise<Annotation> => {
+      versionAtStart: DocumentContentVersion,
+    ): Promise<{ annotation: Annotation; version: DocumentContentVersion }> => {
       if (!hasDocumentContentChanged(documentId, versionAtStart)) {
-        return annotation;
+        return { annotation, version: versionAtStart };
       }
       for (;;) {
         const versionBeforeLoad = getDocumentVersion(documentId);
@@ -538,8 +552,54 @@ export function createStudySyncStore(backend: StudyBackend) {
           resolved = { ...annotation, locationLabel: null };
         }
         if (!hasDocumentContentChanged(documentId, versionBeforeLoad)) {
-          return resolved;
+          return { annotation: resolved, version: versionBeforeLoad };
         }
+      }
+    };
+
+    const resolveAnnotationForState = (
+      state: Pick<StudySyncState, 'documents'>,
+      reconciled: { annotation: Annotation; version: DocumentContentVersion },
+    ): { annotation: Annotation; stale: boolean } => {
+      if (
+        hasStateDocumentContentChanged(state, reconciled.annotation.documentId, reconciled.version)
+      ) {
+        return { annotation: { ...reconciled.annotation, locationLabel: null }, stale: true };
+      }
+      return { annotation: reconciled.annotation, stale: false };
+    };
+
+    const refreshAnnotationFromBackend = async (
+      notebookId: string,
+      annotationId: string,
+      documentId: string,
+    ): Promise<Annotation | null> => {
+      let latest: Annotation | null = null;
+      for (;;) {
+        const versionBeforeLoad = getDocumentVersion(documentId);
+        let fetched: Annotation | null;
+        try {
+          const graph = await backend.loadNotebookGraph(notebookId);
+          fetched = graph.annotations.find((candidate) => candidate.id === annotationId) ?? null;
+        } catch {
+          return null;
+        }
+        if (!fetched) return null;
+        let stale = false;
+        set((state) => {
+          if (!state.annotations.some((candidate) => candidate.id === annotationId)) {
+            return state;
+          }
+          stale = hasStateDocumentContentChanged(state, documentId, versionBeforeLoad);
+          const next = stale ? { ...fetched, locationLabel: null } : fetched;
+          latest = next;
+          return {
+            annotations: state.annotations.map((candidate) =>
+              candidate.id === annotationId ? next : candidate,
+            ),
+          };
+        });
+        if (!stale) return latest;
       }
     };
 
@@ -1764,22 +1824,25 @@ export function createStudySyncStore(backend: StudyBackend) {
             locationLabel: selection.locationLabel ?? null,
             expectedFileHash,
           });
-          const resolvedAnnotation = await reconcileAnnotationWithBackend(
+          const reconciled = await reconcileAnnotationWithBackend(
             notebook.id,
             created.annotation,
             selection.documentId,
             versionAtStart,
           );
           let resolvedParentTitle: string | null = null;
+          let needsBackendRefresh = false;
           // Only clear the selection the user excerpted: they may have made a
           // new one while the write was in flight.
           set((state) => {
+            const final = resolveAnnotationForState(state, reconciled);
+            needsBackendRefresh = final.stale;
             resolvedParentTitle = parentNode
               ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
                 parentTitleBeforeWrite)
               : null;
             return {
-              annotations: [...state.annotations, resolvedAnnotation],
+              annotations: [...state.annotations, final.annotation],
               cards: [...state.cards, created.card],
               nodes: [...state.nodes, created.node],
               edges: created.edge ? [...state.edges, created.edge] : state.edges,
@@ -1792,6 +1855,13 @@ export function createStudySyncStore(backend: StudyBackend) {
           // The new card is selected and shown so it can be found, but the
           // nesting target stays whatever the reader chose.
           get().revealNode(created.node.id, resolvedParentTitle);
+          if (needsBackendRefresh) {
+            await refreshAnnotationFromBackend(
+              notebook.id,
+              created.annotation.id,
+              selection.documentId,
+            );
+          }
         } catch (error) {
           // Drop the selection if its source document changed under it; otherwise keep it for retry.
           set((state) => ({
@@ -1799,7 +1869,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             error: describeError(error),
             selection:
               state.selection === selection &&
-              hasDocumentContentChanged(selection.documentId, versionAtStart)
+              hasStateDocumentContentChanged(state, selection.documentId, versionAtStart)
                 ? null
                 : state.selection,
           }));
@@ -1826,17 +1896,30 @@ export function createStudySyncStore(backend: StudyBackend) {
             locationLabel: selection.locationLabel ?? null,
             expectedFileHash,
           });
-          const resolvedAnnotation = await reconcileAnnotationWithBackend(
+          const reconciled = await reconcileAnnotationWithBackend(
             notebook.id,
             saved,
             selection.documentId,
             versionAtStart,
           );
-          created = resolvedAnnotation;
-          set((state) => ({
-            annotations: [...state.annotations, resolvedAnnotation],
-            selection: state.selection === selection ? null : state.selection,
-          }));
+          let needsBackendRefresh = false;
+          set((state) => {
+            const final = resolveAnnotationForState(state, reconciled);
+            created = final.annotation;
+            needsBackendRefresh = final.stale;
+            return {
+              annotations: [...state.annotations, final.annotation],
+              selection: state.selection === selection ? null : state.selection,
+            };
+          });
+          if (needsBackendRefresh) {
+            const refreshed = await refreshAnnotationFromBackend(
+              notebook.id,
+              saved.id,
+              selection.documentId,
+            );
+            if (refreshed) created = refreshed;
+          }
         });
         return created;
       },
@@ -1847,7 +1930,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
         await guarded(async () => {
           const updated = await backend.updateAnnotation(annotationId, patch);
-          const resolvedAnnotation =
+          const reconciled =
             notebook && versionAtStart
               ? await reconcileAnnotationWithBackend(
                   notebook.id,
@@ -1855,12 +1938,27 @@ export function createStudySyncStore(backend: StudyBackend) {
                   updated.documentId,
                   versionAtStart,
                 )
-              : updated;
-          set((state) => ({
-            annotations: state.annotations.map((candidate) =>
-              candidate.id === annotationId ? resolvedAnnotation : candidate,
-            ),
-          }));
+              : null;
+          let needsBackendRefresh = false;
+          set((state) => {
+            if (!reconciled) {
+              return {
+                annotations: state.annotations.map((candidate) =>
+                  candidate.id === annotationId ? updated : candidate,
+                ),
+              };
+            }
+            const final = resolveAnnotationForState(state, reconciled);
+            needsBackendRefresh = final.stale;
+            return {
+              annotations: state.annotations.map((candidate) =>
+                candidate.id === annotationId ? final.annotation : candidate,
+              ),
+            };
+          });
+          if (needsBackendRefresh && notebook) {
+            await refreshAnnotationFromBackend(notebook.id, annotationId, updated.documentId);
+          }
         });
       },
 
@@ -1889,23 +1987,29 @@ export function createStudySyncStore(backend: StudyBackend) {
         const deleting = guarded(
           () => backend.deleteAnnotation(annotationId),
           () => {
-            const restoredAnnotation = hasDocumentContentChanged(removed.documentId, versionAtStart)
-              ? { ...removed, locationLabel: null }
-              : removed;
-            set((state) => ({
-              annotations: [...state.annotations, restoredAnnotation],
-              deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
-                (entry) => entry.annotation.id !== removed.id,
-              ),
-              deletionOrder: withoutLastDeletion(state.deletionOrder, 'annotation'),
-              cards: state.cards.map((card) => {
-                const index = removedFromCards.get(card.id);
-                if (index === undefined || card.annotationIds.includes(annotationId)) return card;
-                const annotationIds = [...card.annotationIds];
-                annotationIds.splice(Math.min(index, annotationIds.length), 0, annotationId);
-                return { ...card, annotationIds };
-              }),
-            }));
+            set((state) => {
+              const restoredAnnotation = hasStateDocumentContentChanged(
+                state,
+                removed.documentId,
+                versionAtStart,
+              )
+                ? { ...removed, locationLabel: null }
+                : removed;
+              return {
+                annotations: [...state.annotations, restoredAnnotation],
+                deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
+                  (entry) => entry.annotation.id !== removed.id,
+                ),
+                deletionOrder: withoutLastDeletion(state.deletionOrder, 'annotation'),
+                cards: state.cards.map((card) => {
+                  const index = removedFromCards.get(card.id);
+                  if (index === undefined || card.annotationIds.includes(annotationId)) return card;
+                  const annotationIds = [...card.annotationIds];
+                  annotationIds.splice(Math.min(index, annotationIds.length), 0, annotationId);
+                  return { ...card, annotationIds };
+                }),
+              };
+            });
           },
         );
         pendingDeletes.set(annotationId, deleting);
@@ -1934,30 +2038,47 @@ export function createStudySyncStore(backend: StudyBackend) {
           async () => {
             const result = await backend.restoreAnnotation(annotationId);
             const notebookId = get().notebook?.id ?? result.annotation.notebookId;
-            const resolvedAnnotation = await reconcileAnnotationWithBackend(
+            const reconciled = await reconcileAnnotationWithBackend(
               notebookId,
               result.annotation,
               documentId,
               versionAtStart,
             );
-            restored = resolvedAnnotation;
             const restoredCards = new Map(result.cards.map((card) => [card.id, card]));
-            set((state) => ({
-              annotations: [...state.annotations, resolvedAnnotation],
-              cards: state.cards.map((card) => {
-                const restoredCard = restoredCards.get(card.id);
-                return restoredCard ? { ...card, annotationIds: restoredCard.annotationIds } : card;
-              }),
-            }));
+            let needsBackendRefresh = false;
+            set((state) => {
+              const final = resolveAnnotationForState(state, reconciled);
+              restored = final.annotation;
+              needsBackendRefresh = final.stale;
+              return {
+                annotations: [...state.annotations, final.annotation],
+                cards: state.cards.map((card) => {
+                  const restoredCard = restoredCards.get(card.id);
+                  return restoredCard
+                    ? { ...card, annotationIds: restoredCard.annotationIds }
+                    : card;
+                }),
+              };
+            });
+            if (needsBackendRefresh) {
+              const refreshed = await refreshAnnotationFromBackend(
+                notebookId,
+                result.annotation.id,
+                documentId,
+              );
+              if (refreshed) restored = refreshed;
+            }
           },
           () => {
-            const rolledBack = hasDocumentContentChanged(documentId, versionAtStart)
-              ? { ...last, annotation: { ...last.annotation, locationLabel: null } }
-              : last;
-            set((state) => ({
-              deletedAnnotationHistory: [...state.deletedAnnotationHistory, rolledBack],
-              deletionOrder: [...state.deletionOrder, 'annotation'],
-            }));
+            set((state) => {
+              const rolledBack = hasStateDocumentContentChanged(state, documentId, versionAtStart)
+                ? { ...last, annotation: { ...last.annotation, locationLabel: null } }
+                : last;
+              return {
+                deletedAnnotationHistory: [...state.deletedAnnotationHistory, rolledBack],
+                deletionOrder: [...state.deletionOrder, 'annotation'],
+              };
+            });
           },
         );
         return restored;

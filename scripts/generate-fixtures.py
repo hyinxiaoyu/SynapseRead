@@ -377,6 +377,43 @@ and &lt;img src=x onerror=alert(1)&gt; stay text.</p></aside>"""),
     write_epub(OUT / "sample-footnotes.epub", files)
 
 
+def build_shared_xhtml_epub():
+    """Two chapters inside one XHTML file targeted by #fragment TOC entries (#125)."""
+    files = {
+        "META-INF/container.xml": """<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+<rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+</rootfiles></container>
+""",
+        "OEBPS/content.opf": """<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+<dc:identifier id="id">synapseread-shared-xhtml-fixture</dc:identifier>
+<dc:title>Shared Chapters Fixture</dc:title><dc:language>en</dc:language>
+<meta property="dcterms:modified">2026-01-01T00:00:00Z</meta></metadata>
+<manifest>
+<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+<item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+</manifest>
+<spine><itemref idref="ch1"/></spine>
+</package>
+""",
+        "OEBPS/nav.xhtml": note_chapter("Contents", """<nav epub:type="toc"><ol>
+<li><a href="chapter1.xhtml#arrival">Chapter One: Arrival</a></li>
+<li><a href="chapter1.xhtml#departure">Chapter Two: Departure</a></li>
+</ol></nav>"""),
+        "OEBPS/chapter1.xhtml": note_chapter("Shared Chapters", """<section id="arrival">
+<h1>Chapter One: Arrival</h1>
+<p>Arrival harbor passage opens the first chapter inside the shared file.</p>
+</section>
+<section id="departure">
+<h1>Chapter Two: Departure</h1>
+<p>Departure voyage passage opens the second chapter inside the same file.</p>
+</section>"""),
+    }
+    write_epub(OUT / "sample-shared-xhtml.epub", files)
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "sample.pdf").write_bytes(build_pdf())
@@ -385,6 +422,7 @@ def main():
     build_uneven_epub()
     (OUT / "sample-footnotes.pdf").write_bytes(build_footnotes_pdf())
     build_footnotes_epub()
+    build_shared_xhtml_epub()
 
 
 if __name__ == "__main__":

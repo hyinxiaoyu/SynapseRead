@@ -25,6 +25,7 @@ import { formatForPath } from '@/lib/documentFormats';
 import { MAX_LOCATION_LABEL_CHARS } from '@/lib/sourceAttribution';
 import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
 import sampleCodeEpubUrl from '../../../../../fixtures/documents/sample-code.epub?url&no-inline';
+import sampleSharedXhtmlEpubUrl from '../../../../../fixtures/documents/sample-shared-xhtml.epub?url&no-inline';
 import sampleLabelsPdfUrl from '../../../../../fixtures/documents/sample-labels.pdf?url&no-inline';
 import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
 import sampleUnevenEpubUrl from '../../../../../fixtures/documents/sample-uneven.epub?url&no-inline';
@@ -156,6 +157,8 @@ const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample-footnotes.pdf': fetchBytes(sampleFootnotesPdfUrl),
   // Synthetic code blocks across plain, Pandoc, and multi-page listings (#104).
   '/preview/sample-code.epub': fetchBytes(sampleCodeEpubUrl),
+  // Two chapters sharing a single XHTML file via `#fragment` TOC entries (#125).
+  '/preview/sample-shared-xhtml.epub': fetchBytes(sampleSharedXhtmlEpubUrl),
 };
 
 export interface MemoryBackendOptions {
