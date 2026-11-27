@@ -493,20 +493,12 @@ export function createStudySyncStore(backend: StudyBackend) {
     const documentTitleSeqs = new Map<string, number>();
     /** Monotonic per-document counter incremented whenever a content-changing relink commits (#125). */
     const documentContentEpochs = new Map<string, number>();
-    /** Monotonic per-annotation save sequence numbers issued when `updateAnnotation` starts (#125). */
-    const annotationUpdateSeqs = new Map<string, number>();
-    /** Highest `updateAnnotation` sequence number successfully applied to store state per annotation (#125). */
-    const appliedAnnotationUpdateSeqs = new Map<string, number>();
+    /** Per-annotation FIFO tail promises so `updateAnnotation` patches commit strictly in order (#125). */
+    const pendingAnnotationUpdates = new Map<string, Promise<void>>();
 
     const nextDocumentTitleSeq = (documentId: string): number => {
       const next = (documentTitleSeqs.get(documentId) ?? 0) + 1;
       documentTitleSeqs.set(documentId, next);
-      return next;
-    };
-
-    const nextAnnotationUpdateSeq = (annotationId: string): number => {
-      const next = (annotationUpdateSeqs.get(annotationId) ?? 0) + 1;
-      annotationUpdateSeqs.set(annotationId, next);
       return next;
     };
 
@@ -623,54 +615,6 @@ export function createStudySyncStore(backend: StudyBackend) {
           };
         });
         if (!present || !stale) return latest;
-      }
-    };
-
-    /**
-     * When an older `updateAnnotation` call finishes after a newer save already applied
-     * to UI state, the older request may have committed to the backend last and overwritten
-     * the newer persisted fields. Compare persisted state against the live annotation and
-     * re-persist the live fields if they diverged, keeping UI and backend in sync (#125).
-     */
-    const reconcileSupersededAnnotationWrite = async (
-      notebookId: string,
-      annotationId: string,
-    ): Promise<void> => {
-      for (;;) {
-        if (pendingDeletes.has(annotationId)) return;
-        const seqBeforeCheck = appliedAnnotationUpdateSeqs.get(annotationId) ?? 0;
-        let persisted: Annotation | null;
-        try {
-          const graph = await backend.loadNotebookGraph(notebookId);
-          persisted = graph.annotations.find((candidate) => candidate.id === annotationId) ?? null;
-        } catch {
-          return;
-        }
-        if (!persisted || pendingDeletes.has(annotationId)) return;
-        const live = get().annotations.find((candidate) => candidate.id === annotationId);
-        if (!live) return;
-        const seqNow = appliedAnnotationUpdateSeqs.get(annotationId) ?? 0;
-        const matchesLive =
-          (persisted.note ?? null) === (live.note ?? null) &&
-          persisted.color === live.color &&
-          persisted.style === live.style;
-        if (matchesLive) {
-          if (seqNow === seqBeforeCheck) return;
-          continue;
-        }
-        try {
-          // `note: ''` explicitly clears `note` to `NULL` in Core & memoryBackend,
-          // whereas `note: null` means "leave unchanged".
-          await backend.updateAnnotation(annotationId, {
-            note: live.note ?? '',
-            color: live.color,
-            style: live.style,
-          });
-        } catch {
-          return;
-        }
-        const seqAfterWrite = appliedAnnotationUpdateSeqs.get(annotationId) ?? 0;
-        if (seqAfterWrite === seqNow) return;
       }
     };
 
@@ -1996,62 +1940,59 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async updateAnnotation(annotationId, patch) {
-        const { notebook, annotations } = get();
-        const existing = annotations.find((candidate) => candidate.id === annotationId);
-        const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
-        const updateSeq = nextAnnotationUpdateSeq(annotationId);
-        await guarded(async () => {
-          const updated = await backend.updateAnnotation(annotationId, patch);
-          const reconciled =
-            notebook && versionAtStart
-              ? await reconcileAnnotationWithBackend(
-                  notebook.id,
-                  updated,
-                  updated.documentId,
-                  versionAtStart,
-                )
-              : null;
-          let needsBackendRefresh = false;
-          let superseded = false;
-          set((state) => {
-            const current = state.annotations.find((candidate) => candidate.id === annotationId);
-            if (!current) return state;
-            const final = reconciled
-              ? resolveAnnotationForState(state, reconciled)
-              : { annotation: updated, stale: false };
-            needsBackendRefresh = final.stale;
-            const lastAppliedSeq = appliedAnnotationUpdateSeqs.get(annotationId) ?? 0;
-            superseded = updateSeq < lastAppliedSeq;
-            // If a newer save already applied to UI state, preserve its note, color, and
-            // style and merge only the verified `locationLabel` (#125).
-            const nextLocationLabel = final.annotation.locationLabel ?? null;
-            const nextAnnotation: Annotation = superseded
-              ? (current.locationLabel ?? null) === nextLocationLabel
-                ? current
-                : { ...current, locationLabel: nextLocationLabel }
-              : final.annotation;
-            if (updateSeq > lastAppliedSeq) {
-              appliedAnnotationUpdateSeqs.set(annotationId, updateSeq);
+        const run = async () => {
+          const { notebook, annotations } = get();
+          const existing = annotations.find((candidate) => candidate.id === annotationId);
+          const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
+          await guarded(async () => {
+            const updated = await backend.updateAnnotation(annotationId, patch);
+            const reconciled =
+              notebook && versionAtStart
+                ? await reconcileAnnotationWithBackend(
+                    notebook.id,
+                    updated,
+                    updated.documentId,
+                    versionAtStart,
+                  )
+                : null;
+            let needsBackendRefresh = false;
+            set((state) => {
+              const current = state.annotations.find((candidate) => candidate.id === annotationId);
+              if (!current) return state;
+              const final = reconciled
+                ? resolveAnnotationForState(state, reconciled)
+                : { annotation: updated, stale: false };
+              needsBackendRefresh = final.stale;
+              return {
+                annotations: state.annotations.map((candidate) =>
+                  candidate.id === annotationId ? final.annotation : candidate,
+                ),
+              };
+            });
+            if (needsBackendRefresh) {
+              const notebookId = get().notebook?.id ?? updated.notebookId;
+              await refreshAnnotationLocationFromBackend(
+                notebookId,
+                annotationId,
+                updated.documentId,
+              );
             }
-            if (nextAnnotation === current) return state;
-            return {
-              annotations: state.annotations.map((candidate) =>
-                candidate.id === annotationId ? nextAnnotation : candidate,
-              ),
-            };
           });
-          const notebookId = get().notebook?.id ?? updated.notebookId;
-          if (needsBackendRefresh) {
-            await refreshAnnotationLocationFromBackend(
-              notebookId,
-              annotationId,
-              updated.documentId,
-            );
+        };
+        const previous = pendingAnnotationUpdates.get(annotationId);
+        const next = previous ? previous.then(run, run) : run();
+        const tail = next.then(
+          () => undefined,
+          () => undefined,
+        );
+        pendingAnnotationUpdates.set(annotationId, tail);
+        try {
+          await next;
+        } finally {
+          if (pendingAnnotationUpdates.get(annotationId) === tail) {
+            pendingAnnotationUpdates.delete(annotationId);
           }
-          if (superseded) {
-            await reconcileSupersededAnnotationWrite(notebookId, annotationId);
-          }
-        });
+        }
       },
 
       async removeAnnotation(annotationId) {

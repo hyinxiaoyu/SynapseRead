@@ -2259,10 +2259,10 @@ describe('useStudySyncStore', () => {
       }
     });
 
-    it('guards overlapping pre-relink updateAnnotation responses against both succeeding and failing newer saves (#125)', async () => {
-      // 1) Pre-relink save ("Older note") commits first with delayed response -> content-changing
-      // relink -> newer save ("Newest note", new color & style) succeeds -> delayed older response
-      // arrives and must NOT roll back the newer note, color, or style while keeping locationLabel null.
+    it('serializes per-annotation updateAnnotation patches across relinks, disjoint field edits, multi-save chains, and failures (#125)', async () => {
+      // 1) Two saves edit different fields across a content-changing relink: pause note save,
+      // relink, enqueue color save, release note save -> both note and color are preserved
+      // while locationLabel stays null in live state, persisted backend, and reload.
       {
         const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
         const revisedBytes = new TextEncoder().encode('Revised file.\n');
@@ -2276,6 +2276,7 @@ describe('useStudySyncStore', () => {
         await customStore.getState().initialize();
         await customStore.getState().openDocument();
         const docId = customStore.getState().activeDocumentId as string;
+        const notebookId = customStore.getState().notebook!.id;
         const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
 
         customStore.getState().setSelection({
@@ -2289,141 +2290,67 @@ describe('useStudySyncStore', () => {
         const created = (await customStore.getState().createAnnotationFromSelection())!;
 
         const origUpdate = customBackend.updateAnnotation.bind(customBackend);
-        let releaseFirstSave!: () => void;
-        let firstSaveCommitted!: () => void;
-        const firstSaveGate = new Promise<void>((r) => {
-          releaseFirstSave = r;
+        const appliedOrder: string[] = [];
+        let releaseNoteSave!: () => void;
+        let noteSaveStarted!: () => void;
+        const noteSaveGate = new Promise<void>((r) => {
+          releaseNoteSave = r;
         });
-        const waitFirstSaveCommitted = new Promise<void>((r) => {
-          firstSaveCommitted = r;
-        });
-
-        vi.spyOn(customBackend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
-          const result = await origUpdate(id, patch);
-          firstSaveCommitted();
-          await firstSaveGate;
-          return result;
-        });
-
-        // Start pre-relink save ("Older note") and pause its response after backend commit.
-        const firstSavePromise = customStore.getState().updateAnnotation(created.id, {
-          note: 'Older note',
-          color: '#f59e0b',
-          style: 'highlight',
-        });
-        await waitFirstSaveCommitted;
-
-        // Complete content-changing relink, then save "Newest note" with updated color & style.
-        const relinked = await customStore.getState().relinkDocument(docId, false);
-        expect(relinked?.contentChanged).toBe(true);
-
-        await customStore.getState().updateAnnotation(created.id, {
-          note: 'Newest note',
-          color: '#22c55e',
-          style: 'underline',
-        });
-        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
-        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
-        expect(customStore.getState().annotations[0]?.style).toBe('underline');
-        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
-
-        // Deliver the older pre-relink save response: newer note/color/style must remain intact.
-        releaseFirstSave();
-        await firstSavePromise;
-
-        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
-        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
-        expect(customStore.getState().annotations[0]?.style).toBe('underline');
-        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
-
-        const reopened = createStudySyncStore(customBackend);
-        await reopened.getState().initialize();
-        expect(reopened.getState().annotations[0]?.note).toBe('Newest note');
-        expect(reopened.getState().annotations[0]?.color).toBe('#22c55e');
-        expect(reopened.getState().annotations[0]?.style).toBe('underline');
-        expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
-      }
-
-      // 2) Pre-relink save ("Older note") commits first with delayed response -> content-changing
-      // relink -> newer save FAILS -> delayed first response arrives and MUST still apply
-      // "Older note" with locationLabel: null, matching the backend.
-      {
-        const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
-        const revisedBytes = new TextEncoder().encode('Revised file.\n');
-        const customBackend = createMemoryBackend({
-          library: {
-            '/t/original.txt': originalBytes,
-            '/t/revised.txt': revisedBytes,
-          },
-        });
-        const customStore = createStudySyncStore(customBackend);
-        await customStore.getState().initialize();
-        await customStore.getState().openDocument();
-        const docId = customStore.getState().activeDocumentId as string;
-        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
-
-        customStore.getState().setSelection({
-          documentId: docId,
-          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
-          text: 'Old chapter',
-          imagePng: null,
-          locationLabel: 'Old chapter · Line 1',
-          sourceFileHash: oldHash,
-        });
-        const created = (await customStore.getState().createAnnotationFromSelection())!;
-
-        const origUpdate = customBackend.updateAnnotation.bind(customBackend);
-        let releaseFirstSave!: () => void;
-        let firstSaveCommitted!: () => void;
-        const firstSaveGate = new Promise<void>((r) => {
-          releaseFirstSave = r;
-        });
-        const waitFirstSaveCommitted = new Promise<void>((r) => {
-          firstSaveCommitted = r;
+        const waitNoteSaveStarted = new Promise<void>((r) => {
+          noteSaveStarted = r;
         });
 
         vi.spyOn(customBackend, 'updateAnnotation')
           .mockImplementationOnce(async (id, patch) => {
-            const result = await origUpdate(id, patch);
-            firstSaveCommitted();
-            await firstSaveGate;
-            return result;
+            noteSaveStarted();
+            await noteSaveGate;
+            appliedOrder.push(`note:${patch.note ?? 'null'}`);
+            return origUpdate(id, patch);
           })
-          .mockRejectedValueOnce({ code: 'io', message: 'disk full' });
+          .mockImplementationOnce(async (id, patch) => {
+            appliedOrder.push(`color:${patch.color ?? 'null'}`);
+            return origUpdate(id, patch);
+          });
 
-        const firstSavePromise = customStore.getState().updateAnnotation(created.id, {
-          note: 'Older note',
+        // Pause the note edit before it commits, then relink and enqueue a color edit.
+        const noteSavePromise = customStore.getState().updateAnnotation(created.id, {
+          note: 'Saved note',
           color: null,
         });
-        await waitFirstSaveCommitted;
+        await waitNoteSaveStarted;
 
         const relinked = await customStore.getState().relinkDocument(docId, false);
         expect(relinked?.contentChanged).toBe(true);
 
-        // Newer save fails in backend and must not advance the applied save sequence.
-        await customStore.getState().updateAnnotation(created.id, {
-          note: 'Failed note',
-          color: null,
+        const colorSavePromise = customStore.getState().updateAnnotation(created.id, {
+          note: null,
+          color: '#22c55e',
         });
-        expect(customStore.getState().annotations[0]?.note).toBeNull();
 
-        // Deliver the earlier succeeded save response: "Older note" applies with cleared locationLabel.
-        releaseFirstSave();
-        await firstSavePromise;
+        // Release the paused note save; the queued color save must run strictly after it.
+        releaseNoteSave();
+        await Promise.all([noteSavePromise, colorSavePromise]);
 
-        expect(customStore.getState().annotations[0]?.note).toBe('Older note');
+        expect(appliedOrder).toEqual(['note:Saved note', 'color:#22c55e']);
+        expect(customStore.getState().annotations[0]?.note).toBe('Saved note');
+        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
         expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        const persisted = (await customBackend.loadNotebookGraph(notebookId)).annotations[0];
+        expect(persisted?.note).toBe('Saved note');
+        expect(persisted?.color).toBe('#22c55e');
+        expect(persisted?.locationLabel).toBeNull();
 
         const reopened = createStudySyncStore(customBackend);
         await reopened.getState().initialize();
-        expect(reopened.getState().annotations[0]?.note).toBe('Older note');
+        expect(reopened.getState().annotations[0]?.note).toBe('Saved note');
+        expect(reopened.getState().annotations[0]?.color).toBe('#22c55e');
         expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
       }
 
-      // 3) Pre-relink save ("Older note") paused BEFORE writing to backend -> content-changing
-      // relink -> newer save ("Newest note") commits to backend & UI -> older request unpauses
-      // and commits to backend LAST -> backend is reconciled back to "Newest note" so live state
-      // and reloaded workspace stay consistent with locationLabel: null.
+      // 2) Three overlapping saves across a content-changing relink ("First note" -> "Second note"
+      // -> "Third note"): all three execute in strict FIFO order with zero compensatory writes, so
+      // live state, persisted record, and reloaded workspace all agree on "Third note" + null location.
       {
         const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
         const revisedBytes = new TextEncoder().encode('Revised file.\n');
@@ -2437,6 +2364,7 @@ describe('useStudySyncStore', () => {
         await customStore.getState().initialize();
         await customStore.getState().openDocument();
         const docId = customStore.getState().activeDocumentId as string;
+        const notebookId = customStore.getState().notebook!.id;
         const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
 
         customStore.getState().setSelection({
@@ -2450,63 +2378,62 @@ describe('useStudySyncStore', () => {
         const created = (await customStore.getState().createAnnotationFromSelection())!;
 
         const origUpdate = customBackend.updateAnnotation.bind(customBackend);
-        let releaseFirstWrite!: () => void;
-        let firstWritePaused!: () => void;
-        const firstWriteGate = new Promise<void>((r) => {
-          releaseFirstWrite = r;
+        const appliedNotes: (string | null)[] = [];
+        let releaseFirst!: () => void;
+        let firstStarted!: () => void;
+        const firstGate = new Promise<void>((r) => {
+          releaseFirst = r;
         });
-        const waitFirstWritePaused = new Promise<void>((r) => {
-          firstWritePaused = r;
-        });
-
-        vi.spyOn(customBackend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
-          firstWritePaused();
-          await firstWriteGate;
-          return origUpdate(id, patch);
+        const waitFirstStarted = new Promise<void>((r) => {
+          firstStarted = r;
         });
 
-        // Start pre-relink save ("Older note") and pause it BEFORE backend write executes.
-        const firstSavePromise = customStore.getState().updateAnnotation(created.id, {
-          note: 'Older note',
-          color: '#f59e0b',
-          style: 'highlight',
-        });
-        await waitFirstWritePaused;
+        const updateSpy = vi
+          .spyOn(customBackend, 'updateAnnotation')
+          .mockImplementation(async (id, patch) => {
+            if (patch.note === 'First note') {
+              firstStarted();
+              await firstGate;
+            }
+            appliedNotes.push(patch.note);
+            return origUpdate(id, patch);
+          });
 
-        // Complete content-changing relink, then save "Newest note" to backend and UI.
+        const firstPromise = customStore
+          .getState()
+          .updateAnnotation(created.id, { note: 'First note', color: null });
+        await waitFirstStarted;
+
         const relinked = await customStore.getState().relinkDocument(docId, false);
         expect(relinked?.contentChanged).toBe(true);
 
-        await customStore.getState().updateAnnotation(created.id, {
-          note: 'Newest note',
-          color: '#22c55e',
-          style: 'underline',
-        });
-        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
-        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
-        expect(customStore.getState().annotations[0]?.style).toBe('underline');
+        const secondPromise = customStore
+          .getState()
+          .updateAnnotation(created.id, { note: 'Second note', color: null });
+        const thirdPromise = customStore
+          .getState()
+          .updateAnnotation(created.id, { note: 'Third note', color: null });
+
+        releaseFirst();
+        await Promise.all([firstPromise, secondPromise, thirdPromise]);
+
+        expect(updateSpy).toHaveBeenCalledTimes(3);
+        expect(appliedNotes).toEqual(['First note', 'Second note', 'Third note']);
+        expect(customStore.getState().annotations[0]?.note).toBe('Third note');
         expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
 
-        // Release the older request so it writes to the backend LAST.
-        releaseFirstWrite();
-        await firstSavePromise;
-
-        // Both live state and reloaded backend state must agree on "Newest note" and locationLabel: null.
-        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
-        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
-        expect(customStore.getState().annotations[0]?.style).toBe('underline');
-        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+        const persisted = (await customBackend.loadNotebookGraph(notebookId)).annotations[0];
+        expect(persisted?.note).toBe('Third note');
+        expect(persisted?.locationLabel).toBeNull();
 
         const reopened = createStudySyncStore(customBackend);
         await reopened.getState().initialize();
-        expect(reopened.getState().annotations[0]?.note).toBe('Newest note');
-        expect(reopened.getState().annotations[0]?.color).toBe('#22c55e');
-        expect(reopened.getState().annotations[0]?.style).toBe('underline');
+        expect(reopened.getState().annotations[0]?.note).toBe('Third note');
         expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
       }
 
-      // 4) Same late-commit order when the newer save explicitly cleared the note (`note: ''`):
-      // backend must be reconciled back to `note: null` rather than keeping the older note.
+      // 3) Queue continues cleanly after a single save failure, and a failing later save does not
+      // clobber the earlier succeeded save.
       {
         const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
         const revisedBytes = new TextEncoder().encode('Revised file.\n');
@@ -2520,6 +2447,7 @@ describe('useStudySyncStore', () => {
         await customStore.getState().initialize();
         await customStore.getState().openDocument();
         const docId = customStore.getState().activeDocumentId as string;
+        const notebookId = customStore.getState().notebook!.id;
         const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
 
         customStore.getState().setSelection({
@@ -2530,48 +2458,58 @@ describe('useStudySyncStore', () => {
           locationLabel: 'Old chapter · Line 1',
           sourceFileHash: oldHash,
         });
-        const created = (await customStore
-          .getState()
-          .createAnnotationFromSelection({ note: 'Initial note' }))!;
+        const created = (await customStore.getState().createAnnotationFromSelection())!;
 
         const origUpdate = customBackend.updateAnnotation.bind(customBackend);
-        let releaseFirstWrite!: () => void;
-        let firstWritePaused!: () => void;
-        const firstWriteGate = new Promise<void>((r) => {
-          releaseFirstWrite = r;
+        let releaseFirst!: () => void;
+        let firstStarted!: () => void;
+        const firstGate = new Promise<void>((r) => {
+          releaseFirst = r;
         });
-        const waitFirstWritePaused = new Promise<void>((r) => {
-          firstWritePaused = r;
-        });
-
-        vi.spyOn(customBackend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
-          firstWritePaused();
-          await firstWriteGate;
-          return origUpdate(id, patch);
+        const waitFirstStarted = new Promise<void>((r) => {
+          firstStarted = r;
         });
 
-        const firstSavePromise = customStore.getState().updateAnnotation(created.id, {
-          note: 'Older note',
-          color: null,
-        });
-        await waitFirstWritePaused;
+        vi.spyOn(customBackend, 'updateAnnotation')
+          .mockImplementationOnce(async (id, patch) => {
+            firstStarted();
+            await firstGate;
+            return origUpdate(id, patch);
+          })
+          .mockRejectedValueOnce({ code: 'io', message: 'disk full' })
+          .mockImplementationOnce(async (id, patch) => origUpdate(id, patch))
+          .mockRejectedValueOnce({ code: 'io', message: 'disk full again' });
+
+        const firstPromise = customStore
+          .getState()
+          .updateAnnotation(created.id, { note: 'Older note', color: null });
+        await waitFirstStarted;
 
         await customStore.getState().relinkDocument(docId, false);
-        await customStore.getState().updateAnnotation(created.id, {
-          note: '',
-          color: null,
-        });
-        expect(customStore.getState().annotations[0]?.note).toBeNull();
 
-        releaseFirstWrite();
-        await firstSavePromise;
+        const failedMiddlePromise = customStore
+          .getState()
+          .updateAnnotation(created.id, { note: 'Failed middle', color: null });
+        const recoveredPromise = customStore
+          .getState()
+          .updateAnnotation(created.id, { note: 'Recovered note', color: null });
+        const failedTailPromise = customStore
+          .getState()
+          .updateAnnotation(created.id, { note: 'Failed tail', color: null });
 
-        expect(customStore.getState().annotations[0]?.note).toBeNull();
+        releaseFirst();
+        await Promise.all([firstPromise, failedMiddlePromise, recoveredPromise, failedTailPromise]);
+
+        expect(customStore.getState().annotations[0]?.note).toBe('Recovered note');
         expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        const persisted = (await customBackend.loadNotebookGraph(notebookId)).annotations[0];
+        expect(persisted?.note).toBe('Recovered note');
+        expect(persisted?.locationLabel).toBeNull();
 
         const reopened = createStudySyncStore(customBackend);
         await reopened.getState().initialize();
-        expect(reopened.getState().annotations[0]?.note).toBeNull();
+        expect(reopened.getState().annotations[0]?.note).toBe('Recovered note');
         expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
       }
     });
