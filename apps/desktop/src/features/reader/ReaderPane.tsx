@@ -819,9 +819,7 @@ function DocumentTab({
     [createAnnotationFromSelection],
   );
   const onUpdateAnnotation = useCallback(
-    (annotationId: string, patch: AnnotationPatch) => {
-      void updateAnnotation(annotationId, patch);
-    },
+    (annotationId: string, patch: AnnotationPatch) => updateAnnotation(annotationId, patch),
     [updateAnnotation],
   );
   const onDeleteAnnotation = useCallback(

@@ -576,8 +576,8 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   annotations?: readonly Annotation[];
   /** Creates an independent highlight/note from the current selection without creating a MindMap node. */
   onCreateAnnotation?: (options?: CreateAnnotationOptions) => void;
-  /** Updates an annotation's inline note and/or color. */
-  onUpdateAnnotation?: (annotationId: string, patch: AnnotationPatch) => void;
+  /** Updates an annotation's inline note and/or color; resolves to `false` when the write fails. */
+  onUpdateAnnotation?: (annotationId: string, patch: AnnotationPatch) => void | Promise<boolean>;
   /** Deletes an annotation from this document. */
   onDeleteAnnotation?: (annotationId: string) => void;
   /** Undoes the most recent annotation deletion in this session, if available. */

@@ -299,7 +299,8 @@ export interface StudySyncState {
   /** Opens the MindMap and reveals and selects the card backed by `annotationId` (#124). */
   showAnnotationCard(annotationId: string): void;
   createAnnotationFromSelection(options?: CreateAnnotationOptions): Promise<Annotation | null>;
-  updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<void>;
+  /** Persists an annotation edit; resolves to `false` when the backend write fails (#124). */
+  updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<boolean>;
   removeAnnotation(annotationId: string): Promise<void>;
   undoRemoveAnnotation(): Promise<Annotation | null>;
   jumpToAnnotation(annotationId: string): void;
@@ -551,8 +552,15 @@ export function createStudySyncStore(backend: StudyBackend) {
     const documentTitleSeqs = new Map<string, number>();
     /** Monotonic per-document counter incremented whenever a content-changing relink commits (#125). */
     const documentContentEpochs = new Map<string, number>();
+    interface PendingAnnotationUpdate {
+      /** Resolves once every update queued up to this entry settles (never rejects). */
+      settled: Promise<void>;
+      /** Outcome of the latest queued note write (`patch.note !== null`) up to this entry (#124). */
+      noteResult: Promise<boolean> | null;
+    }
+
     /** Per-annotation FIFO tail promises so `updateAnnotation` patches commit strictly in order (#125). */
-    const pendingAnnotationUpdates = new Map<string, Promise<void>>();
+    const pendingAnnotationUpdates = new Map<string, PendingAnnotationUpdate>();
 
     const nextDocumentTitleSeq = (documentId: string): number => {
       const next = (documentTitleSeqs.get(documentId) ?? 0) + 1;
@@ -1968,9 +1976,20 @@ export function createStudySyncStore(backend: StudyBackend) {
         }));
         try {
           // Drain any queued note/color edits for this highlight so the new card's
-          // seeded `markdownNotes` reflects the latest saved note (#124).
-          const priorUpdates = pendingAnnotationUpdates.get(annotationId);
-          if (priorUpdates) await priorUpdates;
+          // seeded `markdownNotes` reflects the latest saved note, and abort if the
+          // latest queued note write failed so we never create a card with a stale note (#124).
+          for (;;) {
+            const priorUpdates = pendingAnnotationUpdates.get(annotationId);
+            if (!priorUpdates) break;
+            await priorUpdates.settled;
+            if (priorUpdates.noteResult !== null && !(await priorUpdates.noteResult)) {
+              const latest = pendingAnnotationUpdates.get(annotationId);
+              if (!latest || latest.noteResult === priorUpdates.noteResult) {
+                releaseExcerpting();
+                return;
+              }
+            }
+          }
 
           const { notebook, annotations, cards, nodes, nestingTargetNodeId, nodeSizes } = get();
           if (!notebook || pendingDeletes.has(annotationId)) {
@@ -2107,7 +2126,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async updateAnnotation(annotationId, patch) {
-        const run = async () => {
+        const run = async (): Promise<boolean> => {
           const { notebook, annotations, deletedAnnotationHistory } = get();
           const existing =
             annotations.find((candidate) => candidate.id === annotationId) ??
@@ -2115,6 +2134,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             deletedAnnotationHistory.find((entry) => entry.annotation.id === annotationId)
               ?.annotation;
           const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
+          let succeeded = false;
           await guarded(async () => {
             const updated = await backend.updateAnnotation(annotationId, patch);
             const reconciled =
@@ -2158,6 +2178,7 @@ export function createStudySyncStore(backend: StudyBackend) {
                 ),
               };
             });
+            succeeded = true;
             if (needsBackendRefresh) {
               const notebookId = get().notebook?.id ?? updated.notebookId;
               await refreshAnnotationLocationFromBackend(
@@ -2167,18 +2188,25 @@ export function createStudySyncStore(backend: StudyBackend) {
               );
             }
           });
+          return succeeded;
         };
         const previous = pendingAnnotationUpdates.get(annotationId);
-        const next = previous ? previous.then(run, run) : run();
-        const tail = next.then(
+        const next: Promise<boolean> = previous ? previous.settled.then(run, run) : run();
+        const settled = next.then(
           () => undefined,
           () => undefined,
         );
-        pendingAnnotationUpdates.set(annotationId, tail);
+        const entry: PendingAnnotationUpdate = {
+          settled,
+          // A newer note write supersedes any earlier queued note write's outcome;
+          // a color/style-only patch preserves the prior queued note outcome (#124).
+          noteResult: patch.note !== null ? next : (previous?.noteResult ?? null),
+        };
+        pendingAnnotationUpdates.set(annotationId, entry);
         try {
-          await next;
+          return await next;
         } finally {
-          if (pendingAnnotationUpdates.get(annotationId) === tail) {
+          if (pendingAnnotationUpdates.get(annotationId) === entry) {
             pendingAnnotationUpdates.delete(annotationId);
           }
         }
@@ -2218,7 +2246,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           async () => {
             // Drain any queued edits for this annotation before soft-deleting it so those
             // edits persist and survive a subsequent Undo (#125).
-            if (priorUpdates) await priorUpdates;
+            if (priorUpdates) await priorUpdates.settled;
             await backend.deleteAnnotation(annotationId);
           },
           () => {

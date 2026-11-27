@@ -131,7 +131,10 @@ function HighlightHarness({
   cardSource: boolean;
   excerpting?: boolean;
   onDelete: (annotationId: string) => void;
-  onUpdate?: (annotationId: string, patch: { note: string | null; color: string | null }) => void;
+  onUpdate?: (
+    annotationId: string,
+    patch: { note: string | null; color: string | null },
+  ) => void | Promise<boolean>;
   dismiss: () => void;
   onExcerptAnnotation?: (annotationId: string) => void;
   onShowAnnotationCard?: (annotationId: string) => void;
@@ -500,6 +503,113 @@ describe('SelectionPopover MindMap actions for existing highlights (#124)', () =
       fireEvent.click(screen.getByTestId('popover-show-in-mindmap'));
       expect(onShowAnnotationCard).toHaveBeenCalledWith(highlight.id);
       expect(dismiss).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('keeps the popover editor and draft open when async Save Note fails, and excerpts once on success (#124)', async () => {
+    // 1. Save Note fails after immediate Excerpt click -> editor stays open with draft, no excerpt/dismiss; retry succeeds.
+    {
+      let resolveFirstSave!: (ok: boolean) => void;
+      let resolveRetrySave!: (ok: boolean) => void;
+      const onUpdate = vi
+        .fn<
+          (id: string, patch: { note: string | null; color: string | null }) => Promise<boolean>
+        >()
+        .mockImplementationOnce(
+          () =>
+            new Promise<boolean>((resolve) => {
+              resolveFirstSave = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise<boolean>((resolve) => {
+              resolveRetrySave = resolve;
+            }),
+        );
+      const onExcerptAnnotation = vi.fn();
+      const dismiss = vi.fn();
+
+      const { unmount } = render(
+        <HighlightHarness
+          cardSource={false}
+          onDelete={vi.fn()}
+          onUpdate={onUpdate}
+          dismiss={dismiss}
+          onExcerptAnnotation={onExcerptAnnotation}
+          annotationOverride={{ note: 'Original note' }}
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId('popover-note-edit'));
+      const field = screen.getByTestId('popover-note-input');
+      fireEvent.change(field, { target: { value: 'Revised note' } });
+      fireEvent.click(screen.getByTestId('popover-note-save'));
+
+      // Editor stays open while save is in flight; clicking Excerpt queues it without closing yet.
+      expect(field.closest('[inert]')).toBeNull();
+      fireEvent.click(screen.getByTestId('popover-excerpt'));
+      expect(onExcerptAnnotation).not.toHaveBeenCalled();
+      expect(dismiss).not.toHaveBeenCalled();
+      expect(screen.getByTestId('popover-delete')).toBeDisabled();
+
+      // Fail the save: editor stays open with the revised draft intact and focused; no card created.
+      await act(async () => {
+        resolveFirstSave(false);
+      });
+      expect(onExcerptAnnotation).not.toHaveBeenCalled();
+      expect(dismiss).not.toHaveBeenCalled();
+      expect(field.closest('[inert]')).toBeNull();
+      expect(field).toHaveValue('Revised note');
+      expect(field).toHaveFocus();
+
+      // Clicking Excerpt now without retrying Save still blocks and warns.
+      fireEvent.click(screen.getByTestId('popover-excerpt'));
+      expect(onExcerptAnnotation).not.toHaveBeenCalled();
+      expect(screen.getByTestId('popover-unsaved-note-warning')).toBeVisible();
+
+      // Retry Save Note and immediately click Excerpt -> resolves true -> closes editor, excerpts once, dismisses.
+      fireEvent.click(screen.getByTestId('popover-note-save'));
+      fireEvent.click(screen.getByTestId('popover-excerpt'));
+      await act(async () => {
+        resolveRetrySave(true);
+      });
+      expect(onExcerptAnnotation).toHaveBeenCalledTimes(1);
+      expect(onExcerptAnnotation).toHaveBeenCalledWith(highlight.id);
+      expect(dismiss).toHaveBeenCalledTimes(1);
+      unmount();
+    }
+
+    // 2. Save Note succeeds without queued Excerpt -> editor closes only once save confirms.
+    {
+      let resolveSave!: (ok: boolean) => void;
+      const onUpdate = vi.fn(
+        () =>
+          new Promise<boolean>((resolve) => {
+            resolveSave = resolve;
+          }),
+      );
+      render(
+        <HighlightHarness
+          cardSource={false}
+          onDelete={vi.fn()}
+          onUpdate={onUpdate}
+          dismiss={vi.fn()}
+          onExcerptAnnotation={vi.fn()}
+          annotationOverride={{ note: 'Original note' }}
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId('popover-note-edit'));
+      const field = screen.getByTestId('popover-note-input');
+      fireEvent.change(field, { target: { value: 'Confirmed note' } });
+      fireEvent.click(screen.getByTestId('popover-note-save'));
+      expect(field.closest('[inert]')).toBeNull();
+
+      await act(async () => {
+        resolveSave(true);
+      });
+      expect(field.closest('[inert]')).not.toBeNull();
     }
   });
 });

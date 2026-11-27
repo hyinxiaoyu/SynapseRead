@@ -83,7 +83,7 @@ export interface AnnotationsController {
   createHighlight: (options?: { color?: string; style?: AnnotationStyle }) => void;
   submitNoteSelection: () => void;
   selectAnnotation: (annotation: Annotation) => void;
-  updateAnnotation: (annotationId: string, patch: AnnotationPatch) => void;
+  updateAnnotation: (annotationId: string, patch: AnnotationPatch) => void | Promise<boolean>;
   deleteAnnotation: (annotationId: string) => void;
   undoDelete: () => void;
   isAnnotationStale: (annotation: Annotation) => boolean;
@@ -106,7 +106,8 @@ export interface UseAnnotationsOptions {
   selection?: ReaderSelection | null | undefined;
   annotations?: readonly Annotation[] | undefined;
   onCreateAnnotation?: ((options?: CreateAnnotationOptions) => void) | undefined;
-  onUpdateAnnotation?: ((annotationId: string, patch: AnnotationPatch) => void) | undefined;
+  onUpdateAnnotation?:
+    ((annotationId: string, patch: AnnotationPatch) => void | Promise<boolean>) | undefined;
   onDeleteAnnotation?: ((annotationId: string) => void) | undefined;
   canUndoAnnotationDelete?: boolean | undefined;
   onUndoAnnotationDelete?: (() => void) | undefined;
@@ -200,8 +201,7 @@ export function useAnnotationsController({
 
   const updateAnnotation = (annotationId: string, patch: AnnotationPatch) => {
     if (onUpdateAnnotation) {
-      onUpdateAnnotation(annotationId, patch);
-      return;
+      return onUpdateAnnotation(annotationId, patch);
     }
     setLocalAnnotations((prev) =>
       prev.map((candidate) =>
