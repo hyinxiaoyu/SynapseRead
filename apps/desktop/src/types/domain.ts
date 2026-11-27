@@ -588,6 +588,11 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
    * first, because the card then loses its link back to the text.
    */
   cardSourceAnnotationIds?: ReadonlySet<string>;
+  /**
+   * Annotations currently being sent to the MindMap. Deleting one of them is
+   * disabled until the card write commits so source-link confirmation cannot be skipped (#124).
+   */
+  excerptingAnnotationIds?: ReadonlySet<string>;
   /** Sends the published selection to the MindMap, as the Excerpt to MindMap button does. */
   onExcerptSelection?: () => void;
   /** Sends an existing highlight or underline to the MindMap without creating a duplicate (#124). */

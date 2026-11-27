@@ -196,6 +196,8 @@ export interface StudySyncState {
   /** Reader -> MindMap: what the reader currently has selected. */
   selection: ReaderSelection | null;
   isExcerpting: boolean;
+  /** Annotations currently being promoted to MindMap cards (deletion held off until committed, #124). */
+  excerptingAnnotationIds: string[];
   /** The card highlighted on the canvas and shown in the inspector. */
   selectedNodeId: string | null;
   /**
@@ -1264,6 +1266,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       edges: [],
       selection: null,
       isExcerpting: false,
+      excerptingAnnotationIds: [],
       selectedNodeId: null,
       nestingTargetNodeId: null,
       nestingTargetNonce: 0,
@@ -1934,14 +1937,35 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async excerptAnnotation(annotationId) {
         const initial = get();
-        if (!initial.notebook || initial.isExcerpting) return;
+        if (
+          !initial.notebook ||
+          initial.isExcerpting ||
+          initial.excerptingAnnotationIds.includes(annotationId)
+        ) {
+          return;
+        }
         if (initial.cards.some((card) => card.annotationIds.includes(annotationId))) {
           get().showAnnotationCard(annotationId);
           return;
         }
         if (!initial.annotations.some((candidate) => candidate.id === annotationId)) return;
 
-        set({ isExcerpting: true });
+        const releaseExcerpting = (extra?: Partial<StudySyncState>) => {
+          set((state) => ({
+            isExcerpting: false,
+            excerptingAnnotationIds: state.excerptingAnnotationIds.filter(
+              (id) => id !== annotationId,
+            ),
+            ...extra,
+          }));
+        };
+
+        set((state) => ({
+          isExcerpting: true,
+          excerptingAnnotationIds: state.excerptingAnnotationIds.includes(annotationId)
+            ? state.excerptingAnnotationIds
+            : [...state.excerptingAnnotationIds, annotationId],
+        }));
         try {
           // Drain any queued note/color edits for this highlight so the new card's
           // seeded `markdownNotes` reflects the latest saved note (#124).
@@ -1950,17 +1974,17 @@ export function createStudySyncStore(backend: StudyBackend) {
 
           const { notebook, annotations, cards, nodes, nestingTargetNodeId, nodeSizes } = get();
           if (!notebook || pendingDeletes.has(annotationId)) {
-            set({ isExcerpting: false });
+            releaseExcerpting();
             return;
           }
           if (cards.some((card) => card.annotationIds.includes(annotationId))) {
-            set({ isExcerpting: false });
+            releaseExcerpting();
             get().showAnnotationCard(annotationId);
             return;
           }
           const annotation = annotations.find((candidate) => candidate.id === annotationId);
           if (!annotation) {
-            set({ isExcerpting: false });
+            releaseExcerpting();
             return;
           }
 
@@ -2003,16 +2027,16 @@ export function createStudySyncStore(backend: StudyBackend) {
               nodes: [...state.nodes, created.node],
               edges: created.edge ? [...state.edges, created.edge] : state.edges,
               isExcerpting: false,
+              excerptingAnnotationIds: state.excerptingAnnotationIds.filter(
+                (id) => id !== annotationId,
+              ),
               excerptNonce: state.excerptNonce + 1,
               lastExcerptParentTitle: resolvedParentTitle,
             };
           });
           get().revealNode(created.node.id, resolvedParentTitle);
         } catch (error) {
-          set({
-            isExcerpting: false,
-            error: describeError(error),
-          });
+          releaseExcerpting({ error: describeError(error) });
         }
       },
 
@@ -2161,6 +2185,9 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async removeAnnotation(annotationId) {
+        // Hold off deletion while this annotation is being promoted to a MindMap card so
+        // card-source confirmation cannot be skipped and no stale card link is applied (#124).
+        if (get().excerptingAnnotationIds.includes(annotationId)) return;
         const removed = get().annotations.find((annotation) => annotation.id === annotationId);
         if (!removed) return;
         const versionAtStart = getDocumentVersion(removed.documentId);

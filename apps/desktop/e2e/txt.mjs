@@ -416,14 +416,24 @@ export async function txtFlow(page) {
     `document.querySelector('[data-testid="selection-popover"]')?.dataset.popoverMode === 'edit'`,
     'edit popover for second TXT highlight',
   );
+  // Typing an unsaved note draft in the popover must warn instead of dropping the draft (#124).
+  await page.clickButton('Add Note');
+  await page.setInputValue('[data-testid="popover-note-input"]', 'Saved popover draft');
+  await page.evaluate(`document.querySelector('[data-testid="popover-excerpt"]').click()`);
+  await page.waitFor(
+    `document.querySelector('[data-testid="popover-unsaved-note-warning"]') && document.querySelector('[data-testid="popover-note-input"]')?.value === 'Saved popover draft'`,
+    'unsaved popover note blocks excerpting and preserves draft',
+  );
+  // Saving and immediately excerpting seeds the card with the saved note.
+  await page.clickButton('Save Note');
   await page.evaluate(`document.querySelector('[data-testid="popover-excerpt"]').click()`);
   await page.waitFor(
     `!document.querySelector('[data-testid="selection-popover"]')`,
     'popover closes after promoting existing highlight',
   );
   await page.waitFor(
-    `[...document.querySelectorAll('.react-flow__node')].some((n) => n.textContent.includes('document content'))`,
-    'second highlight promoted from popover appears on MindMap',
+    `[...document.querySelectorAll('.react-flow__node')].some((n) => n.textContent.includes('document content') && n.textContent.includes('Saved popover draft'))`,
+    'second highlight promoted from popover appears on MindMap with its saved note',
   );
   await page.click(secondHighlightPoint);
   await page.waitFor(

@@ -755,6 +755,7 @@ function DocumentTab({
   const reportDocumentTitle = useStudySyncStore((state) => state.reportDocumentTitle);
   const immersive = useStudySyncStore((state) => state.immersive);
   const isExcerpting = useStudySyncStore((state) => state.isExcerpting);
+  const excerptingAnnotationIdsList = useStudySyncStore((state) => state.excerptingAnnotationIds);
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
   const excerptAnnotation = useStudySyncStore((state) => state.excerptAnnotation);
   const showAnnotationCard = useStudySyncStore((state) => state.showAnnotationCard);
@@ -770,6 +771,10 @@ function DocumentTab({
   const cardSourceAnnotationIds = useMemo(
     () => new Set(cards.flatMap((card) => card.annotationIds)),
     [cards],
+  );
+  const excerptingAnnotationIds = useMemo(
+    () => new Set(excerptingAnnotationIdsList),
+    [excerptingAnnotationIdsList],
   );
   const bookmarks = useMemo(
     () => selectBookmarks(allBookmarks, document.id),
@@ -906,6 +911,7 @@ function DocumentTab({
         canUndoAnnotationDelete={deletedAnnotationHistory.length > 0}
         onUndoAnnotationDelete={onUndoAnnotationDelete}
         cardSourceAnnotationIds={cardSourceAnnotationIds}
+        excerptingAnnotationIds={excerptingAnnotationIds}
         onExcerptSelection={onExcerptSelection}
         onExcerptAnnotation={onExcerptAnnotation}
         onShowAnnotationCard={onShowAnnotationCard}

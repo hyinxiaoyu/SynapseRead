@@ -2,6 +2,7 @@ import { Check, ChevronDown, Link2, Network, Pencil, Quote, StickyNote, Undo2 } 
 import {
   Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -88,6 +89,8 @@ export interface AnnotationsController {
   isAnnotationStale: (annotation: Annotation) => boolean;
   /** The annotation is a MindMap card's source, so deleting it asks first. */
   isCardSource?: (annotationId: string) => boolean;
+  /** The annotation is currently being sent to the MindMap, so deleting it is held off (#124). */
+  isExcerptingAnnotation?: (annotationId: string) => boolean;
   /** Sends an existing highlight or underline to the MindMap without duplicating it (#124). */
   excerptAnnotation?: ((annotationId: string) => void) | undefined;
   /** Opens the MindMap and reveals the card backed by this annotation (#124). */
@@ -108,6 +111,7 @@ export interface UseAnnotationsOptions {
   canUndoAnnotationDelete?: boolean | undefined;
   onUndoAnnotationDelete?: (() => void) | undefined;
   cardSourceAnnotationIds?: ReadonlySet<string> | undefined;
+  excerptingAnnotationIds?: ReadonlySet<string> | undefined;
   onExcerptAnnotation?: ((annotationId: string) => void) | undefined;
   onShowAnnotationCard?: ((annotationId: string) => void) | undefined;
   canExcerpt?: boolean | undefined;
@@ -126,6 +130,7 @@ export function useAnnotationsController({
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
   cardSourceAnnotationIds,
+  excerptingAnnotationIds,
   onExcerptAnnotation,
   onShowAnnotationCard,
   canExcerpt,
@@ -258,6 +263,7 @@ export function useAnnotationsController({
     undoDelete,
     isAnnotationStale: (annotation) => (isStaleAnnotation ? isStaleAnnotation(annotation) : false),
     isCardSource: (annotationId) => cardSourceAnnotationIds?.has(annotationId) ?? false,
+    isExcerptingAnnotation: (annotationId) => excerptingAnnotationIds?.has(annotationId) ?? false,
     excerptAnnotation: onExcerptAnnotation,
     showAnnotationCard: onShowAnnotationCard,
     canExcerpt,
@@ -330,8 +336,10 @@ function AnnotationRow({
   locationLabel,
   linkedToCard,
   stale,
+  deletingDisabled = false,
   tabIndex,
   onFocus,
+  onFocusWithin,
   onKeyDown,
   onSelect,
   onExcerpt,
@@ -348,8 +356,10 @@ function AnnotationRow({
   locationLabel: string;
   linkedToCard: boolean;
   stale: boolean;
+  deletingDisabled?: boolean;
   tabIndex: number;
   onFocus: () => void;
+  onFocusWithin: () => void;
   onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   onSelect: () => void;
   onExcerpt?: (() => void) | undefined;
@@ -403,10 +413,18 @@ function AnnotationRow({
     }
   };
   const finishEdit = (save: boolean) => {
+    const returnFocus = Boolean(
+      rowRef.current &&
+      document.activeElement instanceof Node &&
+      rowRef.current.contains(document.activeElement),
+    );
     if (save) commitNote();
     closing.current = true;
     if (!save) setNoteDraft(annotation.note ?? '');
     setEditing(false);
+    if (returnFocus) {
+      rowRef.current?.querySelector<HTMLElement>('[data-testid="annotation-jump-button"]')?.focus();
+    }
   };
 
   const date = formatShortDate(annotation.createdAt);
@@ -416,7 +434,9 @@ function AnnotationRow({
     <li
       ref={rowRef}
       data-testid="annotation-item"
+      data-annotation-row-id={annotation.id}
       data-expanded={expanded ? 'true' : undefined}
+      onFocus={onFocusWithin}
       className="group/row flex flex-col"
     >
       <div className="flex items-start gap-0.5">
@@ -597,6 +617,8 @@ function AnnotationRow({
           <RowDeleteButton
             label={`Delete annotation at ${locationLabel}`}
             testId="annotation-delete-button"
+            disabled={deletingDisabled}
+            disabledTitle="Sending to MindMap…"
             onDelete={onDelete}
           />
         </div>
@@ -773,6 +795,23 @@ export function AnnotationsList({
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   /** Row currently holding focus, so ⇧⌘E excerpts or reveals it via the command registry (#124). */
   const [focusedAnnotationId, setFocusedAnnotationId] = useState<string | null>(null);
+  const listRef = useRef<HTMLOListElement>(null);
+
+  useEffect(() => {
+    if (focusedAnnotationId === null) return;
+    const onFocusIn = (event: FocusEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const list = listRef.current;
+      if (!list || !target || !list.contains(target)) {
+        setFocusedAnnotationId(null);
+        return;
+      }
+      const item = target.closest<HTMLElement>('[data-annotation-row-id]');
+      setFocusedAnnotationId(item?.dataset.annotationRowId ?? null);
+    };
+    document.addEventListener('focusin', onFocusIn, true);
+    return () => document.removeEventListener('focusin', onFocusIn, true);
+  }, [focusedAnnotationId]);
   const placed = filterAnnotations(controller.annotations, filter, filters)
     .map((annotation, index) => ({
       annotation,
@@ -785,9 +824,16 @@ export function AnnotationsList({
     );
   if (
     confirmingDeleteId !== null &&
-    !placed.some(({ annotation }) => annotation.id === confirmingDeleteId)
+    (!placed.some(({ annotation }) => annotation.id === confirmingDeleteId) ||
+      (controller.isExcerptingAnnotation?.(confirmingDeleteId) ?? false))
   ) {
     setConfirmingDeleteId(null);
+  }
+  if (
+    focusedAnnotationId !== null &&
+    !placed.some(({ annotation }) => annotation.id === focusedAnnotationId)
+  ) {
+    setFocusedAnnotationId(null);
   }
   const roving = useRovingList(placed.length);
   const filtering = filters.colors.size > 0 || filters.noteOnly;
@@ -862,12 +908,18 @@ export function AnnotationsList({
   } else {
     body = (
       <ol
+        ref={listRef}
         {...roving.listProps}
         aria-label="Highlights and notes"
         data-testid="annotations-list"
         data-arrow-keys=""
         onBlur={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          const next = event.relatedTarget as Element | null;
+          if (
+            !next ||
+            !event.currentTarget.contains(next) ||
+            !next.closest('[data-testid="annotation-item"]')
+          ) {
             setFocusedAnnotationId(null);
           }
         }}
@@ -876,13 +928,16 @@ export function AnnotationsList({
         {placed.map(({ annotation, placement }, index) => {
           const groupStart =
             placement.group !== undefined && placed[index - 1]?.placement.group !== placement.group;
+          const deletingDisabled = controller.isExcerptingAnnotation?.(annotation.id) ?? false;
           const remove = (from: HTMLElement) => {
+            if (controller.isExcerptingAnnotation?.(annotation.id)) return;
             roving.refocusAfterRemoval(from, index);
             setConfirmingDeleteId(null);
             controller.deleteAnnotation(annotation.id);
             onDeleted?.();
           };
           const requestRemove = (from: HTMLElement) => {
+            if (controller.isExcerptingAnnotation?.(annotation.id)) return;
             if (controller.isCardSource?.(annotation.id)) {
               setConfirmingDeleteId(annotation.id);
               from
@@ -909,11 +964,10 @@ export function AnnotationsList({
                 locationLabel={placement.label ?? formatAnnotationLocation(annotation)}
                 linkedToCard={isLinked(annotation.id)}
                 stale={controller.isAnnotationStale(annotation)}
+                deletingDisabled={deletingDisabled}
                 tabIndex={roving.tabIndexFor(index)}
-                onFocus={() => {
-                  roving.onRowFocus(index);
-                  setFocusedAnnotationId(annotation.id);
-                }}
+                onFocus={() => roving.onRowFocus(index)}
+                onFocusWithin={() => setFocusedAnnotationId(annotation.id)}
                 onKeyDown={(event) => {
                   if (roving.onRowKeyDown(event, index)) return;
                   if (isDeleteKey(event)) {

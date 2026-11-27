@@ -5277,4 +5277,121 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
       highlight.id,
     ]);
   });
+
+  it('blocks deleting an annotation while excerptAnnotation is in flight (before and after commit) and recovers on failure (#124)', async () => {
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('Alpha passage and beta passage') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 13, lineIndex: 0 },
+      text: 'Alpha passage',
+      imagePng: null,
+    });
+    const first = (await store.getState().createAnnotationFromSelection({ note: 'Note A' }))!;
+
+    const origUpdate = backend.updateAnnotation.bind(backend);
+    const origCreateCard = backend.createCardForAnnotation.bind(backend);
+    const deleteSpy = vi.spyOn(backend, 'deleteAnnotation');
+
+    // Phase 1: hold while draining a pending note edit (before backend card commit).
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+      await updateGate;
+      return origUpdate(id, patch);
+    });
+
+    // Phase 2: hold AFTER backend commits the card, before the response reaches the store.
+    let cardCommitted!: () => void;
+    const waitCardCommitted = new Promise<void>((resolve) => {
+      cardCommitted = resolve;
+    });
+    let releaseCardResponse!: () => void;
+    const cardResponseGate = new Promise<void>((resolve) => {
+      releaseCardResponse = resolve;
+    });
+    vi.spyOn(backend, 'createCardForAnnotation').mockImplementationOnce(async (input) => {
+      const created = await origCreateCard(input);
+      cardCommitted();
+      await cardResponseGate;
+      return created;
+    });
+
+    const updatePromise = store
+      .getState()
+      .updateAnnotation(first.id, { note: 'Edited before commit', color: null });
+    const promotePromise = store.getState().excerptAnnotation(first.id);
+
+    // During pre-commit drain, excerptingAnnotationIds tracks `first.id` and removeAnnotation is blocked.
+    expect(store.getState().excerptingAnnotationIds).toEqual([first.id]);
+    await store.getState().removeAnnotation(first.id);
+    expect(store.getState().annotations.some((a) => a.id === first.id)).toBe(true);
+    expect(deleteSpy).not.toHaveBeenCalled();
+
+    // Release note update; wait until backend commits the card while response is still paused.
+    releaseUpdate();
+    await updatePromise;
+    await waitCardCommitted;
+
+    // During post-commit response wait, removeAnnotation is STILL blocked (cannot skip confirmation or leave stale link).
+    expect(store.getState().excerptingAnnotationIds).toEqual([first.id]);
+    await store.getState().removeAnnotation(first.id);
+    expect(store.getState().annotations.some((a) => a.id === first.id)).toBe(true);
+    expect(deleteSpy).not.toHaveBeenCalled();
+
+    // Release the response: card + link land atomically as excerptingAnnotationIds clears.
+    releaseCardResponse();
+    await promotePromise;
+
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    expect(store.getState().cards).toHaveLength(1);
+    const cardId = store.getState().cards[0]!.id;
+    expect(store.getState().cards[0]?.annotationIds).toEqual([first.id]);
+    expect(store.getState().cards[0]?.markdownNotes).toBe('Edited before commit');
+
+    // Now deleting (after UI card-source confirmation) keeps store and backend sources consistent.
+    await store.getState().removeAnnotation(first.id);
+    expect(deleteSpy).toHaveBeenCalledWith(first.id);
+    expect(store.getState().cards.find((c) => c.id === cardId)?.annotationIds).toEqual([]);
+    const graphAfterDelete = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterDelete.cards.find((c) => c.id === cardId)?.annotationIds).toEqual([]);
+
+    // Undo restores the original annotation id and card link in both store and backend.
+    const restored = await store.getState().undoRemoveAnnotation();
+    expect(restored?.id).toBe(first.id);
+    expect(store.getState().cards.find((c) => c.id === cardId)?.annotationIds).toEqual([first.id]);
+    const graphAfterUndo = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterUndo.cards.find((c) => c.id === cardId)?.annotationIds).toEqual([first.id]);
+
+    // Failure releases excerptingAnnotationIds so the reader can retry or delete.
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 18, endByteOffset: 30, lineIndex: 0 },
+      text: 'beta passage',
+      imagePng: null,
+    });
+    const second = (await store.getState().createAnnotationFromSelection())!;
+    vi.spyOn(backend, 'createCardForAnnotation').mockRejectedValueOnce({
+      code: 'database',
+      message: 'disk full',
+    });
+
+    await store.getState().excerptAnnotation(second.id);
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    expect(store.getState().isExcerpting).toBe(false);
+    expect(store.getState().error).toContain('disk full');
+
+    // Can delete after failed promotion (or retry).
+    await store.getState().removeAnnotation(second.id);
+    expect(store.getState().annotations.some((a) => a.id === second.id)).toBe(false);
+  });
 });

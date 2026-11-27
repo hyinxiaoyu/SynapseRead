@@ -503,4 +503,140 @@ describe('AnnotationsList card sources', () => {
     fireEvent.blur(linkedJump, { relatedTarget: screen.getByTestId('outside') });
     expect(commandState('edit.excerpt').enabled).toBe(false);
   });
+
+  it('tracks focus across child controls of each row so ⇧⌘E acts only on the focused row and never inside the note textarea (#124)', () => {
+    const pressExcerptShortcut = (target: HTMLElement) => {
+      forgetRecentCommandRuns();
+      act(() => {
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'E',
+            shiftKey: true,
+            metaKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+    };
+
+    const excerptAnnotation = vi.fn();
+    const showAnnotationCard = vi.fn();
+    const controller = controllerFor(
+      [
+        annotation('row-a', { excerptText: 'Alpha unlinked' }),
+        annotation('row-b', { excerptText: 'Beta linked', note: 'Saved note' }),
+      ],
+      {
+        isCardSource: (id) => id === 'row-b',
+        excerptAnnotation,
+        showAnnotationCard,
+        canExcerpt: true,
+      },
+    );
+    const { rerender } = render(
+      <div>
+        <AnnotationsList controller={controller} filter="" />
+        <button type="button" data-testid="outside">
+          Outside
+        </button>
+      </div>,
+    );
+
+    const [rowA, rowB] = screen.getAllByTestId('annotation-item') as [HTMLElement, HTMLElement];
+    const rowAJump = within(rowA).getByTestId('annotation-jump-button');
+    const rowBBadge = within(rowB).getByTestId('annotation-card-badge');
+    const rowBShowButton = within(rowB).getByTestId('annotation-show-card-button');
+    const rowBEditButton = within(rowB).getByTestId('annotation-edit-button');
+
+    // Focus Row A jump button, then move real DOM focus to Row B's In MindMap badge and press ⇧⌘E.
+    act(() => rowAJump.focus());
+    act(() => rowBBadge.focus());
+    expect(rowBBadge).toHaveFocus();
+    pressExcerptShortcut(rowBBadge);
+    expect(excerptAnnotation).not.toHaveBeenCalled();
+    expect(showAnnotationCard).toHaveBeenCalledTimes(1);
+    expect(showAnnotationCard).toHaveBeenLastCalledWith('row-b');
+
+    // Move real DOM focus from Row A to Row B's row action button.
+    act(() => rowAJump.focus());
+    act(() => rowBShowButton.focus());
+    pressExcerptShortcut(rowBShowButton);
+    expect(excerptAnnotation).not.toHaveBeenCalled();
+    expect(showAnnotationCard).toHaveBeenCalledTimes(2);
+
+    // Open Row B's inline editor: color swatch still targets Row B, while textarea keeps its own keyboard behavior.
+    fireEvent.click(rowBEditButton);
+    const rowBColor = within(rowB).getByTestId('annotation-item-color-green');
+    act(() => rowAJump.focus());
+    act(() => rowBColor.focus());
+    pressExcerptShortcut(rowBColor);
+    expect(excerptAnnotation).not.toHaveBeenCalled();
+    expect(showAnnotationCard).toHaveBeenCalledTimes(3);
+
+    const rowBTextarea = within(rowB).getByTestId('annotation-note-input');
+    act(() => rowBTextarea.focus());
+    pressExcerptShortcut(rowBTextarea);
+    expect(excerptAnnotation).not.toHaveBeenCalled();
+    expect(showAnnotationCard).toHaveBeenCalledTimes(3);
+
+    // Filtering out the focused row clears the command context even after the filter is cleared.
+    act(() => rowAJump.focus());
+    expect(commandState('edit.excerpt').enabled).toBe(true);
+    rerender(
+      <div>
+        <AnnotationsList controller={controller} filter="Beta" />
+        <button type="button" data-testid="outside">
+          Outside
+        </button>
+      </div>,
+    );
+    expect(commandState('edit.excerpt').enabled).toBe(false);
+    rerender(
+      <div>
+        <AnnotationsList controller={controller} filter="" />
+        <button type="button" data-testid="outside">
+          Outside
+        </button>
+      </div>,
+    );
+    expect(commandState('edit.excerpt').enabled).toBe(false);
+  });
+
+  it('disables deleting a row while that annotation is being sent to the MindMap (#124)', () => {
+    const deleteAnnotation = vi.fn();
+    const base = [annotation('a')];
+    const { rerender } = render(
+      <AnnotationsList
+        controller={controllerFor(base, {
+          deleteAnnotation,
+          isCardSource: () => false,
+          isExcerptingAnnotation: (id) => id === 'a',
+        })}
+        filter=""
+      />,
+    );
+
+    const deleteBtn = screen.getByTestId('annotation-delete-button');
+    expect(deleteBtn).toBeDisabled();
+    fireEvent.click(deleteBtn);
+    fireEvent.keyDown(screen.getByTestId('annotation-jump-button'), { key: 'Backspace' });
+    expect(deleteAnnotation).not.toHaveBeenCalled();
+
+    // Once committed, delete re-enables and enters card-source confirmation.
+    rerender(
+      <AnnotationsList
+        controller={controllerFor(base, {
+          deleteAnnotation,
+          isCardSource: (id) => id === 'a',
+          isExcerptingAnnotation: () => false,
+        })}
+        filter=""
+      />,
+    );
+    expect(screen.getByTestId('annotation-delete-button')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('annotation-delete-button'));
+    expect(deleteAnnotation).not.toHaveBeenCalled();
+    expect(screen.getByTestId('card-source-delete-confirm')).toBeVisible();
+  });
 });

@@ -17,10 +17,14 @@ export function formatShortDate(iso: string): string {
 export function RowDeleteButton({
   label,
   testId,
+  disabled = false,
+  disabledTitle,
   onDelete,
 }: {
   label: string;
   testId: string;
+  disabled?: boolean;
+  disabledTitle?: string;
   /** Given the button, so the list can keep focus near the removed row. */
   onDelete: (from: HTMLElement) => void;
 }) {
@@ -28,11 +32,15 @@ export function RowDeleteButton({
     <button
       type="button"
       tabIndex={-1}
+      disabled={disabled}
       aria-label={label}
-      title={`${label} (⌫)`}
+      title={disabled && disabledTitle ? disabledTitle : `${label} (⌫)`}
       data-testid={testId}
-      onClick={(event) => onDelete(event.currentTarget)}
-      className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity outline-none group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-background hover:text-destructive motion-reduce:transition-none"
+      onClick={(event) => {
+        if (disabled) return;
+        onDelete(event.currentTarget);
+      }}
+      className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity outline-none group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-background hover:text-destructive disabled:pointer-events-none disabled:opacity-40 motion-reduce:transition-none"
     >
       <Trash2 className="size-3.5" />
     </button>

@@ -53,6 +53,7 @@ function PopoverAction({
   label,
   title,
   pressed,
+  disabled = false,
   testId,
   onClick,
   children,
@@ -61,6 +62,7 @@ function PopoverAction({
   label: string;
   title?: string;
   pressed?: boolean | undefined;
+  disabled?: boolean | undefined;
   testId: string;
   onClick: () => void;
   children?: ReactNode;
@@ -68,6 +70,7 @@ function PopoverAction({
   return (
     <button
       type="button"
+      disabled={disabled}
       aria-label={label}
       aria-pressed={pressed}
       title={title ?? label}
@@ -77,7 +80,7 @@ function PopoverAction({
       onMouseDown={keepSelection}
       onClick={onClick}
       className={cn(
-        'flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-md px-1.5 text-xs font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4',
+        'flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-md px-1.5 text-xs font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-4',
         pressed && 'bg-accent text-accent-foreground',
       )}
     >
@@ -125,6 +128,8 @@ export function SelectionPopover({
       : null;
   const editing = annotation !== null;
   const isCardSource = annotation !== null && (annotations.isCardSource?.(annotation.id) ?? false);
+  const isExcerptingAnnotation =
+    annotation !== null && (annotations.isExcerptingAnnotation?.(annotation.id) ?? false);
   const canExcerptTarget = editing
     ? !isCardSource && annotations.excerptAnnotation !== undefined
     : onExcerpt !== undefined;
@@ -226,9 +231,48 @@ export function SelectionPopover({
 
   // Deleting a card's source asks first; the question goes with the popover.
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<string | null>(null);
-  if ((!editing || popover.noteOpen) && confirmDeleteFor !== null) setConfirmDeleteFor(null);
+  if ((!editing || popover.noteOpen || isExcerptingAnnotation) && confirmDeleteFor !== null) {
+    setConfirmDeleteFor(null);
+  }
   const confirmingDelete = editing && confirmDeleteFor === annotation.id;
   const noteValue = editing ? editNote : annotations.draftNote;
+
+  // Guard MindMap actions while an existing highlight has unsaved note edits so
+  // clicking Excerpt/Show (or using ⇧⌘E / the Edit menu) never drops the draft (#124).
+  const hasUnsavedNoteChanges =
+    editing && popover.noteOpen && editNote.trim() !== (annotation.note ?? '').trim();
+  const [unsavedNotePromptFor, setUnsavedNotePromptFor] = useState<string | null>(null);
+  if ((!editing || !hasUnsavedNoteChanges) && unsavedNotePromptFor !== null) {
+    setUnsavedNotePromptFor(null);
+  }
+  const showingUnsavedNotePrompt = editing && unsavedNotePromptFor === annotation.id;
+
+  const close = () => {
+    dismiss();
+    onReturnFocus();
+  };
+
+  const guardUnsavedNote = (): boolean => {
+    if (!editing || !hasUnsavedNoteChanges) return false;
+    setUnsavedNotePromptFor(annotation.id);
+    noteFieldRef.current?.focus();
+    return true;
+  };
+
+  const triggerExcerpt = () => {
+    if (!canExcerpt) return;
+    if (guardUnsavedNote()) return;
+    if (annotation) annotations.excerptAnnotation?.(annotation.id);
+    else onExcerpt?.();
+    close();
+  };
+
+  const triggerShowCard = () => {
+    if (!annotation) return;
+    if (guardUnsavedNote()) return;
+    annotations.showAnnotationCard?.(annotation.id);
+    close();
+  };
 
   const cancelDelete = () => {
     setConfirmDeleteFor(null);
@@ -263,21 +307,13 @@ export function SelectionPopover({
       : null,
   );
   // While an existing highlight's popover is open, ⇧⌘E sends it to the MindMap
-  // (or reveals its card if already linked), matching the popover action (#124).
+  // (or reveals its card if already linked), sharing the unsaved-note guard (#124).
   useCommands(
     {
       'edit.excerpt': {
         run: () => {
-          if (!annotation) return;
-          if (canShowCard) {
-            annotations.showAnnotationCard?.(annotation.id);
-            dismiss();
-            onReturnFocus();
-          } else if (canExcerpt && canExcerptTarget) {
-            annotations.excerptAnnotation?.(annotation.id);
-            dismiss();
-            onReturnFocus();
-          }
+          if (canShowCard) triggerShowCard();
+          else if (canExcerptTarget) triggerExcerpt();
         },
         enabled: canShowCard || (canExcerpt && canExcerptTarget),
         title: canShowCard ? 'Show in MindMap' : excerptLabel,
@@ -287,11 +323,6 @@ export function SelectionPopover({
   );
 
   if (!shown) return null;
-
-  const close = () => {
-    dismiss();
-    onReturnFocus();
-  };
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape') {
@@ -313,7 +344,7 @@ export function SelectionPopover({
     // A toolbar: arrows move between controls, so only one is in the Tab order.
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     const controls = Array.from(
-      rootRef.current?.querySelectorAll<HTMLElement>('[data-popover-control]') ?? [],
+      rootRef.current?.querySelectorAll<HTMLElement>('[data-popover-control]:not(:disabled)') ?? [],
     );
     const index = controls.indexOf(event.target as HTMLElement);
     if (index < 0) return;
@@ -450,12 +481,7 @@ export function SelectionPopover({
               canExcerpt ? commandTooltip(excerptLabel, 'edit.excerpt') : 'Saving the last excerpt…'
             }
             testId="popover-excerpt"
-            onClick={() => {
-              if (!canExcerpt) return;
-              if (annotation) annotations.excerptAnnotation?.(annotation.id);
-              else onExcerpt?.();
-              close();
-            }}
+            onClick={triggerExcerpt}
           />
         )}
         {canShowCard && (
@@ -464,10 +490,7 @@ export function SelectionPopover({
             label="Show in MindMap"
             title="Show in MindMap"
             testId="popover-show-in-mindmap"
-            onClick={() => {
-              if (annotation) annotations.showAnnotationCard?.(annotation.id);
-              close();
-            }}
+            onClick={triggerShowCard}
           />
         )}
         <PopoverAction icon={Copy} label="Copy" testId="popover-copy" onClick={copy} />
@@ -475,8 +498,11 @@ export function SelectionPopover({
           <PopoverAction
             icon={Trash2}
             label="Delete Highlight"
+            title={isExcerptingAnnotation ? 'Sending to MindMap…' : 'Delete Highlight'}
+            disabled={isExcerptingAnnotation}
             testId="popover-delete"
             onClick={() => {
+              if (isExcerptingAnnotation) return;
               if (annotations.isCardSource?.(annotation.id)) {
                 if (popover.noteOpen) popover.closeNote();
                 setConfirmDeleteFor(annotation.id);
@@ -551,6 +577,15 @@ export function SelectionPopover({
             </Button>
           </div>
         </div>
+      )}
+      {showingUnsavedNotePrompt && (
+        <p
+          role="alert"
+          data-testid="popover-unsaved-note-warning"
+          className="px-2 pt-1 text-xs font-medium text-destructive"
+        >
+          Save or cancel your note changes first.
+        </p>
       )}
       {/*
         The note stays mounted so `grid-template-rows` can transition between

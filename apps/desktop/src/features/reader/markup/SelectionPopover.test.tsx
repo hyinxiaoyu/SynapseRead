@@ -118,7 +118,9 @@ const highlight: Annotation = {
 /** A clicked highlight's popover, with `cardSource` saying whether a card cites it. */
 function HighlightHarness({
   cardSource,
+  excerpting = false,
   onDelete,
+  onUpdate,
   dismiss,
   onExcerptAnnotation,
   onShowAnnotationCard,
@@ -127,7 +129,9 @@ function HighlightHarness({
   annotationOverride,
 }: {
   cardSource: boolean;
+  excerpting?: boolean;
   onDelete: (annotationId: string) => void;
+  onUpdate?: (annotationId: string, patch: { note: string | null; color: string | null }) => void;
   dismiss: () => void;
   onExcerptAnnotation?: (annotationId: string) => void;
   onShowAnnotationCard?: (annotationId: string) => void;
@@ -141,8 +145,10 @@ function HighlightHarness({
   const annotations = useAnnotationsController({
     documentId: 'doc-1',
     annotations: [current],
+    onUpdateAnnotation: onUpdate,
     onDeleteAnnotation: onDelete,
     cardSourceAnnotationIds: new Set(cardSource ? [current.id] : []),
+    excerptingAnnotationIds: new Set(excerpting ? [current.id] : []),
     onExcerptAnnotation,
     onShowAnnotationCard,
     excerptTargetTitle,
@@ -345,5 +351,155 @@ describe('SelectionPopover MindMap actions for existing highlights (#124)', () =
     expect(onShowAnnotationCard).toHaveBeenCalledWith(highlight.id);
     expect(dismiss).toHaveBeenCalledTimes(1);
     expect(onExcerptAnnotation).not.toHaveBeenCalled();
+  });
+
+  it('disables Delete Highlight while the annotation is being excerpted, then confirms once linked (#124)', () => {
+    const onDelete = vi.fn();
+    const dismiss = vi.fn();
+    const { rerender } = render(
+      <HighlightHarness cardSource={false} excerpting onDelete={onDelete} dismiss={dismiss} />,
+    );
+
+    const deleteBtn = screen.getByTestId('popover-delete');
+    expect(deleteBtn).toBeDisabled();
+    fireEvent.click(deleteBtn);
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(dismiss).not.toHaveBeenCalled();
+
+    rerender(
+      <HighlightHarness cardSource excerpting={false} onDelete={onDelete} dismiss={dismiss} />,
+    );
+    expect(screen.getByTestId('popover-delete')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('popover-delete'));
+    expect(onDelete).not.toHaveBeenCalled();
+    expect(screen.getByTestId('card-source-delete-confirm')).toBeInTheDocument();
+  });
+
+  it('protects unsaved new, edited, or cleared note drafts across click, shortcut, and menu for Excerpt and Show in MindMap (#124)', () => {
+    // 1. New note draft on unlinked highlight: click, keyboard shortcut, and menu all keep editor open & warn.
+    {
+      const onExcerptAnnotation = vi.fn();
+      const onUpdate = vi.fn();
+      const dismiss = vi.fn();
+      const { unmount } = render(
+        <HighlightHarness
+          cardSource={false}
+          onDelete={vi.fn()}
+          onUpdate={onUpdate}
+          dismiss={dismiss}
+          onExcerptAnnotation={onExcerptAnnotation}
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId('popover-note'));
+      const field = screen.getByTestId('popover-note-input');
+      fireEvent.change(field, { target: { value: 'Unsaved new note' } });
+
+      fireEvent.click(screen.getByTestId('popover-excerpt'));
+      expect(onExcerptAnnotation).not.toHaveBeenCalled();
+      expect(dismiss).not.toHaveBeenCalled();
+      expect(screen.getByTestId('popover-unsaved-note-warning')).toHaveTextContent(
+        /Save or cancel/i,
+      );
+      expect(field).toHaveValue('Unsaved new note');
+      expect(field).toHaveFocus();
+
+      // Same guard for keyboard shortcut and native menu routes.
+      forgetRecentCommandRuns();
+      act(() => {
+        expect(runCommand('edit.excerpt', 'keyboard')).toBe(true);
+      });
+      forgetRecentCommandRuns();
+      act(() => {
+        expect(runCommand('edit.excerpt', 'menu')).toBe(true);
+      });
+      expect(onExcerptAnnotation).not.toHaveBeenCalled();
+      expect(dismiss).not.toHaveBeenCalled();
+
+      // Saving closes the editor and clears the warning; immediate Excerpt succeeds.
+      fireEvent.click(screen.getByTestId('popover-note-save'));
+      expect(onUpdate).toHaveBeenCalledWith(highlight.id, {
+        note: 'Unsaved new note',
+        color: null,
+      });
+      expect(screen.queryByTestId('popover-unsaved-note-warning')).toBeNull();
+
+      fireEvent.click(screen.getByTestId('popover-excerpt'));
+      expect(onExcerptAnnotation).toHaveBeenCalledWith(highlight.id);
+      expect(dismiss).toHaveBeenCalledTimes(1);
+      unmount();
+    }
+
+    // 2. Modifying or clearing an existing note blocks Excerpt until saved or cancelled.
+    {
+      const onExcerptAnnotation = vi.fn();
+      const dismiss = vi.fn();
+      const { unmount } = render(
+        <HighlightHarness
+          cardSource={false}
+          onDelete={vi.fn()}
+          dismiss={dismiss}
+          onExcerptAnnotation={onExcerptAnnotation}
+          annotationOverride={{ note: 'Existing note' }}
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId('popover-note-edit'));
+      const field = screen.getByTestId('popover-note-input');
+      fireEvent.change(field, { target: { value: 'Edited note' } });
+      fireEvent.click(screen.getByTestId('popover-excerpt'));
+      expect(onExcerptAnnotation).not.toHaveBeenCalled();
+      expect(screen.getByTestId('popover-unsaved-note-warning')).toBeVisible();
+
+      // Clearing the existing note to empty is also an unsaved change.
+      fireEvent.change(field, { target: { value: '' } });
+      fireEvent.click(screen.getByTestId('popover-excerpt'));
+      expect(onExcerptAnnotation).not.toHaveBeenCalled();
+      expect(screen.getByTestId('popover-unsaved-note-warning')).toBeVisible();
+
+      // Cancelling discards the draft and clears the warning so Excerpt can proceed.
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByTestId('popover-unsaved-note-warning')).toBeNull();
+      fireEvent.click(screen.getByTestId('popover-excerpt'));
+      expect(onExcerptAnnotation).toHaveBeenCalledWith(highlight.id);
+      unmount();
+    }
+
+    // 3. Show in MindMap on an already-linked highlight also protects unsaved note drafts.
+    {
+      const onShowAnnotationCard = vi.fn();
+      const dismiss = vi.fn();
+      render(
+        <HighlightHarness
+          cardSource
+          onDelete={vi.fn()}
+          dismiss={dismiss}
+          onShowAnnotationCard={onShowAnnotationCard}
+          annotationOverride={{ note: 'Linked note' }}
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId('popover-note-edit'));
+      const field = screen.getByTestId('popover-note-input');
+      fireEvent.change(field, { target: { value: 'Unsaved linked edit' } });
+
+      fireEvent.click(screen.getByTestId('popover-show-in-mindmap'));
+      expect(onShowAnnotationCard).not.toHaveBeenCalled();
+      expect(dismiss).not.toHaveBeenCalled();
+      expect(screen.getByTestId('popover-unsaved-note-warning')).toBeVisible();
+      expect(field).toHaveValue('Unsaved linked edit');
+
+      forgetRecentCommandRuns();
+      act(() => {
+        expect(runCommand('edit.excerpt', 'menu')).toBe(true);
+      });
+      expect(onShowAnnotationCard).not.toHaveBeenCalled();
+      expect(dismiss).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      fireEvent.click(screen.getByTestId('popover-show-in-mindmap'));
+      expect(onShowAnnotationCard).toHaveBeenCalledWith(highlight.id);
+      expect(dismiss).toHaveBeenCalledTimes(1);
+    }
   });
 });
