@@ -292,6 +292,10 @@ export interface StudySyncState {
 
   setSelection(selection: ReaderSelection | null): void;
   excerptSelection(): Promise<void>;
+  /** Sends an existing highlight or underline to the MindMap without duplicating it (#124). */
+  excerptAnnotation(annotationId: string): Promise<void>;
+  /** Opens the MindMap and reveals and selects the card backed by `annotationId` (#124). */
+  showAnnotationCard(annotationId: string): void;
   createAnnotationFromSelection(options?: CreateAnnotationOptions): Promise<Annotation | null>;
   updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<void>;
   removeAnnotation(annotationId: string): Promise<void>;
@@ -361,6 +365,8 @@ export interface RevealRequest {
   nodeId: string;
   /** Title of the parent card when this reveal came from nesting an excerpt (#127). */
   parentTitle?: string | null;
+  /** True when the reader explicitly asked to show this card, opening a collapsed MindMap (#124). */
+  openMindMap?: boolean;
 }
 
 export interface InspectRequest {
@@ -450,6 +456,50 @@ function withoutLastDeletion(order: readonly DeletionKind[], kind: DeletionKind)
   const index = order.lastIndexOf(kind);
   if (index === -1) return [...order];
   return [...order.slice(0, index), ...order.slice(index + 1)];
+}
+
+/**
+ * Reserves measured or content-estimated sizes for every existing card so a new
+ * excerpt never lands on top of an unmeasured card or an unloaded capture (#128).
+ */
+function computeNextCardPosition(
+  nodes: readonly MindMapNode[],
+  cards: readonly NoteCard[],
+  annotations: readonly Annotation[],
+  nodeSizes: Readonly<Record<string, NodeSize>>,
+  parentNodeId: string | null,
+  newSize: NodeSize,
+) {
+  const effectiveSizes: Record<string, NodeSize> = { ...nodeSizes };
+  const captureAnnotationIds = new Set(
+    annotations
+      .filter((annotation) => annotation.excerptImagePath !== null)
+      .map((annotation) => annotation.id),
+  );
+  const cardsById = new Map(cards.map((card) => [card.id, card]));
+  for (const node of nodes) {
+    const card = cardsById.get(node.cardId);
+    if (!card) continue;
+    const hasCapture = card.annotationIds.some((id) => captureAnnotationIds.has(id));
+    const estimated = estimateCardSize({
+      hasCapture,
+      hasNotes: card.markdownNotes.trim() !== '',
+      hasTags: card.tags.length > 0,
+    });
+    const measured = effectiveSizes[node.id];
+    if (!measured) {
+      effectiveSizes[node.id] = estimated;
+    } else if (hasCapture) {
+      effectiveSizes[node.id] = {
+        width: Math.max(measured.width, estimated.width),
+        height: Math.max(measured.height, estimated.height),
+      };
+    }
+  }
+  return nextNodePosition(nodes, parentNodeId, {
+    nodeSizes: effectiveSizes,
+    newSize,
+  });
 }
 
 /**
@@ -1804,41 +1854,15 @@ export function createStudySyncStore(backend: StudyBackend) {
           ? (cards.find((card) => card.id === parentNode.cardId)?.title ?? null)
           : null;
 
-        // Use measured DOM sizes where known; for unmeasured cards (e.g. while the
-        // MindMap is collapsed), reserve a conservative bound from their content (#128).
-        // Capture cards always reserve at least their thumbnail-inclusive estimate so an
-        // early measurement before an image loads can never place a later card underneath.
-        const effectiveSizes: Record<string, NodeSize> = { ...nodeSizes };
-        const captureAnnotationIds = new Set(
-          annotations
-            .filter((annotation) => annotation.excerptImagePath !== null)
-            .map((annotation) => annotation.id),
-        );
-        const cardsById = new Map(cards.map((card) => [card.id, card]));
-        for (const node of nodes) {
-          const card = cardsById.get(node.cardId);
-          if (!card) continue;
-          const hasCapture = card.annotationIds.some((id) => captureAnnotationIds.has(id));
-          const estimated = estimateCardSize({
-            hasCapture,
-            hasNotes: card.markdownNotes.trim() !== '',
-            hasTags: card.tags.length > 0,
-          });
-          const measured = effectiveSizes[node.id];
-          if (!measured) {
-            effectiveSizes[node.id] = estimated;
-          } else if (hasCapture) {
-            effectiveSizes[node.id] = {
-              width: Math.max(measured.width, estimated.width),
-              height: Math.max(measured.height, estimated.height),
-            };
-          }
-        }
         const newSize = estimateCardSize({ hasCapture: selection.imagePng !== null });
-        const position = nextNodePosition(nodes, parentNodeId, {
-          nodeSizes: effectiveSizes,
+        const position = computeNextCardPosition(
+          nodes,
+          cards,
+          annotations,
+          nodeSizes,
+          parentNodeId,
           newSize,
-        });
+        );
         const versionAtStart = getDocumentVersion(selection.documentId);
         const expectedFileHash = selection.sourceFileHash ?? versionAtStart.fileHash;
         set({ isExcerpting: true });
@@ -1906,6 +1930,108 @@ export function createStudySyncStore(backend: StudyBackend) {
                 : state.selection,
           }));
         }
+      },
+
+      async excerptAnnotation(annotationId) {
+        const initial = get();
+        if (!initial.notebook || initial.isExcerpting) return;
+        if (initial.cards.some((card) => card.annotationIds.includes(annotationId))) {
+          get().showAnnotationCard(annotationId);
+          return;
+        }
+        if (!initial.annotations.some((candidate) => candidate.id === annotationId)) return;
+
+        set({ isExcerpting: true });
+        try {
+          // Drain any queued note/color edits for this highlight so the new card's
+          // seeded `markdownNotes` reflects the latest saved note (#124).
+          const priorUpdates = pendingAnnotationUpdates.get(annotationId);
+          if (priorUpdates) await priorUpdates;
+
+          const { notebook, annotations, cards, nodes, nestingTargetNodeId, nodeSizes } = get();
+          if (!notebook || pendingDeletes.has(annotationId)) {
+            set({ isExcerpting: false });
+            return;
+          }
+          if (cards.some((card) => card.annotationIds.includes(annotationId))) {
+            set({ isExcerpting: false });
+            get().showAnnotationCard(annotationId);
+            return;
+          }
+          const annotation = annotations.find((candidate) => candidate.id === annotationId);
+          if (!annotation) {
+            set({ isExcerpting: false });
+            return;
+          }
+
+          const parentNode = nestingTargetNodeId
+            ? nodes.find((node) => node.id === nestingTargetNodeId)
+            : undefined;
+          const parentNodeId = parentNode?.id ?? null;
+          const parentTitleBeforeWrite = parentNode
+            ? (cards.find((card) => card.id === parentNode.cardId)?.title ?? null)
+            : null;
+
+          const newSize = estimateCardSize({
+            hasCapture: annotation.excerptImagePath !== null,
+            hasNotes: annotationHasNote(annotation),
+          });
+          const position = computeNextCardPosition(
+            nodes,
+            cards,
+            annotations,
+            nodeSizes,
+            parentNodeId,
+            newSize,
+          );
+
+          const created = await backend.createCardForAnnotation({
+            annotationId: annotation.id,
+            notebookId: notebook.id,
+            parentNodeId,
+            posX: position.x,
+            posY: position.y,
+          });
+          let resolvedParentTitle: string | null = null;
+          set((state) => {
+            resolvedParentTitle = parentNode
+              ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
+                parentTitleBeforeWrite)
+              : null;
+            return {
+              cards: [...state.cards, created.card],
+              nodes: [...state.nodes, created.node],
+              edges: created.edge ? [...state.edges, created.edge] : state.edges,
+              isExcerpting: false,
+              excerptNonce: state.excerptNonce + 1,
+              lastExcerptParentTitle: resolvedParentTitle,
+            };
+          });
+          get().revealNode(created.node.id, resolvedParentTitle);
+        } catch (error) {
+          set({
+            isExcerpting: false,
+            error: describeError(error),
+          });
+        }
+      },
+
+      showAnnotationCard(annotationId) {
+        const { cards, nodes } = get();
+        const node = nodes.find((candidate) => {
+          const card = cards.find((c) => c.id === candidate.cardId);
+          return card !== undefined && card.annotationIds.includes(annotationId);
+        });
+        if (!node) return;
+        revealNonce += 1;
+        set({
+          selectedNodeId: node.id,
+          revealRequest: {
+            nonce: revealNonce,
+            nodeId: node.id,
+            openMindMap: true,
+          },
+        });
       },
 
       async createAnnotationFromSelection(options) {

@@ -7,6 +7,8 @@ import type {
   CatalogBookClassification,
   CreateAnnotationInput,
   CreateBookmarkInput,
+  CreateCardForAnnotationInput,
+  CreatedCard,
   CreatedExcerpt,
   CreateExcerptInput,
   DeletedCard,
@@ -121,6 +123,7 @@ export interface StudyBackend extends DocumentContentReader {
   loadNotebookGraph(notebookId: string): Promise<NotebookGraph>;
 
   createExcerpt(input: CreateExcerptInput): Promise<CreatedExcerpt>;
+  createCardForAnnotation(input: CreateCardForAnnotationInput): Promise<CreatedCard>;
   createAnnotation(input: CreateAnnotationInput): Promise<Annotation>;
   updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<Annotation>;
   /**

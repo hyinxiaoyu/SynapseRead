@@ -1,6 +1,7 @@
 import { act, fireEvent, render, renderHook, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
+import { commandState, forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
 import {
   type AnnotationsController,
   AnnotationsList,
@@ -427,5 +428,79 @@ describe('AnnotationsList card sources', () => {
 
     rerender(<AnnotationsList controller={controller} filter="" />);
     expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
+  });
+
+  it('excerpts an unlinked row from its action button or ⇧⌘E, and shows a linked card via its row button or In MindMap badge (#124)', () => {
+    forgetRecentCommandRuns();
+    const excerptAnnotation = vi.fn();
+    const showAnnotationCard = vi.fn();
+    const controller = controllerFor(
+      [annotation('linked'), annotation('plain', { style: 'underline' })],
+      {
+        isCardSource: (id) => id === 'linked',
+        excerptAnnotation,
+        showAnnotationCard,
+        canExcerpt: true,
+      },
+    );
+    render(
+      <div>
+        <AnnotationsList controller={controller} filter="" />
+        <button type="button" data-testid="outside">
+          Outside
+        </button>
+      </div>,
+    );
+
+    const [linkedRow, plainRow] = screen.getAllByTestId('annotation-item') as [
+      HTMLElement,
+      HTMLElement,
+    ];
+
+    // Unlinked row: Excerpt to MindMap button, no In MindMap badge or Show button.
+    expect(within(plainRow).queryByTestId('annotation-card-badge')).toBeNull();
+    expect(within(plainRow).queryByTestId('annotation-show-card-button')).toBeNull();
+    fireEvent.click(within(plainRow).getByTestId('annotation-excerpt-button'));
+    expect(excerptAnnotation).toHaveBeenCalledWith('plain');
+
+    // Linked row: Show in MindMap row button AND clickable In MindMap badge button.
+    expect(within(linkedRow).queryByTestId('annotation-excerpt-button')).toBeNull();
+    const badge = within(linkedRow).getByTestId('annotation-card-badge');
+    expect(badge.tagName).toBe('BUTTON');
+    fireEvent.click(badge);
+    expect(showAnnotationCard).toHaveBeenCalledWith('linked');
+
+    fireEvent.click(within(linkedRow).getByTestId('annotation-show-card-button'));
+    expect(showAnnotationCard).toHaveBeenCalledTimes(2);
+    expect(showAnnotationCard).toHaveBeenLastCalledWith('linked');
+
+    // ⇧⌘E on a focused unlinked row excerpts it; on a focused linked row shows its card.
+    const plainJump = within(plainRow).getByTestId('annotation-jump-button');
+    fireEvent.focus(plainJump);
+    expect(commandState('edit.excerpt')).toMatchObject({
+      enabled: true,
+      title: 'Excerpt to MindMap',
+    });
+    act(() => {
+      expect(runCommand('edit.excerpt', 'keyboard')).toBe(true);
+    });
+    expect(excerptAnnotation).toHaveBeenCalledTimes(2);
+    expect(excerptAnnotation).toHaveBeenLastCalledWith('plain');
+
+    const linkedJump = within(linkedRow).getByTestId('annotation-jump-button');
+    fireEvent.focus(linkedJump);
+    expect(commandState('edit.excerpt')).toMatchObject({
+      enabled: true,
+      title: 'Show in MindMap',
+    });
+    forgetRecentCommandRuns();
+    act(() => {
+      expect(runCommand('edit.excerpt', 'keyboard')).toBe(true);
+    });
+    expect(showAnnotationCard).toHaveBeenCalledTimes(3);
+
+    // Leaving the list clears the focused-row command override.
+    fireEvent.blur(linkedJump, { relatedTarget: screen.getByTestId('outside') });
+    expect(commandState('edit.excerpt').enabled).toBe(false);
   });
 });

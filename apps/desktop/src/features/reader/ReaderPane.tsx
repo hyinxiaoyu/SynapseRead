@@ -756,6 +756,8 @@ function DocumentTab({
   const immersive = useStudySyncStore((state) => state.immersive);
   const isExcerpting = useStudySyncStore((state) => state.isExcerpting);
   const excerptSelection = useStudySyncStore((state) => state.excerptSelection);
+  const excerptAnnotation = useStudySyncStore((state) => state.excerptAnnotation);
+  const showAnnotationCard = useStudySyncStore((state) => state.showAnnotationCard);
 
   const highlights = useMemo(
     () => selectHighlights(annotations, document.id),
@@ -829,6 +831,18 @@ function DocumentTab({
   const onExcerptSelection = useCallback(() => {
     void excerptSelection();
   }, [excerptSelection]);
+  const onExcerptAnnotation = useCallback(
+    (annotationId: string) => {
+      void excerptAnnotation(annotationId);
+    },
+    [excerptAnnotation],
+  );
+  const onShowAnnotationCard = useCallback(
+    (annotationId: string) => {
+      showAnnotationCard(annotationId);
+    },
+    [showAnnotationCard],
+  );
   const onDocumentTitle = useCallback(
     (title: string, sourceFileHash: string) => {
       void reportDocumentTitle(document.id, title, sourceFileHash);
@@ -893,6 +907,8 @@ function DocumentTab({
         onUndoAnnotationDelete={onUndoAnnotationDelete}
         cardSourceAnnotationIds={cardSourceAnnotationIds}
         onExcerptSelection={onExcerptSelection}
+        onExcerptAnnotation={onExcerptAnnotation}
+        onShowAnnotationCard={onShowAnnotationCard}
         canExcerpt={!isExcerpting}
         excerptTargetTitle={nestingTargetTitle}
         onClearExcerptTarget={onClearNestingTarget}

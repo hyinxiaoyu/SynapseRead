@@ -5182,4 +5182,99 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(s.getState().lanImport.session).toBeNull();
     expect(s.getState().lanImport.phase).toBe('idle');
   });
+
+  it('promotes an existing highlight to MindMap without duplicating it, drains pending note edits, and reveals its card (#124)', async () => {
+    const backend = createMemoryBackend({
+      library: {
+        '/docs/a.txt': new TextEncoder().encode('The quick brown fox jumps over the lazy dog'),
+      },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 4, endByteOffset: 19, lineIndex: 0 },
+      text: 'quick brown fox',
+      imagePng: null,
+    });
+    const highlight = (await store.getState().createAnnotationFromSelection({
+      color: '#fde047',
+      style: 'highlight',
+      note: 'Initial note',
+    }))!;
+    expect(store.getState().annotations).toHaveLength(1);
+    expect(store.getState().cards).toHaveLength(0);
+
+    // Pause an in-flight note update to verify excerptAnnotation drains it before creating the card.
+    const origUpdate = backend.updateAnnotation.bind(backend);
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+      await updateGate;
+      return origUpdate(id, patch);
+    });
+
+    const updatePromise = store
+      .getState()
+      .updateAnnotation(highlight.id, { note: 'Updated note\nLine 2', color: null });
+    const promotePromise = store.getState().excerptAnnotation(highlight.id);
+    releaseUpdate();
+    await Promise.all([updatePromise, promotePromise]);
+
+    expect(store.getState().annotations).toHaveLength(1);
+    expect(store.getState().cards).toHaveLength(1);
+    expect(store.getState().nodes).toHaveLength(1);
+    const card = store.getState().cards[0]!;
+    const rootNode = store.getState().nodes[0]!;
+    expect(card.title).toBe('quick brown fox');
+    expect(card.markdownNotes).toBe('Updated note\nLine 2');
+    expect(card.annotationIds).toEqual([highlight.id]);
+    expect(store.getState().selectedNodeId).toBe(rootNode.id);
+    expect(store.getState().revealRequest?.nodeId).toBe(rootNode.id);
+    expect(store.getState().revealRequest?.openMindMap).toBeUndefined();
+
+    // Nesting target applies to promoting an existing underline too.
+    store.getState().selectNode(rootNode.id);
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 35, endByteOffset: 43, lineIndex: 0 },
+      text: 'lazy dog',
+      imagePng: null,
+    });
+    const underline = (await store.getState().createAnnotationFromSelection({
+      color: '#86efac',
+      style: 'underline',
+    }))!;
+    await store.getState().excerptAnnotation(underline.id);
+
+    expect(store.getState().annotations).toHaveLength(2);
+    expect(store.getState().cards).toHaveLength(2);
+    expect(store.getState().edges).toHaveLength(1);
+    expect(store.getState().edges[0]?.sourceNodeId).toBe(rootNode.id);
+    expect(store.getState().lastExcerptParentTitle).toBe('quick brown fox');
+
+    // showAnnotationCard selects the card and asks to open MindMap without changing nestingTargetNodeId.
+    const childNode = store.getState().nodes[1]!;
+    store.getState().selectNode(childNode.id);
+    store.getState().showAnnotationCard(highlight.id);
+    expect(store.getState().selectedNodeId).toBe(rootNode.id);
+    expect(store.getState().nestingTargetNodeId).toBe(childNode.id);
+    expect(store.getState().revealRequest).toMatchObject({
+      nodeId: rootNode.id,
+      openMindMap: true,
+    });
+
+    // Deleting and undoing the promoted highlight preserves card-source undo behaviour (#97/#112).
+    await store.getState().removeAnnotation(highlight.id);
+    expect(store.getState().cards.find((c) => c.id === card.id)?.annotationIds).toEqual([]);
+    await store.getState().undoRemoveAnnotation();
+    expect(store.getState().cards.find((c) => c.id === card.id)?.annotationIds).toEqual([
+      highlight.id,
+    ]);
+  });
 });

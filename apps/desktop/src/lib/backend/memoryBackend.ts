@@ -121,6 +121,23 @@ function defaultCardTitle(excerptText: string | null, locationLabel: string | nu
     : 'Image excerpt';
 }
 
+function defaultCardTitleForAnnotation(annotation: Annotation): string {
+  const firstLine = annotation.excerptText
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (firstLine) return truncateChars(firstLine, CARD_TITLE_MAX_CHARS);
+  if (annotation.excerptImagePath !== null) {
+    return defaultCardTitle(null, annotation.locationLabel ?? null);
+  }
+  const firstNoteLine = annotation.note
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (firstNoteLine) return truncateChars(firstNoteLine, CARD_TITLE_MAX_CHARS);
+  return 'Note';
+}
+
 function hashBytes(bytes: Uint8Array): string {
   let h1 = 0x811c9dc5;
   let h2 = 0xcbf29ce4;
@@ -786,6 +803,62 @@ export function createMemoryBackendWithPreview({
       nodes.set(node.id, node);
       if (edge) edges.set(edge.id, edge);
       return { annotation, card, node, edge };
+    },
+
+    async createCardForAnnotation(input) {
+      if (!Number.isFinite(input.posX) || !Number.isFinite(input.posY)) {
+        throw fail('invalid_graph', 'node position must be finite');
+      }
+      require(notebooks, input.notebookId, 'notebook');
+      const annotation = require(annotations, input.annotationId, 'annotation');
+      if (annotation.notebookId !== input.notebookId) {
+        throw fail('invalid_graph', `annotation ${input.annotationId} belongs to another notebook`);
+      }
+      for (const existingCard of cards.values()) {
+        if (existingCard.annotationIds.includes(annotation.id)) {
+          throw fail('invalid_graph', `annotation ${input.annotationId} already backs a card`);
+        }
+      }
+      if (input.parentNodeId) {
+        const parent = require(nodes, input.parentNodeId, 'node');
+        if (parent.notebookId !== input.notebookId) {
+          throw fail('invalid_graph', `node ${input.parentNodeId} belongs to another notebook`);
+        }
+      }
+
+      const card: NoteCard = {
+        id: crypto.randomUUID(),
+        notebookId: input.notebookId,
+        title: defaultCardTitleForAnnotation(annotation),
+        markdownNotes: annotation.note?.trim() ?? '',
+        tags: [],
+        annotationIds: [annotation.id],
+        createdAt: now(),
+      };
+      const node: MindMapNode = {
+        id: crypto.randomUUID(),
+        notebookId: input.notebookId,
+        cardId: card.id,
+        parentNodeId: input.parentNodeId,
+        posX: input.posX,
+        posY: input.posY,
+        isCollapsed: false,
+        style: null,
+      };
+      const edge: MindMapEdge | null = input.parentNodeId
+        ? {
+            id: crypto.randomUUID(),
+            notebookId: input.notebookId,
+            sourceNodeId: input.parentNodeId,
+            targetNodeId: node.id,
+            label: null,
+          }
+        : null;
+
+      cards.set(card.id, card);
+      nodes.set(node.id, node);
+      if (edge) edges.set(edge.id, edge);
+      return { card, node, edge };
     },
 
     async createAnnotation(input) {

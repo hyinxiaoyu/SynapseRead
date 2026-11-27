@@ -30,6 +30,7 @@ fn with_commands<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::db::save_notebook_viewport,
         commands::db::load_notebook_graph,
         commands::db::create_excerpt,
+        commands::db::create_card_for_annotation,
         commands::db::create_annotation,
         commands::db::update_annotation,
         commands::db::delete_annotation,

@@ -1,8 +1,9 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { createRef, useState } from 'react';
+import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { dispatchEscape } from '@/features/commands/escape';
+import { forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
 import { useAnnotationsController } from '@/features/reader/AnnotationsPanel';
 import { SelectionPopover } from '@/features/reader/markup/SelectionPopover';
 import type { SelectionPopoverController } from '@/features/reader/markup/useSelectionPopover';
@@ -119,22 +120,36 @@ function HighlightHarness({
   cardSource,
   onDelete,
   dismiss,
+  onExcerptAnnotation,
+  onShowAnnotationCard,
+  excerptTargetTitle = null,
+  onClearExcerptTarget,
+  annotationOverride,
 }: {
   cardSource: boolean;
   onDelete: (annotationId: string) => void;
   dismiss: () => void;
+  onExcerptAnnotation?: (annotationId: string) => void;
+  onShowAnnotationCard?: (annotationId: string) => void;
+  excerptTargetTitle?: string | null;
+  onClearExcerptTarget?: () => void;
+  annotationOverride?: Partial<Annotation>;
 }) {
-  const boundsRef = createRef<HTMLDivElement>();
+  const boundsRef = { current: document.body };
   const [noteOpen, setNoteOpen] = useState(false);
+  const current = { ...highlight, ...annotationOverride };
   const annotations = useAnnotationsController({
     documentId: 'doc-1',
-    annotations: [highlight],
+    annotations: [current],
     onDeleteAnnotation: onDelete,
-    cardSourceAnnotationIds: new Set(cardSource ? [highlight.id] : []),
+    cardSourceAnnotationIds: new Set(cardSource ? [current.id] : []),
+    onExcerptAnnotation,
+    onShowAnnotationCard,
+    excerptTargetTitle,
     onSelectAnnotation: vi.fn(),
   });
   const popover: SelectionPopoverController = {
-    target: { kind: 'annotation', annotationId: highlight.id, rect: null },
+    target: { kind: 'annotation', annotationId: current.id, rect: null },
     focusRequest: 0,
     noteOpen,
     selectionRect: () => null,
@@ -146,12 +161,14 @@ function HighlightHarness({
     reportPointer: vi.fn(),
   };
   return (
-    <div ref={boundsRef}>
+    <div>
       <SelectionPopover
         popover={popover}
         annotations={annotations}
         selection={null}
         boundsRef={boundsRef}
+        excerptTargetTitle={excerptTargetTitle}
+        onClearExcerptTarget={onClearExcerptTarget}
         onReturnFocus={vi.fn()}
       />
     </div>
@@ -264,5 +281,69 @@ describe('SelectionPopover Delete Highlight', () => {
     fireEvent.click(screen.getByTestId('popover-delete'));
     expect(screen.getByTestId('popover-note-input').closest('[inert]')).not.toBeNull();
     expect(screen.getByTestId('card-source-delete-confirm')).toBeInTheDocument();
+  });
+});
+
+// #124: an existing highlight or underline can be sent to the MindMap or reveal its card.
+describe('SelectionPopover MindMap actions for existing highlights (#124)', () => {
+  it('offers Excerpt to MindMap for an unlinked highlight or underline, including nesting target and ⇧⌘E', () => {
+    forgetRecentCommandRuns();
+    const onExcerptAnnotation = vi.fn();
+    const onShowAnnotationCard = vi.fn();
+    const dismiss = vi.fn();
+    render(
+      <HighlightHarness
+        cardSource={false}
+        onDelete={vi.fn()}
+        dismiss={dismiss}
+        onExcerptAnnotation={onExcerptAnnotation}
+        onShowAnnotationCard={onShowAnnotationCard}
+        excerptTargetTitle="Parent card"
+        annotationOverride={{ style: 'underline' }}
+      />,
+    );
+
+    const excerptBtn = screen.getByTestId('popover-excerpt');
+    expect(excerptBtn).toHaveAccessibleName('Excerpt under ‘Parent card’');
+    expect(screen.getByTestId('popover-nesting-target')).toHaveTextContent('Under ‘Parent card’');
+    expect(screen.queryByTestId('popover-show-in-mindmap')).toBeNull();
+
+    fireEvent.click(excerptBtn);
+    expect(onExcerptAnnotation).toHaveBeenCalledWith(highlight.id);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+
+    forgetRecentCommandRuns();
+    act(() => {
+      expect(runCommand('edit.excerpt', 'keyboard')).toBe(true);
+    });
+    expect(onExcerptAnnotation).toHaveBeenCalledTimes(2);
+    expect(onShowAnnotationCard).not.toHaveBeenCalled();
+  });
+
+  it('replaces Excerpt with Show in MindMap for a highlight that already backs a card', () => {
+    forgetRecentCommandRuns();
+    const onExcerptAnnotation = vi.fn();
+    const onShowAnnotationCard = vi.fn();
+    const dismiss = vi.fn();
+    render(
+      <HighlightHarness
+        cardSource
+        onDelete={vi.fn()}
+        dismiss={dismiss}
+        onExcerptAnnotation={onExcerptAnnotation}
+        onShowAnnotationCard={onShowAnnotationCard}
+        excerptTargetTitle="Parent card"
+      />,
+    );
+
+    expect(screen.queryByTestId('popover-excerpt')).toBeNull();
+    expect(screen.queryByTestId('popover-nesting-target')).toBeNull();
+    const showBtn = screen.getByTestId('popover-show-in-mindmap');
+    expect(showBtn).toHaveAccessibleName('Show in MindMap');
+
+    fireEvent.click(showBtn);
+    expect(onShowAnnotationCard).toHaveBeenCalledWith(highlight.id);
+    expect(dismiss).toHaveBeenCalledTimes(1);
+    expect(onExcerptAnnotation).not.toHaveBeenCalled();
   });
 });

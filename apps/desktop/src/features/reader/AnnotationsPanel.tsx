@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Link2, Pencil, StickyNote, Undo2 } from 'lucide-react';
+import { Check, ChevronDown, Link2, Network, Pencil, Quote, StickyNote, Undo2 } from 'lucide-react';
 import {
   Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -8,7 +8,9 @@ import {
 } from 'react';
 
 import { Button } from '@/components/ui/button';
-import { commandDefinition, formatShortcut } from '@/features/commands/commands';
+import { commandDefinition, commandTooltip, formatShortcut } from '@/features/commands/commands';
+import { useCommands } from '@/features/commands/registry';
+import { excerptActionLabel } from '@/features/mindmap/nestingLabel';
 import { CardSourceDeleteConfirm } from '@/features/reader/CardSourceDeleteConfirm';
 import {
   formatShortDate,
@@ -86,6 +88,14 @@ export interface AnnotationsController {
   isAnnotationStale: (annotation: Annotation) => boolean;
   /** The annotation is a MindMap card's source, so deleting it asks first. */
   isCardSource?: (annotationId: string) => boolean;
+  /** Sends an existing highlight or underline to the MindMap without duplicating it (#124). */
+  excerptAnnotation?: ((annotationId: string) => void) | undefined;
+  /** Opens the MindMap and reveals the card backed by this annotation (#124). */
+  showAnnotationCard?: ((annotationId: string) => void) | undefined;
+  /** False while an excerpt write is in flight. */
+  canExcerpt?: boolean | undefined;
+  /** Title of the active MindMap nesting target, or `null` for a new root (#127). */
+  excerptTargetTitle?: string | null | undefined;
 }
 
 export interface UseAnnotationsOptions {
@@ -98,6 +108,10 @@ export interface UseAnnotationsOptions {
   canUndoAnnotationDelete?: boolean | undefined;
   onUndoAnnotationDelete?: (() => void) | undefined;
   cardSourceAnnotationIds?: ReadonlySet<string> | undefined;
+  onExcerptAnnotation?: ((annotationId: string) => void) | undefined;
+  onShowAnnotationCard?: ((annotationId: string) => void) | undefined;
+  canExcerpt?: boolean | undefined;
+  excerptTargetTitle?: string | null | undefined;
   isStaleAnnotation?: (annotation: Annotation) => boolean;
   onSelectAnnotation: (annotation: Annotation) => void;
 }
@@ -112,6 +126,10 @@ export function useAnnotationsController({
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
   cardSourceAnnotationIds,
+  onExcerptAnnotation,
+  onShowAnnotationCard,
+  canExcerpt,
+  excerptTargetTitle,
   isStaleAnnotation,
   onSelectAnnotation,
 }: UseAnnotationsOptions): AnnotationsController {
@@ -240,6 +258,10 @@ export function useAnnotationsController({
     undoDelete,
     isAnnotationStale: (annotation) => (isStaleAnnotation ? isStaleAnnotation(annotation) : false),
     isCardSource: (annotationId) => cardSourceAnnotationIds?.has(annotationId) ?? false,
+    excerptAnnotation: onExcerptAnnotation,
+    showAnnotationCard: onShowAnnotationCard,
+    canExcerpt,
+    excerptTargetTitle,
   };
 }
 
@@ -312,6 +334,10 @@ function AnnotationRow({
   onFocus,
   onKeyDown,
   onSelect,
+  onExcerpt,
+  canExcerpt = true,
+  excerptLabel,
+  onShowCard,
   onUpdate,
   onDelete,
   confirmingDelete,
@@ -326,6 +352,10 @@ function AnnotationRow({
   onFocus: () => void;
   onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   onSelect: () => void;
+  onExcerpt?: (() => void) | undefined;
+  canExcerpt?: boolean | undefined;
+  excerptLabel: string;
+  onShowCard?: (() => void) | undefined;
   onUpdate: (patch: AnnotationPatch) => void;
   onDelete: (from: HTMLElement) => void;
   /** Deleting this card's source is waiting for the reader to confirm. */
@@ -390,82 +420,111 @@ function AnnotationRow({
       className="group/row flex flex-col"
     >
       <div className="flex items-start gap-0.5">
-        <button
-          type="button"
-          data-roving-row=""
-          data-testid="annotation-jump-button"
-          tabIndex={tabIndex}
-          aria-keyshortcuts={canExpand ? 'Backspace ArrowRight ArrowLeft' : 'Backspace'}
-          onFocus={onFocus}
-          onKeyDown={(event) => {
-            // → and ← open and close a long row in place, as in a disclosure tree.
-            if (canExpand && !event.metaKey && !event.ctrlKey && !event.altKey) {
-              if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
-                event.preventDefault();
-                setExpanded(event.key === 'ArrowRight');
-                return;
+        <div className="flex min-w-0 flex-1 flex-col">
+          <button
+            type="button"
+            data-roving-row=""
+            data-testid="annotation-jump-button"
+            tabIndex={tabIndex}
+            aria-keyshortcuts={canExpand ? 'Backspace ArrowRight ArrowLeft' : 'Backspace'}
+            onFocus={onFocus}
+            onKeyDown={(event) => {
+              // → and ← open and close a long row in place, as in a disclosure tree.
+              if (canExpand && !event.metaKey && !event.ctrlKey && !event.altKey) {
+                if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+                  event.preventDefault();
+                  setExpanded(event.key === 'ArrowRight');
+                  return;
+                }
               }
-            }
-            onKeyDown(event);
-          }}
-          onClick={onSelect}
-          className={rowClassName(false)}
-        >
-          <span className="flex items-start gap-2">
-            <span
-              aria-hidden="true"
-              data-testid="annotation-color-chip"
-              className="mt-1 inline-block size-2.5 shrink-0 rounded-full border border-black/20"
-              style={{ backgroundColor: annotation.color }}
-            />
-            <span
-              ref={excerptRef}
-              data-testid="annotation-excerpt"
-              className={cn('min-w-0 break-words', !expanded && 'line-clamp-3')}
-            >
-              {annotation.excerptText ??
-                (annotation.excerptImagePath ? 'Captured image excerpt' : 'Note')}
+              onKeyDown(event);
+            }}
+            onClick={onSelect}
+            className={cn(rowClassName(false), linkedToCard && 'pb-0.5')}
+          >
+            <span className="flex items-start gap-2">
+              <span
+                aria-hidden="true"
+                data-testid="annotation-color-chip"
+                className="mt-1 inline-block size-2.5 shrink-0 rounded-full border border-black/20"
+                style={{ backgroundColor: annotation.color }}
+              />
+              <span
+                ref={excerptRef}
+                data-testid="annotation-excerpt"
+                className={cn('min-w-0 break-words', !expanded && 'line-clamp-3')}
+              >
+                {annotation.excerptText ??
+                  (annotation.excerptImagePath ? 'Captured image excerpt' : 'Note')}
+              </span>
             </span>
-          </span>
-          {annotationHasNote(annotation) && !editing && (
-            <span
-              ref={noteRef}
-              data-testid="annotation-note-preview"
-              className={cn(
-                'ml-4.5 border-l-2 pl-2 text-xs break-words whitespace-pre-wrap text-muted-foreground italic',
-                !expanded && 'line-clamp-2',
+            {annotationHasNote(annotation) && !editing && (
+              <span
+                ref={noteRef}
+                data-testid="annotation-note-preview"
+                className={cn(
+                  'ml-4.5 border-l-2 pl-2 text-xs break-words whitespace-pre-wrap text-muted-foreground italic',
+                  !expanded && 'line-clamp-2',
+                )}
+              >
+                {annotation.note}
+              </span>
+            )}
+            {!linkedToCard && (
+              <span className="ml-4.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground">
+                <span data-testid="annotation-location">{locationLabel}</span>
+                {date && (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span data-testid="annotation-date">{date}</span>
+                  </>
+                )}
+                {stale && (
+                  <span
+                    data-testid="annotation-stale"
+                    className="rounded bg-destructive/15 px-1.5 text-[10px] font-medium text-destructive"
+                  >
+                    Stale
+                  </span>
+                )}
+              </span>
+            )}
+          </button>
+          {linkedToCard && (
+            // Kept outside the jump button so the interactive In MindMap badge is a real
+            // button without nesting interactive elements (#124).
+            <div className="ml-6.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 pr-2 pb-1 text-[11px] text-muted-foreground">
+              <span data-testid="annotation-location">{locationLabel}</span>
+              {date && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <span data-testid="annotation-date">{date}</span>
+                </>
               )}
-            >
-              {annotation.note}
-            </span>
-          )}
-          <span className="ml-4.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground">
-            <span data-testid="annotation-location">{locationLabel}</span>
-            {date && (
-              <>
-                <span aria-hidden="true">·</span>
-                <span data-testid="annotation-date">{date}</span>
-              </>
-            )}
-            {linkedToCard && (
-              <span
+              <button
+                type="button"
+                tabIndex={-1}
+                aria-label={`Show in MindMap for annotation at ${locationLabel}`}
+                title="Show in MindMap"
                 data-testid="annotation-card-badge"
-                className="inline-flex items-center gap-0.5 rounded bg-secondary px-1.5 text-[10px] font-medium text-secondary-foreground"
+                disabled={!onShowCard}
+                onClick={() => onShowCard?.()}
+                className="inline-flex cursor-pointer items-center gap-0.5 rounded bg-secondary px-1.5 text-[10px] font-medium text-secondary-foreground outline-none hover:bg-secondary/80 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-secondary"
               >
-                <Link2 className="size-2.5" />
+                <Link2 aria-hidden="true" className="size-2.5" />
                 In MindMap
-              </span>
-            )}
-            {stale && (
-              <span
-                data-testid="annotation-stale"
-                className="rounded bg-destructive/15 px-1.5 text-[10px] font-medium text-destructive"
-              >
-                Stale
-              </span>
-            )}
-          </span>
-        </button>
+              </button>
+              {stale && (
+                <span
+                  data-testid="annotation-stale"
+                  className="rounded bg-destructive/15 px-1.5 text-[10px] font-medium text-destructive"
+                >
+                  Stale
+                </span>
+              )}
+            </div>
+          )}
+        </div>
         <div className="flex shrink-0 items-center pt-1">
           {canExpand && (
             <button
@@ -484,6 +543,37 @@ function AnnotationRow({
                   expanded && 'rotate-180',
                 )}
               />
+            </button>
+          )}
+          {!linkedToCard && onExcerpt && (
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label={`${excerptLabel} at ${locationLabel}`}
+              title={
+                canExcerpt
+                  ? commandTooltip(excerptLabel, 'edit.excerpt')
+                  : 'Saving the last excerpt…'
+              }
+              data-testid="annotation-excerpt-button"
+              disabled={!canExcerpt}
+              onClick={onExcerpt}
+              className="flex size-6 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity outline-none group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 motion-reduce:transition-none"
+            >
+              <Quote aria-hidden="true" className="size-3.5" />
+            </button>
+          )}
+          {linkedToCard && onShowCard && (
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label={`Show in MindMap at ${locationLabel}`}
+              title="Show in MindMap"
+              data-testid="annotation-show-card-button"
+              onClick={onShowCard}
+              className="flex size-6 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity outline-none group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
+            >
+              <Network aria-hidden="true" className="size-3.5" />
             </button>
           )}
           <button
@@ -681,6 +771,8 @@ export function AnnotationsList({
   const [filters, setFilters] = useState<AnnotationFilters>(NO_FILTERS);
   /** The card-source row whose delete is waiting for the reader to confirm it. */
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
+  /** Row currently holding focus, so ⇧⌘E excerpts or reveals it via the command registry (#124). */
+  const [focusedAnnotationId, setFocusedAnnotationId] = useState<string | null>(null);
   const placed = filterAnnotations(controller.annotations, filter, filters)
     .map((annotation, index) => ({
       annotation,
@@ -699,6 +791,39 @@ export function AnnotationsList({
   }
   const roving = useRovingList(placed.length);
   const filtering = filters.colors.size > 0 || filters.noteOnly;
+  const excerptLabel = excerptActionLabel(controller.excerptTargetTitle);
+  const isLinked = (annotationId: string): boolean =>
+    linkedAnnotationIds?.has(annotationId) ?? controller.isCardSource?.(annotationId) ?? false;
+  const focusedAnnotation =
+    focusedAnnotationId !== null
+      ? (placed.find(({ annotation }) => annotation.id === focusedAnnotationId)?.annotation ?? null)
+      : null;
+  const focusedLinked = focusedAnnotation !== null && isLinked(focusedAnnotation.id);
+  const focusedCanAct =
+    focusedAnnotation !== null &&
+    (focusedLinked
+      ? controller.showAnnotationCard !== undefined
+      : controller.excerptAnnotation !== undefined);
+
+  useCommands(
+    {
+      'edit.excerpt': {
+        run: () => {
+          if (!focusedAnnotation) return;
+          if (focusedLinked) {
+            controller.showAnnotationCard?.(focusedAnnotation.id);
+          } else if (controller.canExcerpt !== false) {
+            controller.excerptAnnotation?.(focusedAnnotation.id);
+          }
+        },
+        enabled: focusedLinked
+          ? controller.showAnnotationCard !== undefined
+          : controller.canExcerpt !== false && controller.excerptAnnotation !== undefined,
+        title: focusedLinked ? 'Show in MindMap' : excerptLabel,
+      },
+    },
+    focusedCanAct,
+  );
 
   const header = (
     <div className="flex h-7 shrink-0 items-center justify-between gap-2 border-b px-3 text-[11px] text-muted-foreground">
@@ -741,6 +866,11 @@ export function AnnotationsList({
         aria-label="Highlights and notes"
         data-testid="annotations-list"
         data-arrow-keys=""
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setFocusedAnnotationId(null);
+          }
+        }}
         className="min-h-0 flex-1 overflow-y-auto px-1.5 py-1"
       >
         {placed.map(({ annotation, placement }, index) => {
@@ -777,14 +907,13 @@ export function AnnotationsList({
               <AnnotationRow
                 annotation={annotation}
                 locationLabel={placement.label ?? formatAnnotationLocation(annotation)}
-                linkedToCard={
-                  linkedAnnotationIds?.has(annotation.id) ??
-                  controller.isCardSource?.(annotation.id) ??
-                  false
-                }
+                linkedToCard={isLinked(annotation.id)}
                 stale={controller.isAnnotationStale(annotation)}
                 tabIndex={roving.tabIndexFor(index)}
-                onFocus={() => roving.onRowFocus(index)}
+                onFocus={() => {
+                  roving.onRowFocus(index);
+                  setFocusedAnnotationId(annotation.id);
+                }}
                 onKeyDown={(event) => {
                   if (roving.onRowKeyDown(event, index)) return;
                   if (isDeleteKey(event)) {
@@ -793,6 +922,18 @@ export function AnnotationsList({
                   }
                 }}
                 onSelect={() => controller.selectAnnotation(annotation)}
+                onExcerpt={
+                  controller.excerptAnnotation
+                    ? () => controller.excerptAnnotation?.(annotation.id)
+                    : undefined
+                }
+                canExcerpt={controller.canExcerpt}
+                excerptLabel={excerptLabel}
+                onShowCard={
+                  controller.showAnnotationCard
+                    ? () => controller.showAnnotationCard?.(annotation.id)
+                    : undefined
+                }
                 onUpdate={(patch) => controller.updateAnnotation(annotation.id, patch)}
                 onDelete={requestRemove}
                 confirmingDelete={confirmingDeleteId === annotation.id}

@@ -2568,3 +2568,113 @@ fn macos_bundle_config_enforces_hardened_runtime_without_personal_identity() {
         "hardenedRuntime should run without custom exception entitlements unless proven necessary"
     );
 }
+
+#[test]
+fn create_card_for_annotation_round_trips_over_ipc() {
+    let h = Harness::new();
+    let document = h.register("book.txt", "hello world again");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+
+    let first = h.ok(
+        "create_annotation",
+        json!({ "input": {
+            "documentId": document["id"],
+            "notebookId": notebook["id"],
+            "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 5, "lineIndex": 0 },
+            "excerptText": "hello",
+            "excerptImagePng": null,
+            "note": "First note\nLine two",
+            "color": "#fde047",
+            "style": "highlight",
+        }}),
+    );
+    let second = h.ok(
+        "create_annotation",
+        json!({ "input": {
+            "documentId": document["id"],
+            "notebookId": notebook["id"],
+            "anchor": { "format": "txt", "startByteOffset": 6, "endByteOffset": 11, "lineIndex": 0 },
+            "excerptText": "world",
+            "excerptImagePng": null,
+            "note": null,
+            "color": "#86efac",
+            "style": "underline",
+        }}),
+    );
+
+    let root = h.ok(
+        "create_card_for_annotation",
+        json!({ "input": {
+            "annotationId": first["id"],
+            "notebookId": notebook["id"],
+            "parentNodeId": null,
+            "posX": 12.5,
+            "posY": 34.5,
+        }}),
+    );
+    assert_eq!(root["card"]["title"], "hello");
+    assert_eq!(root["card"]["markdownNotes"], "First note\nLine two");
+    assert_eq!(root["card"]["annotationIds"], json!([first["id"]]));
+    assert_eq!(root["node"]["posX"], 12.5);
+    assert_eq!(root["node"]["posY"], 34.5);
+    assert_eq!(root["edge"], Value::Null);
+
+    let child = h.ok(
+        "create_card_for_annotation",
+        json!({ "input": {
+            "annotationId": second["id"],
+            "notebookId": notebook["id"],
+            "parentNodeId": root["node"]["id"],
+            "posX": 300.0,
+            "posY": 34.5,
+        }}),
+    );
+    assert_eq!(child["card"]["title"], "world");
+    assert_eq!(child["card"]["markdownNotes"], "");
+    assert_eq!(child["edge"]["sourceNodeId"], root["node"]["id"]);
+    assert_eq!(child["edge"]["targetNodeId"], child["node"]["id"]);
+
+    // No duplicate annotations created.
+    let graph = h.ok(
+        "load_notebook_graph",
+        json!({ "notebookId": notebook["id"] }),
+    );
+    assert_eq!(graph["annotations"].as_array().unwrap().len(), 2);
+    assert_eq!(graph["cards"].as_array().unwrap().len(), 2);
+
+    // Duplicate promotion is rejected cleanly with `invalid_graph`.
+    let dup_err = h
+        .call(
+            "create_card_for_annotation",
+            json!({ "input": {
+                "annotationId": first["id"],
+                "notebookId": notebook["id"],
+                "parentNodeId": null,
+                "posX": 0.0,
+                "posY": 0.0,
+            }}),
+        )
+        .unwrap_err();
+    assert_eq!(dup_err["code"], "invalid_graph");
+
+    // Unknown annotation returns `not_found`.
+    let missing_err = h
+        .call(
+            "create_card_for_annotation",
+            json!({ "input": {
+                "annotationId": "missing",
+                "notebookId": notebook["id"],
+                "parentNodeId": null,
+                "posX": 0.0,
+                "posY": 0.0,
+            }}),
+        )
+        .unwrap_err();
+    assert_eq!(missing_err["code"], "not_found");
+
+    // Soft-delete and restore still reconnect the card link.
+    h.ok("delete_annotation", json!({ "annotationId": first["id"] }));
+    let restored = h.ok("restore_annotation", json!({ "annotationId": first["id"] }));
+    assert_eq!(restored["cards"][0]["id"], root["card"]["id"]);
+    assert_eq!(restored["cards"][0]["annotationIds"], json!([first["id"]]));
+}

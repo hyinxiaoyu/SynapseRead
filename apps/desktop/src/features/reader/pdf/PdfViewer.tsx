@@ -986,6 +986,8 @@ function PdfPages({
   onUndoAnnotationDelete,
   cardSourceAnnotationIds,
   onExcerptSelection,
+  onExcerptAnnotation,
+  onShowAnnotationCard,
   canExcerpt,
   excerptTargetTitle,
   onClearExcerptTarget,
@@ -2185,6 +2187,10 @@ function PdfPages({
     canUndoAnnotationDelete,
     onUndoAnnotationDelete,
     cardSourceAnnotationIds,
+    onExcerptAnnotation,
+    onShowAnnotationCard,
+    canExcerpt,
+    excerptTargetTitle,
     isStaleAnnotation: (annotation) => {
       const pdfAnchor = asPdfAnchor(annotation.anchor);
       if (!pdfAnchor) return true;

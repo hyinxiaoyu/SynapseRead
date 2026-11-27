@@ -1,4 +1,4 @@
-import { Copy, Pencil, Quote, StickyNote, Trash2, Underline, X } from 'lucide-react';
+import { Copy, Network, Pencil, Quote, StickyNote, Trash2, Underline, X } from 'lucide-react';
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
@@ -12,6 +12,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
+import { useCommands } from '@/features/commands/registry';
 import { excerptActionLabel } from '@/features/mindmap/nestingLabel';
 import {
   type AnnotationsController,
@@ -123,6 +124,13 @@ export function SelectionPopover({
       ? (annotations.annotations.find((candidate) => candidate.id === target.annotationId) ?? null)
       : null;
   const editing = annotation !== null;
+  const isCardSource = annotation !== null && (annotations.isCardSource?.(annotation.id) ?? false);
+  const canExcerptTarget = editing
+    ? !isCardSource && annotations.excerptAnnotation !== undefined
+    : onExcerpt !== undefined;
+  const canShowCard = editing && isCardSource && annotations.showAnnotationCard !== undefined;
+  const normalizedTargetTitle = excerptTargetTitle?.trim() || null;
+  const excerptLabel = excerptActionLabel(normalizedTargetTitle);
   // A whitespace-only note (imported, or saved before notes were trimmed) counts as none.
   const hasNote = annotation !== null && annotationHasNote(annotation);
 
@@ -254,6 +262,29 @@ export function SelectionPopover({
         }
       : null,
   );
+  // While an existing highlight's popover is open, ⇧⌘E sends it to the MindMap
+  // (or reveals its card if already linked), matching the popover action (#124).
+  useCommands(
+    {
+      'edit.excerpt': {
+        run: () => {
+          if (!annotation) return;
+          if (canShowCard) {
+            annotations.showAnnotationCard?.(annotation.id);
+            dismiss();
+            onReturnFocus();
+          } else if (canExcerpt && canExcerptTarget) {
+            annotations.excerptAnnotation?.(annotation.id);
+            dismiss();
+            onReturnFocus();
+          }
+        },
+        enabled: canShowCard || (canExcerpt && canExcerptTarget),
+        title: canShowCard ? 'Show in MindMap' : excerptLabel,
+      },
+    },
+    shown && editing && (canExcerptTarget || canShowCard),
+  );
 
   if (!shown) return null;
 
@@ -327,8 +358,6 @@ export function SelectionPopover({
 
   const currentColor = annotation ? annotation.color : annotations.activeColor;
   const label = editing ? 'Highlight actions' : 'Selection actions';
-  const normalizedTargetTitle = excerptTargetTitle?.trim() || null;
-  const excerptLabel = excerptActionLabel(normalizedTargetTitle);
 
   return (
     <div
@@ -413,7 +442,7 @@ export function SelectionPopover({
           testId="popover-note"
           onClick={toggleNote}
         />
-        {!editing && onExcerpt && (
+        {canExcerptTarget && (
           <PopoverAction
             icon={Quote}
             label={excerptLabel}
@@ -423,7 +452,20 @@ export function SelectionPopover({
             testId="popover-excerpt"
             onClick={() => {
               if (!canExcerpt) return;
-              onExcerpt();
+              if (annotation) annotations.excerptAnnotation?.(annotation.id);
+              else onExcerpt?.();
+              close();
+            }}
+          />
+        )}
+        {canShowCard && (
+          <PopoverAction
+            icon={Network}
+            label="Show in MindMap"
+            title="Show in MindMap"
+            testId="popover-show-in-mindmap"
+            onClick={() => {
+              if (annotation) annotations.showAnnotationCard?.(annotation.id);
               close();
             }}
           />
@@ -449,7 +491,7 @@ export function SelectionPopover({
           />
         )}
       </div>
-      {!editing && onExcerpt && normalizedTargetTitle && (
+      {canExcerptTarget && normalizedTargetTitle && (
         <div
           data-testid="popover-nesting-target"
           className="flex w-0 min-w-full items-center gap-1.5 border-t px-2 pt-1 pb-0.5 text-[11px] text-muted-foreground"

@@ -273,6 +273,14 @@ export function StudyWorkspace() {
     }
   }, [ready, inspectRequest, inspectorRef, inspectorOpen, openInspector]);
 
+  // "Show in MindMap" from a highlight opens the MindMap if collapsed (#124).
+  useEffect(() => {
+    if (!ready || !revealRequest?.openMindMap) return;
+    if (mindMapRef.current?.isCollapsed() || !mindMapOpen) {
+      openMindMap();
+    }
+  }, [ready, revealRequest, mindMapRef, mindMapOpen, openMindMap]);
+
   const handleLayoutChanged = useCallback(
     (layout: Layout) => {
       const mindmap = layout.mindmap;
@@ -438,8 +446,9 @@ export function StudyWorkspace() {
 
   const showDropOverlay = isDraggingFile || htmlDragging;
   // A card the collapsed MindMap could not show: say it was added, and offer to
-  // open the map at it. An open map reveals it itself.
-  const pendingReveal = ready && !mindMapOpen ? revealRequest : null;
+  // open the map at it. An open map reveals it itself, and explicit "Show in
+  // MindMap" requests open the map directly without showing this notice (#124).
+  const pendingReveal = ready && !mindMapOpen && !revealRequest?.openMindMap ? revealRequest : null;
   // Both notices share one stack, so their keys are namespaced: a shared key
   // would hand the deletion notice the excerpt notice's node and its fade timer.
   const excerptNotice = pendingReveal ? (
