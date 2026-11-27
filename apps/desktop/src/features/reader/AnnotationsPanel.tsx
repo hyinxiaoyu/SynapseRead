@@ -155,6 +155,7 @@ export function useAnnotationsController({
         note,
         color,
         style,
+        locationLabel: selection.locationLabel ?? null,
         createdAt: new Date().toISOString(),
       },
     ]);

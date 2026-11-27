@@ -263,6 +263,102 @@ describe('EPUB navigation', () => {
     }
   });
 
+  it('resolves chapterLabel by DOM order when multiple TOC #fragments share one XHTML file (#125)', async () => {
+    const previousToc = fake.book.navigation.toc;
+    (
+      fake.book.navigation as {
+        toc: { id: string; label: string; href: string; subitems?: unknown[] }[];
+      }
+    ).toc = [
+      { id: 'ch1', label: 'Chapter One: Arrival', href: 'chapter1.xhtml#arrival', subitems: [] },
+      {
+        id: 'ch2',
+        label: 'Chapter Two: Departure',
+        href: 'chapter1.xhtml#departure',
+        subitems: [],
+      },
+    ];
+    try {
+      const { handle, contents } = await renderedChapter();
+      contents.document.body.innerHTML = `
+        <section id="arrival"><h1>Chapter One: Arrival</h1><p>Arrival passage text.</p></section>
+        <section id="departure"><h1>Chapter Two: Departure</h1><p>Departure passage text.</p></section>
+      `;
+      const seen: (EpubSelection | null)[] = [];
+      handle.onSelection((selection) => seen.push(selection));
+
+      const rangeFor = (needle: string): Range => {
+        const walker = contents.document.createTreeWalker(
+          contents.document.body,
+          NodeFilter.SHOW_TEXT,
+        );
+        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+          const text = node.textContent ?? '';
+          const idx = text.indexOf(needle);
+          if (idx !== -1) {
+            const range = contents.document.createRange();
+            range.setStart(node, idx);
+            range.setEnd(node, idx + needle.length);
+            return range;
+          }
+        }
+        throw new Error(`Missing text: ${needle}`);
+      };
+
+      const arrivalRange = rangeFor('Arrival passage');
+      const departureRange = rangeFor('Departure passage');
+
+      const getSelection = vi.spyOn(window, 'getSelection');
+      try {
+        getSelection.mockReturnValue({
+          isCollapsed: false,
+          rangeCount: 1,
+          getRangeAt: () => arrivalRange,
+          toString: () => 'Arrival passage',
+        } as unknown as Selection);
+        contents.document.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
+        expect(seen.at(-1)).toEqual({
+          cfiRange: 'epubcfi(/6/2!/4/2/1:0)',
+          chapterHref: 'chapter1.xhtml',
+          text: 'Arrival passage',
+          chapterLabel: 'Chapter One: Arrival',
+        });
+
+        getSelection.mockReturnValue({
+          isCollapsed: false,
+          rangeCount: 1,
+          getRangeAt: () => departureRange,
+          toString: () => 'Departure passage',
+        } as unknown as Selection);
+        contents.document.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
+        expect(seen.at(-1)).toEqual({
+          cfiRange: 'epubcfi(/6/2!/4/2/1:0)',
+          chapterHref: 'chapter1.xhtml',
+          text: 'Departure passage',
+          chapterLabel: 'Chapter Two: Departure',
+        });
+
+        // Also verified through epub.js' debounced `selected` event path.
+        fake.state.listeners.selected?.('epubcfi(/6/2!/4/4/1:4)', contents);
+        expect(seen.at(-1)).toEqual({
+          cfiRange: 'epubcfi(/6/2!/4/4/1:4)',
+          chapterHref: 'chapter1.xhtml',
+          text: 'Departure passage',
+          chapterLabel: 'Chapter Two: Departure',
+        });
+
+        // When a fragment target is missing from the XHTML, fail closed to null (book title only).
+        contents.document.getElementById('departure')?.removeAttribute('id');
+        contents.document.dispatchEvent(new MouseEvent('pointerup', { button: 0 }));
+        expect(seen.at(-1)?.chapterLabel).toBeNull();
+      } finally {
+        getSelection.mockRestore();
+      }
+    } finally {
+      fake.book.navigation.toc = previousToc;
+    }
+  });
+
   it('does not report a click inside the selection as a new one', async () => {
     const { handle, contents } = await renderedChapter();
     const seen: (EpubSelection | null)[] = [];

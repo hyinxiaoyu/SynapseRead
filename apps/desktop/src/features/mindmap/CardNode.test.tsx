@@ -3,7 +3,8 @@ import { type NodeProps, ReactFlowProvider } from '@xyflow/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InspectorPane } from '@/features/inspector/InspectorPane';
-import { useStudySyncStore } from '@/stores/useStudySyncStore';
+import { createMemoryBackend } from '@/lib/backend/memoryBackend';
+import { createStudySyncStore, useStudySyncStore } from '@/stores/useStudySyncStore';
 
 import { type CardFlowNode, CardNode, summarizeMarkdownNotes } from './CardNode';
 
@@ -22,6 +23,7 @@ async function excerpt() {
     anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 4, lineIndex: 0 },
     text: 'The card source',
     imagePng: null,
+    locationLabel: 'Line 1',
   });
   await state().excerptSelection();
   const node = state().nodes.at(-1);
@@ -51,22 +53,236 @@ describe('CardNode source', () => {
     const { nodeId, cardId } = await excerpt();
     renderCard(nodeId, cardId);
     const card = state().cards.find((candidate) => candidate.id === cardId);
-    const jump = () => screen.queryByRole('button', { name: `Jump to source of ${card?.title}` });
+    const expectedSource = 'sample · Line 1';
+    const jump = () =>
+      screen.queryByRole('button', {
+        name: `Jump to source of ${card?.title} (${expectedSource})`,
+      });
     expect(jump()).not.toBeNull();
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent(expectedSource);
     expect(screen.queryByTestId('card-source-removed')).toBeNull();
     expect(screen.queryByTestId('inspector-source-removed')).toBeNull();
 
     await act(() => state().removeAnnotation(card?.annotationIds[0] as string));
     expect(jump()).toBeNull();
+    expect(screen.queryByTestId('card-source-attribution')).toBeNull();
     expect(screen.getByTestId('card-source-removed')).toHaveTextContent('Source removed');
     expect(screen.getByTestId('inspector-source-removed')).toBeVisible();
 
     await act(() => state().undoRemoveAnnotation());
     expect(jump()).not.toBeNull();
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent(expectedSource);
     expect(screen.queryByTestId('card-source-removed')).toBeNull();
     // The inspector lists the excerpt again, beside the card's own title.
-    expect(screen.getByRole('button', { name: 'Jump to this excerpt' })).toBeVisible();
+    expect(
+      screen.getByRole('button', { name: `Jump to this excerpt (${expectedSource})` }),
+    ).toBeVisible();
     expect(screen.getAllByText('The card source')).toHaveLength(2);
+  });
+
+  it('shows truncated document title and location on the card face, and stays current after displayTitle or relink updates (#125)', () => {
+    useStudySyncStore.setState({
+      documents: [
+        {
+          id: 'doc-1',
+          title: 'kahneman-2011',
+          displayTitle: 'Thinking, Fast and Slow',
+          filePath: '/books/kahneman-2011.pdf',
+          fileHash: 'hash-1',
+          format: 'pdf',
+          encoding: 'utf-8',
+          lastCursorAnchor: null,
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      annotations: [
+        {
+          id: 'ann-1',
+          documentId: 'doc-1',
+          notebookId: 'nb-1',
+          anchor: {
+            format: 'pdf',
+            pageIndex: 40,
+            rects: [{ x: 0.1, y: 0.1, width: 0.5, height: 0.1 }],
+          },
+          excerptText: 'System 1 operates automatically',
+          excerptImagePath: null,
+          note: null,
+          color: '#fde047',
+          style: 'highlight',
+          locationLabel: 'Ch. 3 · p. 41',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      cards: [
+        {
+          id: 'card-1',
+          notebookId: 'nb-1',
+          title: 'System 1 operates automatically',
+          markdownNotes: '',
+          tags: [],
+          annotationIds: ['ann-1'],
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      nodes: [
+        {
+          id: 'node-1',
+          notebookId: 'nb-1',
+          cardId: 'card-1',
+          parentNodeId: null,
+          posX: 0,
+          posY: 0,
+          isCollapsed: false,
+          style: null,
+        },
+      ],
+    });
+    renderCard('node-1', 'card-1', false);
+
+    const source = screen.getByTestId('card-source-attribution');
+    expect(source).toHaveTextContent('Thinking, Fast and Slow · Ch. 3 · p. 41');
+    expect(source).toHaveAttribute('title', 'Thinking, Fast and Slow · Ch. 3 · p. 41');
+    expect(source.className).toContain('truncate');
+    expect(source.className).toContain('text-muted-foreground');
+    expect(
+      screen.getByRole('button', {
+        name: 'Jump to source of System 1 operates automatically (Thinking, Fast and Slow · Ch. 3 · p. 41)',
+      }),
+    ).toBeVisible();
+
+    // Relinking/renaming the document updates the card attribution live.
+    act(() => {
+      useStudySyncStore.setState((current) => ({
+        documents: current.documents.map((doc) =>
+          doc.id === 'doc-1' ? { ...doc, title: 'relinked-edition', displayTitle: null } : doc,
+        ),
+      }));
+    });
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent(
+      'relinked-edition · Ch. 3 · p. 41',
+    );
+  });
+
+  it('renders older annotations without locationLabel showing at least the document title (#125)', () => {
+    useStudySyncStore.setState({
+      documents: [
+        {
+          id: 'doc-legacy',
+          title: 'legacy-notes',
+          displayTitle: null,
+          filePath: '/books/legacy-notes.txt',
+          fileHash: 'hash-legacy',
+          format: 'txt',
+          encoding: 'utf-8',
+          lastCursorAnchor: null,
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      annotations: [
+        {
+          id: 'ann-legacy',
+          documentId: 'doc-legacy',
+          notebookId: 'nb-1',
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 10, lineIndex: 5 },
+          excerptText: 'Older excerpt',
+          excerptImagePath: null,
+          note: null,
+          color: '#fde047',
+          style: 'highlight',
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+      cards: [
+        {
+          id: 'card-legacy',
+          notebookId: 'nb-1',
+          title: 'Older excerpt',
+          markdownNotes: '',
+          tags: [],
+          annotationIds: ['ann-legacy'],
+          createdAt: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+    renderCard('node-legacy', 'card-legacy', false);
+
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent('legacy-notes');
+    expect(
+      screen.getByRole('button', { name: 'Jump to source of Older excerpt (legacy-notes)' }),
+    ).toBeVisible();
+  });
+
+  it('immediately clears stale location on content-changing relink across CardNode, Inspector, reopen, and Undo (#125)', async () => {
+    const originalBytes = new TextEncoder().encode('Old chapter\nFirst claim\nSecond claim\n');
+    const revisedBytes = new TextEncoder().encode('Revised document without the old chapter.\n');
+    const customBackend = createMemoryBackend({
+      library: {
+        '/books/original.txt': originalBytes,
+        '/books/renamed.txt': originalBytes,
+        '/books/revised.txt': revisedBytes,
+      },
+    });
+    const customStore = createStudySyncStore(customBackend);
+    await customStore.getState().initialize();
+    await customStore.getState().openDocument();
+    const docId = customStore.getState().activeDocumentId as string;
+
+    customStore.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+      text: 'Old chapter',
+      imagePng: null,
+      locationLabel: 'Old chapter · Line 1',
+    });
+    await customStore.getState().excerptSelection();
+    const firstNode = customStore.getState().nodes[0]!;
+    customStore.getState().selectNode(firstNode.id);
+
+    const syncGlobal = (source = customStore) => {
+      const s = source.getState();
+      useStudySyncStore.setState({
+        documents: s.documents,
+        annotations: s.annotations,
+        cards: s.cards,
+        nodes: s.nodes,
+        selectedNodeId: s.selectedNodeId,
+      });
+    };
+    syncGlobal();
+
+    renderCard(firstNode.id, firstNode.cardId, true);
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent(
+      'original · Old chapter · Line 1',
+    );
+    expect(screen.getByTestId('inspector-excerpt-source')).toHaveTextContent(
+      'original · Old chapter · Line 1',
+    );
+
+    // Same-hash relink (rename) keeps location intact with the new title.
+    await act(async () => {
+      await customStore.getState().relinkDocument(docId, false);
+      syncGlobal();
+    });
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent(
+      'renamed · Old chapter · Line 1',
+    );
+    expect(screen.getByTestId('inspector-excerpt-source')).toHaveTextContent(
+      'renamed · Old chapter · Line 1',
+    );
+
+    // Content-changing relink immediately drops the stale location everywhere.
+    await act(async () => {
+      await customStore.getState().relinkDocument(docId, false);
+      syncGlobal();
+    });
+    expect(screen.getByTestId('card-source-attribution')).toHaveTextContent('revised');
+    expect(screen.getByTestId('card-source-attribution').textContent).not.toContain('Old chapter');
+    expect(screen.getByTestId('inspector-excerpt-source')).toHaveTextContent('revised');
+    expect(
+      screen.getByRole('button', { name: 'Jump to source of Old chapter (revised)' }),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Jump to this excerpt (revised)' })).toBeVisible();
   });
 });
 

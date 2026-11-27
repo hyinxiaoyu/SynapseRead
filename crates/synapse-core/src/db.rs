@@ -47,9 +47,11 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0015_card_undo_snapshots.sql"),
     include_str!("../migrations/0016_document_hidden_from_recent.sql"),
     include_str!("../migrations/0017_document_display_title.sql"),
+    include_str!("../migrations/0018_annotation_location_label.sql"),
 ];
 
 const CARD_TITLE_MAX_CHARS: usize = 80;
+const LOCATION_LABEL_MAX_CHARS: usize = 160;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -414,7 +416,7 @@ impl Database {
 
         if let Some(anchor) = &next.anchor {
             anchor.validate()?;
-            check_anchor_matches_document(&tx, document_id, anchor)?;
+            check_anchor_matches_document(&tx, document_id, anchor, None)?;
         }
         if let Some(progress) = next.progress
             && (!progress.is_finite() || !(0.0..=1.0).contains(&progress))
@@ -454,10 +456,11 @@ impl Database {
     /// bookmarks, and MindMap cards attached.
     ///
     /// Rejects format changes and hash collisions with another registered document.
-    /// When `file_hash` changes, `last_cursor_anchor` is cleared so stale offsets
-    /// are never silently applied on reopen.
+    /// When `file_hash` changes, `last_cursor_anchor`, `last_progress`, `display_title`,
+    /// and existing annotations' `location_label` (including soft-deleted rows) are
+    /// cleared atomically so stale positions are never attributed to the new edition.
     pub fn relink_document(
-        &self,
+        &mut self,
         document_id: &str,
         new_path: &Path,
     ) -> CoreResult<RelinkDocumentResult> {
@@ -465,7 +468,10 @@ impl Database {
         let new_hash = hash_document_for_relink(existing.format, new_path)?;
         let _publish_lease = self.acquire_publish_shared_lock()?;
         ensure_existing_regular_file(new_path)?;
-        relink_document_in_conn(&self.conn, document_id, new_path, &new_hash)
+        let tx = self.conn.transaction()?;
+        let result = relink_document_in_conn(&tx, document_id, new_path, &new_hash)?;
+        tx.commit()?;
+        Ok(result)
     }
 
     /// Commits a document relink inside a transaction using a `new_hash` computed
@@ -739,16 +745,22 @@ impl Database {
         image_path: Option<&str>,
     ) -> CoreResult<CreatedExcerpt> {
         let tx = self.conn.transaction()?;
-        check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
+        check_anchor_matches_document(
+            &tx,
+            &input.document_id,
+            &input.anchor,
+            input.expected_file_hash.as_deref(),
+        )?;
         if let Some(parent_id) = &input.parent_node_id {
             check_node_in_notebook(&tx, parent_id, &input.notebook_id)?;
         }
 
         let anchor_type = input.anchor.format().as_str();
+        let location_label = normalize_location_label(input.location_label.as_deref());
         tx.execute(
             "INSERT INTO annotations (id, document_id, notebook_id, anchor_type,
-                 anchor_payload_json, excerpt_text, excerpt_image_path, color)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 anchor_payload_json, excerpt_text, excerpt_image_path, color, location_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 annotation_id,
                 input.document_id,
@@ -758,6 +770,7 @@ impl Database {
                 input.excerpt_text,
                 image_path,
                 input.color,
+                location_label,
             ],
         )?;
 
@@ -767,7 +780,7 @@ impl Database {
             params![
                 card_id,
                 input.notebook_id,
-                card_title(input.excerpt_text.as_deref())
+                card_title(input.excerpt_text.as_deref(), location_label.as_deref())
             ],
         )?;
         tx.execute(
@@ -882,7 +895,12 @@ impl Database {
         image_path: Option<&str>,
     ) -> CoreResult<Annotation> {
         let tx = self.conn.transaction()?;
-        check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
+        check_anchor_matches_document(
+            &tx,
+            &input.document_id,
+            &input.anchor,
+            input.expected_file_hash.as_deref(),
+        )?;
         check_notebook_exists(&tx, &input.notebook_id)?;
 
         let normalized_note = input
@@ -890,11 +908,13 @@ impl Database {
             .as_deref()
             .map(str::trim)
             .filter(|note| !note.is_empty());
+        let location_label = normalize_location_label(input.location_label.as_deref());
         let anchor_type = input.anchor.format().as_str();
         tx.execute(
             "INSERT INTO annotations (id, document_id, notebook_id, anchor_type,
-                 anchor_payload_json, excerpt_text, excerpt_image_path, note, color, style)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 anchor_payload_json, excerpt_text, excerpt_image_path, note, color, style,
+                 location_label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 annotation_id,
                 input.document_id,
@@ -906,6 +926,7 @@ impl Database {
                 normalized_note,
                 input.color.trim(),
                 input.style.as_str(),
+                location_label,
             ],
         )?;
 
@@ -1501,7 +1522,7 @@ impl Database {
     pub fn create_bookmark(&mut self, input: &CreateBookmarkInput) -> CoreResult<Bookmark> {
         input.anchor.validate()?;
         let tx = self.conn.transaction()?;
-        check_anchor_matches_document(&tx, &input.document_id, &input.anchor)?;
+        check_anchor_matches_document(&tx, &input.document_id, &input.anchor, None)?;
 
         let label = normalize_bookmark_label(
             input.label.as_deref(),
@@ -2132,15 +2153,15 @@ fn insert_imported_document_row(
 }
 
 fn relink_document_in_conn(
-    conn: &Connection,
+    tx: &Transaction<'_>,
     document_id: &str,
     new_path: &Path,
     new_hash: &str,
 ) -> CoreResult<RelinkDocumentResult> {
-    let existing = get_document_in_conn(conn, document_id)?;
+    let existing = get_document_in_conn(tx, document_id)?;
     let _format = validate_relink_format(existing.format, new_path)?;
 
-    let duplicate_id: Option<String> = conn
+    let duplicate_id: Option<String> = tx
         .query_row(
             "SELECT id FROM documents WHERE file_hash = ?1 AND id != ?2",
             params![new_hash, document_id],
@@ -2161,7 +2182,7 @@ fn relink_document_in_conn(
         .unwrap_or_else(|| file_path.clone().into_owned());
 
     if content_changed {
-        conn.execute(
+        tx.execute(
             "UPDATE documents SET
                  title = ?2,
                  file_path = ?3,
@@ -2174,8 +2195,14 @@ fn relink_document_in_conn(
              WHERE id = ?1",
             params![document_id, title, file_path, new_hash],
         )?;
+        // Old chapter/page/line labels no longer describe the revised file, including
+        // soft-deleted annotations that can still be restored via Undo (#125).
+        tx.execute(
+            "UPDATE annotations SET location_label = NULL WHERE document_id = ?1",
+            params![document_id],
+        )?;
     } else {
-        conn.execute(
+        tx.execute(
             "UPDATE documents SET
                  title = ?2,
                  file_path = ?3,
@@ -2187,7 +2214,7 @@ fn relink_document_in_conn(
     }
 
     Ok(RelinkDocumentResult {
-        document: get_document_in_conn(conn, document_id)?,
+        document: get_document_in_conn(tx, document_id)?,
         content_changed,
         previous_file_hash: existing.file_hash,
     })
@@ -2208,12 +2235,13 @@ fn check_anchor_matches_document(
     tx: &Transaction<'_>,
     document_id: &str,
     anchor: &AnchorLocation,
+    expected_file_hash: Option<&str>,
 ) -> CoreResult<()> {
-    let format: String = tx
+    let (format, current_hash): (String, String) = tx
         .query_row(
-            "SELECT format FROM documents WHERE id = ?1",
+            "SELECT format, file_hash FROM documents WHERE id = ?1",
             [document_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?
         .ok_or_else(|| not_found("document", document_id))?;
@@ -2222,6 +2250,13 @@ fn check_anchor_matches_document(
             "{} anchor on a {format} document",
             anchor.format().as_str()
         )));
+    }
+    if let Some(expected) = expected_file_hash
+        && expected != current_hash
+    {
+        return Err(CoreError::InvalidAnchor(
+            "the document changed since this selection was made".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -2302,11 +2337,22 @@ fn expect_changed(changed: usize, entity: &'static str, id: &str) -> CoreResult<
 }
 
 /// First line of the excerpt, shortened on a character boundary.
-fn card_title(excerpt_text: Option<&str>) -> String {
-    let first_line = excerpt_text
-        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
-        .unwrap_or("Image excerpt");
-    truncate_label(first_line)
+/// Captures without text use `"Figure · <location>"` when a location label is known (#125).
+fn card_title(excerpt_text: Option<&str>, location_label: Option<&str>) -> String {
+    if let Some(first_line) =
+        excerpt_text.and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+    {
+        return truncate_label(first_line);
+    }
+    match location_label {
+        Some(label) => truncate_label(&format!("Figure · {label}")),
+        None => "Image excerpt".to_owned(),
+    }
+}
+
+fn normalize_location_label(raw: Option<&str>) -> Option<String> {
+    raw.and_then(sanitize_single_line)
+        .map(|label| truncate_chars(&label, LOCATION_LABEL_MAX_CHARS))
 }
 
 fn truncate_label(text: &str) -> String {
@@ -2519,7 +2565,7 @@ fn map_notebook(row: &Row<'_>) -> rusqlite::Result<StudyNotebook> {
 }
 
 const ANNOTATION_SELECT: &str = "SELECT id, document_id, notebook_id, anchor_payload_json,
-    excerpt_text, excerpt_image_path, note, color, created_at, style FROM annotations";
+    excerpt_text, excerpt_image_path, note, color, created_at, style, location_label FROM annotations";
 
 fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
     Ok(Annotation {
@@ -2532,6 +2578,7 @@ fn map_annotation(row: &Row<'_>) -> rusqlite::Result<Annotation> {
         note: row.get(6)?,
         color: row.get(7)?,
         style: AnnotationStyle::from_column(&row.get::<_, String>(9)?),
+        location_label: row.get(10)?,
         created_at: row.get(8)?,
     })
 }
@@ -2653,6 +2700,8 @@ mod tests {
             parent_node_id,
             pos_x: 10.0,
             pos_y: 20.0,
+            location_label: None,
+            expected_file_hash: None,
         }
     }
 
@@ -2704,6 +2753,7 @@ mod tests {
                     "note",
                     "style",
                     "deleted_at",
+                    "location_label",
                 ],
             ),
             (
@@ -2894,6 +2944,8 @@ mod tests {
                 note: None,
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::Highlight,
+                location_label: None,
+                expected_file_hash: None,
             };
             db.create_annotation(&annotation(txt_anchor())).unwrap();
             assert!(matches!(
@@ -2910,7 +2962,7 @@ mod tests {
     #[test]
     fn markdown_document_relinks_to_another_text_file() {
         let dir = tempfile::tempdir().unwrap();
-        let db = Database::open_in_memory().unwrap();
+        let mut db = Database::open_in_memory().unwrap();
         let original = dir.path().join("notes.md");
         std::fs::write(&original, "# Notes\n").unwrap();
         let document = db.register_document(&original).unwrap();
@@ -3447,6 +3499,8 @@ mod tests {
             parent_node_id: None,
             pos_x: 0.0,
             pos_y: 0.0,
+            location_label: None,
+            expected_file_hash: None,
         }
     }
 
@@ -3673,10 +3727,15 @@ mod tests {
     #[test]
     fn long_titles_are_cut_on_character_boundaries() {
         let long = "汉".repeat(200);
-        let title = card_title(Some(&long));
+        let title = card_title(Some(&long), None);
         assert_eq!(title.chars().count(), CARD_TITLE_MAX_CHARS);
         assert!(title.ends_with('…'));
-        assert_eq!(card_title(Some("\n\n  second line \nx")), "second line");
+        assert_eq!(
+            card_title(Some("\n\n  second line \nx"), None),
+            "second line"
+        );
+        assert_eq!(card_title(None, Some("p. 12")), "Figure · p. 12");
+        assert_eq!(card_title(None, None), "Image excerpt");
     }
 
     #[test]
@@ -5124,6 +5183,8 @@ mod tests {
                 note: Some("  standalone note  ".to_owned()),
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::Highlight,
+                location_label: None,
+                expected_file_hash: None,
             })
             .unwrap();
         assert_eq!(standalone.note.as_deref(), Some("standalone note"));
@@ -5265,6 +5326,8 @@ mod tests {
                 note: Some("preserved note".to_owned()),
                 color: "#fde047".to_owned(),
                 style: AnnotationStyle::default(),
+                location_label: None,
+                expected_file_hash: None,
             })
             .unwrap();
 
@@ -5341,6 +5404,8 @@ mod tests {
             parent_node_id: parent_node_id.map(str::to_owned),
             pos_x: 10.0,
             pos_y: 20.0,
+            location_label: None,
+            expected_file_hash: None,
         }
     }
 
@@ -5730,6 +5795,8 @@ mod tests {
                 parent_node_id: None,
                 pos_x: 10.0,
                 pos_y: 20.0,
+                location_label: None,
+                expected_file_hash: None,
             })
             .unwrap();
 
@@ -6015,6 +6082,8 @@ mod tests {
                     parent_node_id: None,
                     pos_x: 10.0,
                     pos_y: 20.0,
+                    location_label: None,
+                    expected_file_hash: None,
                 })
                 .unwrap();
             let bookmark = db
@@ -6054,7 +6123,7 @@ mod tests {
         };
 
         // Flag persists across database reopen and study records remain intact.
-        let reopened = Database::open(&db_path).unwrap();
+        let mut reopened = Database::open(&db_path).unwrap();
         let docs = reopened.list_documents().unwrap();
         assert_eq!(docs.len(), 1);
         assert!(docs[0].hidden_from_recent_at.is_some());
@@ -6159,7 +6228,7 @@ mod tests {
             (doc.id, doc.file_hash)
         };
 
-        let reopened = Database::open(&db_path).unwrap();
+        let mut reopened = Database::open(&db_path).unwrap();
         let loaded = reopened.get_document(&doc_id).unwrap();
         assert_eq!(loaded.title, "pg1342-images-3");
         assert_eq!(loaded.display_title.as_deref(), Some("Pride and Prejudice"));
@@ -6209,5 +6278,363 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn annotation_location_label_sanitizes_persists_names_captures_and_migrates() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("location-labels.sqlite3");
+
+        // 1. Seed a schema-v17 database with a pre-existing annotation (no location_label column).
+        {
+            let mut conn = Connection::open(&db_path).unwrap();
+            for (version, sql) in (1_u32..).zip(&MIGRATIONS[..17]) {
+                let tx = conn.transaction().unwrap();
+                tx.execute_batch(sql).unwrap();
+                tx.pragma_update(None, "user_version", version).unwrap();
+                tx.commit().unwrap();
+            }
+            conn.execute(
+                "INSERT INTO documents (id, title, file_path, file_hash, format, encoding)
+                 VALUES ('doc-old', 'old-book', '/tmp/old-book.txt', 'hash-old', 'txt', 'utf-8')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO study_notebooks (id, title) VALUES ('nb-1', 'Study')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO annotations (id, document_id, notebook_id, anchor_type, anchor_payload_json, excerpt_text, color)
+                 VALUES ('ann-old', 'doc-old', 'nb-1', 'txt',
+                     '{\"format\":\"txt\",\"startByteOffset\":0,\"endByteOffset\":4,\"lineIndex\":0}',
+                     'legacy excerpt', '#fde047')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 2. Opening migrates to the latest schema and reads legacy annotations with `location_label: None`.
+        let mut db = Database::open(&db_path).unwrap();
+        assert_eq!(db.schema_version().unwrap() as usize, MIGRATIONS.len());
+        let initial_graph = db.load_notebook_graph("nb-1").unwrap();
+        assert_eq!(initial_graph.annotations.len(), 1);
+        assert_eq!(initial_graph.annotations[0].id, "ann-old");
+        assert_eq!(initial_graph.annotations[0].location_label, None);
+
+        // 3. New excerpts sanitize control chars / newlines and cap length.
+        let txt_file = dir.path().join("notes.txt");
+        std::fs::write(&txt_file, "hello world").unwrap();
+        let txt_doc = db.register_document(&txt_file).unwrap();
+        let long_label = format!("  \u{202E}{}\nsecond line", "章".repeat(200));
+        let excerpt = db
+            .create_excerpt(&CreateExcerptInput {
+                document_id: txt_doc.id.clone(),
+                notebook_id: "nb-1".to_owned(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("hello".to_owned()),
+                excerpt_image_png: None,
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+                location_label: Some(long_label),
+                expected_file_hash: None,
+            })
+            .unwrap();
+        let stored_label = excerpt.annotation.location_label.as_deref().unwrap();
+        assert_eq!(stored_label.chars().count(), LOCATION_LABEL_MAX_CHARS);
+        assert!(stored_label.ends_with('…'));
+        assert!(!stored_label.contains('\u{202E}'));
+
+        // Blank / control-only labels normalize to None.
+        let blank_ann = db
+            .create_annotation(&CreateAnnotationInput {
+                document_id: txt_doc.id.clone(),
+                notebook_id: "nb-1".to_owned(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("hello".to_owned()),
+                excerpt_image_png: None,
+                note: None,
+                color: "#fde047".to_owned(),
+                style: AnnotationStyle::Highlight,
+                location_label: Some("  \u{0007}\t\n  ".to_owned()),
+                expected_file_hash: None,
+            })
+            .unwrap();
+        assert_eq!(blank_ann.location_label, None);
+
+        // 4. Captures use `"Figure · <label>"` when location_label is present, else `"Image excerpt"`.
+        let pdf_file = dir.path().join("book.pdf");
+        std::fs::write(&pdf_file, "pdf bytes").unwrap();
+        let pdf_doc = db.register_document(&pdf_file).unwrap();
+        let pdf_anchor = AnchorLocation::Pdf {
+            page_index: 11,
+            rects: vec![NormalizedRect {
+                x: 0.1,
+                y: 0.1,
+                width: 0.4,
+                height: 0.3,
+            }],
+            page_spans: None,
+        };
+        let capture_with_label = db
+            .create_excerpt(&CreateExcerptInput {
+                document_id: pdf_doc.id.clone(),
+                notebook_id: "nb-1".to_owned(),
+                anchor: pdf_anchor.clone(),
+                excerpt_text: None,
+                excerpt_image_png: Some(PNG_BASE64.to_owned()),
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 10.0,
+                pos_y: 20.0,
+                location_label: Some("p. 12".to_owned()),
+                expected_file_hash: None,
+            })
+            .unwrap();
+        assert_eq!(capture_with_label.card.title, "Figure · p. 12");
+        assert_eq!(
+            capture_with_label.annotation.location_label.as_deref(),
+            Some("p. 12")
+        );
+
+        let capture_without_label = db
+            .create_excerpt(&CreateExcerptInput {
+                document_id: pdf_doc.id.clone(),
+                notebook_id: "nb-1".to_owned(),
+                anchor: pdf_anchor,
+                excerpt_text: None,
+                excerpt_image_png: Some(PNG_BASE64.to_owned()),
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 30.0,
+                pos_y: 40.0,
+                location_label: None,
+                expected_file_hash: None,
+            })
+            .unwrap();
+        assert_eq!(capture_without_label.card.title, "Image excerpt");
+        assert_eq!(capture_without_label.annotation.location_label, None);
+
+        // 5. Soft-delete + restore preserves location_label.
+        db.delete_annotation(&capture_with_label.annotation.id)
+            .unwrap();
+        let restored = db
+            .restore_annotation(&capture_with_label.annotation.id)
+            .unwrap();
+        assert_eq!(restored.annotation.location_label.as_deref(), Some("p. 12"));
+    }
+
+    #[test]
+    fn relink_clears_annotation_location_labels_only_when_content_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("relink-locations.sqlite3");
+        let original = dir.path().join("original.txt");
+        let other = dir.path().join("other.txt");
+        std::fs::write(&original, "Old chapter\nLine one\nLine two\n").unwrap();
+        std::fs::write(&other, "Unrelated book content\n").unwrap();
+
+        let (doc_id, nb_id, active_id, deleted_id, other_ann_id) = {
+            let mut db = Database::open(&db_path).unwrap();
+            let doc = db.register_document(&original).unwrap();
+            let other_doc = db.register_document(&other).unwrap();
+            let nb = db.create_notebook("Study").unwrap();
+
+            let active = db
+                .create_excerpt(&CreateExcerptInput {
+                    document_id: doc.id.clone(),
+                    notebook_id: nb.id.clone(),
+                    anchor: txt_anchor(),
+                    excerpt_text: Some("Old chapter".to_owned()),
+                    excerpt_image_png: None,
+                    color: "#fde047".to_owned(),
+                    parent_node_id: None,
+                    pos_x: 0.0,
+                    pos_y: 0.0,
+                    location_label: Some("Old chapter · Line 1".to_owned()),
+                    expected_file_hash: None,
+                })
+                .unwrap();
+            let to_delete = db
+                .create_excerpt(&CreateExcerptInput {
+                    document_id: doc.id.clone(),
+                    notebook_id: nb.id.clone(),
+                    anchor: txt_anchor(),
+                    excerpt_text: Some("Line one".to_owned()),
+                    excerpt_image_png: None,
+                    color: "#fde047".to_owned(),
+                    parent_node_id: None,
+                    pos_x: 10.0,
+                    pos_y: 20.0,
+                    location_label: Some("Old chapter · Line 2".to_owned()),
+                    expected_file_hash: None,
+                })
+                .unwrap();
+            let other_excerpt = db
+                .create_excerpt(&CreateExcerptInput {
+                    document_id: other_doc.id.clone(),
+                    notebook_id: nb.id.clone(),
+                    anchor: txt_anchor(),
+                    excerpt_text: Some("Unrelated".to_owned()),
+                    excerpt_image_png: None,
+                    color: "#fde047".to_owned(),
+                    parent_node_id: None,
+                    pos_x: 30.0,
+                    pos_y: 40.0,
+                    location_label: Some("Other · Line 1".to_owned()),
+                    expected_file_hash: None,
+                })
+                .unwrap();
+
+            // Soft-delete one annotation before relinking.
+            db.delete_annotation(&to_delete.annotation.id).unwrap();
+
+            // 1. Same-hash rename preserves location_label on active and soft-deleted rows.
+            let renamed = dir.path().join("renamed.txt");
+            std::fs::rename(&original, &renamed).unwrap();
+            let same_hash = db.relink_document(&doc.id, &renamed).unwrap();
+            assert!(!same_hash.content_changed);
+            let after_rename = db.load_notebook_graph(&nb.id).unwrap();
+            assert_eq!(
+                after_rename
+                    .annotations
+                    .iter()
+                    .find(|a| a.id == active.annotation.id)
+                    .unwrap()
+                    .location_label
+                    .as_deref(),
+                Some("Old chapter · Line 1")
+            );
+
+            // 2. Content-changing relink clears location_label for this document (including soft-deleted),
+            //    leaving unrelated documents untouched.
+            let revised = dir.path().join("revised.txt");
+            std::fs::write(&revised, "Completely rewritten edition.\n").unwrap();
+            let changed = db.relink_document(&doc.id, &revised).unwrap();
+            assert!(changed.content_changed);
+
+            let after_change = db.load_notebook_graph(&nb.id).unwrap();
+            assert_eq!(
+                after_change
+                    .annotations
+                    .iter()
+                    .find(|a| a.id == active.annotation.id)
+                    .unwrap()
+                    .location_label,
+                None
+            );
+            assert_eq!(
+                after_change
+                    .annotations
+                    .iter()
+                    .find(|a| a.id == other_excerpt.annotation.id)
+                    .unwrap()
+                    .location_label
+                    .as_deref(),
+                Some("Other · Line 1")
+            );
+
+            // Restoring the soft-deleted annotation after content-changing relink returns None.
+            let restored = db.restore_annotation(&to_delete.annotation.id).unwrap();
+            assert_eq!(restored.annotation.location_label, None);
+
+            (
+                doc.id,
+                nb.id,
+                active.annotation.id,
+                to_delete.annotation.id,
+                other_excerpt.annotation.id,
+            )
+        };
+
+        // 3. Reopening the database preserves the cleared labels and the unrelated doc's label.
+        let reopened = Database::open(&db_path).unwrap();
+        assert_eq!(reopened.get_document(&doc_id).unwrap().title, "revised");
+        let graph = reopened.load_notebook_graph(&nb_id).unwrap();
+        assert_eq!(
+            graph
+                .annotations
+                .iter()
+                .find(|a| a.id == active_id)
+                .unwrap()
+                .location_label,
+            None
+        );
+        assert_eq!(
+            graph
+                .annotations
+                .iter()
+                .find(|a| a.id == deleted_id)
+                .unwrap()
+                .location_label,
+            None
+        );
+        assert_eq!(
+            graph
+                .annotations
+                .iter()
+                .find(|a| a.id == other_ann_id)
+                .unwrap()
+                .location_label
+                .as_deref(),
+            Some("Other · Line 1")
+        );
+
+        // 4. Stale expected_file_hash is rejected in both create_excerpt and create_annotation.
+        let mut reopened_mut = reopened;
+        let current_hash = reopened_mut.get_document(&doc_id).unwrap().file_hash;
+        assert!(matches!(
+            reopened_mut.create_excerpt(&CreateExcerptInput {
+                document_id: doc_id.clone(),
+                notebook_id: nb_id.clone(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("stale".to_owned()),
+                excerpt_image_png: None,
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+                location_label: Some("Old chapter · Line 1".to_owned()),
+                expected_file_hash: Some("stale-hash".to_owned()),
+            }),
+            Err(CoreError::InvalidAnchor(_))
+        ));
+        assert!(matches!(
+            reopened_mut.create_annotation(&CreateAnnotationInput {
+                document_id: doc_id.clone(),
+                notebook_id: nb_id.clone(),
+                anchor: txt_anchor(),
+                excerpt_text: Some("stale".to_owned()),
+                excerpt_image_png: None,
+                note: None,
+                color: "#fde047".to_owned(),
+                style: AnnotationStyle::Highlight,
+                location_label: Some("Old chapter · Line 1".to_owned()),
+                expected_file_hash: Some("stale-hash".to_owned()),
+            }),
+            Err(CoreError::InvalidAnchor(_))
+        ));
+        // Matching expected_file_hash succeeds.
+        let fresh = reopened_mut
+            .create_excerpt(&CreateExcerptInput {
+                document_id: doc_id,
+                notebook_id: nb_id,
+                anchor: txt_anchor(),
+                excerpt_text: Some("fresh".to_owned()),
+                excerpt_image_png: None,
+                color: "#fde047".to_owned(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+                location_label: Some("Revised · Line 1".to_owned()),
+                expected_file_hash: Some(current_hash),
+            })
+            .unwrap();
+        assert_eq!(
+            fresh.annotation.location_label.as_deref(),
+            Some("Revised · Line 1")
+        );
     }
 }

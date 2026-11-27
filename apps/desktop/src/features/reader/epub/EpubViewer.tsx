@@ -111,6 +111,7 @@ import {
   type EpubTocItem,
   openEpubDocument,
 } from './epubEngine';
+import { flattenToc, resolveEpubFallbackChapterLabel, sameChapter } from './epubTocLocation';
 import {
   bookFraction,
   locateBookFraction,
@@ -154,19 +155,6 @@ function toOutlineNodes(items: readonly EpubTocItem[]): OutlineNode<string>[] {
   }));
 }
 
-const cleanChapterPath = (href: string) => (href.split('#')[0] ?? '').replace(/^(\.\/|\/)+/, '');
-
-/** Whether two hrefs name the same chapter file, ignoring fragments and relative prefixes. */
-function sameChapter(a: string, b: string): boolean {
-  const left = cleanChapterPath(a);
-  const right = cleanChapterPath(b);
-  return (
-    left !== '' &&
-    right !== '' &&
-    (left === right || left.endsWith(`/${right}`) || right.endsWith(`/${left}`))
-  );
-}
-
 function findOutlineItem(items: readonly EpubTocItem[], href: string): EpubTocItem | null {
   for (const item of items) {
     if (sameChapter(item.href, href)) return item;
@@ -178,10 +166,6 @@ function findOutlineItem(items: readonly EpubTocItem[], href: string): EpubTocIt
 
 function findOutlineLabel(items: readonly EpubTocItem[], href: string): string | null {
   return findOutlineItem(items, href)?.label ?? null;
-}
-
-function flattenToc(items: readonly EpubTocItem[]): EpubTocItem[] {
-  return items.flatMap((item) => [item, ...flattenToc(item.children)]);
 }
 
 /** The title to show for each spine chapter: the last TOC entry at or before it. */
@@ -518,6 +502,7 @@ export function EpubViewer({
           latest.current.onDocumentTitle?.(metadataTitle, sourceFileHash);
         }
 
+        const spineTitles = chapterTitlesBySpine(engine);
         let hasSelection = false;
         engine.onSelection((selection) => {
           if (!latest.current.isActive) return;
@@ -530,6 +515,15 @@ export function EpubViewer({
             return;
           }
           hasSelection = true;
+          const locationLabel =
+            selection.chapterLabel !== undefined
+              ? selection.chapterLabel
+              : resolveEpubFallbackChapterLabel(
+                  engine.toc,
+                  selection.chapterHref,
+                  engine.spineIndexOf(selection.chapterHref),
+                  spineTitles,
+                );
           const nextSelection: ReaderSelection = {
             documentId,
             anchor: {
@@ -539,6 +533,8 @@ export function EpubViewer({
             },
             text: selection.text,
             imagePng: null,
+            locationLabel,
+            sourceFileHash,
           };
           setActiveSelection(nextSelection);
           latest.current.onSelectionChange(nextSelection);

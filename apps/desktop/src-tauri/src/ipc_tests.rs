@@ -1240,6 +1240,183 @@ fn set_document_display_title_sanitizes_persists_and_clears_over_ipc() {
 }
 
 #[test]
+fn annotation_location_label_round_trips_and_names_capture_cards_over_ipc() {
+    let h = Harness::new();
+    let txt = h.register("book.txt", "hello world");
+    let pdf = h.register("slides.pdf", "pdf bytes");
+    let notebook = h.ok("create_notebook", json!({ "title": "Study" }));
+
+    // Excerpt with locationLabel sanitizes, persists, and reloads through load_notebook_graph.
+    let created = h.ok(
+        "create_excerpt",
+        json!({
+            "input": {
+                "documentId": txt["id"],
+                "notebookId": notebook["id"],
+                "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 5, "lineIndex": 0 },
+                "excerptText": "hello",
+                "excerptImagePng": null,
+                "color": "#fde047",
+                "parentNodeId": null,
+                "posX": 10.0,
+                "posY": 20.0,
+                "locationLabel": "  Chapter 1 · Line 1 \nignored ",
+            }
+        }),
+    );
+    assert_eq!(created["annotation"]["locationLabel"], "Chapter 1 · Line 1");
+    assert_eq!(created["card"]["title"], "hello");
+
+    // Capture excerpt with locationLabel gets a descriptive default title ("Figure · ...").
+    let capture = h
+        .capture(&pdf, &notebook, json!({ "locationLabel": "Ch. 3 · p. 12" }))
+        .unwrap();
+    assert_eq!(capture["annotation"]["locationLabel"], "Ch. 3 · p. 12");
+    assert_eq!(capture["card"]["title"], "Figure · Ch. 3 · p. 12");
+
+    // Independent annotation also persists locationLabel, and omitting it stays valid.
+    let annotated = h.ok(
+        "create_annotation",
+        json!({
+            "input": {
+                "documentId": txt["id"],
+                "notebookId": notebook["id"],
+                "anchor": { "format": "txt", "startByteOffset": 6, "endByteOffset": 11, "lineIndex": 0 },
+                "excerptText": "world",
+                "excerptImagePng": null,
+                "note": "key term",
+                "color": "#fde047",
+                "style": "highlight",
+                "locationLabel": "Line 1",
+            }
+        }),
+    );
+    assert_eq!(annotated["locationLabel"], "Line 1");
+
+    let omitted = h.ok(
+        "create_annotation",
+        json!({
+            "input": {
+                "documentId": txt["id"],
+                "notebookId": notebook["id"],
+                "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 5, "lineIndex": 0 },
+                "excerptText": "hello",
+                "excerptImagePng": null,
+                "note": null,
+                "color": "#fde047",
+                "style": "highlight",
+            }
+        }),
+    );
+    assert_eq!(omitted["locationLabel"], Value::Null);
+
+    let graph = h.ok(
+        "load_notebook_graph",
+        json!({ "notebookId": notebook["id"] }),
+    );
+    let annotations = graph["annotations"].as_array().unwrap();
+    assert_eq!(annotations.len(), 4);
+    assert!(
+        annotations
+            .iter()
+            .any(|a| a["id"] == created["annotation"]["id"]
+                && a["locationLabel"] == "Chapter 1 · Line 1")
+    );
+    assert!(
+        annotations.iter().any(
+            |a| a["id"] == capture["annotation"]["id"] && a["locationLabel"] == "Ch. 3 · p. 12"
+        )
+    );
+    assert!(
+        annotations
+            .iter()
+            .any(|a| a["id"] == annotated["id"] && a["locationLabel"] == "Line 1")
+    );
+    assert!(
+        annotations
+            .iter()
+            .any(|a| a["id"] == omitted["id"] && a["locationLabel"] == Value::Null)
+    );
+
+    // Content-changing relink over IPC clears locationLabel for active and soft-deleted annotations.
+    h.ok(
+        "delete_annotation",
+        json!({ "annotationId": annotated["id"] }),
+    );
+    std::fs::write(h.dir.path().join("book.txt"), "completely revised text").unwrap();
+    let relinked = h.ok(
+        "relink_document",
+        json!({ "documentId": txt["id"], "confirmInPlace": true }),
+    );
+    assert_eq!(relinked["contentChanged"], true);
+
+    let after_relink = h.ok(
+        "load_notebook_graph",
+        json!({ "notebookId": notebook["id"] }),
+    );
+    let after_annotations = after_relink["annotations"].as_array().unwrap();
+    assert!(
+        after_annotations
+            .iter()
+            .any(|a| a["id"] == created["annotation"]["id"] && a["locationLabel"] == Value::Null)
+    );
+    assert!(
+        after_annotations.iter().any(
+            |a| a["id"] == capture["annotation"]["id"] && a["locationLabel"] == "Ch. 3 · p. 12"
+        )
+    );
+    let restored = h.ok(
+        "restore_annotation",
+        json!({ "annotationId": annotated["id"] }),
+    );
+    assert_eq!(restored["annotation"]["locationLabel"], Value::Null);
+
+    // Stale expectedFileHash from before relink is rejected on create_excerpt and create_annotation.
+    let stale_excerpt_err = h
+        .call(
+            "create_excerpt",
+            json!({
+                "input": {
+                    "documentId": txt["id"],
+                    "notebookId": notebook["id"],
+                    "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 5, "lineIndex": 0 },
+                    "excerptText": "hello",
+                    "excerptImagePng": null,
+                    "color": "#fde047",
+                    "parentNodeId": null,
+                    "posX": 0.0,
+                    "posY": 0.0,
+                    "locationLabel": "Old chapter · Line 1",
+                    "expectedFileHash": txt["fileHash"],
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(stale_excerpt_err["code"], "invalid_anchor");
+
+    let stale_ann_err = h
+        .call(
+            "create_annotation",
+            json!({
+                "input": {
+                    "documentId": txt["id"],
+                    "notebookId": notebook["id"],
+                    "anchor": { "format": "txt", "startByteOffset": 0, "endByteOffset": 5, "lineIndex": 0 },
+                    "excerptText": "hello",
+                    "excerptImagePng": null,
+                    "note": null,
+                    "color": "#fde047",
+                    "style": "highlight",
+                    "locationLabel": "Old chapter · Line 1",
+                    "expectedFileHash": txt["fileHash"],
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(stale_ann_err["code"], "invalid_anchor");
+}
+
+#[test]
 fn menu_item_states_accept_exactly_what_the_frontend_sends() {
     let h = Harness::new();
     // The mock runtime cannot build a native menu, so this checks the wire format and

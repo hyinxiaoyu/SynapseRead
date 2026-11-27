@@ -426,6 +426,10 @@ pub struct Annotation {
     pub color: String,
     #[serde(default)]
     pub style: AnnotationStyle,
+    /// Optional human-readable location reported by the reader at creation time
+    /// (for example `"Ch. 3 · p. 41"` or `"Line 6"`), keeping anchors opaque (#125).
+    #[serde(default)]
+    pub location_label: Option<String>,
     pub created_at: String,
 }
 
@@ -443,6 +447,13 @@ pub struct CreateAnnotationInput {
     /// Optional on the wire so older callers keep creating highlights.
     #[serde(default)]
     pub style: AnnotationStyle,
+    /// Optional human-readable location reported by the reader (#125).
+    #[serde(default)]
+    pub location_label: Option<String>,
+    /// File hash the selection was made against; when present, core rejects the
+    /// write if the document was relinked to different bytes in the meantime (#125).
+    #[serde(default)]
+    pub expected_file_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -516,6 +527,13 @@ pub struct CreateExcerptInput {
     pub parent_node_id: Option<String>,
     pub pos_x: f64,
     pub pos_y: f64,
+    /// Optional human-readable location reported by the reader (#125).
+    #[serde(default)]
+    pub location_label: Option<String>,
+    /// File hash the selection was made against; when present, core rejects the
+    /// write if the document was relinked to different bytes in the meantime (#125).
+    #[serde(default)]
+    pub expected_file_hash: Option<String>,
 }
 
 /// The rows created by one "Excerpt to MindMap" action.

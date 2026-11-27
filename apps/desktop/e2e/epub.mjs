@@ -94,7 +94,7 @@ const excerpt = async (page, text) => {
   await page.waitFor(excerptEnabled, `selecting "${text}" to enable excerpting`);
   await page.clickButton('Excerpt to MindMap');
   await page.waitFor(
-    `document.querySelector(${JSON.stringify(`[aria-label="Jump to source of ${text}"]`)})`,
+    `document.querySelector(${JSON.stringify(`[aria-label^="Jump to source of ${text} ("]`)})`,
     `a card titled "${text}"`,
   );
   return points;
@@ -223,7 +223,7 @@ export async function epubFlow(page) {
   await excerpt(page, 'final target sentence');
 
   // Jump across chapters: the frame's chapter changes, and the highlight pulses.
-  await page.clickButton('Jump to source of quick brown fox');
+  await page.clickButton('Jump to source of quick brown fox (SynapseRead EPUB fixture · One)');
   await page.waitFor(chapterIs('Chapter One'), 'the jump to change chapter');
   await page.waitFor(`${visibleHost}.querySelector('g.anchor-pulse')`, 'the highlight to pulse');
   await page.waitFor(`!${visibleHost}.querySelector('g.anchor-pulse')`, 'the pulse to end');
@@ -244,7 +244,7 @@ export async function epubFlow(page) {
   // And back: a highlight in the other chapter must repaint when it is shown again.
   // The newest card can sit outside the canvas viewport, where a mouse cannot reach it.
   await page.evaluate(
-    `document.querySelector('[aria-label="Jump to source of final target sentence"]').click()`,
+    `document.querySelector('[aria-label^="Jump to source of final target sentence ("]').click()`,
   );
   await page.waitFor(chapterIs('Chapter Two'), 'the jump back');
   await page.waitFor(`${visibleHost}.querySelector('g.anchor-pulse')`, 'the second pulse');
@@ -982,4 +982,71 @@ async function focusModeFlow(page, visibleViewer) {
   assert(!(await page.inFocusMode()), 'focus mode off');
   await toggleFocusFullScreen(page);
   await page.press('Escape');
+
+  // Shared-XHTML EPUB fixture (#125): two chapters in one XHTML file targeted by `#fragment`
+  // TOC entries must attribute each excerpt to its own chapter on the card, jump label, and Inspector.
+  const sharedTitle = `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.dataset.documentStem === 'sample-shared-xhtml'`;
+  await page.openUntil(`${visibleHost} && ${sharedTitle}`, 'the shared-XHTML EPUB');
+  await page.waitFor(
+    `document.querySelector('[data-testid="unified-toolbar"] [data-testid="reader-toolbar-title"]')?.textContent === 'Shared Chapters Fixture'`,
+    'shared-XHTML EPUB metadata title',
+  );
+  await page.waitFor(chapterIs('Chapter One: Arrival'), 'shared-XHTML chapters to render');
+
+  // Ensure MindMap is visible so card faces can be verified directly.
+  const mindmapClosed = await page.evaluate(
+    `document.getElementById('mindmap').getBoundingClientRect().width === 0`,
+  );
+  if (mindmapClosed) await page.clickButton('Show MindMap');
+
+  await excerpt(page, 'Arrival harbor passage');
+  await excerpt(page, 'Departure voyage passage');
+
+  const sharedSources = await page.evaluate(`(() => {
+    const cards = [...document.querySelectorAll('.react-flow__node')];
+    const describe = (needle) => {
+      const node = cards.find((card) => card.textContent?.includes(needle));
+      if (!node) return null;
+      return {
+        source: node.querySelector('[data-testid="card-source-attribution"]')?.textContent ?? null,
+        jumpLabel:
+          node.querySelector('button[aria-label^="Jump to source of"]')?.getAttribute('aria-label') ??
+          null,
+      };
+    };
+    return {
+      arrival: describe('Arrival harbor passage'),
+      departure: describe('Departure voyage passage'),
+    };
+  })()`);
+  assert(
+    sharedSources.arrival?.source === 'Shared Chapters Fixture · Chapter One: Arrival' &&
+      sharedSources.arrival.jumpLabel ===
+        'Jump to source of Arrival harbor passage (Shared Chapters Fixture · Chapter One: Arrival)',
+    `unexpected Chapter One attribution in shared-XHTML EPUB: ${JSON.stringify(sharedSources.arrival)}`,
+  );
+  assert(
+    sharedSources.departure?.source === 'Shared Chapters Fixture · Chapter Two: Departure' &&
+      sharedSources.departure.jumpLabel ===
+        'Jump to source of Departure voyage passage (Shared Chapters Fixture · Chapter Two: Departure)',
+    `unexpected Chapter Two attribution in shared-XHTML EPUB: ${JSON.stringify(sharedSources.departure)}`,
+  );
+
+  // Open Inspector on the second chapter's card (selected by the second excerpt) and verify its source.
+  const inspectorClosed = await page.evaluate(
+    `document.getElementById('inspector').getBoundingClientRect().width === 0`,
+  );
+  if (inspectorClosed) await page.clickButton('Show inspector');
+  await page.waitFor(
+    `document.querySelector('[data-testid="inspector-excerpt-source"]')?.textContent === 'Shared Chapters Fixture · Chapter Two: Departure'`,
+    'Inspector to show Chapter Two: Departure for shared-XHTML excerpt',
+  );
+  const sharedInspectorJump = await page.evaluate(
+    `document.querySelector('[data-testid="inspector-excerpt-row"] button')?.getAttribute('aria-label')`,
+  );
+  assert(
+    sharedInspectorJump ===
+      'Jump to this excerpt (Shared Chapters Fixture · Chapter Two: Departure)',
+    `unexpected Inspector jump label for shared-XHTML EPUB: ${sharedInspectorJump}`,
+  );
 }

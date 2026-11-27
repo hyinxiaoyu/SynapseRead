@@ -465,11 +465,17 @@ export function createStudySyncStore(backend: StudyBackend) {
   let preferencesWriteChain: Promise<void> = Promise.resolve();
 
   return create<StudySyncState>((set, get) => {
+    interface PendingAnnotationDelete {
+      promise: Promise<void>;
+      /** Latest annotation snapshot for rollback if `deleteAnnotation` fails after queued edits (#125). */
+      snapshot: Annotation;
+    }
+
     /**
      * Deletes still on their way to the backend, by annotation or card id. Undo
      * waits for one, so a quick ⌘Z cannot reach the backend before the delete it undoes.
      */
-    const pendingDeletes = new Map<string, Promise<void>>();
+    const pendingDeletes = new Map<string, PendingAnnotationDelete>();
     const pendingCardDeletes = new Map<string, Promise<void>>();
     /** In-flight `updateDocumentCursor` writes, by document id. */
     const pendingCursorWrites = new Map<string, Set<Promise<void>>>();
@@ -491,11 +497,142 @@ export function createStudySyncStore(backend: StudyBackend) {
     const bookmarkRefreshSeqs = new Map<string, number>();
     /** Monotonic per-document sequence numbers for `reportDocumentTitle` and source relinks. */
     const documentTitleSeqs = new Map<string, number>();
+    /** Monotonic per-document counter incremented whenever a content-changing relink commits (#125). */
+    const documentContentEpochs = new Map<string, number>();
+    /** Per-annotation FIFO tail promises so `updateAnnotation` patches commit strictly in order (#125). */
+    const pendingAnnotationUpdates = new Map<string, Promise<void>>();
 
     const nextDocumentTitleSeq = (documentId: string): number => {
       const next = (documentTitleSeqs.get(documentId) ?? 0) + 1;
       documentTitleSeqs.set(documentId, next);
       return next;
+    };
+
+    interface DocumentContentVersion {
+      fileHash: string | null;
+      epoch: number;
+    }
+
+    const getDocumentVersion = (documentId: string): DocumentContentVersion => ({
+      fileHash: get().documents.find((doc) => doc.id === documentId)?.fileHash ?? null,
+      epoch: documentContentEpochs.get(documentId) ?? 0,
+    });
+
+    const hasStateDocumentContentChanged = (
+      state: Pick<StudySyncState, 'documents'>,
+      documentId: string,
+      atStart: DocumentContentVersion,
+    ): boolean => {
+      const fileHash = state.documents.find((doc) => doc.id === documentId)?.fileHash ?? null;
+      const epoch = documentContentEpochs.get(documentId) ?? 0;
+      return epoch !== atStart.epoch || fileHash !== atStart.fileHash;
+    };
+
+    const hasDocumentContentChanged = (
+      documentId: string,
+      atStart: DocumentContentVersion,
+    ): boolean => hasStateDocumentContentChanged(get(), documentId, atStart);
+
+    /**
+     * When a content-changing relink completed while an annotation write was in flight,
+     * prefer the backend's current annotation row so stale `locationLabel` snapshots never
+     * reappear in UI state (#125). Returns the verified document version alongside the
+     * annotation so the final `set(...)` callback can re-check synchronously against any
+     * relink that landed during the `await` microtask boundary.
+     */
+    const reconcileAnnotationWithBackend = async (
+      notebookId: string,
+      annotation: Annotation,
+      documentId: string,
+      versionAtStart: DocumentContentVersion,
+    ): Promise<{ annotation: Annotation; version: DocumentContentVersion }> => {
+      if (!hasDocumentContentChanged(documentId, versionAtStart)) {
+        return { annotation, version: versionAtStart };
+      }
+      for (;;) {
+        const versionBeforeLoad = getDocumentVersion(documentId);
+        let resolved: Annotation;
+        try {
+          const graph = await backend.loadNotebookGraph(notebookId);
+          const current = graph.annotations.find((candidate) => candidate.id === annotation.id);
+          resolved = {
+            ...annotation,
+            locationLabel: current ? (current.locationLabel ?? null) : null,
+          };
+        } catch {
+          resolved = { ...annotation, locationLabel: null };
+        }
+        if (!hasDocumentContentChanged(documentId, versionBeforeLoad)) {
+          return { annotation: resolved, version: versionBeforeLoad };
+        }
+      }
+    };
+
+    const resolveAnnotationForState = (
+      state: Pick<StudySyncState, 'documents'>,
+      reconciled: { annotation: Annotation; version: DocumentContentVersion },
+    ): { annotation: Annotation; stale: boolean } => {
+      if (
+        hasStateDocumentContentChanged(state, reconciled.annotation.documentId, reconciled.version)
+      ) {
+        return { annotation: { ...reconciled.annotation, locationLabel: null }, stale: true };
+      }
+      return { annotation: reconciled.annotation, stale: false };
+    };
+
+    const refreshAnnotationLocationFromBackend = async (
+      notebookId: string,
+      annotationId: string,
+      documentId: string,
+    ): Promise<Annotation | null> => {
+      let latest: Annotation | null = null;
+      for (;;) {
+        const versionBeforeLoad = getDocumentVersion(documentId);
+        let fetched: Annotation | null;
+        try {
+          const graph = await backend.loadNotebookGraph(notebookId);
+          fetched = graph.annotations.find((candidate) => candidate.id === annotationId) ?? null;
+        } catch {
+          return null;
+        }
+        if (!fetched) return null;
+        let stale = false;
+        let present = false;
+        set((state) => {
+          const current = state.annotations.find((candidate) => candidate.id === annotationId);
+          const pendingDelete = pendingDeletes.get(annotationId);
+          if (!current) {
+            if (pendingDelete) {
+              stale = hasStateDocumentContentChanged(state, documentId, versionBeforeLoad);
+              const nextLocationLabel = stale ? null : (fetched.locationLabel ?? null);
+              pendingDelete.snapshot =
+                pendingDelete.snapshot.locationLabel === nextLocationLabel
+                  ? pendingDelete.snapshot
+                  : { ...pendingDelete.snapshot, locationLabel: nextLocationLabel };
+              latest = pendingDelete.snapshot;
+              present = true;
+            }
+            return state;
+          }
+          present = true;
+          stale = hasStateDocumentContentChanged(state, documentId, versionBeforeLoad);
+          const nextLocationLabel = stale ? null : (fetched.locationLabel ?? null);
+          // Merge only `locationLabel` onto the live row so newer user edits (note, color,
+          // style) saved while this refresh was in flight are never rolled back (#125).
+          const merged: Annotation =
+            current.locationLabel === nextLocationLabel
+              ? current
+              : { ...current, locationLabel: nextLocationLabel };
+          latest = merged;
+          if (merged === current) return state;
+          return {
+            annotations: state.annotations.map((candidate) =>
+              candidate.id === annotationId ? merged : candidate,
+            ),
+          };
+        });
+        if (!present || !stale) return latest;
+      }
     };
 
     const isDocumentLocked = (documentId: string): boolean =>
@@ -1311,6 +1448,12 @@ export function createStudySyncStore(backend: StudyBackend) {
             relinked = result;
             nextDocumentRefreshSeq(documentId);
             nextDocumentTitleSeq(documentId);
+            if (result.contentChanged) {
+              documentContentEpochs.set(
+                documentId,
+                (documentContentEpochs.get(documentId) ?? 0) + 1,
+              );
+            }
             const applyRecentDirectly = op.isUncontested();
             if (!applyRecentDirectly) op.markOverlapIfNeeded();
             set((state) => ({
@@ -1320,6 +1463,18 @@ export function createStudySyncStore(backend: StudyBackend) {
                   ? result.document
                   : { ...result.document, ...pickRecentFields(doc) };
               }),
+              ...(result.contentChanged
+                ? {
+                    annotations: state.annotations.map((ann) =>
+                      ann.documentId === documentId ? { ...ann, locationLabel: null } : ann,
+                    ),
+                    deletedAnnotationHistory: state.deletedAnnotationHistory.map((entry) =>
+                      entry.annotation.documentId === documentId
+                        ? { ...entry, annotation: { ...entry.annotation, locationLabel: null } }
+                        : entry,
+                    ),
+                  }
+                : {}),
               documentSourceStatuses: {
                 ...state.documentSourceStatuses,
                 [documentId]: {
@@ -1684,6 +1839,8 @@ export function createStudySyncStore(backend: StudyBackend) {
           nodeSizes: effectiveSizes,
           newSize,
         });
+        const versionAtStart = getDocumentVersion(selection.documentId);
+        const expectedFileHash = selection.sourceFileHash ?? versionAtStart.fileHash;
         set({ isExcerpting: true });
         try {
           const created = await backend.createExcerpt({
@@ -1696,17 +1853,28 @@ export function createStudySyncStore(backend: StudyBackend) {
             parentNodeId,
             posX: position.x,
             posY: position.y,
+            locationLabel: selection.locationLabel ?? null,
+            expectedFileHash,
           });
+          const reconciled = await reconcileAnnotationWithBackend(
+            notebook.id,
+            created.annotation,
+            selection.documentId,
+            versionAtStart,
+          );
           let resolvedParentTitle: string | null = null;
+          let needsBackendRefresh = false;
           // Only clear the selection the user excerpted: they may have made a
           // new one while the write was in flight.
           set((state) => {
+            const final = resolveAnnotationForState(state, reconciled);
+            needsBackendRefresh = final.stale;
             resolvedParentTitle = parentNode
               ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
                 parentTitleBeforeWrite)
               : null;
             return {
-              annotations: [...state.annotations, created.annotation],
+              annotations: [...state.annotations, final.annotation],
               cards: [...state.cards, created.card],
               nodes: [...state.nodes, created.node],
               edges: created.edge ? [...state.edges, created.edge] : state.edges,
@@ -1719,9 +1887,24 @@ export function createStudySyncStore(backend: StudyBackend) {
           // The new card is selected and shown so it can be found, but the
           // nesting target stays whatever the reader chose.
           get().revealNode(created.node.id, resolvedParentTitle);
+          if (needsBackendRefresh) {
+            await refreshAnnotationLocationFromBackend(
+              notebook.id,
+              created.annotation.id,
+              selection.documentId,
+            );
+          }
         } catch (error) {
-          // The selection stays so the user can retry.
-          set({ isExcerpting: false, error: describeError(error) });
+          // Drop the selection if its source document changed under it; otherwise keep it for retry.
+          set((state) => ({
+            isExcerpting: false,
+            error: describeError(error),
+            selection:
+              state.selection === selection &&
+              hasStateDocumentContentChanged(state, selection.documentId, versionAtStart)
+                ? null
+                : state.selection,
+          }));
         }
       },
 
@@ -1729,6 +1912,8 @@ export function createStudySyncStore(backend: StudyBackend) {
         const { selection, notebook, isExcerpting } = get();
         if (!selection || !notebook || isExcerpting) return null;
 
+        const versionAtStart = getDocumentVersion(selection.documentId);
+        const expectedFileHash = selection.sourceFileHash ?? versionAtStart.fileHash;
         let created: Annotation | null = null;
         await guarded(async () => {
           const saved = await backend.createAnnotation({
@@ -1740,30 +1925,120 @@ export function createStudySyncStore(backend: StudyBackend) {
             note: options?.note ?? null,
             color: options?.color ?? DEFAULT_EXCERPT_COLOR,
             style: options?.style ?? 'highlight',
+            locationLabel: selection.locationLabel ?? null,
+            expectedFileHash,
           });
-          created = saved;
-          set((state) => ({
-            annotations: [...state.annotations, saved],
-            selection: state.selection === selection ? null : state.selection,
-          }));
+          const reconciled = await reconcileAnnotationWithBackend(
+            notebook.id,
+            saved,
+            selection.documentId,
+            versionAtStart,
+          );
+          let needsBackendRefresh = false;
+          set((state) => {
+            const final = resolveAnnotationForState(state, reconciled);
+            created = final.annotation;
+            needsBackendRefresh = final.stale;
+            return {
+              annotations: [...state.annotations, final.annotation],
+              selection: state.selection === selection ? null : state.selection,
+            };
+          });
+          if (needsBackendRefresh) {
+            const refreshed = await refreshAnnotationLocationFromBackend(
+              notebook.id,
+              saved.id,
+              selection.documentId,
+            );
+            if (refreshed) created = refreshed;
+          }
         });
         return created;
       },
 
       async updateAnnotation(annotationId, patch) {
-        await guarded(async () => {
-          const updated = await backend.updateAnnotation(annotationId, patch);
-          set((state) => ({
-            annotations: state.annotations.map((candidate) =>
-              candidate.id === annotationId ? updated : candidate,
-            ),
-          }));
-        });
+        const run = async () => {
+          const { notebook, annotations, deletedAnnotationHistory } = get();
+          const existing =
+            annotations.find((candidate) => candidate.id === annotationId) ??
+            pendingDeletes.get(annotationId)?.snapshot ??
+            deletedAnnotationHistory.find((entry) => entry.annotation.id === annotationId)
+              ?.annotation;
+          const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
+          await guarded(async () => {
+            const updated = await backend.updateAnnotation(annotationId, patch);
+            const reconciled =
+              notebook && versionAtStart
+                ? await reconcileAnnotationWithBackend(
+                    notebook.id,
+                    updated,
+                    updated.documentId,
+                    versionAtStart,
+                  )
+                : null;
+            let needsBackendRefresh = false;
+            set((state) => {
+              const final = reconciled
+                ? resolveAnnotationForState(state, reconciled)
+                : { annotation: updated, stale: false };
+              needsBackendRefresh = final.stale;
+              // Always keep an in-flight delete's rollback snapshot up to date, even if
+              // an immediate Undo already popped `deletedAnnotationHistory` (#125).
+              const pendingDelete = pendingDeletes.get(annotationId);
+              if (pendingDelete) {
+                pendingDelete.snapshot = final.annotation;
+              }
+              const current = state.annotations.find((candidate) => candidate.id === annotationId);
+              if (current) {
+                return {
+                  annotations: state.annotations.map((candidate) =>
+                    candidate.id === annotationId ? final.annotation : candidate,
+                  ),
+                };
+              }
+              const inHistory = state.deletedAnnotationHistory.some(
+                (entry) => entry.annotation.id === annotationId,
+              );
+              if (!inHistory) return state;
+              return {
+                deletedAnnotationHistory: state.deletedAnnotationHistory.map((entry) =>
+                  entry.annotation.id === annotationId
+                    ? { ...entry, annotation: final.annotation }
+                    : entry,
+                ),
+              };
+            });
+            if (needsBackendRefresh) {
+              const notebookId = get().notebook?.id ?? updated.notebookId;
+              await refreshAnnotationLocationFromBackend(
+                notebookId,
+                annotationId,
+                updated.documentId,
+              );
+            }
+          });
+        };
+        const previous = pendingAnnotationUpdates.get(annotationId);
+        const next = previous ? previous.then(run, run) : run();
+        const tail = next.then(
+          () => undefined,
+          () => undefined,
+        );
+        pendingAnnotationUpdates.set(annotationId, tail);
+        try {
+          await next;
+        } finally {
+          if (pendingAnnotationUpdates.get(annotationId) === tail) {
+            pendingAnnotationUpdates.delete(annotationId);
+          }
+        }
       },
 
       async removeAnnotation(annotationId) {
         const removed = get().annotations.find((annotation) => annotation.id === annotationId);
         if (!removed) return;
+        const versionAtStart = getDocumentVersion(removed.documentId);
+        const priorUpdates = pendingAnnotationUpdates.get(annotationId);
         const removedFromCards = new Map(
           get()
             .cards.filter((card) => card.annotationIds.includes(annotationId))
@@ -1782,38 +2057,71 @@ export function createStudySyncStore(backend: StudyBackend) {
               : card,
           ),
         }));
+        const pendingDelete: PendingAnnotationDelete = {
+          promise: Promise.resolve(),
+          snapshot: removed,
+        };
         const deleting = guarded(
-          () => backend.deleteAnnotation(annotationId),
-          () =>
-            set((state) => ({
-              annotations: [...state.annotations, removed],
-              deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
-                (entry) => entry.annotation.id !== removed.id,
-              ),
-              deletionOrder: withoutLastDeletion(state.deletionOrder, 'annotation'),
-              cards: state.cards.map((card) => {
-                const index = removedFromCards.get(card.id);
-                if (index === undefined || card.annotationIds.includes(annotationId)) return card;
-                const annotationIds = [...card.annotationIds];
-                annotationIds.splice(Math.min(index, annotationIds.length), 0, annotationId);
-                return { ...card, annotationIds };
-              }),
-            })),
+          async () => {
+            // Drain any queued edits for this annotation before soft-deleting it so those
+            // edits persist and survive a subsequent Undo (#125).
+            if (priorUpdates) await priorUpdates;
+            await backend.deleteAnnotation(annotationId);
+          },
+          () => {
+            set((state) => {
+              const latestRemoved = pendingDelete.snapshot;
+              const restoredAnnotation = hasStateDocumentContentChanged(
+                state,
+                latestRemoved.documentId,
+                versionAtStart,
+              )
+                ? { ...latestRemoved, locationLabel: null }
+                : latestRemoved;
+              const wasInHistory = state.deletedAnnotationHistory.some(
+                (entry) => entry.annotation.id === removed.id,
+              );
+              return {
+                annotations: [...state.annotations, restoredAnnotation],
+                deletedAnnotationHistory: wasInHistory
+                  ? state.deletedAnnotationHistory.filter(
+                      (entry) => entry.annotation.id !== removed.id,
+                    )
+                  : state.deletedAnnotationHistory,
+                deletionOrder: wasInHistory
+                  ? withoutLastDeletion(state.deletionOrder, 'annotation')
+                  : state.deletionOrder,
+                cards: state.cards.map((card) => {
+                  const index = removedFromCards.get(card.id);
+                  if (index === undefined || card.annotationIds.includes(annotationId)) return card;
+                  const annotationIds = [...card.annotationIds];
+                  annotationIds.splice(Math.min(index, annotationIds.length), 0, annotationId);
+                  return { ...card, annotationIds };
+                }),
+              };
+            });
+          },
         );
-        pendingDeletes.set(annotationId, deleting);
+        pendingDelete.promise = deleting;
+        pendingDeletes.set(annotationId, pendingDelete);
         await deleting;
-        pendingDeletes.delete(annotationId);
+        if (pendingDeletes.get(annotationId) === pendingDelete) {
+          pendingDeletes.delete(annotationId);
+        }
       },
 
       async undoRemoveAnnotation() {
         const last = get().deletedAnnotationHistory.at(-1);
         if (!last) return null;
         const annotationId = last.annotation.id;
+        const documentId = last.annotation.documentId;
+        const versionAtStart = getDocumentVersion(documentId);
+        const pendingDelete = pendingDeletes.get(annotationId);
         set((state) => ({
           deletedAnnotationHistory: state.deletedAnnotationHistory.slice(0, -1),
           deletionOrder: withoutLastDeletion(state.deletionOrder, 'annotation'),
         }));
-        await pendingDeletes.get(annotationId);
+        await pendingDelete?.promise;
         // The delete failed and was rolled back: the highlight is already back.
         if (get().annotations.some((annotation) => annotation.id === annotationId)) return null;
 
@@ -1823,21 +2131,50 @@ export function createStudySyncStore(backend: StudyBackend) {
         await guarded(
           async () => {
             const result = await backend.restoreAnnotation(annotationId);
-            restored = result.annotation;
+            const notebookId = get().notebook?.id ?? result.annotation.notebookId;
+            const reconciled = await reconcileAnnotationWithBackend(
+              notebookId,
+              result.annotation,
+              documentId,
+              versionAtStart,
+            );
             const restoredCards = new Map(result.cards.map((card) => [card.id, card]));
-            set((state) => ({
-              annotations: [...state.annotations, result.annotation],
-              cards: state.cards.map((card) => {
-                const restoredCard = restoredCards.get(card.id);
-                return restoredCard ? { ...card, annotationIds: restoredCard.annotationIds } : card;
-              }),
-            }));
+            let needsBackendRefresh = false;
+            set((state) => {
+              const final = resolveAnnotationForState(state, reconciled);
+              restored = final.annotation;
+              needsBackendRefresh = final.stale;
+              return {
+                annotations: [...state.annotations, final.annotation],
+                cards: state.cards.map((card) => {
+                  const restoredCard = restoredCards.get(card.id);
+                  return restoredCard
+                    ? { ...card, annotationIds: restoredCard.annotationIds }
+                    : card;
+                }),
+              };
+            });
+            if (needsBackendRefresh) {
+              const refreshed = await refreshAnnotationLocationFromBackend(
+                notebookId,
+                result.annotation.id,
+                documentId,
+              );
+              if (refreshed) restored = refreshed;
+            }
           },
-          () =>
-            set((state) => ({
-              deletedAnnotationHistory: [...state.deletedAnnotationHistory, last],
-              deletionOrder: [...state.deletionOrder, 'annotation'],
-            })),
+          () => {
+            set((state) => {
+              const baseAnnotation = pendingDelete?.snapshot ?? last.annotation;
+              const rolledBack = hasStateDocumentContentChanged(state, documentId, versionAtStart)
+                ? { ...last, annotation: { ...baseAnnotation, locationLabel: null } }
+                : { ...last, annotation: baseAnnotation };
+              return {
+                deletedAnnotationHistory: [...state.deletedAnnotationHistory, rolledBack],
+                deletionOrder: [...state.deletionOrder, 'annotation'],
+              };
+            });
+          },
         );
         return restored;
       },

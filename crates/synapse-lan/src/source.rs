@@ -1263,7 +1263,7 @@ mod tests {
 
         // Relink the document mid-session so `doc.file_hash != snapshot_file_hash`.
         {
-            let guard = db.lock().expect("lock db");
+            let mut guard = db.lock().expect("lock db");
             let relinked = guard
                 .relink_document(&doc.id, &replacement_path)
                 .expect("relink document");

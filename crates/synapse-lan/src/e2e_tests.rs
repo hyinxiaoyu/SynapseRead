@@ -603,6 +603,8 @@ async fn e2e_missing_file_restore_preserves_md_extension_and_study_data() {
                 parent_node_id: None,
                 pos_x: 10.0,
                 pos_y: 20.0,
+                location_label: None,
+                expected_file_hash: None,
             })
             .expect("create excerpt");
         db.create_bookmark(&CreateBookmarkInput {
@@ -2609,7 +2611,7 @@ async fn e2e_relink_after_preview_and_mid_execute_blocks_position_and_bookmarks(
     .expect("plan A");
 
     {
-        let db = receiver.db.lock().expect("lock");
+        let mut db = receiver.db.lock().expect("lock");
         let relinked = db
             .relink_document(&dst_doc.id, &dst_txt_v2)
             .expect("relink to v2");
@@ -2660,7 +2662,7 @@ async fn e2e_relink_after_preview_and_mid_execute_blocks_position_and_bookmarks(
     // --- Path B: relink in the race window BETWEEN verify_document_file and DB writes ---
     {
         // Restore v1 so preview and file verification both succeed cleanly.
-        let db = receiver.db.lock().expect("lock");
+        let mut db = receiver.db.lock().expect("lock");
         db.relink_document(&dst_doc.id, &dst_txt_v1)
             .expect("relink back to v1");
     }
@@ -2680,7 +2682,7 @@ async fn e2e_relink_after_preview_and_mid_execute_blocks_position_and_bookmarks(
     let v2_for_hook = dst_txt_v2.clone();
     let hooks = ExecuteTestHooks {
         before_metadata_writes: Some(Arc::new(move |_book_id, doc_id| {
-            let db = db_for_hook.lock().expect("lock");
+            let mut db = db_for_hook.lock().expect("lock");
             db.relink_document(doc_id, &v2_for_hook)
                 .expect("mid-execute relink to v2");
         })),
@@ -3798,6 +3800,8 @@ async fn e2e_concurrent_missing_markdown_records_preserve_md_and_markdown_extens
                     pos_x: 0.0,
                     pos_y: 0.0,
                     parent_node_id: None,
+                    location_label: None,
+                    expected_file_hash: None,
                 })
                 .expect("excerpt");
                 std::fs::remove_file(&md_path).expect("delete md to make it missing");

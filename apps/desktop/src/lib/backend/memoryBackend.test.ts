@@ -1461,4 +1461,172 @@ describe('memory backend card delete and restore', () => {
       code: 'not_found',
     });
   });
+
+  it('sanitizes and persists annotation locationLabel and names capture cards (#125)', async () => {
+    const backend = createMemoryBackend({
+      library: {
+        '/books/notes.txt': new TextEncoder().encode('hello world'),
+        '/books/slides.pdf': new TextEncoder().encode('%PDF-1.7'),
+      },
+    });
+    const txt = (await backend.pickDocument())!;
+    const pdf = (await backend.pickDocument())!;
+    const nb = await backend.createNotebook('Study');
+
+    const excerpt = await backend.createExcerpt({
+      documentId: txt.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+      excerptText: 'hello',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 0,
+      posY: 0,
+      locationLabel: '  \u202EChapter 1 · Line 1\nsecond line  ',
+    });
+    expect(excerpt.annotation.locationLabel).toBe('Chapter 1 · Line 1');
+    expect(excerpt.card.title).toBe('hello');
+
+    const capture = await backend.createExcerpt({
+      documentId: pdf.id,
+      notebookId: nb.id,
+      anchor: {
+        format: 'pdf',
+        pageIndex: 11,
+        rects: [{ x: 0.1, y: 0.1, width: 0.4, height: 0.3 }],
+      },
+      excerptText: null,
+      excerptImagePng: 'iVBORw0KGgo=',
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 20,
+      posY: 30,
+      locationLabel: 'p. 12',
+    });
+    expect(capture.annotation.locationLabel).toBe('p. 12');
+    expect(capture.card.title).toBe('Figure · p. 12');
+
+    const captureWithoutLabel = await backend.createExcerpt({
+      documentId: pdf.id,
+      notebookId: nb.id,
+      anchor: {
+        format: 'pdf',
+        pageIndex: 11,
+        rects: [{ x: 0.1, y: 0.1, width: 0.4, height: 0.3 }],
+      },
+      excerptText: null,
+      excerptImagePng: 'iVBORw0KGgo=',
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 40,
+      posY: 50,
+    });
+    expect(captureWithoutLabel.annotation.locationLabel).toBeNull();
+    expect(captureWithoutLabel.card.title).toBe('Image excerpt');
+
+    const truncated = await backend.createAnnotation({
+      documentId: txt.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 6, endByteOffset: 11, lineIndex: 0 },
+      excerptText: 'world',
+      excerptImagePng: null,
+      note: null,
+      color: '#fde047',
+      style: 'highlight',
+      locationLabel: '章'.repeat(200),
+    });
+    expect(Array.from(truncated.locationLabel ?? '')).toHaveLength(160);
+    expect(truncated.locationLabel?.endsWith('…')).toBe(true);
+  });
+
+  it('preserves annotation locationLabel on same-hash relink and clears active + soft-deleted labels on content-changed relink (#125)', async () => {
+    const originalBytes = new TextEncoder().encode('Old chapter\nLine 1\nLine 2\n');
+    const revisedBytes = new TextEncoder().encode('Completely revised text.\n');
+    const backend = createMemoryBackend({
+      library: {
+        '/books/original.txt': originalBytes,
+        '/books/renamed.txt': originalBytes,
+        '/books/revised.txt': revisedBytes,
+      },
+    });
+    const doc = (await backend.pickDocument())!;
+    const nb = await backend.createNotebook('Study');
+    const active = await backend.createExcerpt({
+      documentId: doc.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+      excerptText: 'Old chapter',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 0,
+      posY: 0,
+      locationLabel: 'Old chapter · Line 1',
+    });
+    const toDelete = await backend.createExcerpt({
+      documentId: doc.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 12, endByteOffset: 18, lineIndex: 1 },
+      excerptText: 'Line 1',
+      excerptImagePng: null,
+      color: '#fde047',
+      parentNodeId: null,
+      posX: 10,
+      posY: 20,
+      locationLabel: 'Old chapter · Line 2',
+    });
+    await backend.deleteAnnotation(toDelete.annotation.id);
+
+    // Same-hash rename preserves locationLabel.
+    const sameHash = (await backend.relinkDocument(doc.id))!;
+    expect(sameHash.contentChanged).toBe(false);
+    expect(sameHash.document.title).toBe('renamed');
+    const afterRename = await backend.loadNotebookGraph(nb.id);
+    expect(afterRename.annotations.find((a) => a.id === active.annotation.id)?.locationLabel).toBe(
+      'Old chapter · Line 1',
+    );
+
+    // Content-changing relink clears both active and soft-deleted locationLabel values.
+    const changed = (await backend.relinkDocument(doc.id))!;
+    expect(changed.contentChanged).toBe(true);
+    expect(changed.document.title).toBe('revised');
+    const afterChange = await backend.loadNotebookGraph(nb.id);
+    expect(
+      afterChange.annotations.find((a) => a.id === active.annotation.id)?.locationLabel,
+    ).toBeNull();
+    const restored = await backend.restoreAnnotation(toDelete.annotation.id);
+    expect(restored.annotation.locationLabel).toBeNull();
+
+    // Stale expectedFileHash from before relink is rejected on createExcerpt and createAnnotation.
+    await expect(
+      backend.createExcerpt({
+        documentId: doc.id,
+        notebookId: nb.id,
+        anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+        excerptText: 'stale',
+        excerptImagePng: null,
+        color: '#fde047',
+        parentNodeId: null,
+        posX: 0,
+        posY: 0,
+        locationLabel: 'Old chapter · Line 1',
+        expectedFileHash: doc.fileHash,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_anchor' });
+    await expect(
+      backend.createAnnotation({
+        documentId: doc.id,
+        notebookId: nb.id,
+        anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+        excerptText: 'stale',
+        excerptImagePng: null,
+        note: null,
+        color: '#fde047',
+        style: 'highlight',
+        locationLabel: 'Old chapter · Line 1',
+        expectedFileHash: doc.fileHash,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_anchor' });
+  });
 });

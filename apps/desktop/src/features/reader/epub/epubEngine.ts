@@ -53,6 +53,7 @@ import {
   isCopyableCodeBlock,
   visibleCodeBlockRect,
 } from './codeBlocks';
+import { type EpubTocItem, resolveEpubSelectionChapterLabel } from './epubTocLocation';
 import { isNoteRef, noteTextAt } from './linkPeekText';
 import { sanitizeChapter } from './sanitizeChapter';
 import {
@@ -65,13 +66,7 @@ import {
 
 export type { EpubReadingMode } from '@/types/domain';
 export type { EpubCodeBlockHover } from './codeBlocks';
-
-export interface EpubTocItem {
-  id: string;
-  label: string;
-  href: string;
-  children: readonly EpubTocItem[];
-}
+export type { EpubTocItem } from './epubTocLocation';
 
 export interface EpubSearchMatch extends DocumentSearchResultItem {
   cfiRange: string;
@@ -120,6 +115,13 @@ export interface EpubSelection {
   cfiRange: string;
   chapterHref: string;
   text: string;
+  /**
+   * Chapter/section label resolved from the live chapter DOM and TOC `#fragment`
+   * targets (#125). `null` means TOC entries share this XHTML file and cannot be
+   * safely disambiguated, so callers must fall back to the book title only.
+   * `undefined` means the TOC had no entries for this file (spine fallback applies).
+   */
+  chapterLabel?: string | null;
 }
 
 export interface EpubLocation {
@@ -905,14 +907,25 @@ export async function openEpubDocument(
     const selection = contents.window.getSelection();
     if (!hasTextSelection(selection) || selection.rangeCount === 0) return null;
     try {
-      const cfiRange = contents.cfiFromRange(selection.getRangeAt(0));
+      const range = selection.getRangeAt(0);
+      const cfiRange = contents.cfiFromRange(range);
       const text = selection.toString().trim();
-      return text && cfiRange ? { cfiRange, text } : null;
+      return text && cfiRange
+        ? { cfiRange, text, range, document: contents.document ?? null }
+        : null;
     } catch {
       return null;
     }
   };
-  const reportSelection = (selection: { cfiRange: string; text: string }, released: boolean) => {
+  const reportSelection = (
+    selection: {
+      cfiRange: string;
+      text: string;
+      range: Range | null;
+      document: Document | null;
+    },
+    released: boolean,
+  ) => {
     const chapterHref = book.spine.get(selection.cfiRange)?.href;
     // Core refuses an excerpt of only whitespace.
     if (!chapterHref) {
@@ -928,11 +941,18 @@ export async function openEpubDocument(
       releasedSelection = null;
       return;
     }
-    releasedSelection = released ? selection : null;
+    releasedSelection = released ? { cfiRange: selection.cfiRange, text: selection.text } : null;
+    const chapterLabel = resolveEpubSelectionChapterLabel({
+      toc,
+      chapterHref,
+      document: selection.document,
+      selectionRange: selection.range,
+    });
     selectionListener({
       cfiRange: selection.cfiRange,
       chapterHref,
       text: selection.text,
+      ...(chapterLabel !== undefined ? { chapterLabel } : {}),
     });
   };
   let locationListener: (location: EpubLocation) => void = () => undefined;
@@ -1461,13 +1481,29 @@ export async function openEpubDocument(
     syncCodeBlockTabStops(contents);
   });
   rendition.on('selected', (cfiRange: string, contents: Contents) => {
-    const text = contents.window.getSelection()?.toString().trim() ?? '';
+    const selection = contents.window.getSelection();
+    const text = selection?.toString().trim() ?? '';
     if (!text) {
       releasedSelection = null;
       selectionListener(null);
       return;
     }
-    reportSelection({ cfiRange, text }, false);
+    let range: Range | null = null;
+    if (selection && selection.rangeCount > 0) {
+      try {
+        range = selection.getRangeAt(0);
+      } catch {
+        range = null;
+      }
+    }
+    if (!range && typeof contents.range === 'function') {
+      try {
+        range = contents.range(cfiRange);
+      } catch {
+        range = null;
+      }
+    }
+    reportSelection({ cfiRange, text, range, document: contents.document ?? null }, false);
   });
   rendition.on('relocated', (location: Location) => {
     clearCodeBlockHover();

@@ -22,8 +22,10 @@ export type {
   MemoryLanTestController,
 };
 import { formatForPath } from '@/lib/documentFormats';
+import { MAX_LOCATION_LABEL_CHARS } from '@/lib/sourceAttribution';
 import sampleEpubUrl from '../../../../../fixtures/documents/sample.epub?url&no-inline';
 import sampleCodeEpubUrl from '../../../../../fixtures/documents/sample-code.epub?url&no-inline';
+import sampleSharedXhtmlEpubUrl from '../../../../../fixtures/documents/sample-shared-xhtml.epub?url&no-inline';
 import sampleLabelsPdfUrl from '../../../../../fixtures/documents/sample-labels.pdf?url&no-inline';
 import samplePdfUrl from '../../../../../fixtures/documents/sample.pdf?url&no-inline';
 import sampleUnevenEpubUrl from '../../../../../fixtures/documents/sample-uneven.epub?url&no-inline';
@@ -67,6 +69,7 @@ export type MemoryFile = Uint8Array | (() => Promise<Uint8Array>);
 /** The PNG signature, in base64. */
 const PNG_BASE64_PREFIX = 'iVBORw0KGgo';
 const MAX_DISPLAY_TITLE_CHARS = 512;
+const CARD_TITLE_MAX_CHARS = 80;
 
 function isControlOrBidiChar(ch: string): boolean {
   const code = ch.codePointAt(0) ?? 0;
@@ -80,19 +83,42 @@ function isControlOrBidiChar(ch: string): boolean {
   );
 }
 
-function sanitizeDisplayTitle(raw: string | null): string | null {
-  if (raw === null) return null;
+function truncateChars(text: string, maxChars: number): string {
+  const chars = Array.from(text);
+  if (chars.length <= maxChars) return text;
+  return `${chars.slice(0, maxChars - 1).join('')}…`;
+}
+
+function sanitizeSingleLine(raw: string | null | undefined, maxChars: number): string | null {
+  if (raw == null) return null;
   for (const line of raw.split(/\r?\n/)) {
     const cleaned = Array.from(line)
       .filter((ch) => !isControlOrBidiChar(ch))
       .join('');
     const trimmed = cleaned.trim();
     if (!trimmed) continue;
-    const chars = Array.from(trimmed);
-    if (chars.length <= MAX_DISPLAY_TITLE_CHARS) return trimmed;
-    return `${chars.slice(0, MAX_DISPLAY_TITLE_CHARS - 1).join('')}…`;
+    return truncateChars(trimmed, maxChars);
   }
   return null;
+}
+
+function sanitizeDisplayTitle(raw: string | null): string | null {
+  return sanitizeSingleLine(raw, MAX_DISPLAY_TITLE_CHARS);
+}
+
+function sanitizeLocationLabel(raw: string | null | undefined): string | null {
+  return sanitizeSingleLine(raw, MAX_LOCATION_LABEL_CHARS);
+}
+
+function defaultCardTitle(excerptText: string | null, locationLabel: string | null): string {
+  const firstLine = excerptText
+    ?.split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (firstLine) return truncateChars(firstLine, CARD_TITLE_MAX_CHARS);
+  return locationLabel
+    ? truncateChars(`Figure · ${locationLabel}`, CARD_TITLE_MAX_CHARS)
+    : 'Image excerpt';
 }
 
 function hashBytes(bytes: Uint8Array): string {
@@ -131,6 +157,8 @@ const PREVIEW_LIBRARY: Record<string, MemoryFile> = {
   '/preview/sample-footnotes.pdf': fetchBytes(sampleFootnotesPdfUrl),
   // Synthetic code blocks across plain, Pandoc, and multi-page listings (#104).
   '/preview/sample-code.epub': fetchBytes(sampleCodeEpubUrl),
+  // Two chapters sharing a single XHTML file via `#fragment` TOC entries (#125).
+  '/preview/sample-shared-xhtml.epub': fetchBytes(sampleSharedXhtmlEpubUrl),
 };
 
 export interface MemoryBackendOptions {
@@ -601,6 +629,22 @@ export function createMemoryBackendWithPreview({
         displayTitle: contentChanged ? null : (existing.displayTitle ?? null),
       };
       documents.set(documentId, updated);
+      if (contentChanged) {
+        // Clear stale location labels for this document, including soft-deleted rows (#125).
+        for (const [id, ann] of annotations) {
+          if (ann.documentId === documentId) {
+            annotations.set(id, { ...ann, locationLabel: null });
+          }
+        }
+        for (const [id, entry] of deletedAnnotations) {
+          if (entry.annotation.documentId === documentId) {
+            deletedAnnotations.set(id, {
+              ...entry,
+              annotation: { ...entry.annotation, locationLabel: null },
+            });
+          }
+        }
+      }
       return {
         document: updated,
         contentChanged,
@@ -681,6 +725,9 @@ export function createMemoryBackendWithPreview({
           `${input.anchor.format} anchor on a ${document.format} document`,
         );
       }
+      if (input.expectedFileHash != null && input.expectedFileHash !== document.fileHash) {
+        throw fail('invalid_anchor', 'the document changed since this selection was made');
+      }
       if (input.parentNodeId) require(nodes, input.parentNodeId, 'node');
       if (!input.excerptText?.trim() && input.excerptImagePng === null) {
         throw fail('invalid_anchor', 'an excerpt needs text or a captured image');
@@ -691,6 +738,7 @@ export function createMemoryBackendWithPreview({
 
       const annotationId = crypto.randomUUID();
       if (input.excerptImagePng !== null) captures.set(annotationId, input.excerptImagePng);
+      const locationLabel = sanitizeLocationLabel(input.locationLabel);
       const annotation: Annotation = {
         id: annotationId,
         documentId: input.documentId,
@@ -701,12 +749,13 @@ export function createMemoryBackendWithPreview({
         note: null,
         color: input.color,
         style: 'highlight',
+        locationLabel,
         createdAt: now(),
       };
       const card: NoteCard = {
         id: crypto.randomUUID(),
         notebookId: input.notebookId,
-        title: input.excerptText?.trim().split('\n')[0]?.slice(0, 80) || 'Image excerpt',
+        title: defaultCardTitle(input.excerptText, locationLabel),
         markdownNotes: '',
         tags: [],
         annotationIds: [annotation.id],
@@ -749,6 +798,9 @@ export function createMemoryBackendWithPreview({
           `${input.anchor.format} anchor on a ${document.format} document`,
         );
       }
+      if (input.expectedFileHash != null && input.expectedFileHash !== document.fileHash) {
+        throw fail('invalid_anchor', 'the document changed since this selection was made');
+      }
       if (!input.color.trim()) {
         throw fail('invalid_anchor', 'an annotation needs a highlight color');
       }
@@ -776,6 +828,7 @@ export function createMemoryBackendWithPreview({
         note: trimmedNote,
         color: input.color.trim(),
         style: input.style,
+        locationLabel: sanitizeLocationLabel(input.locationLabel),
         createdAt: now(),
       };
       annotations.set(annotation.id, annotation);

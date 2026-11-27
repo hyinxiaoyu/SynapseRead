@@ -91,6 +91,7 @@ import {
 import { useJumpHistory, useSearchTrip } from '@/features/reader/useJumpHistory';
 import { useMarkupToolbar, useReaderCommands } from '@/features/reader/useReaderCommands';
 import { documentDisplayName } from '@/lib/documentTitles';
+import { formatLocationWithSuffix } from '@/lib/sourceAttribution';
 import { cn, describeError } from '@/lib/utils';
 import {
   type Annotation,
@@ -256,6 +257,8 @@ export function TxtViewer({
   const load = useTextStream(content, document.id, document.encoding);
   const { model, rowCount, complete } = load;
   const documentId = document.id;
+  // Snapshot the source hash this text stream was opened from (#125).
+  const [sourceFileHash] = useState(document.fileHash);
   const scrollRef = useRef<HTMLDivElement>(null);
   const readerAreaRef = useRef<HTMLDivElement>(null);
 
@@ -376,11 +379,18 @@ export function TxtViewer({
       }
       hasSelection.current = true;
       setPinnedRows([model.rowAtUnit(startUnit), model.rowAtUnit(endUnit)]);
+      const anchorRow =
+        model.rowAtSourceOffset(selected.anchor.startByteOffset) ?? model.rowAtUnit(startUnit);
+      const heading = model.headings[headingIndexAt(model.headings, anchorRow)] ?? null;
+      const linePart = `Line ${selected.anchor.lineIndex + 1}`;
+      const locationLabel = formatLocationWithSuffix(heading?.label, linePart);
       const nextSelection: ReaderSelection = {
         documentId,
         anchor: selected.anchor,
         text: selected.text,
         imagePng: null,
+        locationLabel,
+        sourceFileHash,
       };
       setActiveSelection(nextSelection);
       onSelectionChange(nextSelection);
@@ -391,7 +401,7 @@ export function TxtViewer({
       view.removeEventListener('selectionchange', onChange);
       view.removeEventListener('mouseup', onChange);
     };
-  }, [isActive, model, documentId, onSelectionChange]);
+  }, [isActive, model, documentId, sourceFileHash, onSelectionChange]);
 
   // ---- Reopen at the last reading position ---------------------------------
 

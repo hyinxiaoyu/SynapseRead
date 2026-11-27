@@ -8,6 +8,7 @@ import { commandTooltip } from '@/features/commands/commands';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { runCommand } from '@/features/commands/registry';
 import { registerBeforeCloseFlush } from '@/lib/flushBeforeClose';
+import { formatAnnotationSource } from '@/lib/sourceAttribution';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 import type { Annotation, CardPatch, NoteCard } from '@/types/domain';
 
@@ -112,9 +113,9 @@ function ExcerptImage({ annotation }: { annotation: Annotation }) {
     };
   }, [captureUrl, annotationId]);
   return url ? (
-    <img src={url} alt="Captured area" className="min-w-0 flex-1 rounded border bg-white" />
+    <img src={url} alt="Captured area" className="w-full rounded border bg-white" />
   ) : (
-    <p className="min-w-0 flex-1 text-xs">Image excerpt</p>
+    <p className="text-xs">Image excerpt</p>
   );
 }
 
@@ -139,6 +140,7 @@ function CardEditor({
   onSaveStatus: (cardId: string, status: SaveStatus) => void;
 }) {
   const annotations = useStudySyncStore((state) => state.annotations);
+  const documents = useStudySyncStore((state) => state.documents);
   const updateCard = useStudySyncStore((state) => state.updateCard);
   const jumpToNode = useStudySyncStore((state) => state.jumpToNode);
   const inspectRequest = useStudySyncStore((state) => state.inspectRequest);
@@ -333,24 +335,43 @@ function CardEditor({
             kept.
           </p>
         )}
-        {excerpts.map((annotation) => (
-          <div key={annotation.id} className="flex items-start gap-1 rounded-md bg-muted p-2">
-            {annotation.excerptImagePath ? (
-              <ExcerptImage annotation={annotation} />
-            ) : (
-              <p className="min-w-0 flex-1 text-xs">{annotation.excerptText}</p>
-            )}
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Jump to this excerpt"
-              className="size-6"
-              onClick={() => jumpToNode(nodeId, annotation.id)}
+        {excerpts.map((annotation) => {
+          const sourceLabel = formatAnnotationSource(annotation, documents);
+          return (
+            <div
+              key={annotation.id}
+              data-testid="inspector-excerpt-row"
+              className="flex items-start gap-1.5 rounded-md bg-muted p-2"
             >
-              <Link2 />
-            </Button>
-          </div>
-        ))}
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                {sourceLabel && (
+                  <p
+                    data-testid="inspector-excerpt-source"
+                    className="text-[11px] leading-snug break-words text-muted-foreground"
+                  >
+                    {sourceLabel}
+                  </p>
+                )}
+                {annotation.excerptImagePath ? (
+                  <ExcerptImage annotation={annotation} />
+                ) : (
+                  <p className="text-xs break-words">{annotation.excerptText}</p>
+                )}
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={
+                  sourceLabel ? `Jump to this excerpt (${sourceLabel})` : 'Jump to this excerpt'
+                }
+                className="size-6 shrink-0"
+                onClick={() => jumpToNode(nodeId, annotation.id)}
+              >
+                <Link2 />
+              </Button>
+            </div>
+          );
+        })}
       </div>
       <div className="mt-auto border-t pt-3">
         <Button
