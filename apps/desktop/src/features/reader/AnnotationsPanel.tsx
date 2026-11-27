@@ -2,6 +2,7 @@ import { Check, ChevronDown, Link2, Network, Pencil, Quote, StickyNote, Undo2 } 
 import {
   Fragment,
   type KeyboardEvent as ReactKeyboardEvent,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -331,6 +332,20 @@ function isClamped(element: HTMLElement | null): boolean {
   return element !== null && element.scrollHeight > element.clientHeight + 1;
 }
 
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'then' in value &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
+}
+
+interface AnnotationRowActions {
+  triggerExcerpt: () => void;
+  triggerShowCard: () => void;
+}
+
 function AnnotationRow({
   annotation,
   locationLabel,
@@ -351,6 +366,8 @@ function AnnotationRow({
   confirmingDelete,
   onConfirmDelete,
   onCancelDelete,
+  registerRowActions,
+  onQueuedExcerptChange,
 }: {
   annotation: Annotation;
   locationLabel: string;
@@ -366,22 +383,31 @@ function AnnotationRow({
   canExcerpt?: boolean | undefined;
   excerptLabel: string;
   onShowCard?: (() => void) | undefined;
-  onUpdate: (patch: AnnotationPatch) => void;
+  onUpdate: (patch: AnnotationPatch) => void | Promise<boolean>;
   onDelete: (from: HTMLElement) => void;
   /** Deleting this card's source is waiting for the reader to confirm. */
   confirmingDelete: boolean;
   onConfirmDelete: (from: HTMLElement) => void;
   onCancelDelete: () => void;
+  registerRowActions: (annotationId: string, actions: AnnotationRowActions | null) => void;
+  onQueuedExcerptChange: (annotationId: string, queued: boolean) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const rowRef = useRef<HTMLLIElement>(null);
+  const noteFieldRef = useRef<HTMLTextAreaElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [clamped, setClamped] = useState(false);
   const [noteDraft, setNoteDraft] = useState(annotation.note ?? '');
   const [prevPropNote, setPrevPropNote] = useState(annotation.note ?? '');
+  const [savingNote, setSavingNote] = useState<{ draft: string } | null>(null);
+  const [failedNoteDraft, setFailedNoteDraft] = useState<string | null>(null);
+  const [unsavedNoteWarning, setUnsavedNoteWarning] = useState(false);
+
   if ((annotation.note ?? '') !== prevPropNote) {
     setPrevPropNote(annotation.note ?? '');
-    setNoteDraft(annotation.note ?? '');
+    if (!editing && failedNoteDraft === null) {
+      setNoteDraft(annotation.note ?? '');
+    }
   }
 
   // Offer More only where the clamp actually hides text, at the sidebar's width.
@@ -400,32 +426,232 @@ function AnnotationRow({
     return () => observer.disconnect();
   }, [expanded, editing, annotation.excerptText, annotation.note]);
 
-  // Set by Save, ⌘↩, Esc, and Cancel. The field still has focus as it goes away, so
-  // a blur can follow; it must neither save a discarded draft nor save a saved one
-  // twice, since `annotation.note` only catches up once the async update lands.
+  // Set by Save, ⌘↩, Esc, and Cancel as the editor closes so a trailing blur
+  // neither saves a discarded draft nor saves a confirmed draft twice.
   const closing = useRef(false);
-  const commitNote = () => {
-    if (closing.current) return;
-    const trimmed = noteDraft.trim();
-    const current = annotation.note?.trim() ?? '';
-    if (trimmed !== current) {
-      onUpdate({ note: trimmed, color: null });
-    }
-  };
-  const finishEdit = (save: boolean) => {
+  const mountedRef = useRef(true);
+  const saveSeqRef = useRef(0);
+  const latestNoteDraftRef = useRef(noteDraft);
+  const failedNoteDraftRef = useRef<string | null>(failedNoteDraft);
+  const pendingSaveRef = useRef<{
+    seq: number;
+    draft: string;
+    closeOnSuccess: boolean;
+    queuedAction: 'excerpt' | 'show' | null;
+  } | null>(null);
+  const latestCallbacksRef = useRef({
+    onExcerpt,
+    onShowCard,
+    onQueuedExcerptChange,
+  });
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      pendingSaveRef.current = null;
+      latestCallbacksRef.current.onQueuedExcerptChange(annotation.id, false);
+    };
+  }, [annotation.id]);
+  useEffect(() => {
+    latestNoteDraftRef.current = noteDraft;
+    failedNoteDraftRef.current = failedNoteDraft;
+    latestCallbacksRef.current = {
+      onExcerpt,
+      onShowCard,
+      onQueuedExcerptChange,
+    };
+  });
+
+  // Track both in-flight saves (explicit Save and blur auto-save) and failed drafts so
+  // clicking Excerpt/Show or pressing ⇧⌘E never creates a card with a stale note (#124).
+  const committedNote = savingNote !== null ? savingNote.draft : (annotation.note ?? '');
+  const isSavingCurrentDraft = savingNote !== null && savingNote.draft.trim() === noteDraft.trim();
+  const hasUnsavedNoteChanges =
+    (editing || failedNoteDraft !== null) &&
+    !isSavingCurrentDraft &&
+    noteDraft.trim() !== committedNote.trim();
+  if (!hasUnsavedNoteChanges && unsavedNoteWarning) {
+    setUnsavedNoteWarning(false);
+  }
+
+  const closeEditor = () => {
     const returnFocus = Boolean(
       rowRef.current &&
       document.activeElement instanceof Node &&
       rowRef.current.contains(document.activeElement),
     );
-    if (save) commitNote();
     closing.current = true;
-    if (!save) setNoteDraft(annotation.note ?? '');
     setEditing(false);
+    setUnsavedNoteWarning(false);
     if (returnFocus) {
       rowRef.current?.querySelector<HTMLElement>('[data-testid="annotation-jump-button"]')?.focus();
     }
   };
+
+  const cancelEdit = () => {
+    pendingSaveRef.current = null;
+    failedNoteDraftRef.current = null;
+    setSavingNote(null);
+    setFailedNoteDraft(null);
+    onQueuedExcerptChange(annotation.id, false);
+    const savedNote = annotation.note ?? '';
+    latestNoteDraftRef.current = savedNote;
+    setNoteDraft(savedNote);
+    closeEditor();
+  };
+
+  const saveNote = ({
+    closeOnSuccess,
+    fromBlur = false,
+  }: {
+    closeOnSuccess: boolean;
+    fromBlur?: boolean;
+  }) => {
+    if (fromBlur && closing.current) return;
+    const trimmed = latestNoteDraftRef.current.trim();
+    const existing = pendingSaveRef.current;
+    if (existing && existing.draft === trimmed) {
+      if (closeOnSuccess) existing.closeOnSuccess = true;
+      return;
+    }
+    if (fromBlur && failedNoteDraftRef.current !== null && failedNoteDraftRef.current === trimmed) {
+      return;
+    }
+    const committed = existing ? existing.draft : (annotation.note?.trim() ?? '');
+    if (trimmed === committed) {
+      if (closeOnSuccess) {
+        failedNoteDraftRef.current = null;
+        setFailedNoteDraft(null);
+        closeEditor();
+      }
+      return;
+    }
+    failedNoteDraftRef.current = null;
+    setFailedNoteDraft(null);
+    setUnsavedNoteWarning(false);
+    const result = onUpdate({ note: trimmed, color: null });
+    if (!isPromiseLike<boolean>(result)) {
+      if (closeOnSuccess) closeEditor();
+      return;
+    }
+    const seq = (saveSeqRef.current += 1);
+    const entry = {
+      seq,
+      draft: trimmed,
+      closeOnSuccess,
+      queuedAction: null as 'excerpt' | 'show' | null,
+    };
+    pendingSaveRef.current = entry;
+    setSavingNote({ draft: trimmed });
+    onQueuedExcerptChange(annotation.id, false);
+    void result.then(
+      (saved) => {
+        if (!mountedRef.current) return;
+        const isCurrent = pendingSaveRef.current?.seq === seq;
+        if (isCurrent) {
+          pendingSaveRef.current = null;
+          setSavingNote(null);
+          latestCallbacksRef.current.onQueuedExcerptChange(annotation.id, false);
+        }
+        if (!isCurrent) return;
+        if (saved) {
+          failedNoteDraftRef.current = null;
+          setFailedNoteDraft(null);
+          if (latestNoteDraftRef.current.trim() === trimmed) {
+            if (entry.closeOnSuccess || entry.queuedAction !== null) {
+              closeEditor();
+            }
+            if (entry.queuedAction === 'excerpt') {
+              latestCallbacksRef.current.onExcerpt?.();
+            } else if (entry.queuedAction === 'show') {
+              latestCallbacksRef.current.onShowCard?.();
+            }
+          }
+          return;
+        }
+        // Save failed: keep the editor and draft intact so the user can retry (#124).
+        closing.current = false;
+        failedNoteDraftRef.current = trimmed;
+        setFailedNoteDraft(trimmed);
+        setEditing(true);
+        if (entry.closeOnSuccess || entry.queuedAction !== null) {
+          noteFieldRef.current?.focus();
+        }
+      },
+      () => {
+        if (!mountedRef.current) return;
+        if (pendingSaveRef.current?.seq === seq) {
+          pendingSaveRef.current = null;
+          setSavingNote(null);
+          latestCallbacksRef.current.onQueuedExcerptChange(annotation.id, false);
+          closing.current = false;
+          failedNoteDraftRef.current = trimmed;
+          setFailedNoteDraft(trimmed);
+          setEditing(true);
+          if (entry.closeOnSuccess || entry.queuedAction !== null) {
+            noteFieldRef.current?.focus();
+          }
+        }
+      },
+    );
+  };
+
+  const guardUnsavedNote = (): boolean => {
+    const draft = latestNoteDraftRef.current.trim();
+    const pending = pendingSaveRef.current;
+    if (pending) {
+      if (draft === pending.draft) return false;
+      closing.current = false;
+      setEditing(true);
+      setUnsavedNoteWarning(true);
+      noteFieldRef.current?.focus();
+      return true;
+    }
+    if (!editing && failedNoteDraftRef.current === null) return false;
+    if (draft === (annotation.note ?? '').trim()) return false;
+    closing.current = false;
+    setEditing(true);
+    setUnsavedNoteWarning(true);
+    noteFieldRef.current?.focus();
+    return true;
+  };
+
+  const triggerExcerpt = () => {
+    if (!onExcerpt || !canExcerpt) return;
+    if (guardUnsavedNote()) return;
+    const pending = pendingSaveRef.current;
+    if (pending && pending.draft === latestNoteDraftRef.current.trim()) {
+      pending.queuedAction = 'excerpt';
+      onQueuedExcerptChange(annotation.id, true);
+      return;
+    }
+    onExcerpt();
+  };
+
+  const triggerShowCard = () => {
+    if (!onShowCard) return;
+    if (guardUnsavedNote()) return;
+    const pending = pendingSaveRef.current;
+    if (pending && pending.draft === latestNoteDraftRef.current.trim()) {
+      pending.queuedAction = 'show';
+      onQueuedExcerptChange(annotation.id, true);
+      return;
+    }
+    onShowCard();
+  };
+
+  const rowActionsRef = useRef<AnnotationRowActions>({ triggerExcerpt, triggerShowCard });
+  useEffect(() => {
+    rowActionsRef.current = { triggerExcerpt, triggerShowCard };
+  });
+  useEffect(() => {
+    registerRowActions(annotation.id, {
+      triggerExcerpt: () => rowActionsRef.current.triggerExcerpt(),
+      triggerShowCard: () => rowActionsRef.current.triggerShowCard(),
+    });
+    return () => registerRowActions(annotation.id, null);
+  }, [annotation.id, registerRowActions]);
 
   const date = formatShortDate(annotation.createdAt);
   const canExpand = expanded || clamped;
@@ -528,7 +754,7 @@ function AnnotationRow({
                 title="Show in MindMap"
                 data-testid="annotation-card-badge"
                 disabled={!onShowCard}
-                onClick={() => onShowCard?.()}
+                onClick={triggerShowCard}
                 className="inline-flex cursor-pointer items-center gap-0.5 rounded bg-secondary px-1.5 text-[10px] font-medium text-secondary-foreground outline-none hover:bg-secondary/80 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:hover:bg-secondary"
               >
                 <Link2 aria-hidden="true" className="size-2.5" />
@@ -577,7 +803,7 @@ function AnnotationRow({
               }
               data-testid="annotation-excerpt-button"
               disabled={!canExcerpt}
-              onClick={onExcerpt}
+              onClick={triggerExcerpt}
               className="flex size-6 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity outline-none group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 motion-reduce:transition-none"
             >
               <Quote aria-hidden="true" className="size-3.5" />
@@ -590,7 +816,7 @@ function AnnotationRow({
               aria-label={`Show in MindMap at ${locationLabel}`}
               title="Show in MindMap"
               data-testid="annotation-show-card-button"
-              onClick={onShowCard}
+              onClick={triggerShowCard}
               className="flex size-6 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity outline-none group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
             >
               <Network aria-hidden="true" className="size-3.5" />
@@ -658,6 +884,15 @@ function AnnotationRow({
               );
             })}
           </div>
+          {unsavedNoteWarning && (
+            <p
+              role="alert"
+              data-testid="annotation-unsaved-note-warning"
+              className="text-xs font-medium text-destructive"
+            >
+              Save or cancel your note changes first.
+            </p>
+          )}
           <NoteEditor
             value={noteDraft}
             label={`Note for annotation at ${locationLabel}`}
@@ -665,17 +900,30 @@ function AnnotationRow({
             testId="annotation-note-input"
             formTestId="annotation-note-form"
             saveTestId="annotation-note-save"
+            fieldRef={noteFieldRef}
             autoFocus
-            onChange={setNoteDraft}
-            onSave={() => finishEdit(true)}
-            onCancel={() => finishEdit(false)}
+            onChange={(value) => {
+              latestNoteDraftRef.current = value;
+              setNoteDraft(value);
+              setUnsavedNoteWarning(false);
+              if (failedNoteDraftRef.current !== null) {
+                failedNoteDraftRef.current = null;
+                setFailedNoteDraft(null);
+              }
+              if (pendingSaveRef.current) {
+                pendingSaveRef.current.queuedAction = null;
+                onQueuedExcerptChange(annotation.id, false);
+              }
+            }}
+            onSave={() => saveNote({ closeOnSuccess: true })}
+            onCancel={cancelEdit}
             // Leaving the field keeps what was typed, so a click elsewhere loses nothing.
-            onBlur={commitNote}
+            onBlur={() => saveNote({ closeOnSuccess: false, fromBlur: true })}
             onKeyDown={(event) => {
               if (event.key === 'Escape') {
                 event.preventDefault();
                 event.stopPropagation();
-                finishEdit(false);
+                cancelEdit();
               }
             }}
           />
@@ -795,7 +1043,25 @@ export function AnnotationsList({
   const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
   /** Row currently holding focus, so ⇧⌘E excerpts or reveals it via the command registry (#124). */
   const [focusedAnnotationId, setFocusedAnnotationId] = useState<string | null>(null);
+  /** Rows whose Excerpt/Show action is queued behind an in-flight note save (#124). */
+  const [queuedExcerptIds, setQueuedExcerptIds] = useState<readonly string[]>([]);
+  const rowActionsRef = useRef(new Map<string, AnnotationRowActions>());
   const listRef = useRef<HTMLOListElement>(null);
+
+  const registerRowActions = useCallback(
+    (annotationId: string, actions: AnnotationRowActions | null) => {
+      if (actions) rowActionsRef.current.set(annotationId, actions);
+      else rowActionsRef.current.delete(annotationId);
+    },
+    [],
+  );
+  const handleQueuedExcerptChange = useCallback((annotationId: string, queued: boolean) => {
+    setQueuedExcerptIds((current) => {
+      const has = current.includes(annotationId);
+      if (queued === has) return current;
+      return queued ? [...current, annotationId] : current.filter((id) => id !== annotationId);
+    });
+  }, []);
 
   useEffect(() => {
     if (focusedAnnotationId === null) return;
@@ -822,10 +1088,13 @@ export function AnnotationsList({
         a.placement.order - b.placement.order ||
         (compareWithinOrder?.(a.annotation, b.annotation) ?? 0),
     );
+  const isRowBusyExcerpting = (annotationId: string): boolean =>
+    (controller.isExcerptingAnnotation?.(annotationId) ?? false) ||
+    queuedExcerptIds.includes(annotationId);
   if (
     confirmingDeleteId !== null &&
     (!placed.some(({ annotation }) => annotation.id === confirmingDeleteId) ||
-      (controller.isExcerptingAnnotation?.(confirmingDeleteId) ?? false))
+      isRowBusyExcerpting(confirmingDeleteId))
   ) {
     setConfirmingDeleteId(null);
   }
@@ -856,10 +1125,13 @@ export function AnnotationsList({
       'edit.excerpt': {
         run: () => {
           if (!focusedAnnotation) return;
+          const rowActions = rowActionsRef.current.get(focusedAnnotation.id);
           if (focusedLinked) {
-            controller.showAnnotationCard?.(focusedAnnotation.id);
+            if (rowActions) rowActions.triggerShowCard();
+            else controller.showAnnotationCard?.(focusedAnnotation.id);
           } else if (controller.canExcerpt !== false) {
-            controller.excerptAnnotation?.(focusedAnnotation.id);
+            if (rowActions) rowActions.triggerExcerpt();
+            else controller.excerptAnnotation?.(focusedAnnotation.id);
           }
         },
         enabled: focusedLinked
@@ -928,16 +1200,16 @@ export function AnnotationsList({
         {placed.map(({ annotation, placement }, index) => {
           const groupStart =
             placement.group !== undefined && placed[index - 1]?.placement.group !== placement.group;
-          const deletingDisabled = controller.isExcerptingAnnotation?.(annotation.id) ?? false;
+          const deletingDisabled = isRowBusyExcerpting(annotation.id);
           const remove = (from: HTMLElement) => {
-            if (controller.isExcerptingAnnotation?.(annotation.id)) return;
+            if (isRowBusyExcerpting(annotation.id)) return;
             roving.refocusAfterRemoval(from, index);
             setConfirmingDeleteId(null);
             controller.deleteAnnotation(annotation.id);
             onDeleted?.();
           };
           const requestRemove = (from: HTMLElement) => {
-            if (controller.isExcerptingAnnotation?.(annotation.id)) return;
+            if (isRowBusyExcerpting(annotation.id)) return;
             if (controller.isCardSource?.(annotation.id)) {
               setConfirmingDeleteId(annotation.id);
               from
@@ -993,6 +1265,8 @@ export function AnnotationsList({
                 confirmingDelete={confirmingDeleteId === annotation.id}
                 onConfirmDelete={remove}
                 onCancelDelete={() => setConfirmingDeleteId(null)}
+                registerRowActions={registerRowActions}
+                onQueuedExcerptChange={handleQueuedExcerptChange}
               />
             </Fragment>
           );

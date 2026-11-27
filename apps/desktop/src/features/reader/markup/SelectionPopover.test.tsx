@@ -612,4 +612,143 @@ describe('SelectionPopover MindMap actions for existing highlights (#124)', () =
       expect(field.closest('[inert]')).not.toBeNull();
     }
   });
+
+  it('guards Excerpt and Show in MindMap when the draft is edited back to the old value while a save is still in flight (#124)', async () => {
+    function StatefulHighlightHarness({
+      cardSource,
+      initialNote,
+      onUpdate,
+      dismiss,
+      onExcerptAnnotation,
+      onShowAnnotationCard,
+    }: {
+      cardSource: boolean;
+      initialNote: string;
+      onUpdate: (
+        id: string,
+        patch: { note: string | null; color: string | null },
+      ) => Promise<boolean>;
+      dismiss: () => void;
+      onExcerptAnnotation?: (id: string) => void;
+      onShowAnnotationCard?: (id: string) => void;
+    }) {
+      const boundsRef = { current: document.body };
+      const [noteOpen, setNoteOpen] = useState(false);
+      const [savedNote, setSavedNote] = useState<string | null>(initialNote);
+      const activeAnnotation: Annotation = { ...highlight, note: savedNote };
+      const annotations = useAnnotationsController({
+        documentId: 'doc-1',
+        annotations: [activeAnnotation],
+        onSelectAnnotation: vi.fn(),
+        onUpdateAnnotation: async (id, patch) => {
+          const ok = await onUpdate(id, patch);
+          if (ok && patch.note !== null) setSavedNote(patch.note);
+          return ok;
+        },
+        onDeleteAnnotation: vi.fn(),
+        ...(onExcerptAnnotation ? { onExcerptAnnotation } : {}),
+        ...(onShowAnnotationCard ? { onShowAnnotationCard } : {}),
+        canExcerpt: true,
+        cardSourceAnnotationIds: new Set(cardSource ? [activeAnnotation.id] : []),
+      });
+      const popover: SelectionPopoverController = {
+        target: {
+          kind: 'annotation',
+          annotationId: activeAnnotation.id,
+          rect: { left: 100, top: 200, right: 220, bottom: 220 },
+        },
+        focusRequest: 0,
+        noteOpen,
+        selectionRect: () => null,
+        openForAnnotation: vi.fn(),
+        showFromKeyboard: vi.fn(),
+        openNote: () => setNoteOpen(true),
+        closeNote: () => setNoteOpen(false),
+        dismiss,
+        reportPointer: vi.fn(),
+      };
+      return (
+        <div style={{ width: 800, height: 600 }}>
+          <SelectionPopover
+            popover={popover}
+            annotations={annotations}
+            selection={null}
+            boundsRef={boundsRef}
+            onReturnFocus={vi.fn()}
+          />
+        </div>
+      );
+    }
+
+    for (const cardSource of [false, true]) {
+      for (const saveSucceeds of [true, false]) {
+        let resolveSaveB!: (ok: boolean) => void;
+        const onUpdate = vi.fn(
+          () =>
+            new Promise<boolean>((resolve) => {
+              resolveSaveB = resolve;
+            }),
+        );
+        const onExcerptAnnotation = vi.fn();
+        const onShowAnnotationCard = vi.fn();
+        const dismiss = vi.fn();
+
+        const { unmount } = render(
+          <StatefulHighlightHarness
+            cardSource={cardSource}
+            initialNote="A"
+            onUpdate={onUpdate}
+            dismiss={dismiss}
+            onExcerptAnnotation={onExcerptAnnotation}
+            onShowAnnotationCard={onShowAnnotationCard}
+          />,
+        );
+
+        fireEvent.click(screen.getByTestId('popover-note-edit'));
+        const field = screen.getByTestId('popover-note-input');
+        // A -> Save B (paused) -> revert input back to A.
+        fireEvent.change(field, { target: { value: 'B' } });
+        fireEvent.click(screen.getByTestId('popover-note-save'));
+        expect(onUpdate).toHaveBeenCalledWith(highlight.id, { note: 'B', color: null });
+        fireEvent.change(field, { target: { value: 'A' } });
+
+        // Clicking Excerpt / Show (or triggering ⇧⌘E) must NOT bypass the guard even though A equals the old annotation.note.
+        const actionTestId = cardSource ? 'popover-show-in-mindmap' : 'popover-excerpt';
+        fireEvent.click(screen.getByTestId(actionTestId));
+        expect(screen.getByTestId('popover-unsaved-note-warning')).toBeVisible();
+        expect(field.closest('[inert]')).toBeNull();
+        expect(field).toHaveValue('A');
+        expect(onExcerptAnnotation).not.toHaveBeenCalled();
+        expect(onShowAnnotationCard).not.toHaveBeenCalled();
+        expect(dismiss).not.toHaveBeenCalled();
+
+        forgetRecentCommandRuns();
+        act(() => {
+          expect(runCommand('edit.excerpt', 'keyboard')).toBe(true);
+        });
+        expect(onExcerptAnnotation).not.toHaveBeenCalled();
+        expect(onShowAnnotationCard).not.toHaveBeenCalled();
+        expect(dismiss).not.toHaveBeenCalled();
+
+        // Whether B's save succeeds or fails, the editor stays open with 'A' and no MindMap action runs.
+        await act(async () => {
+          resolveSaveB(saveSucceeds);
+        });
+        expect(field.closest('[inert]')).toBeNull();
+        expect(field).toHaveValue('A');
+        expect(onExcerptAnnotation).not.toHaveBeenCalled();
+        expect(onShowAnnotationCard).not.toHaveBeenCalled();
+        expect(dismiss).not.toHaveBeenCalled();
+
+        if (saveSucceeds) {
+          // Since B landed on the backend, 'A' is still unsaved and remains guarded.
+          fireEvent.click(screen.getByTestId(actionTestId));
+          expect(screen.getByTestId('popover-unsaved-note-warning')).toBeVisible();
+          expect(onExcerptAnnotation).not.toHaveBeenCalled();
+          expect(onShowAnnotationCard).not.toHaveBeenCalled();
+        }
+        unmount();
+      }
+    }
+  });
 });

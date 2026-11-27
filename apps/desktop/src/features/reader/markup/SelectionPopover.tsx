@@ -306,16 +306,18 @@ export function SelectionPopover({
 
   // Guard MindMap actions while an existing highlight has unsaved note edits so
   // clicking Excerpt/Show (or using ⇧⌘E / the Edit menu) never drops the draft (#124).
+  // While a save is still in flight, compare against that submitted draft rather than
+  // the stale `annotation.note` so reverting back to the old value cannot bypass the guard.
+  const savingForActive =
+    editing && savingNote !== null && savingNote.annotationId === annotation.id ? savingNote : null;
   const isSavingCurrentDraft =
-    editing &&
-    savingNote !== null &&
-    savingNote.annotationId === annotation.id &&
-    savingNote.draft === editNote;
+    savingForActive !== null && savingForActive.draft.trim() === editNote.trim();
+  const committedNote = savingForActive ? savingForActive.draft : (annotation?.note ?? '');
   const hasUnsavedNoteChanges =
     editing &&
     popover.noteOpen &&
     !isSavingCurrentDraft &&
-    editNote.trim() !== (annotation.note ?? '').trim();
+    editNote.trim() !== committedNote.trim();
   const [unsavedNotePromptFor, setUnsavedNotePromptFor] = useState<string | null>(null);
   if ((!editing || !hasUnsavedNoteChanges) && unsavedNotePromptFor !== null) {
     setUnsavedNotePromptFor(null);
@@ -331,7 +333,14 @@ export function SelectionPopover({
   };
 
   const guardUnsavedNote = (): boolean => {
-    if (!editing || !hasUnsavedNoteChanges) return false;
+    if (!editing || !popover.noteOpen) return false;
+    const draft = latestEditNoteRef.current.trim();
+    const pending = pendingNoteSaveRef.current;
+    const committed =
+      pending && pending.annotationId === annotation.id
+        ? pending.draft.trim()
+        : (annotation.note ?? '').trim();
+    if (draft === committed) return false;
     setUnsavedNotePromptFor(annotation.id);
     noteFieldRef.current?.focus();
     return true;
@@ -342,7 +351,11 @@ export function SelectionPopover({
     if (guardUnsavedNote()) return;
     if (annotation) {
       const pending = pendingNoteSaveRef.current;
-      if (pending && pending.annotationId === annotation.id && pending.draft === editNote) {
+      if (
+        pending &&
+        pending.annotationId === annotation.id &&
+        pending.draft.trim() === latestEditNoteRef.current.trim()
+      ) {
         pending.queuedAction = 'excerpt';
         setQueuedActionWhileSaving(true);
         return;
@@ -358,7 +371,11 @@ export function SelectionPopover({
     if (!annotation) return;
     if (guardUnsavedNote()) return;
     const pending = pendingNoteSaveRef.current;
-    if (pending && pending.annotationId === annotation.id && pending.draft === editNote) {
+    if (
+      pending &&
+      pending.annotationId === annotation.id &&
+      pending.draft.trim() === latestEditNoteRef.current.trim()
+    ) {
       pending.queuedAction = 'show';
       setQueuedActionWhileSaving(true);
       return;
@@ -467,9 +484,13 @@ export function SelectionPopover({
 
   const saveNote = () => {
     if (annotation) {
-      const draft = editNote;
+      const draft = latestEditNoteRef.current;
       const existing = pendingNoteSaveRef.current;
-      if (existing && existing.annotationId === annotation.id && existing.draft === draft) {
+      if (
+        existing &&
+        existing.annotationId === annotation.id &&
+        existing.draft.trim() === draft.trim()
+      ) {
         return;
       }
       const result = annotations.updateAnnotation(annotation.id, { note: draft, color: null });
@@ -498,7 +519,7 @@ export function SelectionPopover({
           }
           if (!isCurrent || activeAnnotationIdRef.current !== annotation.id) return;
           if (saved) {
-            if (latestEditNoteRef.current === draft) {
+            if (latestEditNoteRef.current.trim() === draft.trim()) {
               const callbacks = latestCallbacksRef.current;
               callbacks.closeNote();
               if (entry.queuedAction === 'excerpt') {
@@ -773,6 +794,7 @@ export function SelectionPopover({
             fieldClassName={cn(popover.noteOpen && 'min-w-64')}
             onChange={(value) => {
               if (editing) {
+                latestEditNoteRef.current = value;
                 setEditNote(value);
                 if (pendingNoteSaveRef.current) {
                   pendingNoteSaveRef.current.queuedAction = null;
