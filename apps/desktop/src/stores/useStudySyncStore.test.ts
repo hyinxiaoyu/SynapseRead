@@ -2419,6 +2419,161 @@ describe('useStudySyncStore', () => {
         expect(reopened.getState().annotations[0]?.note).toBe('Older note');
         expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
       }
+
+      // 3) Pre-relink save ("Older note") paused BEFORE writing to backend -> content-changing
+      // relink -> newer save ("Newest note") commits to backend & UI -> older request unpauses
+      // and commits to backend LAST -> backend is reconciled back to "Newest note" so live state
+      // and reloaded workspace stay consistent with locationLabel: null.
+      {
+        const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+        const revisedBytes = new TextEncoder().encode('Revised file.\n');
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+        const created = (await customStore.getState().createAnnotationFromSelection())!;
+
+        const origUpdate = customBackend.updateAnnotation.bind(customBackend);
+        let releaseFirstWrite!: () => void;
+        let firstWritePaused!: () => void;
+        const firstWriteGate = new Promise<void>((r) => {
+          releaseFirstWrite = r;
+        });
+        const waitFirstWritePaused = new Promise<void>((r) => {
+          firstWritePaused = r;
+        });
+
+        vi.spyOn(customBackend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+          firstWritePaused();
+          await firstWriteGate;
+          return origUpdate(id, patch);
+        });
+
+        // Start pre-relink save ("Older note") and pause it BEFORE backend write executes.
+        const firstSavePromise = customStore.getState().updateAnnotation(created.id, {
+          note: 'Older note',
+          color: '#f59e0b',
+          style: 'highlight',
+        });
+        await waitFirstWritePaused;
+
+        // Complete content-changing relink, then save "Newest note" to backend and UI.
+        const relinked = await customStore.getState().relinkDocument(docId, false);
+        expect(relinked?.contentChanged).toBe(true);
+
+        await customStore.getState().updateAnnotation(created.id, {
+          note: 'Newest note',
+          color: '#22c55e',
+          style: 'underline',
+        });
+        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
+        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
+        expect(customStore.getState().annotations[0]?.style).toBe('underline');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        // Release the older request so it writes to the backend LAST.
+        releaseFirstWrite();
+        await firstSavePromise;
+
+        // Both live state and reloaded backend state must agree on "Newest note" and locationLabel: null.
+        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
+        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
+        expect(customStore.getState().annotations[0]?.style).toBe('underline');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations[0]?.note).toBe('Newest note');
+        expect(reopened.getState().annotations[0]?.color).toBe('#22c55e');
+        expect(reopened.getState().annotations[0]?.style).toBe('underline');
+        expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
+      }
+
+      // 4) Same late-commit order when the newer save explicitly cleared the note (`note: ''`):
+      // backend must be reconciled back to `note: null` rather than keeping the older note.
+      {
+        const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+        const revisedBytes = new TextEncoder().encode('Revised file.\n');
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+        const created = (await customStore
+          .getState()
+          .createAnnotationFromSelection({ note: 'Initial note' }))!;
+
+        const origUpdate = customBackend.updateAnnotation.bind(customBackend);
+        let releaseFirstWrite!: () => void;
+        let firstWritePaused!: () => void;
+        const firstWriteGate = new Promise<void>((r) => {
+          releaseFirstWrite = r;
+        });
+        const waitFirstWritePaused = new Promise<void>((r) => {
+          firstWritePaused = r;
+        });
+
+        vi.spyOn(customBackend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+          firstWritePaused();
+          await firstWriteGate;
+          return origUpdate(id, patch);
+        });
+
+        const firstSavePromise = customStore.getState().updateAnnotation(created.id, {
+          note: 'Older note',
+          color: null,
+        });
+        await waitFirstWritePaused;
+
+        await customStore.getState().relinkDocument(docId, false);
+        await customStore.getState().updateAnnotation(created.id, {
+          note: '',
+          color: null,
+        });
+        expect(customStore.getState().annotations[0]?.note).toBeNull();
+
+        releaseFirstWrite();
+        await firstSavePromise;
+
+        expect(customStore.getState().annotations[0]?.note).toBeNull();
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations[0]?.note).toBeNull();
+        expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
+      }
     });
 
     it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {
