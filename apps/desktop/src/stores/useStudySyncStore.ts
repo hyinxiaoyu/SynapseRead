@@ -547,7 +547,10 @@ export function createStudySyncStore(backend: StudyBackend) {
         try {
           const graph = await backend.loadNotebookGraph(notebookId);
           const current = graph.annotations.find((candidate) => candidate.id === annotation.id);
-          resolved = current ?? { ...annotation, locationLabel: null };
+          resolved = {
+            ...annotation,
+            locationLabel: current ? (current.locationLabel ?? null) : null,
+          };
         } catch {
           resolved = { ...annotation, locationLabel: null };
         }
@@ -569,7 +572,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       return { annotation: reconciled.annotation, stale: false };
     };
 
-    const refreshAnnotationFromBackend = async (
+    const refreshAnnotationLocationFromBackend = async (
       notebookId: string,
       annotationId: string,
       documentId: string,
@@ -586,20 +589,30 @@ export function createStudySyncStore(backend: StudyBackend) {
         }
         if (!fetched) return null;
         let stale = false;
+        let present = false;
         set((state) => {
-          if (!state.annotations.some((candidate) => candidate.id === annotationId)) {
+          const current = state.annotations.find((candidate) => candidate.id === annotationId);
+          if (!current) {
             return state;
           }
+          present = true;
           stale = hasStateDocumentContentChanged(state, documentId, versionBeforeLoad);
-          const next = stale ? { ...fetched, locationLabel: null } : fetched;
-          latest = next;
+          const nextLocationLabel = stale ? null : (fetched.locationLabel ?? null);
+          // Merge only `locationLabel` onto the live row so newer user edits (note, color,
+          // style) saved while this refresh was in flight are never rolled back (#125).
+          const merged: Annotation =
+            current.locationLabel === nextLocationLabel
+              ? current
+              : { ...current, locationLabel: nextLocationLabel };
+          latest = merged;
+          if (merged === current) return state;
           return {
             annotations: state.annotations.map((candidate) =>
-              candidate.id === annotationId ? next : candidate,
+              candidate.id === annotationId ? merged : candidate,
             ),
           };
         });
-        if (!stale) return latest;
+        if (!present || !stale) return latest;
       }
     };
 
@@ -1856,7 +1869,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           // nesting target stays whatever the reader chose.
           get().revealNode(created.node.id, resolvedParentTitle);
           if (needsBackendRefresh) {
-            await refreshAnnotationFromBackend(
+            await refreshAnnotationLocationFromBackend(
               notebook.id,
               created.annotation.id,
               selection.documentId,
@@ -1913,7 +1926,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             };
           });
           if (needsBackendRefresh) {
-            const refreshed = await refreshAnnotationFromBackend(
+            const refreshed = await refreshAnnotationLocationFromBackend(
               notebook.id,
               saved.id,
               selection.documentId,
@@ -1957,7 +1970,11 @@ export function createStudySyncStore(backend: StudyBackend) {
             };
           });
           if (needsBackendRefresh && notebook) {
-            await refreshAnnotationFromBackend(notebook.id, annotationId, updated.documentId);
+            await refreshAnnotationLocationFromBackend(
+              notebook.id,
+              annotationId,
+              updated.documentId,
+            );
           }
         });
       },
@@ -2061,7 +2078,7 @@ export function createStudySyncStore(backend: StudyBackend) {
               };
             });
             if (needsBackendRefresh) {
-              const refreshed = await refreshAnnotationFromBackend(
+              const refreshed = await refreshAnnotationLocationFromBackend(
                 notebookId,
                 result.annotation.id,
                 documentId,

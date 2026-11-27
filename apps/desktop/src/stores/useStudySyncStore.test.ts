@@ -2041,6 +2041,224 @@ describe('useStudySyncStore', () => {
       }
     });
 
+    it('preserves newer annotation edits when a relink locationLabel refresh delivers an older snapshot (#125)', async () => {
+      // 1) Excerpt + same-turn relink -> refresh reads old snapshot (note: null) -> user saves
+      // "Newest note" -> delayed refresh snapshot arrives -> live state and reload both keep
+      // "Newest note" while locationLabel stays null.
+      {
+        const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+        const revisedBytes = new TextEncoder().encode('Revised file.\n');
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        const origCreateExcerpt = customBackend.createExcerpt.bind(customBackend);
+        const origRelink = customBackend.relinkDocument.bind(customBackend);
+        const origLoadGraph = customBackend.loadNotebookGraph.bind(customBackend);
+
+        let releaseExcerpt!: () => void;
+        let releaseRelink!: () => void;
+        let releaseRefresh!: () => void;
+        let excerptCommitted!: () => void;
+        let relinkCommitted!: () => void;
+        let refreshReadOldSnapshot!: () => void;
+
+        const excerptGate = new Promise<void>((r) => {
+          releaseExcerpt = r;
+        });
+        const relinkGate = new Promise<void>((r) => {
+          releaseRelink = r;
+        });
+        const refreshGate = new Promise<void>((r) => {
+          releaseRefresh = r;
+        });
+        const waitExcerptCommitted = new Promise<void>((r) => {
+          excerptCommitted = r;
+        });
+        const waitRelinkCommitted = new Promise<void>((r) => {
+          relinkCommitted = r;
+        });
+        const waitRefreshReadOldSnapshot = new Promise<void>((r) => {
+          refreshReadOldSnapshot = r;
+        });
+
+        vi.spyOn(customBackend, 'createExcerpt').mockImplementationOnce(async (input) => {
+          const result = await origCreateExcerpt(input);
+          excerptCommitted();
+          await excerptGate;
+          return result;
+        });
+        vi.spyOn(customBackend, 'relinkDocument').mockImplementationOnce(
+          async (id, confirmInPlace) => {
+            const result = await origRelink(id, confirmInPlace);
+            relinkCommitted();
+            await relinkGate;
+            return result;
+          },
+        );
+        vi.spyOn(customBackend, 'loadNotebookGraph').mockImplementationOnce(async (notebookId) => {
+          const snapshot = await origLoadGraph(notebookId);
+          expect(snapshot.annotations[0]?.note).toBeNull();
+          expect(snapshot.annotations[0]?.locationLabel).toBeNull();
+          refreshReadOldSnapshot();
+          await refreshGate;
+          return snapshot;
+        });
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+
+        const excerptPromise = customStore.getState().excerptSelection();
+        await waitExcerptCommitted;
+        const relinkPromise = customStore.getState().relinkDocument(docId, false);
+        await waitRelinkCommitted;
+
+        // Deliver excerpt then relink in the same turn so refresh starts after synchronous commit.
+        releaseExcerpt();
+        releaseRelink();
+        await relinkPromise;
+        await waitRefreshReadOldSnapshot;
+
+        // While the refresh holds the older snapshot (note: null), save "Newest note".
+        const annotationId = customStore.getState().annotations[0]!.id;
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+        await customStore
+          .getState()
+          .updateAnnotation(annotationId, { note: 'Newest note', color: null });
+        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        // Deliver the delayed refresh snapshot: must NOT roll back "Newest note".
+        releaseRefresh();
+        await excerptPromise;
+
+        expect(customStore.getState().annotations).toHaveLength(1);
+        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        // Reloading from backend agrees.
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations).toHaveLength(1);
+        expect(reopened.getState().annotations[0]?.note).toBe('Newest note');
+        expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
+      }
+
+      // 2) Same delayed refresh on createAnnotationFromSelection returns the merged record
+      // with the newer note, and a deleted annotation is never resurrected by a late refresh.
+      {
+        const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+        const revisedBytes = new TextEncoder().encode('Revised file.\n');
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        const origCreate = customBackend.createAnnotation.bind(customBackend);
+        const origRelink = customBackend.relinkDocument.bind(customBackend);
+        const origLoadGraph = customBackend.loadNotebookGraph.bind(customBackend);
+
+        let releaseCreate!: () => void;
+        let releaseRelink!: () => void;
+        let releaseRefresh!: () => void;
+        let createCommitted!: () => void;
+        let relinkCommitted!: () => void;
+        let refreshReadOldSnapshot!: () => void;
+
+        const createGate = new Promise<void>((r) => {
+          releaseCreate = r;
+        });
+        const relinkGate = new Promise<void>((r) => {
+          releaseRelink = r;
+        });
+        const refreshGate = new Promise<void>((r) => {
+          releaseRefresh = r;
+        });
+        const waitCreateCommitted = new Promise<void>((r) => {
+          createCommitted = r;
+        });
+        const waitRelinkCommitted = new Promise<void>((r) => {
+          relinkCommitted = r;
+        });
+        const waitRefreshReadOldSnapshot = new Promise<void>((r) => {
+          refreshReadOldSnapshot = r;
+        });
+
+        vi.spyOn(customBackend, 'createAnnotation').mockImplementationOnce(async (input) => {
+          const result = await origCreate(input);
+          createCommitted();
+          await createGate;
+          return result;
+        });
+        vi.spyOn(customBackend, 'relinkDocument').mockImplementationOnce(
+          async (id, confirmInPlace) => {
+            const result = await origRelink(id, confirmInPlace);
+            relinkCommitted();
+            await relinkGate;
+            return result;
+          },
+        );
+        vi.spyOn(customBackend, 'loadNotebookGraph').mockImplementationOnce(async (notebookId) => {
+          const snapshot = await origLoadGraph(notebookId);
+          refreshReadOldSnapshot();
+          await refreshGate;
+          return snapshot;
+        });
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+
+        const createPromise = customStore.getState().createAnnotationFromSelection();
+        await waitCreateCommitted;
+        const relinkPromise = customStore.getState().relinkDocument(docId, false);
+        await waitRelinkCommitted;
+
+        releaseCreate();
+        releaseRelink();
+        await relinkPromise;
+        await waitRefreshReadOldSnapshot;
+
+        const annotationId = customStore.getState().annotations[0]!.id;
+        await customStore
+          .getState()
+          .updateAnnotation(annotationId, { note: 'Newest note', color: null });
+
+        releaseRefresh();
+        const created = await createPromise;
+        expect(created?.note).toBe('Newest note');
+        expect(created?.locationLabel).toBeNull();
+        expect(customStore.getState().annotations[0]?.note).toBe('Newest note');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+      }
+    });
+
     it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {
       const bytes = new TextEncoder().encode('drop-hide race');
       const file = new File([bytes], 'drop-race.txt', { type: 'text/plain' });
