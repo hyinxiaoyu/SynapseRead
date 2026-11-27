@@ -1941,8 +1941,11 @@ export function createStudySyncStore(backend: StudyBackend) {
 
       async updateAnnotation(annotationId, patch) {
         const run = async () => {
-          const { notebook, annotations } = get();
-          const existing = annotations.find((candidate) => candidate.id === annotationId);
+          const { notebook, annotations, deletedAnnotationHistory } = get();
+          const existing =
+            annotations.find((candidate) => candidate.id === annotationId) ??
+            deletedAnnotationHistory.find((entry) => entry.annotation.id === annotationId)
+              ?.annotation;
           const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
           await guarded(async () => {
             const updated = await backend.updateAnnotation(annotationId, patch);
@@ -1957,15 +1960,29 @@ export function createStudySyncStore(backend: StudyBackend) {
                 : null;
             let needsBackendRefresh = false;
             set((state) => {
-              const current = state.annotations.find((candidate) => candidate.id === annotationId);
-              if (!current) return state;
               const final = reconciled
                 ? resolveAnnotationForState(state, reconciled)
                 : { annotation: updated, stale: false };
               needsBackendRefresh = final.stale;
+              const current = state.annotations.find((candidate) => candidate.id === annotationId);
+              if (current) {
+                return {
+                  annotations: state.annotations.map((candidate) =>
+                    candidate.id === annotationId ? final.annotation : candidate,
+                  ),
+                };
+              }
+              const inHistory = state.deletedAnnotationHistory.some(
+                (entry) => entry.annotation.id === annotationId,
+              );
+              if (!inHistory) return state;
+              // Keep the optimistic delete snapshot current so a failed delete rollback
+              // restores the latest persisted edit rather than pre-queue fields (#125).
               return {
-                annotations: state.annotations.map((candidate) =>
-                  candidate.id === annotationId ? final.annotation : candidate,
+                deletedAnnotationHistory: state.deletedAnnotationHistory.map((entry) =>
+                  entry.annotation.id === annotationId
+                    ? { ...entry, annotation: final.annotation }
+                    : entry,
                 ),
               };
             });
@@ -1999,6 +2016,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         const removed = get().annotations.find((annotation) => annotation.id === annotationId);
         if (!removed) return;
         const versionAtStart = getDocumentVersion(removed.documentId);
+        const priorUpdates = pendingAnnotationUpdates.get(annotationId);
         const removedFromCards = new Map(
           get()
             .cards.filter((card) => card.annotationIds.includes(annotationId))
@@ -2018,16 +2036,24 @@ export function createStudySyncStore(backend: StudyBackend) {
           ),
         }));
         const deleting = guarded(
-          () => backend.deleteAnnotation(annotationId),
+          async () => {
+            // Drain any queued edits for this annotation before soft-deleting it so those
+            // edits persist and survive a subsequent Undo (#125).
+            if (priorUpdates) await priorUpdates;
+            await backend.deleteAnnotation(annotationId);
+          },
           () => {
             set((state) => {
+              const latestRemoved =
+                state.deletedAnnotationHistory.find((entry) => entry.annotation.id === removed.id)
+                  ?.annotation ?? removed;
               const restoredAnnotation = hasStateDocumentContentChanged(
                 state,
-                removed.documentId,
+                latestRemoved.documentId,
                 versionAtStart,
               )
-                ? { ...removed, locationLabel: null }
-                : removed;
+                ? { ...latestRemoved, locationLabel: null }
+                : latestRemoved;
               return {
                 annotations: [...state.annotations, restoredAnnotation],
                 deletedAnnotationHistory: state.deletedAnnotationHistory.filter(
@@ -2047,7 +2073,9 @@ export function createStudySyncStore(backend: StudyBackend) {
         );
         pendingDeletes.set(annotationId, deleting);
         await deleting;
-        pendingDeletes.delete(annotationId);
+        if (pendingDeletes.get(annotationId) === deleting) {
+          pendingDeletes.delete(annotationId);
+        }
       },
 
       async undoRemoveAnnotation() {

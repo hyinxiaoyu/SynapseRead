@@ -2512,6 +2512,152 @@ describe('useStudySyncStore', () => {
         expect(reopened.getState().annotations[0]?.note).toBe('Recovered note');
         expect(reopened.getState().annotations[0]?.locationLabel).toBeNull();
       }
+
+      // 4) Delete waits for queued updates so undo restores every queued edit (note + color),
+      // and a failed delete rolls back with the latest queued edits intact.
+      {
+        const originalBytes = new TextEncoder().encode('Old chapter\nLine one\n');
+        const revisedBytes = new TextEncoder().encode('Revised file.\n');
+        const customBackend = createMemoryBackend({
+          library: {
+            '/t/original.txt': originalBytes,
+            '/t/revised.txt': revisedBytes,
+          },
+        });
+        const customStore = createStudySyncStore(customBackend);
+        await customStore.getState().initialize();
+        await customStore.getState().openDocument();
+        const docId = customStore.getState().activeDocumentId as string;
+        const notebookId = customStore.getState().notebook!.id;
+        const oldHash = customStore.getState().documents.find((d) => d.id === docId)!.fileHash;
+
+        customStore.getState().setSelection({
+          documentId: docId,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 11, lineIndex: 0 },
+          text: 'Old chapter',
+          imagePng: null,
+          locationLabel: 'Old chapter · Line 1',
+          sourceFileHash: oldHash,
+        });
+        const created = (await customStore
+          .getState()
+          .createAnnotationFromSelection({ color: '#fde047' }))!;
+
+        const origUpdate = customBackend.updateAnnotation.bind(customBackend);
+        const origDelete = customBackend.deleteAnnotation.bind(customBackend);
+        const callOrder: string[] = [];
+        let releaseNoteResponse!: () => void;
+        let noteCommitted!: () => void;
+        const noteGate = new Promise<void>((r) => {
+          releaseNoteResponse = r;
+        });
+        const waitNoteCommitted = new Promise<void>((r) => {
+          noteCommitted = r;
+        });
+
+        vi.spyOn(customBackend, 'updateAnnotation')
+          .mockImplementationOnce(async (id, patch) => {
+            const result = await origUpdate(id, patch);
+            callOrder.push('update:note');
+            noteCommitted();
+            await noteGate;
+            return result;
+          })
+          .mockImplementationOnce(async (id, patch) => {
+            callOrder.push('update:color');
+            return origUpdate(id, patch);
+          });
+        vi.spyOn(customBackend, 'deleteAnnotation').mockImplementationOnce(async (id) => {
+          callOrder.push('delete');
+          return origDelete(id);
+        });
+
+        // 1) Start note edit and hold its response after backend commit.
+        const notePromise = customStore.getState().updateAnnotation(created.id, {
+          note: 'Saved note',
+          color: null,
+        });
+        await waitNoteCommitted;
+
+        // 2) Queue color edit and immediately delete while note response is still held.
+        const colorPromise = customStore.getState().updateAnnotation(created.id, {
+          note: null,
+          color: '#22c55e',
+        });
+        const removePromise = customStore.getState().removeAnnotation(created.id);
+
+        // 3) Release first response; color edit must commit before delete, then undo restores both.
+        releaseNoteResponse();
+        await Promise.all([notePromise, colorPromise, removePromise]);
+        expect(customStore.getState().error).toBeNull();
+        expect(callOrder).toEqual(['update:note', 'update:color', 'delete']);
+
+        const restored = await customStore.getState().undoRemoveAnnotation();
+        expect(restored?.note).toBe('Saved note');
+        expect(restored?.color).toBe('#22c55e');
+        expect(restored?.locationLabel).toBe('Old chapter · Line 1');
+        expect(customStore.getState().annotations[0]?.note).toBe('Saved note');
+        expect(customStore.getState().annotations[0]?.color).toBe('#22c55e');
+
+        const persisted = (await customBackend.loadNotebookGraph(notebookId)).annotations[0];
+        expect(persisted?.note).toBe('Saved note');
+        expect(persisted?.color).toBe('#22c55e');
+
+        const reopened = createStudySyncStore(customBackend);
+        await reopened.getState().initialize();
+        expect(reopened.getState().annotations[0]?.note).toBe('Saved note');
+        expect(reopened.getState().annotations[0]?.color).toBe('#22c55e');
+
+        // 4b) If delete fails after queued edits succeed across a relink, rollback keeps the
+        // updated note & color and clears locationLabel.
+        let releaseSecondNote!: () => void;
+        let secondNoteCommitted!: () => void;
+        const secondNoteGate = new Promise<void>((r) => {
+          releaseSecondNote = r;
+        });
+        const waitSecondNoteCommitted = new Promise<void>((r) => {
+          secondNoteCommitted = r;
+        });
+
+        vi.spyOn(customBackend, 'updateAnnotation')
+          .mockImplementationOnce(async (id, patch) => {
+            const result = await origUpdate(id, patch);
+            secondNoteCommitted();
+            await secondNoteGate;
+            return result;
+          })
+          .mockImplementationOnce(async (id, patch) => origUpdate(id, patch));
+        vi.spyOn(customBackend, 'deleteAnnotation').mockRejectedValueOnce({
+          code: 'io',
+          message: 'delete failed',
+        });
+
+        const secondNotePromise = customStore.getState().updateAnnotation(created.id, {
+          note: 'After undo note',
+          color: null,
+        });
+        await waitSecondNoteCommitted;
+
+        await customStore.getState().relinkDocument(docId, false);
+        const secondColorPromise = customStore.getState().updateAnnotation(created.id, {
+          note: null,
+          color: '#3b82f6',
+        });
+        const failedDeletePromise = customStore.getState().removeAnnotation(created.id);
+
+        releaseSecondNote();
+        await Promise.all([secondNotePromise, secondColorPromise, failedDeletePromise]);
+
+        expect(customStore.getState().annotations[0]?.note).toBe('After undo note');
+        expect(customStore.getState().annotations[0]?.color).toBe('#3b82f6');
+        expect(customStore.getState().annotations[0]?.locationLabel).toBeNull();
+
+        const reopenedAfterFailedDelete = createStudySyncStore(customBackend);
+        await reopenedAfterFailedDelete.getState().initialize();
+        expect(reopenedAfterFailedDelete.getState().annotations[0]?.note).toBe('After undo note');
+        expect(reopenedAfterFailedDelete.getState().annotations[0]?.color).toBe('#3b82f6');
+        expect(reopenedAfterFailedDelete.getState().annotations[0]?.locationLabel).toBeNull();
+      }
     });
 
     it('keeps a document hidden when an older dropFiles response resolves after hideRecentDocument', async () => {
