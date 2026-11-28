@@ -58,19 +58,17 @@ interface ActiveDrag {
   touchIds: ReadonlySet<number>;
 }
 
-function dragEventTouchIds(event: unknown): Set<number> {
+function changedTouchIds(event: unknown): Set<number> {
   const ids = new Set<number>();
   if (typeof event !== 'object' || event === null) return ids;
   const candidate = event as {
     changedTouches?: ArrayLike<{ identifier: number }>;
-    touches?: ArrayLike<{ identifier: number }>;
   };
-  for (const list of [candidate.changedTouches, candidate.touches]) {
-    if (!list) continue;
-    for (let i = 0; i < list.length; i += 1) {
-      const touch = list[i];
-      if (touch !== undefined) ids.add(touch.identifier);
-    }
+  const list = candidate.changedTouches;
+  if (!list) return ids;
+  for (let i = 0; i < list.length; i += 1) {
+    const touch = list[i];
+    if (touch !== undefined) ids.add(touch.identifier);
   }
   return ids;
 }
@@ -258,9 +256,10 @@ export function MindMapPane({
   );
 
   const cancelNodeDrag = useCallback(
-    (nodeId: string) => {
+    (nodeId: string, expectedDrag?: ActiveDrag) => {
       const active = activeDragsRef.current.get(nodeId);
       if (!active) return;
+      if (expectedDrag !== undefined && active !== expectedDrag) return;
       activeDragsRef.current.delete(nodeId);
       // Restore the pre-drag position on screen so a cancelled drag never leaves
       // uncommitted mid-drag coordinates visible or persisted (#182).
@@ -307,29 +306,30 @@ export function MindMapPane({
     };
     const onTouchGestureEnded = (event: TouchEvent) => {
       if (activeDragsRef.current.size === 0) return;
-      const endedIds = dragEventTouchIds(event);
+      // Only `changedTouches` lists the touch points that actually ended or were
+      // cancelled; `touches` holds points that are still active on screen (#182).
+      const endedIds = changedTouchIds(event);
       if (endedIds.size === 0) return;
-      const matchingNodeIds: string[] = [];
+      const matchingDrags: Array<[string, ActiveDrag]> = [];
       for (const [id, active] of activeDragsRef.current) {
         if (active.kind !== 'touch') continue;
         for (const touchId of endedIds) {
           if (active.touchIds.has(touchId)) {
-            matchingNodeIds.push(id);
+            matchingDrags.push([id, active]);
             break;
           }
         }
       }
-      if (matchingNodeIds.length === 0) return;
+      if (matchingDrags.length === 0) return;
       // Defer to the next macrotask (not a microtask, which browsers drain between
       // capture and target listeners of the same native event) so `XYDrag.on('end')`
       // finishes both `updateNodePositions(dragItems, false)` and `onNodeDragStop`
-      // first. Normal `touchend` settles and `touchcancel` cancels in `onNodeDragStop`,
-      // making this a no-op, while an aborted multitouch drag (which skips
-      // `onNodeDragStop`) still cancels cleanly via the same idempotent path.
+      // first. Guarding with the matched `ActiveDrag` instance ensures a stale
+      // callback can never cancel a newer drag on the same card.
       const timer = window.setTimeout(() => {
         cancelFallbackTimers.delete(timer);
-        for (const id of matchingNodeIds) {
-          cancelNodeDragRef.current(id);
+        for (const [id, expectedDrag] of matchingDrags) {
+          cancelNodeDragRef.current(id, expectedDrag);
         }
       }, 0);
       cancelFallbackTimers.add(timer);
@@ -724,7 +724,7 @@ export function MindMapPane({
             node.id,
             origin,
             touch ? 'touch' : 'mouse',
-            touch ? dragEventTouchIds(event) : undefined,
+            touch ? changedTouchIds(event) : undefined,
           );
         }}
         onNodeDragStop={(event, node) => {

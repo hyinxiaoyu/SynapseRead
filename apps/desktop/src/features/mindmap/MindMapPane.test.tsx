@@ -1157,6 +1157,91 @@ describe('MindMapPane', () => {
           vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
         });
         expect(commits).toEqual([{ id: 'a', posX: 83, posY: 70 }]);
+
+        // 5. Dual-touch: touch 1 drags card to (101, 80) and stays pressed while touch 2 taps
+        //    and releases outside (`changedTouches: [touch2], touches: [touch1]`). Must NOT
+        //    snap back, must keep arrow keys blocked, must write 0 times before touch 1 ends,
+        //    and must write once at (101, 80) when touch 1 releases.
+        commits.length = 0;
+        const pane = document.querySelector('.react-flow__pane') as HTMLElement;
+        const touch1Start = {
+          identifier: 10,
+          clientX: 90,
+          clientY: 80,
+          pageX: 90,
+          pageY: 80,
+          target: cardA,
+        };
+        const touch1Thresh = {
+          identifier: 10,
+          clientX: 92,
+          clientY: 80,
+          pageX: 92,
+          pageY: 80,
+          target: cardA,
+        };
+        const touch1Moved = {
+          identifier: 10,
+          clientX: 110,
+          clientY: 90,
+          pageX: 110,
+          pageY: 90,
+          target: cardA,
+        };
+        const touch2Outside = {
+          identifier: 11,
+          clientX: 500,
+          clientY: 500,
+          pageX: 500,
+          pageY: 500,
+          target: pane,
+        };
+        const sendRawTouch = (
+          target: EventTarget,
+          type: 'touchstart' | 'touchmove' | 'touchend',
+          changedTouches: unknown[],
+          touches: unknown[],
+        ) => {
+          const event = new Event(type, { bubbles: true, cancelable: true });
+          Object.defineProperties(event, {
+            changedTouches: { value: changedTouches },
+            touches: { value: touches },
+            targetTouches: { value: touches },
+            view: { value: window },
+          });
+          act(() => {
+            target.dispatchEvent(event);
+          });
+        };
+
+        sendRawTouch(cardA, 'touchstart', [touch1Start], [touch1Start]);
+        sendRawTouch(cardA, 'touchmove', [touch1Thresh], [touch1Thresh]);
+        sendRawTouch(cardA, 'touchmove', [touch1Moved], [touch1Moved]);
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 101, posY: 80 });
+
+        // Unrelated touch 2 taps outside and releases while touch 1 stays in `touches`.
+        sendRawTouch(pane, 'touchstart', [touch2Outside], [touch1Moved, touch2Outside]);
+        sendRawTouch(pane, 'touchend', [touch2Outside], [touch1Moved]);
+
+        // Advance past both 0 ms fallback macrotask and > 300 ms debounce.
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 101, posY: 80 });
+        cardA.focus();
+        fireEvent.keyDown(cardA, { key: 'ArrowRight' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 101, posY: 80 });
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([]);
+
+        // Releasing touch 1 commits (101, 80) once.
+        sendRawTouch(cardA, 'touchend', [touch1Moved], []);
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 101, posY: 80 }]);
       } finally {
         if (originalMaxTouchPoints) {
           Object.defineProperty(Navigator.prototype, 'maxTouchPoints', originalMaxTouchPoints);

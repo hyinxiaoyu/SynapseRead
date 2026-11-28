@@ -1825,6 +1825,107 @@ export async function mindmapFlow(page) {
         Math.round(writes4c[0].posY) === Math.round(coords4cAfter.y),
       `expected touchEnd to write final position exactly once, got ${JSON.stringify({ coords4cAfter, writes4c })}`,
     );
+
+    // 4d. Dual-touch regression (#182): Touch 1 drags card and stays down while Touch 2
+    //     taps and releases outside (`changedTouches: [2], touches: [1]`). Card must NOT
+    //     snap back, arrow keys must stay blocked with 0 writes past 300 ms, and releasing
+    //     Touch 1 must commit the final dragged coordinates once.
+    const before4d = await page.evaluate(cardByText('Arrival line 02'));
+    const writesBefore4d = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().length`,
+    );
+    const outsidePoint = await page.evaluate(`(() => {
+      const pane = document.querySelector('.react-flow')?.getBoundingClientRect();
+      return { x: pane.right - 24, y: pane.top + 24 };
+    })()`);
+    const t1Start = before4d.center;
+    const t1End = { x: t1Start.x + 18, y: t1Start.y + 10 };
+    await page.cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x: t1Start.x, y: t1Start.y, id: 1 }],
+    });
+    for (let step = 1; step <= 4; step += 1) {
+      await page.cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [
+          {
+            x: t1Start.x + ((t1End.x - t1Start.x) * step) / 4,
+            y: t1Start.y + ((t1End.y - t1Start.y) * step) / 4,
+            id: 1,
+          },
+        ],
+      });
+    }
+    await page.waitFor(
+      `(${cardByText('Arrival line 02')})?.transform !== ${JSON.stringify(before4d.transform)}`,
+      'touch 1 to drag card before secondary touch tap',
+    );
+    const dragged4d = parseTranslate(
+      (await page.evaluate(cardByText('Arrival line 02'))).transform,
+    );
+
+    // Secondary touch 2 taps outside card and releases while touch 1 stays held.
+    await page.cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [
+        { x: t1End.x, y: t1End.y, id: 1 },
+        { x: outsidePoint.x, y: outsidePoint.y, id: 2 },
+      ],
+    });
+    await page.cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [{ x: outsidePoint.x, y: outsidePoint.y, id: 2 }],
+    });
+
+    await waitTwoFrames();
+    const afterTouch2Release = parseTranslate(
+      (await page.evaluate(cardByText('Arrival line 02'))).transform,
+    );
+    assert(
+      Math.round(afterTouch2Release.x) === Math.round(dragged4d.x) &&
+        Math.round(afterTouch2Release.y) === Math.round(dragged4d.y),
+      `releasing unrelated touch 2 must not snap dragged card back: ${JSON.stringify({ dragged4d, afterTouch2Release })}`,
+    );
+
+    // Arrow key must remain intercepted while touch 1 is still down, with 0 writes past 300 ms.
+    await page.evaluate(
+      `document.querySelector('.react-flow__node[data-id="${touchCardId}"]')?.focus()`,
+    );
+    await page.press('ArrowRight');
+    await new Promise((done) => setTimeout(done, 400));
+    const afterArrowDuringTouch1 = parseTranslate(
+      (await page.evaluate(cardByText('Arrival line 02'))).transform,
+    );
+    const writesDuringTouch1 = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4d})`,
+    );
+    assert(
+      writesDuringTouch1.length === 0 &&
+        Math.round(afterArrowDuringTouch1.x) === Math.round(dragged4d.x) &&
+        Math.round(afterArrowDuringTouch1.y) === Math.round(dragged4d.y),
+      `expected arrow key to stay blocked with 0 writes while touch 1 is held, got ${JSON.stringify({ dragged4d, afterArrowDuringTouch1, writesDuringTouch1 })}`,
+    );
+
+    // Release touch 1 -> commits final dragged position once.
+    await page.cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [{ x: t1End.x, y: t1End.y, id: 1 }],
+    });
+    await page.waitFor(
+      `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBefore4d + 1}`,
+      'touch 1 release to persist final dragged coordinates',
+    );
+    await new Promise((done) => setTimeout(done, 400));
+    const writes4d = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4d})`,
+    );
+    assert(
+      writes4d.length === 1 &&
+        writes4d[0].nodeId === touchCardId &&
+        Math.round(writes4d[0].posX) === Math.round(dragged4d.x) &&
+        Math.round(writes4d[0].posY) === Math.round(dragged4d.y),
+      `expected touch 1 release to write final dragged position once, got ${JSON.stringify({ dragged4d, writes4d })}`,
+    );
   } finally {
     await page.cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
   }
