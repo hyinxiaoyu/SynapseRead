@@ -9,10 +9,18 @@ import {
   onCommandRun,
   runCommand,
 } from '@/features/commands/registry';
+import { flushBeforeClose } from '@/lib/flushBeforeClose';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
-import type { MindMapNode, NoteCard, StudyNotebook } from '@/types/domain';
+import type {
+  Annotation,
+  MindMapEdge,
+  MindMapNode,
+  NoteCard,
+  StudyDocument,
+  StudyNotebook,
+} from '@/types/domain';
 
-import { MindMapPane } from './MindMapPane';
+import { KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS, MindMapPane } from './MindMapPane';
 
 const initialState = useStudySyncStore.getState();
 const PANE = { width: 800, height: 600 };
@@ -66,11 +74,52 @@ function seed(nodes: MindMapNode[], extra: Partial<ReturnType<typeof useStudySyn
   });
 }
 
-function mockReducedMotion(reduce: boolean) {
+function mockMediaQueries({
+  reduceMotion = false,
+  dark = false,
+}: {
+  reduceMotion?: boolean;
+  dark?: boolean;
+}) {
+  const listeners = new Map<string, Set<() => void>>();
+  let currentDark = dark;
+  let currentReduce = reduceMotion;
   vi.stubGlobal(
     'matchMedia',
-    vi.fn((query: string) => ({ matches: reduce && query.includes('reduce'), media: query })),
+    vi.fn((query: string) => ({
+      get matches() {
+        if (query.includes('prefers-color-scheme: dark')) return currentDark;
+        if (query.includes('reduce')) return currentReduce;
+        return false;
+      },
+      media: query,
+      addEventListener: (_event: string, listener: () => void) => {
+        const set = listeners.get(query) ?? new Set();
+        set.add(listener);
+        listeners.set(query, set);
+      },
+      removeEventListener: (_event: string, listener: () => void) => {
+        listeners.get(query)?.delete(listener);
+      },
+    })),
   );
+  return {
+    setDark(next: boolean) {
+      currentDark = next;
+      for (const [query, set] of listeners) {
+        if (query.includes('prefers-color-scheme: dark')) {
+          for (const listener of set) listener();
+        }
+      }
+    },
+    setReduceMotion(next: boolean) {
+      currentReduce = next;
+    },
+  };
+}
+
+function mockReducedMotion(reduce: boolean) {
+  mockMediaQueries({ reduceMotion: reduce });
 }
 
 describe('MindMapPane', () => {
@@ -589,6 +638,456 @@ describe('MindMapPane', () => {
       const { removeCard } = renderBeside({ open: false, inspectorOpen: true });
       expect(runCommand('edit.deleteCard', 'toolbar')).toBe(true);
       expect(removeCard).toHaveBeenCalledWith('card-a');
+    });
+  });
+
+  describe('system Dark Mode (#184)', () => {
+    it('follows prefers-color-scheme and reacts live when system appearance changes', () => {
+      const media = mockMediaQueries({ dark: true });
+      seed([node('a', 40, 40)], {});
+      render(<MindMapPane open />);
+
+      const flow = document.querySelector('.react-flow') as HTMLElement;
+      expect(flow.classList.contains('dark')).toBe(true);
+      expect(flow.classList.contains('light')).toBe(false);
+
+      act(() => media.setDark(false));
+      expect(flow.classList.contains('light')).toBe(true);
+      expect(flow.classList.contains('dark')).toBe(false);
+
+      act(() => media.setDark(true));
+      expect(flow.classList.contains('dark')).toBe(true);
+    });
+  });
+
+  describe('keyboard arrow movement persistence (#182)', () => {
+    it('coalesces a burst of arrow-key and Shift+arrow-key moves into one updateNodeLayout write', async () => {
+      vi.useFakeTimers();
+      try {
+        // Exercise the real store -> memoryBackend.updateNodeLayout path.
+        await useStudySyncStore.getState().initialize();
+        await useStudySyncStore.getState().openDocument();
+        const activeDoc = useStudySyncStore.getState().documents[0];
+        expect(activeDoc).toBeDefined();
+        useStudySyncStore.getState().setSelection({
+          documentId: activeDoc!.id,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 15, lineIndex: 0 },
+          text: 'The quick brown',
+          imagePng: null,
+          locationLabel: 'Line 1',
+        });
+        await useStudySyncStore.getState().excerptSelection();
+        const createdNode = useStudySyncStore.getState().nodes[0];
+        expect(createdNode).toBeDefined();
+        const startX = createdNode!.posX;
+        const startY = createdNode!.posY;
+        const writesBefore = window.__synapsePreview?.getNodeLayoutWrites().length ?? 0;
+
+        render(<MindMapPane open />);
+
+        const cardEl = cardElement(createdNode!.id);
+        cardEl.focus();
+
+        // Three regular presses (+15y) and one Shift press (+20x) within the debounce window.
+        fireEvent.keyDown(cardEl, { key: 'ArrowDown' });
+        fireEvent.keyDown(cardEl, { key: 'ArrowDown' });
+        fireEvent.keyDown(cardEl, { key: 'ArrowDown' });
+        fireEvent.keyDown(cardEl, { key: 'ArrowRight', shiftKey: true });
+
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({
+          posX: startX + 20,
+          posY: startY + 15,
+        });
+        expect((window.__synapsePreview?.getNodeLayoutWrites().length ?? 0) - writesBefore).toBe(0);
+
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS);
+        });
+
+        const writes = (window.__synapsePreview?.getNodeLayoutWrites() ?? []).slice(writesBefore);
+        expect(writes).toEqual([
+          {
+            nodeId: createdNode!.id,
+            posX: startX + 20,
+            posY: startY + 15,
+            isCollapsed: false,
+          },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('flushes a pending keyboard move immediately via flushBeforeClose before quitting', async () => {
+      vi.useFakeTimers();
+      try {
+        const commits: Array<{ id: string; posX: number; posY: number }> = [];
+        const commitNodeLayout = vi.fn(async (nodeId: string) => {
+          const target = useStudySyncStore.getState().nodes.find((n) => n.id === nodeId);
+          if (target) commits.push({ id: nodeId, posX: target.posX, posY: target.posY });
+        });
+        seed([node('a', 40, 40)], { selectedNodeId: 'a', commitNodeLayout });
+        render(<MindMapPane open />);
+
+        const cardA = cardElement('a');
+        cardA.focus();
+        fireEvent.keyDown(cardA, { key: 'ArrowDown' });
+        expect(commitNodeLayout).not.toHaveBeenCalled();
+
+        await act(async () => {
+          await flushBeforeClose();
+        });
+
+        expect(commits).toEqual([{ id: 'a', posX: 40, posY: 45 }]);
+
+        // Advancing past the original debounce must not write a second time.
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commitNodeLayout).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('flushes pending keyboard moves on pagehide, visibilitychange: hidden, and unmount', async () => {
+      vi.useFakeTimers();
+      try {
+        const commits: Array<{ id: string; posX: number; posY: number }> = [];
+        const commitNodeLayout = vi.fn(async (nodeId: string) => {
+          const target = useStudySyncStore.getState().nodes.find((n) => n.id === nodeId);
+          if (target) commits.push({ id: nodeId, posX: target.posX, posY: target.posY });
+        });
+        seed([node('a', 40, 40)], { selectedNodeId: 'a', commitNodeLayout });
+        const { unmount } = render(<MindMapPane open />);
+
+        const cardA = cardElement('a');
+        cardA.focus();
+
+        // 1. Flush via pagehide.
+        fireEvent.keyDown(cardA, { key: 'ArrowRight' });
+        await act(async () => {
+          window.dispatchEvent(new Event('pagehide'));
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 45, posY: 40 }]);
+
+        // 2. Flush via visibilitychange -> hidden.
+        fireEvent.keyDown(cardA, { key: 'ArrowDown' });
+        const originalVisibility = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+        Object.defineProperty(document, 'visibilityState', {
+          configurable: true,
+          value: 'hidden',
+        });
+        try {
+          await act(async () => {
+            document.dispatchEvent(new Event('visibilitychange'));
+          });
+        } finally {
+          if (originalVisibility) {
+            Object.defineProperty(document, 'visibilityState', originalVisibility);
+          } else {
+            delete (document as { visibilityState?: DocumentVisibilityState }).visibilityState;
+          }
+        }
+        expect(commits).toEqual([
+          { id: 'a', posX: 45, posY: 40 },
+          { id: 'a', posX: 45, posY: 45 },
+        ]);
+
+        // 3. Flush via unmount.
+        fireEvent.keyDown(cardA, { key: 'ArrowUp', shiftKey: true });
+        await act(async () => {
+          unmount();
+        });
+        expect(commits).toEqual([
+          { id: 'a', posX: 45, posY: 40 },
+          { id: 'a', posX: 45, posY: 45 },
+          { id: 'a', posX: 45, posY: 25 },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('skips flushing a deleted node and never throws', async () => {
+      vi.useFakeTimers();
+      try {
+        const commitNodeLayout = vi.fn(async () => {});
+        seed([node('a', 40, 40)], { selectedNodeId: 'a', commitNodeLayout });
+        render(<MindMapPane open />);
+
+        const cardA = cardElement('a');
+        cardA.focus();
+        fireEvent.keyDown(cardA, { key: 'ArrowDown' });
+
+        // Remove the node from state before the debounce timer fires.
+        act(() => {
+          useStudySyncStore.setState({ nodes: [], cards: [], selectedNodeId: null });
+        });
+
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS);
+        });
+        expect(commitNodeLayout).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('screen reader names and descriptions (#185)', () => {
+    it('gives cards and links title-based accessible names and accurate keyboard descriptions', () => {
+      const OriginalResizeObserver = globalThis.ResizeObserver;
+      const originalDOMMatrixReadOnly = globalThis.DOMMatrixReadOnly;
+      const originalOffsetWidth = Object.getOwnPropertyDescriptor(
+        HTMLElement.prototype,
+        'offsetWidth',
+      );
+      const originalOffsetHeight = Object.getOwnPropertyDescriptor(
+        HTMLElement.prototype,
+        'offsetHeight',
+      );
+
+      const observers: Array<{
+        callback: ResizeObserverCallback;
+        targets: Element[];
+        instance: ResizeObserver;
+      }> = [];
+      class MeasuringResizeObserver implements ResizeObserver {
+        private entry: {
+          callback: ResizeObserverCallback;
+          targets: Element[];
+          instance: ResizeObserver;
+        };
+        constructor(callback: ResizeObserverCallback) {
+          this.entry = { callback, targets: [], instance: this };
+          observers.push(this.entry);
+        }
+        observe(target: Element) {
+          this.entry.targets.push(target);
+        }
+        unobserve() {}
+        disconnect() {}
+      }
+      globalThis.ResizeObserver = MeasuringResizeObserver;
+      if (typeof globalThis.DOMMatrixReadOnly === 'undefined') {
+        globalThis.DOMMatrixReadOnly = class {
+          m22 = 1;
+        } as unknown as typeof DOMMatrixReadOnly;
+      }
+      Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+        configurable: true,
+        get() {
+          if (this.classList.contains('react-flow')) return PANE.width;
+          if (this.classList.contains('react-flow__node')) return 240;
+          if (this.classList.contains('react-flow__handle')) return 6;
+          return 0;
+        },
+      });
+      Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+        configurable: true,
+        get() {
+          if (this.classList.contains('react-flow')) return PANE.height;
+          if (this.classList.contains('react-flow__node')) return 96;
+          if (this.classList.contains('react-flow__handle')) return 6;
+          return 0;
+        },
+      });
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement,
+      ) {
+        if (this.classList.contains('react-flow')) {
+          return DOMRect.fromRect({ x: 0, y: 0, ...PANE });
+        }
+        if (this.classList.contains('react-flow__node')) {
+          return DOMRect.fromRect({ x: 0, y: 0, width: 240, height: 96 });
+        }
+        if (this.classList.contains('react-flow__handle')) {
+          const isRight = this.classList.contains('react-flow__handle-right');
+          return DOMRect.fromRect({ x: isRight ? 237 : -3, y: 45, width: 6, height: 6 });
+        }
+        return DOMRect.fromRect({ x: 0, y: 0, width: 0, height: 0 });
+      });
+
+      try {
+        const doc: StudyDocument = {
+          id: 'doc-1',
+          filePath: '/books/habits.txt',
+          fileHash: 'hash',
+          format: 'txt',
+          title: 'Habits Book',
+          displayTitle: null,
+          encoding: 'utf-8',
+          lastCursorAnchor: null,
+          lastOpenedAt: '2026-01-01T00:00:00Z',
+          createdAt: '2026-01-01T00:00:00Z',
+        };
+        const annParent: Annotation = {
+          id: 'ann-parent',
+          documentId: doc.id,
+          notebookId: notebook.id,
+          anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 10, lineIndex: 0 },
+          excerptText: 'Habits',
+          excerptImagePath: null,
+          note: null,
+          color: 'yellow',
+          style: 'highlight',
+          locationLabel: 'Line 1',
+          createdAt: '2026-01-01T00:00:00Z',
+        };
+        const annChild: Annotation = {
+          ...annParent,
+          id: 'ann-child',
+          excerptText: 'The quick brown fox',
+          locationLabel: 'Line 6',
+        };
+        const parentCard: NoteCard = {
+          id: 'card-parent-uuid',
+          notebookId: notebook.id,
+          title: 'Habits',
+          markdownNotes: '',
+          tags: [],
+          annotationIds: [annParent.id],
+          createdAt: '2026-01-01T00:00:00Z',
+        };
+        const childCard: NoteCard = {
+          id: 'card-child-uuid',
+          notebookId: notebook.id,
+          title: 'The quick brown fox',
+          markdownNotes: 'Important takeaway',
+          tags: ['focus', 'routine'],
+          annotationIds: [annChild.id],
+          createdAt: '2026-01-01T00:00:00Z',
+        };
+        const peerCard: NoteCard = {
+          id: 'card-peer-uuid',
+          notebookId: notebook.id,
+          title: 'Memory',
+          markdownNotes: '',
+          tags: [],
+          annotationIds: [],
+          createdAt: '2026-01-01T00:00:00Z',
+        };
+        const parentNode: MindMapNode = {
+          ...node('node-parent-uuid', 40, 40),
+          cardId: parentCard.id,
+        };
+        const childNode: MindMapNode = {
+          ...node('node-child-uuid', 360, 40),
+          cardId: childCard.id,
+          parentNodeId: parentNode.id,
+        };
+        const peerNode: MindMapNode = {
+          ...node('node-peer-uuid', 360, 220),
+          cardId: peerCard.id,
+        };
+        const nestingEdge: MindMapEdge = {
+          id: 'edge-nesting-uuid',
+          notebookId: notebook.id,
+          sourceNodeId: parentNode.id,
+          targetNodeId: childNode.id,
+          label: null,
+        };
+        const crossEdge: MindMapEdge = {
+          id: 'edge-cross-uuid',
+          notebookId: notebook.id,
+          sourceNodeId: childNode.id,
+          targetNodeId: peerNode.id,
+          label: null,
+        };
+
+        useStudySyncStore.setState({
+          notebook,
+          documents: [doc],
+          annotations: [annParent, annChild],
+          cards: [parentCard, childCard, peerCard],
+          nodes: [parentNode, childNode, peerNode],
+          edges: [nestingEdge, crossEdge],
+          selectedNodeId: childNode.id,
+        });
+
+        render(<MindMapPane open />);
+        act(() => {
+          for (const { callback, targets, instance } of observers) {
+            const entries = targets
+              .filter(
+                (target) =>
+                  target.classList.contains('react-flow__node') ||
+                  target.classList.contains('react-flow'),
+              )
+              .map((target) => {
+                const isFlow = target.classList.contains('react-flow');
+                const width = isFlow ? PANE.width : 240;
+                const height = isFlow ? PANE.height : 96;
+                return {
+                  target,
+                  contentRect: DOMRect.fromRect({ x: 0, y: 0, width, height }),
+                  borderBoxSize: [{ inlineSize: width, blockSize: height }],
+                  contentBoxSize: [{ inlineSize: width, blockSize: height }],
+                  devicePixelContentBoxSize: [{ inlineSize: width, blockSize: height }],
+                } as ResizeObserverEntry;
+              });
+            if (entries.length > 0) callback(entries, instance);
+          }
+        });
+
+        const childEl = cardElement(childNode.id);
+        expect(childEl.getAttribute('aria-label')).toBe(
+          'Card: The quick brown fox, from Habits Book · Line 6, nested under ‘Habits’, has notes, 2 tags',
+        );
+        expect(childEl.getAttribute('aria-label')).not.toContain('uuid');
+
+        const peerEl = cardElement(peerNode.id);
+        expect(peerEl.getAttribute('aria-label')).toBe('Card: Memory, source removed');
+
+        const nodeDescId = childEl.getAttribute('aria-describedby');
+        expect(nodeDescId).toBeTruthy();
+        const nodeDesc = document.getElementById(nodeDescId as string)?.textContent ?? '';
+        expect(nodeDesc).toContain('to edit card');
+        expect(nodeDesc).toContain('Space to make it the target for the next excerpt');
+        expect(nodeDesc).toContain('arrow keys to move it');
+        expect(nodeDesc).toContain('to delete it');
+        expect(nodeDesc).toContain('to undo');
+        expect(nodeDesc).not.toContain('Press enter or space to select a node');
+
+        const nestingEl = document.querySelector(
+          `.react-flow__edge[data-id="${nestingEdge.id}"]`,
+        ) as Element | null;
+        expect(nestingEl).not.toBeNull();
+        expect(nestingEl?.getAttribute('aria-label')).toBe(
+          '‘The quick brown fox’ nested under ‘Habits’',
+        );
+
+        const crossEl = document.querySelector(
+          `.react-flow__edge[data-id="${crossEdge.id}"]`,
+        ) as Element | null;
+        expect(crossEl).not.toBeNull();
+        expect(crossEl?.getAttribute('aria-label')).toBe(
+          'Link from ‘The quick brown fox’ to ‘Memory’',
+        );
+
+        const edgeDescId = nestingEl?.getAttribute('aria-describedby');
+        expect(edgeDescId).toBeTruthy();
+        const edgeDesc = document.getElementById(edgeDescId as string)?.textContent ?? '';
+        expect(edgeDesc).toContain('to select this link');
+        expect(edgeDesc).toContain('to remove it');
+        expect(edgeDesc).not.toContain('select an edge');
+
+        // Arrow-key movement announces direction without raw x/y pixel coordinates.
+        childEl.focus();
+        fireEvent.keyDown(childEl, { key: 'ArrowDown' });
+        const liveRegion = document.querySelector('[id^="react-flow__aria-live-"]');
+        expect(liveRegion?.textContent).toBe('Moved selected card down.');
+      } finally {
+        globalThis.ResizeObserver = OriginalResizeObserver;
+        globalThis.DOMMatrixReadOnly = originalDOMMatrixReadOnly;
+        if (originalOffsetWidth) {
+          Object.defineProperty(HTMLElement.prototype, 'offsetWidth', originalOffsetWidth);
+        }
+        if (originalOffsetHeight) {
+          Object.defineProperty(HTMLElement.prototype, 'offsetHeight', originalOffsetHeight);
+        }
+      }
     });
   });
 });

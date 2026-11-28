@@ -515,9 +515,9 @@ export async function mindmapFlow(page) {
     };
   })()`;
 
-  const hasEdge = (sourceId, targetId) =>
+  const hasNestingEdge = (parentTitle, childTitle) =>
     page.evaluate(
-      `Boolean(document.querySelector('[aria-label="Edge from ${sourceId} to ${targetId}"]'))`,
+      `Boolean(document.querySelector(${JSON.stringify(`[aria-label="‘${childTitle}’ nested under ‘${parentTitle}’"]`)}))`,
     );
 
   const countEdges = () => page.evaluate(`document.querySelectorAll('.react-flow__edge').length`);
@@ -721,9 +721,8 @@ export async function mindmapFlow(page) {
     `document.querySelectorAll('.react-flow__edge').length === ${totalEdges}`,
     'new edge under card A after dragging card B',
   );
-  const child13 = await page.evaluate(cardByText('Filler line 013'));
   assert(
-    await hasEdge(cardAInfo.id, child13.id),
+    await hasNestingEdge('Filler line 011', 'Filler line 013'),
     'excerpt after dragging unselected card B must still nest under card A',
   );
 
@@ -802,9 +801,8 @@ export async function mindmapFlow(page) {
     `document.querySelectorAll('.react-flow__edge').length === ${totalEdges}`,
     'new edge under A after slow double-click on B',
   );
-  const child14 = await page.evaluate(cardByText('Filler line 014'));
   assert(
-    await hasEdge(cardAForClick.id, child14.id),
+    await hasNestingEdge('Filler line 011', 'Filler line 014'),
     'excerpt after slow double-click on B must still nest under A',
   );
 
@@ -1196,5 +1194,258 @@ export async function mindmapFlow(page) {
   await page.assertContrast(
     '[data-testid="inspector-excerpt-source"]',
     'Inspector excerpt source attribution',
+  );
+
+  // Close Inspector so canvas chrome, keyboard movement, and screen reader labels are unobstructed.
+  await page.clickButton('Hide inspector');
+  await page.waitFor(
+    `document.querySelector('button[aria-label="Show inspector"]')?.getAttribute('aria-pressed') === 'false'`,
+    'Inspector to close before section 18',
+  );
+  await waitTwoFrames();
+
+  // 18. Issues #184, #182, and #185:
+  //   - #184: Canvas controls, minimap, attribution, and links follow system Dark Mode with AA/non-text contrast.
+  //   - #182: Arrow-key and Shift+arrow-key moves coalesce into one updateNodeLayout write and flush before close.
+  //   - #185: Cards and links have title-based accessible names (never IDs) and accurate keyboard descriptions.
+  const probeCanvasChrome = () =>
+    page.evaluate(`(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 1;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const rgba = (color) => {
+        ctx.clearRect(0, 0, 1, 1);
+        ctx.fillStyle = '#000';
+        ctx.fillStyle = color;
+        ctx.fillRect(0, 0, 1, 1);
+        const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+        return { r, g, b, a: a / 255 };
+      };
+      const over = (top, bottom) => ({
+        r: top.r * top.a + bottom.r * (1 - top.a),
+        g: top.g * top.a + bottom.g * (1 - top.a),
+        b: top.b * top.a + bottom.b * (1 - top.a),
+        a: 1,
+      });
+      const backdrop = (el) => {
+        const layers = [];
+        for (let node = el; node; node = node.parentElement) {
+          const layer = rgba(getComputedStyle(node).backgroundColor);
+          if (layer.a > 0) layers.push(layer);
+          if (layer.a >= 1) break;
+        }
+        return layers.reduceRight((below, layer) => over(layer, below), { r: 255, g: 255, b: 255, a: 1 });
+      };
+      const lum = ({ r, g, b }) => {
+        const lin = (c) => ((c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+      };
+      const ratio = (a, b) => {
+        const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+        return (hi + 0.05) / (lo + 0.05);
+      };
+      const flow = document.querySelector('.react-flow');
+      const flowBg = backdrop(flow);
+      const buttons = [...document.querySelectorAll('.react-flow__controls-button:not(:disabled)')].map((btn) => {
+        const bg = backdrop(btn);
+        const svg = btn.querySelector('svg');
+        const fill = over(rgba(getComputedStyle(svg).fill), bg);
+        return {
+          label: btn.getAttribute('aria-label'),
+          bg,
+          bgLum: lum(bg),
+          iconRatio: ratio(fill, bg),
+        };
+      });
+      const minimap = document.querySelector('.react-flow__minimap');
+      const minimapBg = minimap ? backdrop(minimap) : null;
+      const edgePath = document.querySelector('.react-flow__edge-path');
+      const edgeStroke = edgePath ? over(rgba(getComputedStyle(edgePath).stroke), flowBg) : null;
+      return {
+        darkClass: flow?.classList.contains('dark') ?? false,
+        lightClass: flow?.classList.contains('light') ?? false,
+        flowBg,
+        flowBgLum: lum(flowBg),
+        buttons,
+        minimapBgLum: minimapBg ? lum(minimapBg) : null,
+        edgeRatio: edgeStroke ? ratio(edgeStroke, flowBg) : null,
+      };
+    })()`);
+
+  // 18a. Light mode canvas chrome contrast baseline (#184).
+  await page.assertContrast('.react-flow__attribution', 'MindMap attribution (Light)');
+  const lightChrome = await probeCanvasChrome();
+  assert(
+    lightChrome.lightClass &&
+      !lightChrome.darkClass &&
+      lightChrome.buttons.length >= 3 &&
+      lightChrome.buttons.every((b) => b.iconRatio >= 3) &&
+      lightChrome.edgeRatio !== null &&
+      lightChrome.edgeRatio >= 3,
+    `Light mode MindMap chrome contrast failed: ${JSON.stringify(lightChrome)}`,
+  );
+
+  // 18b. Emulated system Dark Mode canvas chrome (#184).
+  await page.emulateMedia([{ name: 'prefers-color-scheme', value: 'dark' }]);
+  try {
+    await page.waitFor(
+      `document.querySelector('.react-flow')?.classList.contains('dark')`,
+      'ReactFlow to switch to dark mode under prefers-color-scheme: dark',
+    );
+    await page.assertContrast('.react-flow__attribution', 'MindMap attribution (Dark)');
+    await page.assertContrast(CARD_NODE, 'MindMap cards (Dark)');
+    const darkChrome = await probeCanvasChrome();
+    assert(
+      darkChrome.darkClass &&
+        darkChrome.flowBgLum < 0.05 &&
+        darkChrome.minimapBgLum !== null &&
+        darkChrome.minimapBgLum < 0.1 &&
+        darkChrome.buttons.length >= 3 &&
+        darkChrome.buttons.every(
+          (b) => b.bgLum < 0.15 && b.bgLum > darkChrome.flowBgLum && b.iconRatio >= 3,
+        ) &&
+        darkChrome.edgeRatio !== null &&
+        darkChrome.edgeRatio >= 3,
+      `Dark mode MindMap chrome failed contrast or surface checks: ${JSON.stringify(darkChrome)}`,
+    );
+  } finally {
+    await page.emulateMedia([{ name: 'prefers-color-scheme', value: 'light' }]);
+    await page.waitFor(
+      `document.querySelector('.react-flow')?.classList.contains('light')`,
+      'ReactFlow to return to light mode',
+    );
+  }
+
+  // 18c. Accessible names and keyboard descriptions on cards and links (#185).
+  const a11yReport = await page.evaluate(`(() => {
+    const cards = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})];
+    const nestedCard = cards.find((n) => n.textContent?.includes('Filler line 013'));
+    const edges = [...document.querySelectorAll('.react-flow__edge')];
+    const nestingEdge = edges.find((e) =>
+      e.getAttribute('aria-label') === '‘Filler line 013’ nested under ‘Filler line 011’',
+    );
+    const nodeDescId = nestedCard?.getAttribute('aria-describedby') ?? null;
+    const edgeDescId = nestingEdge?.getAttribute('aria-describedby') ?? null;
+    return {
+      cardId: nestedCard?.dataset.id ?? null,
+      cardLabel: nestedCard?.getAttribute('aria-label') ?? null,
+      cardDesc: nodeDescId ? document.getElementById(nodeDescId)?.textContent ?? null : null,
+      edgeLabel: nestingEdge?.getAttribute('aria-label') ?? null,
+      edgeDesc: edgeDescId ? document.getElementById(edgeDescId)?.textContent ?? null : null,
+      unnamedCards: cards.filter((n) => !(n.getAttribute('aria-label') ?? '').trim()).length,
+      idNamedEdges: edges.filter((e) => (e.getAttribute('aria-label') ?? '').startsWith('Edge from ')).length,
+    };
+  })()`);
+  assert(
+    a11yReport.unnamedCards === 0 &&
+      a11yReport.idNamedEdges === 0 &&
+      Boolean(a11yReport.cardLabel?.startsWith('Card: Filler line 013')) &&
+      Boolean(a11yReport.cardLabel?.includes('from sample · Line')) &&
+      Boolean(a11yReport.cardLabel?.includes('nested under ‘Filler line 011’')) &&
+      !a11yReport.cardLabel?.includes(a11yReport.cardId) &&
+      a11yReport.edgeLabel === '‘Filler line 013’ nested under ‘Filler line 011’' &&
+      Boolean(a11yReport.cardDesc?.includes('to edit card')) &&
+      Boolean(a11yReport.cardDesc?.includes('Space to make it the target for the next excerpt')) &&
+      Boolean(a11yReport.cardDesc?.includes('arrow keys to move it')) &&
+      Boolean(a11yReport.cardDesc?.includes('to delete it')) &&
+      Boolean(a11yReport.edgeDesc?.includes('to select this link')) &&
+      Boolean(a11yReport.edgeDesc?.includes('to remove it')),
+    `unexpected MindMap accessibility report: ${JSON.stringify(a11yReport)}`,
+  );
+
+  // 18d. Keyboard arrow movement persists via memory backend, coalesces bursts,
+  // keeps mouse drag as one write, and flushes immediately before close (#182).
+  await panCardIntoView('Filler line 010');
+  await waitForViewportSettled();
+  const arrowTarget = await page.evaluate(cardByText('Filler line 010'));
+  assert(arrowTarget, 'Filler line 010 should be visible before arrow-key movement test');
+  await page.click({ x: arrowTarget.left + 28, y: arrowTarget.center.y });
+  await page.waitFor(
+    `document.activeElement?.closest('.react-flow__node')?.dataset.id === ${JSON.stringify(arrowTarget.id)}`,
+    'Filler line 010 card to receive focus before arrow moves',
+  );
+
+  const parseTranslate = (transform) => {
+    const match = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(transform ?? '');
+    assert(match, `unexpected transform: ${transform}`);
+    return { x: Number(match[1]), y: Number(match[2]) };
+  };
+  const startCoords = parseTranslate(arrowTarget.transform);
+  const writesBeforeBurst = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+
+  // Burst: 4x ArrowDown (+20y) + 1x Shift+ArrowRight (+20x) -> 1 coalesced write.
+  const SHIFT = 8;
+  await page.press('ArrowDown');
+  await page.press('ArrowDown');
+  await page.press('ArrowDown');
+  await page.press('ArrowDown');
+  await page.press('ArrowRight', 'ArrowRight', SHIFT);
+
+  await page.waitFor(
+    `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBeforeBurst + 1}`,
+    'debounced updateNodeLayout write after arrow-key burst',
+  );
+  // Allow an extra debounce interval to verify no duplicate write occurs.
+  await new Promise((done) => setTimeout(done, 400));
+  const burstWrites = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeBurst})`,
+  );
+  assert(
+    burstWrites.length === 1 &&
+      burstWrites[0].nodeId === arrowTarget.id &&
+      Math.round(burstWrites[0].posX) === Math.round(startCoords.x + 20) &&
+      Math.round(burstWrites[0].posY) === Math.round(startCoords.y + 20),
+    `expected 1 coalesced write at (+20, +20), got: ${JSON.stringify({ startCoords, burstWrites })}`,
+  );
+
+  // Mouse drag still produces exactly one write on release.
+  const writesBeforeDrag = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+  const beforeDrag = await page.evaluate(cardByText('Filler line 010'));
+  await page.drag(beforeDrag.center, { x: beforeDrag.center.x + 24, y: beforeDrag.center.y + 12 });
+  await page.waitFor(
+    `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBeforeDrag + 1}`,
+    'mouse drag to persist layout on release',
+  );
+  await new Promise((done) => setTimeout(done, 400));
+  const dragWrites = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeDrag})`,
+  );
+  assert(
+    dragWrites.length === 1 && dragWrites[0].nodeId === arrowTarget.id,
+    `expected mouse drag to produce exactly 1 layout write, got ${JSON.stringify(dragWrites)}`,
+  );
+
+  // A keyboard move right before quitting flushes immediately via onBeforeClose.
+  const afterDrag = await page.evaluate(cardByText('Filler line 010'));
+  const beforeQuitCoords = parseTranslate(afterDrag.transform);
+  const writesBeforeQuit = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+  await page.evaluate(
+    `document.querySelector('.react-flow__node[data-id="${arrowTarget.id}"]')?.focus()`,
+  );
+  await page.press('ArrowUp');
+  await page.evaluate(`window.__synapsePreview.triggerBeforeClose()`);
+  const quitWritesImmediate = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeQuit})`,
+  );
+  assert(
+    quitWritesImmediate.length === 1 &&
+      quitWritesImmediate[0].nodeId === arrowTarget.id &&
+      Math.round(quitWritesImmediate[0].posX) === Math.round(beforeQuitCoords.x) &&
+      Math.round(quitWritesImmediate[0].posY) === Math.round(beforeQuitCoords.y - 5),
+    `expected pre-quit flush to save ArrowUp move immediately, got ${JSON.stringify({ beforeQuitCoords, quitWritesImmediate })}`,
+  );
+  await new Promise((done) => setTimeout(done, 400));
+  const quitWritesAfterWait = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeQuit})`,
+  );
+  assert(
+    quitWritesAfterWait.length === 1,
+    `expected no duplicate write after pre-quit flush, got ${JSON.stringify(quitWritesAfterWait)}`,
   );
 }

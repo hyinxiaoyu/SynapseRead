@@ -17,6 +17,8 @@ export interface SynapsePreviewController {
   getMenuItemStates(): MemoryMenuItemStateMap;
   getHostStats(): MemoryHostStats;
   listLocalBookmarks: MemoryBackendWithPreview['listLocalBookmarks'];
+  getNodeLayoutWrites: MemoryBackendWithPreview['getNodeLayoutWrites'];
+  triggerBeforeClose: MemoryBackendWithPreview['triggerBeforeClose'];
   pauseNextCursorWrite(): void;
   releasePausedCursorWrite(): void;
 }
@@ -39,6 +41,8 @@ export function createDefaultBackend(): StudyBackend {
       getMenuItemStates: preview.getMenuItemStates,
       getHostStats: preview.getHostStats,
       listLocalBookmarks: preview.listLocalBookmarks,
+      getNodeLayoutWrites: preview.getNodeLayoutWrites,
+      triggerBeforeClose: preview.triggerBeforeClose,
       pauseNextCursorWrite: preview.pauseNextCursorWrite,
       releasePausedCursorWrite: preview.releasePausedCursorWrite,
     };

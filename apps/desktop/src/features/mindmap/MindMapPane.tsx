@@ -26,6 +26,7 @@ import {
 import { commandDefinition, formatShortcut } from '@/features/commands/commands';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
 import { isEditableShortcutTarget, runCommand, useCommands } from '@/features/commands/registry';
+import { cardAriaLabel, edgeAriaLabel, mindMapAriaLabelConfig } from '@/features/mindmap/a11y';
 import { CardNode, type CardFlowNode } from '@/features/mindmap/CardNode';
 import type { NodeSize } from '@/features/mindmap/placement';
 import {
@@ -34,12 +35,16 @@ import {
   REVEAL_DURATION_MS,
   viewportRevealing,
 } from '@/features/mindmap/reveal';
+import { registerBeforeCloseFlush } from '@/lib/flushBeforeClose';
+import { formatCardSource } from '@/lib/sourceAttribution';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
 
 const NODE_TYPES = { card: CardNode };
 type Measured = NonNullable<CardFlowNode['measured']>;
 /** A card's size until React Flow has measured it: `w-60`, about three lines tall. */
 const UNMEASURED_CARD = { width: 240, height: 96 };
+/** Coalesces rapid arrow-key nudges into one layout write (#182). */
+export const KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS = 300;
 
 interface CardMenuState {
   nodeId: string;
@@ -72,6 +77,8 @@ export function MindMapPane({
   const nodes = useStudySyncStore((state) => state.nodes);
   const cards = useStudySyncStore((state) => state.cards);
   const edges = useStudySyncStore((state) => state.edges);
+  const annotations = useStudySyncStore((state) => state.annotations);
+  const documents = useStudySyncStore((state) => state.documents);
   const selectedNodeId = useStudySyncStore((state) => state.selectedNodeId);
   const deletedCardCount = useStudySyncStore((state) => state.deletedCardHistory.length);
   const lastDeletionKind = useStudySyncStore((state) => state.deletionOrder.at(-1) ?? null);
@@ -101,6 +108,99 @@ export function MindMapPane({
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<CardMenuState | null>(null);
 
+  const pendingLayoutIdsRef = useRef<Set<string>>(new Set());
+  const layoutTimerRef = useRef<number | null>(null);
+  const inFlightLayoutRef = useRef<Promise<void> | null>(null);
+
+  const clearLayoutTimer = useCallback(() => {
+    if (layoutTimerRef.current !== null) {
+      window.clearTimeout(layoutTimerRef.current);
+      layoutTimerRef.current = null;
+    }
+  }, []);
+
+  const trackLayoutWrite = useCallback((work: () => Promise<void>): Promise<void> => {
+    const previous = inFlightLayoutRef.current ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(work)
+      .finally(() => {
+        if (inFlightLayoutRef.current === next) {
+          inFlightLayoutRef.current = null;
+        }
+      });
+    inFlightLayoutRef.current = next;
+    return next;
+  }, []);
+
+  const flushPendingLayouts = useCallback((): Promise<void> => {
+    clearLayoutTimer();
+    const pendingIds = [...pendingLayoutIdsRef.current];
+    pendingLayoutIdsRef.current.clear();
+    if (pendingIds.length === 0) {
+      return inFlightLayoutRef.current ?? Promise.resolve();
+    }
+    return trackLayoutWrite(async () => {
+      for (const id of pendingIds) {
+        if (!useStudySyncStore.getState().nodes.some((candidate) => candidate.id === id)) {
+          continue;
+        }
+        await commitNodeLayout(id);
+      }
+    });
+  }, [clearLayoutTimer, commitNodeLayout, trackLayoutWrite]);
+
+  const flushPendingLayoutsRef = useRef(flushPendingLayouts);
+  useEffect(() => {
+    flushPendingLayoutsRef.current = flushPendingLayouts;
+  }, [flushPendingLayouts]);
+
+  const scheduleLayoutCommit = useCallback(
+    (nodeId: string) => {
+      pendingLayoutIdsRef.current.add(nodeId);
+      clearLayoutTimer();
+      layoutTimerRef.current = window.setTimeout(() => {
+        layoutTimerRef.current = null;
+        void flushPendingLayoutsRef.current();
+      }, KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS);
+    },
+    [clearLayoutTimer],
+  );
+
+  const cancelPendingLayout = useCallback(
+    (nodeId: string) => {
+      pendingLayoutIdsRef.current.delete(nodeId);
+      if (pendingLayoutIdsRef.current.size === 0) {
+        clearLayoutTimer();
+      }
+    },
+    [clearLayoutTimer],
+  );
+
+  // Flush any pending arrow-key move before tab hide, unmount, or native quit (#182).
+  useEffect(() => {
+    const onPageHide = () => {
+      void flushPendingLayoutsRef.current();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        void flushPendingLayoutsRef.current();
+      }
+    };
+    window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    const unregisterFlush = registerBeforeCloseFlush({
+      isDirty: () => pendingLayoutIdsRef.current.size > 0 || inFlightLayoutRef.current !== null,
+      flush: () => flushPendingLayoutsRef.current(),
+    });
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      unregisterFlush();
+      void flushPendingLayoutsRef.current();
+    };
+  }, []);
+
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
 
   const handleSectionFocus = useCallback((event: ReactFocusEvent<HTMLElement>) => {
@@ -118,35 +218,56 @@ export function MindMapPane({
     }
   }, []);
 
+  const ariaLabelConfig = useMemo(() => mindMapAriaLabelConfig(), []);
+  const cardById = useMemo(() => new Map(cards.map((card) => [card.id, card])), [cards]);
+  const nodeById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
+
   const flowNodes = useMemo<CardFlowNode[]>(
     () =>
       nodes.map((node) => {
         const size = measured[node.id];
+        const card = cardById.get(node.cardId);
+        const parentNode = node.parentNodeId ? nodeById.get(node.parentNodeId) : undefined;
+        const parentTitle = parentNode ? (cardById.get(parentNode.cardId)?.title ?? null) : null;
+        const sourceLabel = card ? formatCardSource(card, annotations, documents) : null;
         return {
           id: node.id,
           type: 'card',
           position: { x: node.posX, y: node.posY },
           data: { cardId: node.cardId },
           selected: node.id === selectedNodeId,
+          ariaLabel: cardAriaLabel({ card, parentTitle, sourceLabel }),
           // Card deletion routes through the command registry (`edit.deleteCard`) so
           // keyboard, context menu, Inspector, and native menu all share one path.
           deletable: false,
           ...(size ? { measured: size } : {}),
         };
       }),
-    [nodes, measured, selectedNodeId],
+    [nodes, measured, selectedNodeId, cardById, nodeById, annotations, documents],
   );
 
   const flowEdges = useMemo<Edge[]>(
     () =>
-      edges.map((edge) => ({
-        id: edge.id,
-        source: edge.sourceNodeId,
-        target: edge.targetNodeId,
-        selected: selectedEdgeIds.has(edge.id),
-        ...(edge.label === null ? {} : { label: edge.label }),
-      })),
-    [edges, selectedEdgeIds],
+      edges.map((edge) => {
+        const sourceNode = nodeById.get(edge.sourceNodeId);
+        const targetNode = nodeById.get(edge.targetNodeId);
+        const sourceTitle = sourceNode ? (cardById.get(sourceNode.cardId)?.title ?? null) : null;
+        const targetTitle = targetNode ? (cardById.get(targetNode.cardId)?.title ?? null) : null;
+        return {
+          id: edge.id,
+          source: edge.sourceNodeId,
+          target: edge.targetNodeId,
+          selected: selectedEdgeIds.has(edge.id),
+          ariaLabel: edgeAriaLabel({
+            sourceTitle,
+            targetTitle,
+            isNesting: targetNode?.parentNodeId === edge.sourceNodeId,
+            label: edge.label,
+          }),
+          ...(edge.label === null ? {} : { label: edge.label }),
+        };
+      }),
+    [edges, selectedEdgeIds, nodeById, cardById],
   );
 
   const handleSectionKeyDownCapture = useCallback(
@@ -171,7 +292,18 @@ export function MindMapPane({
       let hasSizeUpdate = false;
       for (const change of changes) {
         if (change.type === 'position' && change.position) {
+          const existing = useStudySyncStore
+            .getState()
+            .nodes.find((candidate) => candidate.id === change.id);
+          const moved =
+            existing !== undefined &&
+            (existing.posX !== change.position.x || existing.posY !== change.position.y);
           dragNode(change.id, change.position.x, change.position.y);
+          if (change.dragging === true) {
+            cancelPendingLayout(change.id);
+          } else if (moved) {
+            scheduleLayoutCommit(change.id);
+          }
         } else if (change.type === 'dimensions' && change.dimensions) {
           const { dimensions, id } = change;
           setMeasured((current) => ({ ...current, [id]: dimensions }));
@@ -194,7 +326,7 @@ export function MindMapPane({
         reportNodeSizes(sizeUpdates);
       }
     },
-    [dragNode, reportNodeSizes, setSelectedNode],
+    [cancelPendingLayout, dragNode, reportNodeSizes, scheduleLayoutCommit, setSelectedNode],
   );
 
   const onEdgesChange = useCallback(
@@ -342,6 +474,8 @@ export function MindMapPane({
       onKeyDownCapture={handleSectionKeyDownCapture}
     >
       <ReactFlow<CardFlowNode>
+        colorMode="system"
+        ariaLabelConfig={ariaLabelConfig}
         nodes={flowNodes}
         edges={flowEdges}
         nodeTypes={NODE_TYPES}
@@ -397,7 +531,10 @@ export function MindMapPane({
         onNodeDragStart={() => {
           clickSequenceRef.current = null;
         }}
-        onNodeDragStop={(_event, node) => void commitNodeLayout(node.id)}
+        onNodeDragStop={(_event, node) => {
+          cancelPendingLayout(node.id);
+          void trackLayoutWrite(() => commitNodeLayout(node.id));
+        }}
         onMoveEnd={(_event, viewport) => void saveViewport(viewport)}
         {...(initialViewport ? { defaultViewport: initialViewport } : {})}
         minZoom={MIN_REVEAL_ZOOM}
