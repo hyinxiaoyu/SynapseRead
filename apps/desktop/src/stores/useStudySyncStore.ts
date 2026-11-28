@@ -555,12 +555,28 @@ export function createStudySyncStore(backend: StudyBackend) {
     interface PendingAnnotationUpdate {
       /** Resolves once every update queued up to this entry settles (never rejects). */
       settled: Promise<void>;
-      /** Outcome of the latest queued note write (`patch.note !== null`) up to this entry (#124). */
-      noteResult: Promise<boolean> | null;
+      /** Sequence number of the latest note write (`patch.note !== null`) in this active chain (#124). */
+      noteSeq: number | null;
+    }
+
+    interface LatestNoteWrite {
+      /** Monotonic sequence incremented for every `updateAnnotation` call with `patch.note !== null`. */
+      seq: number;
+      /** Resolves to `true` when persisted, `false` when the write failed. */
+      result: Promise<boolean>;
+      /** True once this note write has settled (succeeded or failed). */
+      settled: boolean;
     }
 
     /** Per-annotation FIFO tail promises so `updateAnnotation` patches commit strictly in order (#125). */
     const pendingAnnotationUpdates = new Map<string, PendingAnnotationUpdate>();
+    /**
+     * Retains the latest note-write outcome per annotation even after `pendingAnnotationUpdates`
+     * clears so a queued `excerptAnnotation` still sees a note save that failed while waiting (#124).
+     * Color/style-only updates (`patch.note === null`) never overwrite this record.
+     */
+    const latestNoteWrites = new Map<string, LatestNoteWrite>();
+    let noteWriteSeq = 0;
     /** Serializes card-creation writes so queued annotation excerpts never drop or overlap (#124). */
     let excerptQueue: Promise<void> = Promise.resolve();
     let activeSelectionExcerpt = false;
@@ -1969,6 +1985,15 @@ export function createStudySyncStore(backend: StudyBackend) {
         if (!initial.annotations.some((candidate) => candidate.id === annotationId)) return;
 
         const notebookIdAtCall = initial.notebook.id;
+        const pendingAtCall = pendingAnnotationUpdates.get(annotationId);
+        const noteAtCall = latestNoteWrites.get(annotationId);
+        // Watch any note write already in flight (or part of an active update chain) when
+        // this excerpt is requested, plus any note write started while this excerpt waits in
+        // `excerptQueue`. Historical failures that already settled before this request do not
+        // poison future excerpts (e.g., after the user cancels a failed draft) (#124).
+        const minRelevantNoteSeq =
+          pendingAtCall?.noteSeq ??
+          (noteAtCall && !noteAtCall.settled ? noteAtCall.seq : (noteAtCall?.seq ?? 0) + 1);
         const releaseExcerpting = (extra?: Partial<StudySyncState>) => {
           set((state) => {
             const remaining = state.excerptingAnnotationIds.filter((id) => id !== annotationId);
@@ -1991,18 +2016,31 @@ export function createStudySyncStore(backend: StudyBackend) {
           try {
             // Drain any queued note/color edits for this highlight so the new card's
             // seeded `markdownNotes` reflects the latest saved note, and abort if the
-            // latest queued note write failed so we never create a card with a stale note (#124).
+            // latest relevant note write failed — even if it already settled while this
+            // excerpt was waiting in `excerptQueue` (#124).
             for (;;) {
               const priorUpdates = pendingAnnotationUpdates.get(annotationId);
-              if (!priorUpdates) break;
-              await priorUpdates.settled;
-              if (priorUpdates.noteResult !== null && !(await priorUpdates.noteResult)) {
-                const latest = pendingAnnotationUpdates.get(annotationId);
-                if (!latest || latest.noteResult === priorUpdates.noteResult) {
+              if (priorUpdates) {
+                await priorUpdates.settled;
+                continue;
+              }
+              const latestNote = latestNoteWrites.get(annotationId);
+              if (
+                latestNote &&
+                latestNote.seq >= minRelevantNoteSeq &&
+                !(await latestNote.result)
+              ) {
+                const currentNote = latestNoteWrites.get(annotationId);
+                if (
+                  !pendingAnnotationUpdates.has(annotationId) &&
+                  currentNote?.seq === latestNote.seq
+                ) {
                   releaseExcerpting();
                   return;
                 }
+                continue;
               }
+              break;
             }
 
             const { notebook, annotations, cards, nodes, nestingTargetNodeId, nodeSizes } = get();
@@ -2217,16 +2255,23 @@ export function createStudySyncStore(backend: StudyBackend) {
           () => undefined,
           () => undefined,
         );
+        let noteWrite: LatestNoteWrite | null = null;
+        if (patch.note !== null) {
+          noteWriteSeq += 1;
+          noteWrite = { seq: noteWriteSeq, result: next, settled: false };
+          latestNoteWrites.set(annotationId, noteWrite);
+        }
         const entry: PendingAnnotationUpdate = {
           settled,
-          // A newer note write supersedes any earlier queued note write's outcome;
-          // a color/style-only patch preserves the prior queued note outcome (#124).
-          noteResult: patch.note !== null ? next : (previous?.noteResult ?? null),
+          // A newer note write supersedes any earlier queued note write's sequence;
+          // a color/style-only patch preserves the prior active chain's note sequence (#124).
+          noteSeq: noteWrite ? noteWrite.seq : (previous?.noteSeq ?? null),
         };
         pendingAnnotationUpdates.set(annotationId, entry);
         try {
           return await next;
         } finally {
+          if (noteWrite) noteWrite.settled = true;
           if (pendingAnnotationUpdates.get(annotationId) === entry) {
             pendingAnnotationUpdates.delete(annotationId);
           }
