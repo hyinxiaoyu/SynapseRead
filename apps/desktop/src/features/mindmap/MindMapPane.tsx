@@ -190,6 +190,17 @@ export function MindMapPane({
     [scheduleLayoutTimer],
   );
 
+  const isAnyNodeDragging = useCallback(() => {
+    if (draggingNodeIdsRef.current.size === 0) return false;
+    const currentNodes = useStudySyncStore.getState().nodes;
+    for (const id of [...draggingNodeIdsRef.current]) {
+      if (!currentNodes.some((candidate) => candidate.id === id)) {
+        draggingNodeIdsRef.current.delete(id);
+      }
+    }
+    return draggingNodeIdsRef.current.size > 0;
+  }, []);
+
   const markNodeDragging = useCallback(
     (nodeId: string) => {
       draggingNodeIdsRef.current.add(nodeId);
@@ -213,6 +224,11 @@ export function MindMapPane({
     [clearLayoutTimer, commitNodeLayout, hasNonDraggingPendingLayout, trackLayoutWrite],
   );
 
+  const scheduleLayoutTimerRef = useRef(scheduleLayoutTimer);
+  useEffect(() => {
+    scheduleLayoutTimerRef.current = scheduleLayoutTimer;
+  }, [scheduleLayoutTimer]);
+
   // Flush any pending arrow-key move before tab hide, unmount, or native quit (#182).
   useEffect(() => {
     const flushAll = async () => {
@@ -228,7 +244,16 @@ export function MindMapPane({
         void flushAll();
       }
     };
+    const onDragCancelled = () => {
+      if (draggingNodeIdsRef.current.size === 0) return;
+      draggingNodeIdsRef.current.clear();
+      // Re-arm the debounce for any preserved pre-drag keyboard-move snapshot without
+      // persisting uncommitted mid-drag coordinates.
+      scheduleLayoutTimerRef.current();
+    };
     window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('pointercancel', onDragCancelled);
+    window.addEventListener('touchcancel', onDragCancelled);
     document.addEventListener('visibilitychange', onVisibilityChange);
     const unregisterFlush = registerBeforeCloseFlush({
       isDirty: () => pendingLayoutsRef.current.size > 0 || inFlightLayoutRef.current !== null,
@@ -236,6 +261,8 @@ export function MindMapPane({
     });
     return () => {
       window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('pointercancel', onDragCancelled);
+      window.removeEventListener('touchcancel', onDragCancelled);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       unregisterFlush();
       void flushAll();
@@ -313,6 +340,22 @@ export function MindMapPane({
 
   const handleSectionKeyDownCapture = useCallback(
     (event: ReactKeyboardEvent<HTMLElement>) => {
+      if (
+        (event.key === 'ArrowUp' ||
+          event.key === 'ArrowDown' ||
+          event.key === 'ArrowLeft' ||
+          event.key === 'ArrowRight') &&
+        isAnyNodeDragging()
+      ) {
+        if (event.target instanceof Element && event.target.closest('input, textarea, select')) {
+          return;
+        }
+        // Ignore arrow nudges while a pointer drag is active so React Flow never moves
+        // the dragged card, announces a bogus shift, or queues mid-drag coordinates (#182).
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       if (event.key !== ' ') return;
       if (!(event.target instanceof Element)) return;
       const nodeEl = event.target.closest<HTMLElement>('.react-flow__node[data-id]');
@@ -324,7 +367,7 @@ export function MindMapPane({
         selectNode(nodeEl.dataset.id);
       }
     },
-    [selectNode],
+    [isAnyNodeDragging, selectNode],
   );
 
   const onNodesChange = useCallback(
@@ -342,18 +385,13 @@ export function MindMapPane({
           dragNode(change.id, change.position.x, change.position.y);
           if (change.dragging === true) {
             markNodeDragging(change.id);
-          } else {
-            const wasDragging = draggingNodeIdsRef.current.delete(change.id);
-            if (moved) {
-              scheduleLayoutCommit(change.id, {
-                posX: change.position.x,
-                posY: change.position.y,
-              });
-            } else if (wasDragging && pendingLayoutsRef.current.has(change.id)) {
-              // If a drag aborts without `onNodeDragStop`, re-arm the debounce for the
-              // preserved keyboard-move snapshot.
-              scheduleLayoutTimer();
-            }
+          } else if (moved && !draggingNodeIdsRef.current.has(change.id)) {
+            // Only non-drag moves (keyboard arrows) queue a debounced commit; active
+            // pointer drags are settled exclusively by `onNodeDragStop` or drag cancel.
+            scheduleLayoutCommit(change.id, {
+              posX: change.position.x,
+              posY: change.position.y,
+            });
           }
         } else if (change.type === 'dimensions' && change.dimensions) {
           const { dimensions, id } = change;
@@ -377,14 +415,7 @@ export function MindMapPane({
         reportNodeSizes(sizeUpdates);
       }
     },
-    [
-      dragNode,
-      markNodeDragging,
-      reportNodeSizes,
-      scheduleLayoutCommit,
-      scheduleLayoutTimer,
-      setSelectedNode,
-    ],
+    [dragNode, markNodeDragging, reportNodeSizes, scheduleLayoutCommit, setSelectedNode],
   );
 
   const onEdgesChange = useCallback(

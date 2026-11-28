@@ -918,6 +918,96 @@ describe('MindMapPane', () => {
       }
     });
 
+    it('ignores arrow keys pressed mid-drag so no intermediate coordinates are written or announced (#182)', async () => {
+      vi.useFakeTimers();
+      try {
+        const commits: Array<{ id: string; posX: number; posY: number }> = [];
+        const commitNodeLayout = vi.fn(
+          async (nodeId: string, position?: { posX: number; posY: number }) => {
+            const target = useStudySyncStore.getState().nodes.find((n) => n.id === nodeId);
+            commits.push({
+              id: nodeId,
+              posX: position?.posX ?? target?.posX ?? 0,
+              posY: position?.posY ?? target?.posY ?? 0,
+            });
+          },
+        );
+        seed([node('a', 40, 40)], { selectedNodeId: 'a', commitNodeLayout });
+        render(<MindMapPane open />);
+
+        const cardA = cardElement('a');
+        const dispatchMouse = (
+          target: EventTarget,
+          type: 'mousedown' | 'mousemove' | 'mouseup',
+          init: MouseEventInit,
+        ) => {
+          const event = new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            ...init,
+          });
+          Object.defineProperty(event, 'view', { value: window });
+          act(() => {
+            target.dispatchEvent(event);
+          });
+        };
+        cardA.focus();
+
+        // 1. Drag from (40, 40) to (64, 52), hold mouse pressed, press ArrowDown, wait > 300 ms:
+        //    must stay at (64, 52), keep live region empty, write 0 times before release, then 1 time on release.
+        dispatchMouse(cardA, 'mousedown', { clientX: 50, clientY: 50 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 52, clientY: 50 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 76, clientY: 62 });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 64, posY: 52 });
+
+        fireEvent.keyDown(cardA, { key: 'ArrowDown' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 64, posY: 52 });
+        const liveRegion = document.querySelector('[id^="react-flow__aria-live-"]');
+        expect(liveRegion?.textContent ?? '').toBe('');
+
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([]);
+
+        dispatchMouse(window, 'mouseup', { clientX: 76, clientY: 62 });
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 64, posY: 52 }]);
+
+        // 2. Keyboard move (64, 52) -> (69, 52), start dragging to (93, 64), press ArrowDown mid-drag,
+        //    wait > 300 ms (still 0 writes), then close before release -> writes ONLY pre-drag (69, 52).
+        commits.length = 0;
+        cardA.focus();
+        fireEvent.keyDown(cardA, { key: 'ArrowRight' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 69, posY: 52 });
+
+        dispatchMouse(cardA, 'mousedown', { clientX: 80, clientY: 60 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 82, clientY: 60 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 106, clientY: 72 });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 93, posY: 64 });
+
+        fireEvent.keyDown(cardA, { key: 'ArrowDown' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 93, posY: 64 });
+
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([]);
+
+        await act(async () => {
+          await flushBeforeClose();
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 69, posY: 52 }]);
+
+        dispatchMouse(window, 'mouseup', { clientX: 106, clientY: 72 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('waits for an in-flight layout write and any follow-up move before flushBeforeClose resolves (#182)', async () => {
       vi.useFakeTimers();
       try {

@@ -1454,9 +1454,70 @@ export async function mindmapFlow(page) {
     `expected 1 coalesced write at (+20, +20), got: ${JSON.stringify({ startCoords, burstWrites })}`,
   );
 
-  // Path 1 (regression): Keyboard move followed by real mouse drag within 300 ms, then close
-  // BEFORE mouse release must persist the last completed keyboard-move coordinates (not 0 writes
-  // and not mid-drag coordinates).
+  // Path 1a (regression): Drag with real mouse, keep mouse button pressed, press ArrowDown,
+  // and wait past the 300 ms debounce: must produce 0 writes before release, stay at the dragged
+  // coordinates, and write the final dragged position exactly once on release.
+  const beforeDragArrowCard = await page.evaluate(cardByText('Filler line 010'));
+  const writesBeforeDragArrow = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+  await page.evaluate(
+    `document.querySelector('.react-flow__node[data-id="${arrowTarget.id}"]')?.focus()`,
+  );
+  const dragArrowStart = beforeDragArrowCard.center;
+  const dragArrowMid = { x: dragArrowStart.x + 24, y: dragArrowStart.y + 12 };
+  await page.mouse('mouseMoved', dragArrowStart.x, dragArrowStart.y);
+  await page.mouse('mousePressed', dragArrowStart.x, dragArrowStart.y);
+  for (let step = 1; step <= 4; step += 1) {
+    await page.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: dragArrowStart.x + ((dragArrowMid.x - dragArrowStart.x) * step) / 4,
+      y: dragArrowStart.y + ((dragArrowMid.y - dragArrowStart.y) * step) / 4,
+      button: 'left',
+      buttons: 1,
+    });
+  }
+  await page.waitFor(
+    `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(beforeDragArrowCard.transform)}`,
+    'real mouse drag to move card before mid-drag ArrowDown',
+  );
+  const draggedBeforeArrow = parseTranslate(
+    (await page.evaluate(cardByText('Filler line 010'))).transform,
+  );
+  await page.press('ArrowDown');
+  await new Promise((done) => setTimeout(done, 400));
+  const draggedAfterArrow = parseTranslate(
+    (await page.evaluate(cardByText('Filler line 010'))).transform,
+  );
+  const writesDuringHeldDrag = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeDragArrow})`,
+  );
+  assert(
+    writesDuringHeldDrag.length === 0 &&
+      Math.round(draggedAfterArrow.x) === Math.round(draggedBeforeArrow.x) &&
+      Math.round(draggedAfterArrow.y) === Math.round(draggedBeforeArrow.y),
+    `expected ArrowDown during held drag to keep position and write 0 times before release, got ${JSON.stringify({ draggedBeforeArrow, draggedAfterArrow, writesDuringHeldDrag })}`,
+  );
+  await page.mouse('mouseReleased', dragArrowMid.x, dragArrowMid.y);
+  await page.waitFor(
+    `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBeforeDragArrow + 1}`,
+    'releasing held drag after mid-drag ArrowDown to write once',
+  );
+  await new Promise((done) => setTimeout(done, 400));
+  const writesAfterHeldDragRelease = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeDragArrow})`,
+  );
+  assert(
+    writesAfterHeldDragRelease.length === 1 &&
+      writesAfterHeldDragRelease[0].nodeId === arrowTarget.id &&
+      Math.round(writesAfterHeldDragRelease[0].posX) === Math.round(draggedBeforeArrow.x) &&
+      Math.round(writesAfterHeldDragRelease[0].posY) === Math.round(draggedBeforeArrow.y),
+    `expected exactly 1 final write on release after mid-drag ArrowDown, got ${JSON.stringify({ draggedBeforeArrow, writesAfterHeldDragRelease })}`,
+  );
+
+  // Path 1b (regression): Keyboard move followed by real mouse drag within 300 ms, pressing
+  // ArrowDown while still dragging, waiting past debounce (0 writes), and closing BEFORE mouse
+  // release must persist ONLY the last completed keyboard-move coordinates before drag started.
   const beforeMidDragCard = await page.evaluate(cardByText('Filler line 010'));
   const beforeMidDragCoords = parseTranslate(beforeMidDragCard.transform);
   const writesBeforeMidDrag = await page.evaluate(
@@ -1487,6 +1548,13 @@ export async function mindmapFlow(page) {
   await page.waitFor(
     `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(afterKeyCard.transform)}`,
     'real mouse drag to move card before release',
+  );
+  await page.press('ArrowDown');
+  await new Promise((done) => setTimeout(done, 400));
+  assert(
+    (await page.evaluate(`window.__synapsePreview.getNodeLayoutWrites().length`)) ===
+      writesBeforeMidDrag,
+    'expected 0 writes while dragging even after pressing ArrowDown and waiting past debounce',
   );
   await page.evaluate(`window.__synapsePreview.triggerBeforeClose()`);
   const midDragCloseWrites = await page.evaluate(
