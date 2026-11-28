@@ -108,7 +108,8 @@ export function MindMapPane({
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<CardMenuState | null>(null);
 
-  const pendingLayoutIdsRef = useRef<Set<string>>(new Set());
+  const pendingLayoutsRef = useRef<Map<string, { posX: number; posY: number }>>(new Map());
+  const draggingNodeIdsRef = useRef<Set<string>>(new Set());
   const layoutTimerRef = useRef<number | null>(null);
   const inFlightLayoutRef = useRef<Promise<void> | null>(null);
 
@@ -117,6 +118,13 @@ export function MindMapPane({
       window.clearTimeout(layoutTimerRef.current);
       layoutTimerRef.current = null;
     }
+  }, []);
+
+  const hasNonDraggingPendingLayout = useCallback(() => {
+    for (const id of pendingLayoutsRef.current.keys()) {
+      if (!draggingNodeIdsRef.current.has(id)) return true;
+    }
+    return false;
   }, []);
 
   const trackLayoutWrite = useCallback((work: () => Promise<void>): Promise<void> => {
@@ -133,71 +141,104 @@ export function MindMapPane({
     return next;
   }, []);
 
-  const flushPendingLayouts = useCallback((): Promise<void> => {
-    clearLayoutTimer();
-    const pendingIds = [...pendingLayoutIdsRef.current];
-    pendingLayoutIdsRef.current.clear();
-    if (pendingIds.length === 0) {
-      return inFlightLayoutRef.current ?? Promise.resolve();
-    }
-    return trackLayoutWrite(async () => {
-      for (const id of pendingIds) {
-        if (!useStudySyncStore.getState().nodes.some((candidate) => candidate.id === id)) {
-          continue;
+  const flushPendingLayouts = useCallback(
+    ({ includeDragging = false }: { includeDragging?: boolean } = {}): Promise<void> => {
+      const entries: Array<[string, { posX: number; posY: number }]> = [];
+      for (const [id, position] of pendingLayoutsRef.current) {
+        if (includeDragging || !draggingNodeIdsRef.current.has(id)) {
+          entries.push([id, position]);
+          pendingLayoutsRef.current.delete(id);
         }
-        await commitNodeLayout(id);
       }
-    });
-  }, [clearLayoutTimer, commitNodeLayout, trackLayoutWrite]);
+      if (!hasNonDraggingPendingLayout()) {
+        clearLayoutTimer();
+      }
+      if (entries.length === 0) {
+        return inFlightLayoutRef.current ?? Promise.resolve();
+      }
+      return trackLayoutWrite(async () => {
+        for (const [id, position] of entries) {
+          if (!useStudySyncStore.getState().nodes.some((candidate) => candidate.id === id)) {
+            continue;
+          }
+          await commitNodeLayout(id, position);
+        }
+      });
+    },
+    [clearLayoutTimer, commitNodeLayout, hasNonDraggingPendingLayout, trackLayoutWrite],
+  );
 
   const flushPendingLayoutsRef = useRef(flushPendingLayouts);
   useEffect(() => {
     flushPendingLayoutsRef.current = flushPendingLayouts;
   }, [flushPendingLayouts]);
 
+  const scheduleLayoutTimer = useCallback(() => {
+    clearLayoutTimer();
+    if (!hasNonDraggingPendingLayout()) return;
+    layoutTimerRef.current = window.setTimeout(() => {
+      layoutTimerRef.current = null;
+      void flushPendingLayoutsRef.current({ includeDragging: false });
+    }, KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS);
+  }, [clearLayoutTimer, hasNonDraggingPendingLayout]);
+
   const scheduleLayoutCommit = useCallback(
-    (nodeId: string) => {
-      pendingLayoutIdsRef.current.add(nodeId);
-      clearLayoutTimer();
-      layoutTimerRef.current = window.setTimeout(() => {
-        layoutTimerRef.current = null;
-        void flushPendingLayoutsRef.current();
-      }, KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS);
+    (nodeId: string, position: { posX: number; posY: number }) => {
+      pendingLayoutsRef.current.set(nodeId, position);
+      scheduleLayoutTimer();
     },
-    [clearLayoutTimer],
+    [scheduleLayoutTimer],
   );
 
-  const cancelPendingLayout = useCallback(
+  const markNodeDragging = useCallback(
     (nodeId: string) => {
-      pendingLayoutIdsRef.current.delete(nodeId);
-      if (pendingLayoutIdsRef.current.size === 0) {
+      draggingNodeIdsRef.current.add(nodeId);
+      if (!hasNonDraggingPendingLayout()) {
         clearLayoutTimer();
       }
     },
-    [clearLayoutTimer],
+    [clearLayoutTimer, hasNonDraggingPendingLayout],
+  );
+
+  const settleNodeDrag = useCallback(
+    (nodeId: string, finalPosition: { posX: number; posY: number }) => {
+      draggingNodeIdsRef.current.delete(nodeId);
+      // The completed drag supersedes any unsaved keyboard-move snapshot for this node.
+      pendingLayoutsRef.current.delete(nodeId);
+      if (!hasNonDraggingPendingLayout()) {
+        clearLayoutTimer();
+      }
+      void trackLayoutWrite(() => commitNodeLayout(nodeId, finalPosition));
+    },
+    [clearLayoutTimer, commitNodeLayout, hasNonDraggingPendingLayout, trackLayoutWrite],
   );
 
   // Flush any pending arrow-key move before tab hide, unmount, or native quit (#182).
   useEffect(() => {
+    const flushAll = async () => {
+      while (pendingLayoutsRef.current.size > 0 || inFlightLayoutRef.current !== null) {
+        await flushPendingLayoutsRef.current({ includeDragging: true });
+      }
+    };
     const onPageHide = () => {
-      void flushPendingLayoutsRef.current();
+      void flushAll();
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        void flushPendingLayoutsRef.current();
+        void flushAll();
       }
     };
     window.addEventListener('pagehide', onPageHide);
     document.addEventListener('visibilitychange', onVisibilityChange);
     const unregisterFlush = registerBeforeCloseFlush({
-      isDirty: () => pendingLayoutIdsRef.current.size > 0 || inFlightLayoutRef.current !== null,
-      flush: () => flushPendingLayoutsRef.current(),
+      isDirty: () => pendingLayoutsRef.current.size > 0 || inFlightLayoutRef.current !== null,
+      flush: flushAll,
     });
     return () => {
       window.removeEventListener('pagehide', onPageHide);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       unregisterFlush();
-      void flushPendingLayoutsRef.current();
+      void flushAll();
     };
   }, []);
 
@@ -300,9 +341,19 @@ export function MindMapPane({
             (existing.posX !== change.position.x || existing.posY !== change.position.y);
           dragNode(change.id, change.position.x, change.position.y);
           if (change.dragging === true) {
-            cancelPendingLayout(change.id);
-          } else if (moved) {
-            scheduleLayoutCommit(change.id);
+            markNodeDragging(change.id);
+          } else {
+            const wasDragging = draggingNodeIdsRef.current.delete(change.id);
+            if (moved) {
+              scheduleLayoutCommit(change.id, {
+                posX: change.position.x,
+                posY: change.position.y,
+              });
+            } else if (wasDragging && pendingLayoutsRef.current.has(change.id)) {
+              // If a drag aborts without `onNodeDragStop`, re-arm the debounce for the
+              // preserved keyboard-move snapshot.
+              scheduleLayoutTimer();
+            }
           }
         } else if (change.type === 'dimensions' && change.dimensions) {
           const { dimensions, id } = change;
@@ -326,7 +377,14 @@ export function MindMapPane({
         reportNodeSizes(sizeUpdates);
       }
     },
-    [cancelPendingLayout, dragNode, reportNodeSizes, scheduleLayoutCommit, setSelectedNode],
+    [
+      dragNode,
+      markNodeDragging,
+      reportNodeSizes,
+      scheduleLayoutCommit,
+      scheduleLayoutTimer,
+      setSelectedNode,
+    ],
   );
 
   const onEdgesChange = useCallback(
@@ -528,12 +586,20 @@ export function MindMapPane({
           closeContextMenu();
           selectNode(null);
         }}
-        onNodeDragStart={() => {
+        onNodeDragStart={(_event, node) => {
           clickSequenceRef.current = null;
+          markNodeDragging(node.id);
         }}
         onNodeDragStop={(_event, node) => {
-          cancelPendingLayout(node.id);
-          void trackLayoutWrite(() => commitNodeLayout(node.id));
+          const current = useStudySyncStore
+            .getState()
+            .nodes.find((candidate) => candidate.id === node.id);
+          settleNodeDrag(
+            node.id,
+            current
+              ? { posX: current.posX, posY: current.posY }
+              : { posX: node.position.x, posY: node.position.y },
+          );
         }}
         onMoveEnd={(_event, viewport) => void saveViewport(viewport)}
         {...(initialViewport ? { defaultViewport: initialViewport } : {})}

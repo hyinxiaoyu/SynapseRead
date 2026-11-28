@@ -109,8 +109,10 @@ describe('MindMap accessibility helpers (#185)', () => {
       const nodeDesc = config['node.a11yDescription.default'];
       expect(nodeDesc).toBe(config['node.a11yDescription.keyboardDisabled']);
       expect(nodeDesc).toContain('Return to edit card');
-      expect(nodeDesc).toContain('Space to make it the target for the next excerpt');
-      expect(nodeDesc).toContain('arrow keys to move it');
+      expect(nodeDesc).toContain(
+        'Space to select this card and make it the target for the next excerpt',
+      );
+      expect(nodeDesc).toContain('Once selected, use the arrow keys to move it');
       expect(nodeDesc).toContain('Shift for larger steps');
       expect(nodeDesc).toContain('Delete or Forward Delete to delete it');
       expect(nodeDesc).toContain('Command+Z to undo');

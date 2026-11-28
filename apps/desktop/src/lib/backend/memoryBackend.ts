@@ -233,6 +233,9 @@ export interface MemoryBackendWithPreview {
   getHostStats(): MemoryHostStats;
   listLocalBookmarks(documentId?: string): Bookmark[];
   getNodeLayoutWrites(): MemoryNodeLayoutWrite[];
+  pauseNextNodeLayoutWrite(): void;
+  releasePausedNodeLayoutWrite(): void;
+  hasPausedNodeLayoutWrite(): boolean;
   triggerBeforeClose(): Promise<void>;
   pauseNextCursorWrite(): void;
   releasePausedCursorWrite(): void;
@@ -469,6 +472,8 @@ export function createMemoryBackendWithPreview({
   let bookmarkMutationCount = 0;
   let pauseCursorNext = false;
   let pendingCursorWaiter: (() => void) | null = null;
+  let pauseNodeLayoutNext = false;
+  let pendingNodeLayoutWaiter: (() => void) | null = null;
   const menuItemStates: MemoryMenuItemStateMap = {};
 
   const backend: StudyBackend = {
@@ -1121,7 +1126,17 @@ export function createMemoryBackendWithPreview({
     },
 
     async updateNodeLayout(nodeId, patch) {
-      Object.assign(require(nodes, nodeId, 'node'), patch);
+      const target = require(nodes, nodeId, 'node');
+      if (pauseNodeLayoutNext) {
+        pauseNodeLayoutNext = false;
+        await new Promise<void>((resolve) => {
+          pendingNodeLayoutWaiter = () => {
+            pendingNodeLayoutWaiter = null;
+            resolve();
+          };
+        });
+      }
+      Object.assign(target, patch);
       nodeLayoutWrites.push({
         nodeId,
         posX: patch.posX,
@@ -1406,6 +1421,15 @@ export function createMemoryBackendWithPreview({
     },
     getNodeLayoutWrites() {
       return nodeLayoutWrites.map((entry) => ({ ...entry }));
+    },
+    pauseNextNodeLayoutWrite() {
+      pauseNodeLayoutNext = true;
+    },
+    releasePausedNodeLayoutWrite() {
+      pendingNodeLayoutWaiter?.();
+    },
+    hasPausedNodeLayoutWrite() {
+      return pendingNodeLayoutWaiter !== null;
     },
     async triggerBeforeClose() {
       await Promise.all([...beforeCloseListeners].map((listener) => listener()));

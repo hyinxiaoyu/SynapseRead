@@ -323,8 +323,8 @@ export interface StudySyncState {
   reportNodeSizes(sizes: Readonly<Record<string, NodeSize>>): void;
   /** Updates position in memory only: called for every frame of a drag. */
   dragNode(nodeId: string, posX: number, posY: number): void;
-  /** Persists the node's current layout: called when a drag ends. */
-  commitNodeLayout(nodeId: string): Promise<void>;
+  /** Persists the node's layout: uses `position` when provided, otherwise the store's current coordinates. */
+  commitNodeLayout(nodeId: string, position?: { posX: number; posY: number }): Promise<void>;
   connectNodes(sourceNodeId: string, targetNodeId: string): Promise<void>;
   removeEdge(edgeId: string): Promise<void>;
   /** Persists a card edit; resolves to `false` when the backend write fails. */
@@ -2573,10 +2573,12 @@ export function createStudySyncStore(backend: StudyBackend) {
         }));
       },
 
-      async commitNodeLayout(nodeId) {
+      async commitNodeLayout(nodeId, position) {
         const node = get().nodes.find((candidate) => candidate.id === nodeId);
         if (!node) return;
-        const { posX, posY, isCollapsed } = node;
+        const posX = position?.posX ?? node.posX;
+        const posY = position?.posY ?? node.posY;
+        const { isCollapsed } = node;
         await guarded(() => backend.updateNodeLayout(nodeId, { posX, posY, isCollapsed }));
       },
 

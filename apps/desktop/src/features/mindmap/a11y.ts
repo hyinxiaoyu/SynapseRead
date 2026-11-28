@@ -151,7 +151,7 @@ export function mindMapAriaLabelConfig(
     platform,
   );
 
-  const nodeDescription = `Press ${editKeys} to edit card. Press Space to make it the target for the next excerpt. Use the arrow keys to move it, or hold Shift for larger steps. Press ${deleteKeys} to delete it (${undoKeys} to undo), or Escape to clear selection.`;
+  const nodeDescription = `Press ${editKeys} to edit card. Press Space to select this card and make it the target for the next excerpt. Once selected, use the arrow keys to move it, or hold Shift for larger steps. Press ${deleteKeys} to delete it (${undoKeys} to undo), or Escape to clear selection.`;
   const edgeDescription = `Press ${editKeys} or Space to select this link. Press ${deleteKeys} to remove it, or Escape to deselect.`;
 
   return {

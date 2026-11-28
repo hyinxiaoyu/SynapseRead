@@ -833,6 +833,146 @@ describe('MindMapPane', () => {
         vi.useRealTimers();
       }
     });
+
+    it('preserves an unsaved keyboard move if close fires mid-drag, and writes final position once on normal release (#182)', async () => {
+      vi.useFakeTimers();
+      try {
+        const commits: Array<{ id: string; posX: number; posY: number }> = [];
+        const commitNodeLayout = vi.fn(
+          async (nodeId: string, position?: { posX: number; posY: number }) => {
+            const target = useStudySyncStore.getState().nodes.find((n) => n.id === nodeId);
+            const posX = position?.posX ?? target?.posX ?? 0;
+            const posY = position?.posY ?? target?.posY ?? 0;
+            commits.push({ id: nodeId, posX, posY });
+          },
+        );
+        seed([node('a', 40, 40)], { selectedNodeId: 'a', commitNodeLayout });
+        render(<MindMapPane open />);
+
+        const cardA = cardElement('a');
+        const dispatchMouse = (
+          target: EventTarget,
+          type: 'mousedown' | 'mousemove' | 'mouseup',
+          init: MouseEventInit,
+        ) => {
+          const event = new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            ...init,
+          });
+          Object.defineProperty(event, 'view', { value: window });
+          act(() => {
+            target.dispatchEvent(event);
+          });
+        };
+        cardA.focus();
+
+        // 1. Keyboard move (40, 40) -> (45, 40), then start mouse drag to (69, 52) without releasing.
+        fireEvent.keyDown(cardA, { key: 'ArrowRight' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 45, posY: 40 });
+        dispatchMouse(cardA, 'mousedown', { clientX: 50, clientY: 50 });
+        // First move crosses React Flow's default `nodeDragThreshold` (1 px) to start dragging.
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 52, clientY: 50 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 76, clientY: 62 });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 69, posY: 52 });
+        expect(commits).toEqual([]);
+
+        // Close fires before mouseUp: must flush the last completed keyboard move (45, 40), not (69, 52).
+        await act(async () => {
+          await flushBeforeClose();
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 45, posY: 40 }]);
+
+        // Finish the drag cleanly.
+        dispatchMouse(window, 'mouseup', { clientX: 76, clientY: 62 });
+        await act(async () => {
+          await Promise.resolve();
+        });
+        expect(commits).toEqual([
+          { id: 'a', posX: 45, posY: 40 },
+          { id: 'a', posX: 69, posY: 52 },
+        ]);
+
+        // 2. Keyboard move (69, 52) -> (74, 52), then drag and release at (94, 62): writes ONCE with (94, 62).
+        commits.length = 0;
+        cardA.focus();
+        fireEvent.keyDown(cardA, { key: 'ArrowRight' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 74, posY: 52 });
+        dispatchMouse(cardA, 'mousedown', { clientX: 80, clientY: 60 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 82, clientY: 60 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 102, clientY: 70 });
+        // Even if the drag lasts past the 300 ms debounce, it must not flush mid-drag.
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([]);
+
+        dispatchMouse(window, 'mouseup', { clientX: 102, clientY: 70 });
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 94, posY: 62 }]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('waits for an in-flight layout write and any follow-up move before flushBeforeClose resolves (#182)', async () => {
+      vi.useFakeTimers();
+      try {
+        let releaseFirstWrite: (() => void) | null = null;
+        const commits: Array<{ id: string; posX: number; posY: number }> = [];
+        const commitNodeLayout = vi.fn(
+          async (nodeId: string, position?: { posX: number; posY: number }) => {
+            if (commits.length === 0 && releaseFirstWrite === null) {
+              await new Promise<void>((resolve) => {
+                releaseFirstWrite = resolve;
+              });
+            }
+            const target = useStudySyncStore.getState().nodes.find((n) => n.id === nodeId);
+            commits.push({
+              id: nodeId,
+              posX: position?.posX ?? target?.posX ?? 0,
+              posY: position?.posY ?? target?.posY ?? 0,
+            });
+          },
+        );
+        seed([node('a', 40, 40)], { selectedNodeId: 'a', commitNodeLayout });
+        render(<MindMapPane open />);
+
+        const cardA = cardElement('a');
+        cardA.focus();
+        fireEvent.keyDown(cardA, { key: 'ArrowRight' });
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS);
+        });
+        expect(releaseFirstWrite).not.toBeNull();
+
+        // While the first write is still in flight, move again and trigger close.
+        fireEvent.keyDown(cardA, { key: 'ArrowDown' });
+        let closeDone = false;
+        const closePromise = flushBeforeClose().then(() => {
+          closeDone = true;
+        });
+        await act(async () => {
+          await Promise.resolve();
+        });
+        expect(closeDone).toBe(false);
+
+        await act(async () => {
+          releaseFirstWrite?.();
+          await closePromise;
+        });
+        expect(closeDone).toBe(true);
+        expect(commits).toEqual([
+          { id: 'a', posX: 45, posY: 40 },
+          { id: 'a', posX: 45, posY: 45 },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe('screen reader names and descriptions (#185)', () => {
@@ -1044,8 +1184,10 @@ describe('MindMapPane', () => {
         expect(nodeDescId).toBeTruthy();
         const nodeDesc = document.getElementById(nodeDescId as string)?.textContent ?? '';
         expect(nodeDesc).toContain('to edit card');
-        expect(nodeDesc).toContain('Space to make it the target for the next excerpt');
-        expect(nodeDesc).toContain('arrow keys to move it');
+        expect(nodeDesc).toContain(
+          'Space to select this card and make it the target for the next excerpt',
+        );
+        expect(nodeDesc).toContain('Once selected, use the arrow keys to move it');
         expect(nodeDesc).toContain('to delete it');
         expect(nodeDesc).toContain('to undo');
         expect(nodeDesc).not.toContain('Press enter or space to select a node');

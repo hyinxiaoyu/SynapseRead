@@ -18,6 +18,9 @@ export interface SynapsePreviewController {
   getHostStats(): MemoryHostStats;
   listLocalBookmarks: MemoryBackendWithPreview['listLocalBookmarks'];
   getNodeLayoutWrites: MemoryBackendWithPreview['getNodeLayoutWrites'];
+  pauseNextNodeLayoutWrite(): void;
+  releasePausedNodeLayoutWrite(): void;
+  hasPausedNodeLayoutWrite(): boolean;
   triggerBeforeClose: MemoryBackendWithPreview['triggerBeforeClose'];
   pauseNextCursorWrite(): void;
   releasePausedCursorWrite(): void;
@@ -42,6 +45,9 @@ export function createDefaultBackend(): StudyBackend {
       getHostStats: preview.getHostStats,
       listLocalBookmarks: preview.listLocalBookmarks,
       getNodeLayoutWrites: preview.getNodeLayoutWrites,
+      pauseNextNodeLayoutWrite: preview.pauseNextNodeLayoutWrite,
+      releasePausedNodeLayoutWrite: preview.releasePausedNodeLayoutWrite,
+      hasPausedNodeLayoutWrite: preview.hasPausedNodeLayoutWrite,
       triggerBeforeClose: preview.triggerBeforeClose,
       pauseNextCursorWrite: preview.pauseNextCursorWrite,
       releasePausedCursorWrite: preview.releasePausedCursorWrite,
