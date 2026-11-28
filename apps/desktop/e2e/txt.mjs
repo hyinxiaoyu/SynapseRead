@@ -362,6 +362,90 @@ export async function txtFlow(page) {
   );
   assert(neighbour === 1, 'the highlight after a TXT note marker still paints exactly its text');
 
+  // Excerpt an existing highlight from the sidebar (#124): no duplicate highlight is
+  // created, its note seeds the card's notes, and In MindMap opens & reveals the card.
+  await page.showSidebarTab('Highlights & Notes');
+  const annotationRows = `${visibleTxtViewer}.querySelectorAll('[data-testid="annotation-item"]')`;
+  await page.waitFor(`${annotationRows}.length === 2`, 'two independent TXT highlights in sidebar');
+  await page.evaluate(
+    `${annotationRows}[0].querySelector('[data-testid="annotation-excerpt-button"]').click()`,
+  );
+  await page.waitFor(
+    `${annotationRows}.length === 2`,
+    'promoting a highlight from the sidebar does not duplicate it',
+  );
+  await page.waitFor(
+    `${annotationRows}[0].querySelector('[data-testid="annotation-card-badge"]')?.tagName === 'BUTTON'`,
+    'promoted highlight row gains a clickable In MindMap badge button',
+  );
+  await page.waitFor(
+    `[...document.querySelectorAll('.react-flow__node')].some((n) => n.textContent.includes('Dropped E2E') && n.textContent.includes('first line'))`,
+    'promoted highlight card appears on MindMap with its seeded note',
+  );
+  // Hide MindMap, then click the In MindMap badge button to reopen MindMap at that card.
+  await page.clickButton('Hide MindMap');
+  await page.waitFor(
+    `document.querySelector('[aria-label="Show MindMap"]')?.getAttribute('aria-pressed') === 'false'`,
+    'MindMap collapsed before testing Show in MindMap',
+  );
+  await page.evaluate(
+    `${annotationRows}[0].querySelector('[data-testid="annotation-card-badge"]').click()`,
+  );
+  await page.waitFor(
+    `document.querySelector('[aria-label="Hide MindMap"]')?.getAttribute('aria-pressed') === 'true'`,
+    'clicking In MindMap badge reopens the MindMap',
+  );
+  await page.waitFor(
+    `[...document.querySelectorAll('.react-flow__node.selected')].some((n) => n.textContent.includes('Dropped E2E'))`,
+    'clicking In MindMap badge selects the promoted card',
+  );
+
+  // Also promote the second highlight from its highlight popover, and verify Show in MindMap replaces Excerpt.
+  await page.hideSidebar();
+  const secondHighlightPoint = await page.waitFor(
+    `(() => {
+      const mark = [...${visibleTxtViewer}.querySelectorAll('[data-annotation-id]')].find((e) => e.textContent === 'document content');
+      if (!mark) return null;
+      const r = mark.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`,
+    'second TXT highlight point for popover promotion',
+  );
+  await page.click(secondHighlightPoint);
+  await page.waitFor(
+    `document.querySelector('[data-testid="selection-popover"]')?.dataset.popoverMode === 'edit'`,
+    'edit popover for second TXT highlight',
+  );
+  // Typing an unsaved note draft in the popover must warn instead of dropping the draft (#124).
+  await page.clickButton('Add Note');
+  await page.setInputValue('[data-testid="popover-note-input"]', 'Saved popover draft');
+  await page.evaluate(`document.querySelector('[data-testid="popover-excerpt"]').click()`);
+  await page.waitFor(
+    `document.querySelector('[data-testid="popover-unsaved-note-warning"]') && document.querySelector('[data-testid="popover-note-input"]')?.value === 'Saved popover draft'`,
+    'unsaved popover note blocks excerpting and preserves draft',
+  );
+  // Saving and immediately excerpting seeds the card with the saved note.
+  await page.clickButton('Save Note');
+  await page.evaluate(`document.querySelector('[data-testid="popover-excerpt"]').click()`);
+  await page.waitFor(
+    `!document.querySelector('[data-testid="selection-popover"]')`,
+    'popover closes after promoting existing highlight',
+  );
+  await page.waitFor(
+    `[...document.querySelectorAll('.react-flow__node')].some((n) => n.textContent.includes('document content') && n.textContent.includes('Saved popover draft'))`,
+    'second highlight promoted from popover appears on MindMap with its saved note',
+  );
+  await page.click(secondHighlightPoint);
+  await page.waitFor(
+    `document.querySelector('[data-testid="popover-show-in-mindmap"]') && !document.querySelector('[data-testid="popover-excerpt"]')`,
+    'already-linked highlight popover replaces Excerpt with Show in MindMap',
+  );
+  await page.press('Escape');
+  await page.waitFor(
+    `!document.querySelector('[data-testid="selection-popover"]')`,
+    'Esc closes linked highlight popover',
+  );
+
   // Last, because resizing reflows the text and moves every scroll offset above.
   // TXT keeps the same reading measure as EPUB at every window width.
   for (const width of [1280, 1728, 2560]) {

@@ -1629,4 +1629,117 @@ describe('memory backend card delete and restore', () => {
       }),
     ).rejects.toMatchObject({ code: 'invalid_anchor' });
   });
+
+  it('creates a card for an existing highlight or underline without duplicating it (#124)', async () => {
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('The quick brown fox jumps') },
+    });
+    const doc = (await backend.pickDocument())!;
+    const nb = await backend.createNotebook('Study');
+    const otherNb = await backend.createNotebook('Other');
+
+    const highlight = await backend.createAnnotation({
+      documentId: doc.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 4, endByteOffset: 19, lineIndex: 0 },
+      excerptText: 'quick brown fox',
+      excerptImagePng: null,
+      note: '  Seeded note\nLine 2  ',
+      color: '#fde047',
+      style: 'highlight',
+    });
+
+    const root = await backend.createCardForAnnotation({
+      annotationId: highlight.id,
+      notebookId: nb.id,
+      parentNodeId: null,
+      posX: 10,
+      posY: 20,
+    });
+    expect(root.card.title).toBe('quick brown fox');
+    expect(root.card.markdownNotes).toBe('Seeded note\nLine 2');
+    expect(root.card.annotationIds).toEqual([highlight.id]);
+    expect(root.edge).toBeNull();
+
+    const graph = await backend.loadNotebookGraph(nb.id);
+    expect(graph.annotations).toHaveLength(1);
+    expect(graph.cards).toHaveLength(1);
+
+    // Promoting an already-linked annotation is rejected.
+    await expect(
+      backend.createCardForAnnotation({
+        annotationId: highlight.id,
+        notebookId: nb.id,
+        parentNodeId: null,
+        posX: 0,
+        posY: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_graph' });
+
+    // Promoting an underline under a parent node creates the edge.
+    const underline = await backend.createAnnotation({
+      documentId: doc.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 20, endByteOffset: 25, lineIndex: 0 },
+      excerptText: 'jumps',
+      excerptImagePng: null,
+      note: null,
+      color: '#86efac',
+      style: 'underline',
+    });
+    const child = await backend.createCardForAnnotation({
+      annotationId: underline.id,
+      notebookId: nb.id,
+      parentNodeId: root.node.id,
+      posX: 300,
+      posY: 20,
+    });
+    expect(child.edge?.sourceNodeId).toBe(root.node.id);
+    expect(child.edge?.targetNodeId).toBe(child.node.id);
+
+    // Validation failures match core.
+    const third = await backend.createAnnotation({
+      documentId: doc.id,
+      notebookId: nb.id,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 3, lineIndex: 0 },
+      excerptText: 'The',
+      excerptImagePng: null,
+      note: null,
+      color: '#fde047',
+      style: 'highlight',
+    });
+    await expect(
+      backend.createCardForAnnotation({
+        annotationId: third.id,
+        notebookId: otherNb.id,
+        parentNodeId: null,
+        posX: 0,
+        posY: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_graph' });
+    await expect(
+      backend.createCardForAnnotation({
+        annotationId: third.id,
+        notebookId: nb.id,
+        parentNodeId: null,
+        posX: Number.NaN,
+        posY: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_graph' });
+    await expect(
+      backend.createCardForAnnotation({
+        annotationId: 'missing',
+        notebookId: nb.id,
+        parentNodeId: null,
+        posX: 0,
+        posY: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+
+    // Deleting and restoring the promoted highlight keeps the card link.
+    await backend.deleteAnnotation(highlight.id);
+    const restored = await backend.restoreAnnotation(highlight.id);
+    expect(restored.cards.map((c) => c.id)).toEqual([root.card.id]);
+    expect(restored.cards[0]?.annotationIds).toEqual([highlight.id]);
+  });
 });

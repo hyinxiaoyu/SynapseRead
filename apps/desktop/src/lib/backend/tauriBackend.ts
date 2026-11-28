@@ -8,6 +8,7 @@ import {
   type Annotation,
   type Bookmark,
   type CatalogBookClassification,
+  type CreatedCard,
   type CreatedExcerpt,
   type DeletedCard,
   type DocumentSourceStatus,
@@ -143,6 +144,8 @@ export function createTauriBackend(): StudyBackend {
     loadNotebookGraph: (notebookId) => invoke<NotebookGraph>('load_notebook_graph', { notebookId }),
 
     createExcerpt: (input) => invoke<CreatedExcerpt>('create_excerpt', { input }),
+    createCardForAnnotation: (input) =>
+      invoke<CreatedCard>('create_card_for_annotation', { input }),
     createAnnotation: (input) => invoke<Annotation>('create_annotation', { input }),
     updateAnnotation: (annotationId, patch) =>
       invoke<Annotation>('update_annotation', { annotationId, patch }),

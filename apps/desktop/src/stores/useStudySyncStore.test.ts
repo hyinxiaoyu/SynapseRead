@@ -5182,4 +5182,541 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(s.getState().lanImport.session).toBeNull();
     expect(s.getState().lanImport.phase).toBe('idle');
   });
+
+  it('promotes an existing highlight to MindMap without duplicating it, drains pending note edits, and reveals its card (#124)', async () => {
+    const backend = createMemoryBackend({
+      library: {
+        '/docs/a.txt': new TextEncoder().encode('The quick brown fox jumps over the lazy dog'),
+      },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 4, endByteOffset: 19, lineIndex: 0 },
+      text: 'quick brown fox',
+      imagePng: null,
+    });
+    const highlight = (await store.getState().createAnnotationFromSelection({
+      color: '#fde047',
+      style: 'highlight',
+      note: 'Initial note',
+    }))!;
+    expect(store.getState().annotations).toHaveLength(1);
+    expect(store.getState().cards).toHaveLength(0);
+
+    // Pause an in-flight note update to verify excerptAnnotation drains it before creating the card.
+    const origUpdate = backend.updateAnnotation.bind(backend);
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+      await updateGate;
+      return origUpdate(id, patch);
+    });
+
+    const updatePromise = store
+      .getState()
+      .updateAnnotation(highlight.id, { note: 'Updated note\nLine 2', color: null });
+    const promotePromise = store.getState().excerptAnnotation(highlight.id);
+    releaseUpdate();
+    await Promise.all([updatePromise, promotePromise]);
+
+    expect(store.getState().annotations).toHaveLength(1);
+    expect(store.getState().cards).toHaveLength(1);
+    expect(store.getState().nodes).toHaveLength(1);
+    const card = store.getState().cards[0]!;
+    const rootNode = store.getState().nodes[0]!;
+    expect(card.title).toBe('quick brown fox');
+    expect(card.markdownNotes).toBe('Updated note\nLine 2');
+    expect(card.annotationIds).toEqual([highlight.id]);
+    expect(store.getState().selectedNodeId).toBe(rootNode.id);
+    expect(store.getState().revealRequest?.nodeId).toBe(rootNode.id);
+    expect(store.getState().revealRequest?.openMindMap).toBeUndefined();
+
+    // Nesting target applies to promoting an existing underline too.
+    store.getState().selectNode(rootNode.id);
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 35, endByteOffset: 43, lineIndex: 0 },
+      text: 'lazy dog',
+      imagePng: null,
+    });
+    const underline = (await store.getState().createAnnotationFromSelection({
+      color: '#86efac',
+      style: 'underline',
+    }))!;
+    await store.getState().excerptAnnotation(underline.id);
+
+    expect(store.getState().annotations).toHaveLength(2);
+    expect(store.getState().cards).toHaveLength(2);
+    expect(store.getState().edges).toHaveLength(1);
+    expect(store.getState().edges[0]?.sourceNodeId).toBe(rootNode.id);
+    expect(store.getState().lastExcerptParentTitle).toBe('quick brown fox');
+
+    // showAnnotationCard selects the card and asks to open MindMap without changing nestingTargetNodeId.
+    const childNode = store.getState().nodes[1]!;
+    store.getState().selectNode(childNode.id);
+    store.getState().showAnnotationCard(highlight.id);
+    expect(store.getState().selectedNodeId).toBe(rootNode.id);
+    expect(store.getState().nestingTargetNodeId).toBe(childNode.id);
+    expect(store.getState().revealRequest).toMatchObject({
+      nodeId: rootNode.id,
+      openMindMap: true,
+    });
+
+    // Deleting and undoing the promoted highlight preserves card-source undo behaviour (#97/#112).
+    await store.getState().removeAnnotation(highlight.id);
+    expect(store.getState().cards.find((c) => c.id === card.id)?.annotationIds).toEqual([]);
+    await store.getState().undoRemoveAnnotation();
+    expect(store.getState().cards.find((c) => c.id === card.id)?.annotationIds).toEqual([
+      highlight.id,
+    ]);
+  });
+
+  it('blocks deleting an annotation while excerptAnnotation is in flight (before and after commit) and recovers on failure (#124)', async () => {
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('Alpha passage and beta passage') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 13, lineIndex: 0 },
+      text: 'Alpha passage',
+      imagePng: null,
+    });
+    const first = (await store.getState().createAnnotationFromSelection({ note: 'Note A' }))!;
+
+    const origUpdate = backend.updateAnnotation.bind(backend);
+    const origCreateCard = backend.createCardForAnnotation.bind(backend);
+    const deleteSpy = vi.spyOn(backend, 'deleteAnnotation');
+
+    // Phase 1: hold while draining a pending note edit (before backend card commit).
+    let releaseUpdate!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+      await updateGate;
+      return origUpdate(id, patch);
+    });
+
+    // Phase 2: hold AFTER backend commits the card, before the response reaches the store.
+    let cardCommitted!: () => void;
+    const waitCardCommitted = new Promise<void>((resolve) => {
+      cardCommitted = resolve;
+    });
+    let releaseCardResponse!: () => void;
+    const cardResponseGate = new Promise<void>((resolve) => {
+      releaseCardResponse = resolve;
+    });
+    vi.spyOn(backend, 'createCardForAnnotation').mockImplementationOnce(async (input) => {
+      const created = await origCreateCard(input);
+      cardCommitted();
+      await cardResponseGate;
+      return created;
+    });
+
+    const updatePromise = store
+      .getState()
+      .updateAnnotation(first.id, { note: 'Edited before commit', color: null });
+    const promotePromise = store.getState().excerptAnnotation(first.id);
+
+    // During pre-commit drain, excerptingAnnotationIds tracks `first.id` and removeAnnotation is blocked.
+    expect(store.getState().excerptingAnnotationIds).toEqual([first.id]);
+    await store.getState().removeAnnotation(first.id);
+    expect(store.getState().annotations.some((a) => a.id === first.id)).toBe(true);
+    expect(deleteSpy).not.toHaveBeenCalled();
+
+    // Release note update; wait until backend commits the card while response is still paused.
+    releaseUpdate();
+    await updatePromise;
+    await waitCardCommitted;
+
+    // During post-commit response wait, removeAnnotation is STILL blocked (cannot skip confirmation or leave stale link).
+    expect(store.getState().excerptingAnnotationIds).toEqual([first.id]);
+    await store.getState().removeAnnotation(first.id);
+    expect(store.getState().annotations.some((a) => a.id === first.id)).toBe(true);
+    expect(deleteSpy).not.toHaveBeenCalled();
+
+    // Release the response: card + link land atomically as excerptingAnnotationIds clears.
+    releaseCardResponse();
+    await promotePromise;
+
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    expect(store.getState().cards).toHaveLength(1);
+    const cardId = store.getState().cards[0]!.id;
+    expect(store.getState().cards[0]?.annotationIds).toEqual([first.id]);
+    expect(store.getState().cards[0]?.markdownNotes).toBe('Edited before commit');
+
+    // Now deleting (after UI card-source confirmation) keeps store and backend sources consistent.
+    await store.getState().removeAnnotation(first.id);
+    expect(deleteSpy).toHaveBeenCalledWith(first.id);
+    expect(store.getState().cards.find((c) => c.id === cardId)?.annotationIds).toEqual([]);
+    const graphAfterDelete = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterDelete.cards.find((c) => c.id === cardId)?.annotationIds).toEqual([]);
+
+    // Undo restores the original annotation id and card link in both store and backend.
+    const restored = await store.getState().undoRemoveAnnotation();
+    expect(restored?.id).toBe(first.id);
+    expect(store.getState().cards.find((c) => c.id === cardId)?.annotationIds).toEqual([first.id]);
+    const graphAfterUndo = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterUndo.cards.find((c) => c.id === cardId)?.annotationIds).toEqual([first.id]);
+
+    // Failure releases excerptingAnnotationIds so the reader can retry or delete.
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 18, endByteOffset: 30, lineIndex: 0 },
+      text: 'beta passage',
+      imagePng: null,
+    });
+    const second = (await store.getState().createAnnotationFromSelection())!;
+    vi.spyOn(backend, 'createCardForAnnotation').mockRejectedValueOnce({
+      code: 'database',
+      message: 'disk full',
+    });
+
+    await store.getState().excerptAnnotation(second.id);
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    expect(store.getState().isExcerpting).toBe(false);
+    expect(store.getState().error).toContain('disk full');
+
+    // Can delete after failed promotion (or retry).
+    await store.getState().removeAnnotation(second.id);
+    expect(store.getState().annotations.some((a) => a.id === second.id)).toBe(false);
+  });
+
+  it('aborts excerptAnnotation when a queued note save fails, keeps the update queue healthy, and creates one card on retry (#124)', async () => {
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('The quick brown fox jumps') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 4, endByteOffset: 19, lineIndex: 0 },
+      text: 'quick brown fox',
+      imagePng: null,
+    });
+    const highlight = (await store.getState().createAnnotationFromSelection({
+      color: '#fde047',
+      style: 'highlight',
+      note: 'Original note',
+    }))!;
+
+    // 1. Pause note write, queue excerpt immediately, then fail the note write.
+    let rejectUpdate!: (error: unknown) => void;
+    const failingWrite = new Promise<Annotation>((_resolve, reject) => {
+      rejectUpdate = reject;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(() => failingWrite);
+    const createCardSpy = vi.spyOn(backend, 'createCardForAnnotation');
+
+    const savePromise = store
+      .getState()
+      .updateAnnotation(highlight.id, { note: 'Revised note', color: null });
+    const excerptPromise = store.getState().excerptAnnotation(highlight.id);
+
+    rejectUpdate({ code: 'database', message: 'note write failed' });
+    const [saved] = await Promise.all([savePromise, excerptPromise]);
+
+    expect(saved).toBe(false);
+    expect(store.getState().error).toContain('note write failed');
+    expect(createCardSpy).not.toHaveBeenCalled();
+    expect(store.getState().cards).toHaveLength(0);
+    expect(store.getState().nodes).toHaveLength(0);
+    expect(store.getState().revealRequest).toBeNull();
+    expect(store.getState().isExcerpting).toBe(false);
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    const graphAfterFail = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterFail.cards).toHaveLength(0);
+    expect(graphAfterFail.nodes).toHaveLength(0);
+
+    // 2. A color-only update queued behind a failing note save still runs, yet excerptAnnotation
+    //    still aborts because the latest note save failed.
+    let rejectSecondNote!: (error: unknown) => void;
+    const secondFail = new Promise<Annotation>((_resolve, reject) => {
+      rejectSecondNote = reject;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(() => secondFail);
+
+    const failNoteP = store
+      .getState()
+      .updateAnnotation(highlight.id, { note: 'Revised note', color: null });
+    const colorP = store
+      .getState()
+      .updateAnnotation(highlight.id, { note: null, color: '#86efac' });
+    const abortedExcerptP = store.getState().excerptAnnotation(highlight.id);
+
+    rejectSecondNote({ code: 'database', message: 'still locked' });
+    const [noteOk, colorOk] = await Promise.all([failNoteP, colorP, abortedExcerptP]);
+    expect(noteOk).toBe(false);
+    expect(colorOk).toBe(true);
+    expect(store.getState().annotations[0]?.color).toBe('#86efac');
+    expect(store.getState().cards).toHaveLength(0);
+    expect(store.getState().revealRequest).toBeNull();
+
+    // 3. Retry saving the note and immediately excerpt: creates exactly one card with the revised note.
+    const origUpdate = backend.updateAnnotation.bind(backend);
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(async (id, patch) => {
+      await retryGate;
+      return origUpdate(id, patch);
+    });
+
+    const retrySaveP = store
+      .getState()
+      .updateAnnotation(highlight.id, { note: 'Revised note', color: null });
+    const retryExcerptP = store.getState().excerptAnnotation(highlight.id);
+    releaseRetry();
+    const [retrySaved] = await Promise.all([retrySaveP, retryExcerptP]);
+
+    expect(retrySaved).toBe(true);
+    expect(store.getState().cards).toHaveLength(1);
+    expect(store.getState().cards[0]?.markdownNotes).toBe('Revised note');
+    expect(store.getState().cards[0]?.annotationIds).toEqual([highlight.id]);
+    expect(store.getState().revealRequest?.nodeId).toBe(store.getState().nodes[0]?.id);
+    const graphAfterRetry = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterRetry.cards).toHaveLength(1);
+    expect(graphAfterRetry.cards[0]?.markdownNotes).toBe('Revised note');
+  });
+
+  it('serializes concurrent excerptAnnotation calls without dropping queued items and keeps running after an error (#124)', async () => {
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('Alpha beta gamma passages') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+      text: 'Alpha',
+      imagePng: null,
+    });
+    const annA = (await store.getState().createAnnotationFromSelection({ note: 'Note A' }))!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 6, endByteOffset: 10, lineIndex: 0 },
+      text: 'beta',
+      imagePng: null,
+    });
+    const annB = (await store.getState().createAnnotationFromSelection({ note: 'Note B' }))!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 11, endByteOffset: 16, lineIndex: 0 },
+      text: 'gamma',
+      imagePng: null,
+    });
+    const annC = (await store.getState().createAnnotationFromSelection({ note: 'Note C' }))!;
+
+    const origCreateCard = backend.createCardForAnnotation.bind(backend);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.spyOn(backend, 'createCardForAnnotation')
+      .mockImplementationOnce(async (input) => {
+        await firstGate;
+        return origCreateCard(input);
+      })
+      .mockRejectedValueOnce({ code: 'database', message: 'transient error' });
+
+    const pA = store.getState().excerptAnnotation(annA.id);
+    const pB = store.getState().excerptAnnotation(annB.id);
+    const pC = store.getState().excerptAnnotation(annC.id);
+    // Duplicate call for an already-queued annotation is ignored.
+    const pDup = store.getState().excerptAnnotation(annC.id);
+
+    expect(store.getState().isExcerpting).toBe(true);
+    expect(store.getState().excerptingAnnotationIds).toEqual([annA.id, annB.id, annC.id]);
+
+    releaseFirst();
+    await Promise.all([pA, pB, pC, pDup]);
+
+    expect(store.getState().isExcerpting).toBe(false);
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    expect(store.getState().error).toContain('transient error');
+    expect(store.getState().cards).toHaveLength(2);
+    expect(store.getState().cards.some((c) => c.annotationIds.includes(annA.id))).toBe(true);
+    expect(store.getState().cards.some((c) => c.annotationIds.includes(annC.id))).toBe(true);
+
+    // Serialized cards do not stack at the exact same coordinates.
+    const [nodeA, nodeC] = store.getState().nodes;
+    expect(nodeA && nodeC && (nodeA.posX !== nodeC.posX || nodeA.posY !== nodeC.posY)).toBe(true);
+
+    const graph = await backend.loadNotebookGraph(notebookId);
+    expect(graph.cards).toHaveLength(2);
+  });
+
+  it('aborts a queued excerptAnnotation when a note save fails either before or after the queued task starts, ignoring trailing color edits, and succeeds on retry (#124)', async () => {
+    const setupPair = async () => {
+      const backend = createMemoryBackend({
+        library: { '/docs/a.txt': new TextEncoder().encode('Alpha passage and beta passage') },
+      });
+      const store = createStudySyncStore(backend);
+      await store.getState().initialize();
+      await store.getState().openDocument();
+      const docId = store.getState().activeDocumentId!;
+      const notebookId = store.getState().notebook!.id;
+
+      store.getState().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 13, lineIndex: 0 },
+        text: 'Alpha passage',
+        imagePng: null,
+      });
+      const annA = (await store.getState().createAnnotationFromSelection({ note: 'Saved A1' }))!;
+
+      store.getState().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 18, endByteOffset: 30, lineIndex: 0 },
+        text: 'beta passage',
+        imagePng: null,
+      });
+      const annB = (await store.getState().createAnnotationFromSelection({ note: 'Note B' }))!;
+      return { backend, store, notebookId, annA, annB };
+    };
+
+    // 1. Failure settles BEFORE A's queued excerpt task reaches the head of excerptQueue (plus a trailing color edit).
+    {
+      const { backend, store, notebookId, annA, annB } = await setupPair();
+      const origCreateCard = backend.createCardForAnnotation.bind(backend);
+      let releaseB!: () => void;
+      const bGate = new Promise<void>((resolve) => {
+        releaseB = resolve;
+      });
+      vi.spyOn(backend, 'createCardForAnnotation').mockImplementationOnce(async (input) => {
+        await bGate;
+        return origCreateCard(input);
+      });
+
+      const pB = store.getState().excerptAnnotation(annB.id);
+      const pA = store.getState().excerptAnnotation(annA.id);
+      expect(store.getState().excerptingAnnotationIds).toEqual([annB.id, annA.id]);
+
+      // While A is waiting behind B, a new note save on A fails and settles completely,
+      // followed by a color-only update that succeeds.
+      vi.spyOn(backend, 'updateAnnotation').mockRejectedValueOnce({
+        code: 'database',
+        message: 'note save failed while queued',
+      });
+      const noteOk = await store
+        .getState()
+        .updateAnnotation(annA.id, { note: 'Failed A2', color: null });
+      expect(noteOk).toBe(false);
+      const colorOk = await store
+        .getState()
+        .updateAnnotation(annA.id, { note: null, color: '#86efac' });
+      expect(colorOk).toBe(true);
+
+      // Release B: B lands, A observes the already-settled note failure and aborts without card or reveal.
+      releaseB();
+      await Promise.all([pB, pA]);
+
+      expect(store.getState().isExcerpting).toBe(false);
+      expect(store.getState().excerptingAnnotationIds).toEqual([]);
+      expect(store.getState().cards).toHaveLength(1);
+      expect(store.getState().cards[0]?.annotationIds).toEqual([annB.id]);
+      const nodeB = store.getState().nodes[0]!;
+      expect(store.getState().revealRequest?.nodeId).toBe(nodeB.id);
+      const graphAfterAbort = await backend.loadNotebookGraph(notebookId);
+      expect(graphAfterAbort.cards).toHaveLength(1);
+      expect(graphAfterAbort.cards[0]?.annotationIds).toEqual([annB.id]);
+
+      // Retry saving A's new note and excerpt A -> creates exactly one A card with the latest note.
+      const retryOk = await store
+        .getState()
+        .updateAnnotation(annA.id, { note: 'Retried A2', color: null });
+      expect(retryOk).toBe(true);
+      await store.getState().excerptAnnotation(annA.id);
+      const cardA = store.getState().cards.find((c) => c.annotationIds.includes(annA.id));
+      expect(cardA?.markdownNotes).toBe('Retried A2');
+      const graphAfterRetry = await backend.loadNotebookGraph(notebookId);
+      expect(graphAfterRetry.cards.filter((c) => c.annotationIds.includes(annA.id))).toHaveLength(
+        1,
+      );
+      expect(
+        graphAfterRetry.cards.find((c) => c.annotationIds.includes(annA.id))?.markdownNotes,
+      ).toBe('Retried A2');
+    }
+
+    // 2. Failure settles AFTER A's queued excerpt task starts running.
+    {
+      const { backend, store, notebookId, annA, annB } = await setupPair();
+      const origCreateCard = backend.createCardForAnnotation.bind(backend);
+      let releaseB!: () => void;
+      const bGate = new Promise<void>((resolve) => {
+        releaseB = resolve;
+      });
+      vi.spyOn(backend, 'createCardForAnnotation').mockImplementationOnce(async (input) => {
+        await bGate;
+        return origCreateCard(input);
+      });
+
+      const pB = store.getState().excerptAnnotation(annB.id);
+      const pA = store.getState().excerptAnnotation(annA.id);
+
+      let rejectNoteA!: (error: unknown) => void;
+      vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(
+        () =>
+          new Promise<Annotation>((_resolve, reject) => {
+            rejectNoteA = reject;
+          }),
+      );
+      const failingSave = store
+        .getState()
+        .updateAnnotation(annA.id, { note: 'Pending fail A2', color: null });
+
+      // Release B first so A starts draining `pendingAnnotationUpdates`, then fail A's note save.
+      releaseB();
+      await pB;
+      const nodeB = store.getState().nodes[0]!;
+      expect(store.getState().revealRequest?.nodeId).toBe(nodeB.id);
+
+      rejectNoteA({ code: 'database', message: 'note save failed after start' });
+      const [noteOk] = await Promise.all([failingSave, pA]);
+      expect(noteOk).toBe(false);
+      expect(store.getState().isExcerpting).toBe(false);
+      expect(store.getState().excerptingAnnotationIds).toEqual([]);
+      expect(store.getState().cards).toHaveLength(1);
+      expect(store.getState().revealRequest?.nodeId).toBe(nodeB.id);
+      const graphAfterAbort = await backend.loadNotebookGraph(notebookId);
+      expect(graphAfterAbort.cards).toHaveLength(1);
+
+      // Retry saving A and excerpt -> creates one A card with the latest note.
+      expect(
+        await store.getState().updateAnnotation(annA.id, { note: 'Final A2', color: null }),
+      ).toBe(true);
+      await store.getState().excerptAnnotation(annA.id);
+      const graphAfterRetry = await backend.loadNotebookGraph(notebookId);
+      expect(graphAfterRetry.cards.filter((c) => c.annotationIds.includes(annA.id))).toHaveLength(
+        1,
+      );
+      expect(
+        graphAfterRetry.cards.find((c) => c.annotationIds.includes(annA.id))?.markdownNotes,
+      ).toBe('Final A2');
+    }
+  });
 });

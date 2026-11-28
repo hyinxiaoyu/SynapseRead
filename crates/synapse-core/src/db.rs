@@ -12,11 +12,12 @@ use uuid::Uuid;
 use crate::captures::{CaptureStore, decode_capture};
 use crate::domain::{
     AnchorLocation, Annotation, AnnotationPatch, AnnotationStyle, Bookmark, BookmarkImportReport,
-    BookmarkSkipReason, CardPatch, CreateAnnotationInput, CreateBookmarkInput, CreateExcerptInput,
-    CreatedExcerpt, CursorSnapshot, DeletedCard, Document, DocumentFormat, DocumentSourceState,
-    DocumentSourceStatus, ExportBookmark, ExportCatalogBook, ExportPosition, ImportBookmarkEntry,
-    ImportDocumentResult, ImportLimits, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard,
-    NotebookGraph, PageTransition, PdfDisplayMode, PdfLayout, PdfZoomMode, ReadingPreferences,
+    BookmarkSkipReason, CardPatch, CreateAnnotationInput, CreateBookmarkInput,
+    CreateCardForAnnotationInput, CreateExcerptInput, CreatedCard, CreatedExcerpt, CursorSnapshot,
+    DeletedCard, Document, DocumentFormat, DocumentSourceState, DocumentSourceStatus,
+    ExportBookmark, ExportCatalogBook, ExportPosition, ImportBookmarkEntry, ImportDocumentResult,
+    ImportLimits, MindMapEdge, MindMapNode, NodeLayoutPatch, NoteCard, NotebookGraph,
+    PageTransition, PdfDisplayMode, PdfLayout, PdfZoomMode, ReadingPreferences,
     RelinkDocumentResult, ReplaceCursorResult, RestoredAnnotation, RestoredCard,
     ScrollPageTransition, SkippedBookmark, StudyNotebook, Viewport, WorkspacePaneLayout,
     WorkspaceSession, sanitize_import_title, sanitize_single_line, truncate_chars,
@@ -837,6 +838,120 @@ impl Database {
             node,
             edge,
         })
+    }
+
+    /// Creates a `NoteCard`, `card_annotations` link, `MindMapNode`, and optional
+    /// parent edge for an existing highlight or underline in one transaction (#124).
+    ///
+    /// Titles the card from the annotation's text (falling back to capture/note
+    /// titles) and seeds `markdown_notes` from the highlight's note. Rejects
+    /// missing/soft-deleted annotations, cross-notebook requests, invalid parent
+    /// nodes, non-finite coordinates, and annotations that already back a card.
+    pub fn create_card_for_annotation(
+        &mut self,
+        input: &CreateCardForAnnotationInput,
+    ) -> CoreResult<CreatedCard> {
+        if !input.pos_x.is_finite() || !input.pos_y.is_finite() {
+            return Err(CoreError::InvalidGraph(
+                "node position must be finite".to_owned(),
+            ));
+        }
+
+        let tx = self.conn.transaction()?;
+        check_notebook_exists(&tx, &input.notebook_id)?;
+
+        let annotation = tx
+            .query_row(
+                &format!("{ANNOTATION_SELECT} WHERE id = ?1 AND deleted_at IS NULL"),
+                [&input.annotation_id],
+                map_annotation,
+            )
+            .optional()?
+            .ok_or_else(|| not_found("annotation", &input.annotation_id))?;
+
+        if annotation.notebook_id != input.notebook_id {
+            return Err(CoreError::InvalidGraph(format!(
+                "annotation {} belongs to another notebook",
+                input.annotation_id
+            )));
+        }
+
+        let existing_card: Option<String> = tx
+            .query_row(
+                "SELECT card_id FROM card_annotations WHERE annotation_id = ?1 LIMIT 1",
+                [&input.annotation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_card.is_some() {
+            return Err(CoreError::InvalidGraph(format!(
+                "annotation {} already backs a card",
+                input.annotation_id
+            )));
+        }
+
+        if let Some(parent_id) = &input.parent_node_id {
+            check_node_in_notebook(&tx, parent_id, &input.notebook_id)?;
+        }
+
+        let title = card_title_for_annotation(
+            annotation.excerpt_text.as_deref(),
+            annotation.excerpt_image_path.is_some(),
+            annotation.note.as_deref(),
+            annotation.location_label.as_deref(),
+        );
+        let markdown_notes = annotation.note.as_deref().map(str::trim).unwrap_or("");
+
+        let card_id = new_id();
+        tx.execute(
+            "INSERT INTO note_cards (id, notebook_id, title, markdown_notes)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![card_id, input.notebook_id, title, markdown_notes],
+        )?;
+        tx.execute(
+            "INSERT INTO card_annotations (card_id, annotation_id) VALUES (?1, ?2)",
+            params![card_id, annotation.id],
+        )?;
+
+        let node_id = new_id();
+        tx.execute(
+            "INSERT INTO mindmap_nodes (id, notebook_id, card_id, parent_node_id, pos_x, pos_y)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                node_id,
+                input.notebook_id,
+                card_id,
+                input.parent_node_id,
+                input.pos_x,
+                input.pos_y,
+            ],
+        )?;
+
+        let edge = match &input.parent_node_id {
+            Some(parent_id) => Some(insert_edge(
+                &tx,
+                &input.notebook_id,
+                parent_id,
+                &node_id,
+                None,
+            )?),
+            None => None,
+        };
+
+        let mut card = tx.query_row(
+            &format!("{CARD_SELECT} WHERE id = ?1"),
+            [&card_id],
+            map_card,
+        )?;
+        card.annotation_ids = vec![annotation.id];
+        let node = tx.query_row(
+            &format!("{NODE_SELECT} WHERE id = ?1"),
+            [&node_id],
+            map_node,
+        )?;
+
+        tx.commit()?;
+        Ok(CreatedCard { card, node, edge })
     }
 
     /// Creates an independent highlight or note inside `input.document_id`
@@ -2348,6 +2463,31 @@ fn card_title(excerpt_text: Option<&str>, location_label: Option<&str>) -> Strin
         Some(label) => truncate_label(&format!("Figure · {label}")),
         None => "Image excerpt".to_owned(),
     }
+}
+
+/// Title for a card promoted from an existing annotation (#124). Matches
+/// [`card_title`] for text and capture annotations, and falls back to the
+/// first line of the note when an independent annotation has neither.
+fn card_title_for_annotation(
+    excerpt_text: Option<&str>,
+    has_image: bool,
+    note: Option<&str>,
+    location_label: Option<&str>,
+) -> String {
+    if let Some(first_line) =
+        excerpt_text.and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+    {
+        return truncate_label(first_line);
+    }
+    if has_image {
+        return card_title(None, location_label);
+    }
+    if let Some(first_line) =
+        note.and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+    {
+        return truncate_label(first_line);
+    }
+    "Note".to_owned()
 }
 
 fn normalize_location_label(raw: Option<&str>) -> Option<String> {
@@ -6636,5 +6776,219 @@ mod tests {
             fresh.annotation.location_label.as_deref(),
             Some("Revised · Line 1")
         );
+    }
+
+    #[test]
+    fn create_card_for_annotation_links_existing_highlight_seeds_note_and_validates() {
+        let mut db = Database::open_in_memory().unwrap();
+        let file = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+        std::fs::write(file.path(), "The quick brown fox jumps over the lazy dog.").unwrap();
+        let doc = db.register_document(file.path()).unwrap();
+        let nb = db.create_notebook("Study").unwrap();
+        let other_nb = db.create_notebook("Other").unwrap();
+
+        let highlight = db
+            .create_annotation(&CreateAnnotationInput {
+                document_id: doc.id.clone(),
+                notebook_id: nb.id.clone(),
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 4,
+                    end_byte_offset: 19,
+                    line_index: 0,
+                },
+                excerpt_text: Some("quick brown fox".to_owned()),
+                excerpt_image_png: None,
+                note: Some("  Key claim\nSecond line  ".to_owned()),
+                color: "#fde047".to_owned(),
+                style: AnnotationStyle::Highlight,
+                location_label: Some("Line 1".to_owned()),
+                expected_file_hash: None,
+            })
+            .unwrap();
+
+        let root = db
+            .create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: highlight.id.clone(),
+                notebook_id: nb.id.clone(),
+                parent_node_id: None,
+                pos_x: 10.0,
+                pos_y: 20.0,
+            })
+            .unwrap();
+        assert_eq!(root.card.title, "quick brown fox");
+        assert_eq!(root.card.markdown_notes, "Key claim\nSecond line");
+        assert_eq!(root.card.annotation_ids, vec![highlight.id.clone()]);
+        assert_eq!(root.node.card_id, root.card.id);
+        assert_eq!(root.node.parent_node_id, None);
+        assert_eq!(root.node.pos_x, 10.0);
+        assert_eq!(root.node.pos_y, 20.0);
+        assert!(root.edge.is_none());
+
+        // No duplicate annotation was created.
+        let graph = db.load_notebook_graph(&nb.id).unwrap();
+        assert_eq!(graph.annotations.len(), 1);
+        assert_eq!(graph.cards.len(), 1);
+        assert_eq!(graph.nodes.len(), 1);
+
+        // Promoting an already-linked annotation is rejected without partial writes.
+        assert!(matches!(
+            db.create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: highlight.id.clone(),
+                notebook_id: nb.id.clone(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+            }),
+            Err(CoreError::InvalidGraph(_))
+        ));
+
+        // Promoting an underline under a parent node preserves style and creates the edge.
+        let underline = db
+            .create_annotation(&CreateAnnotationInput {
+                document_id: doc.id.clone(),
+                notebook_id: nb.id.clone(),
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 35,
+                    end_byte_offset: 43,
+                    line_index: 0,
+                },
+                excerpt_text: Some("lazy dog".to_owned()),
+                excerpt_image_png: None,
+                note: None,
+                color: "#86efac".to_owned(),
+                style: AnnotationStyle::Underline,
+                location_label: Some("Line 1".to_owned()),
+                expected_file_hash: None,
+            })
+            .unwrap();
+        let child = db
+            .create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: underline.id.clone(),
+                notebook_id: nb.id.clone(),
+                parent_node_id: Some(root.node.id.clone()),
+                pos_x: 320.0,
+                pos_y: 20.0,
+            })
+            .unwrap();
+        assert_eq!(child.card.title, "lazy dog");
+        assert_eq!(child.card.markdown_notes, "");
+        assert_eq!(child.card.annotation_ids, vec![underline.id.clone()]);
+        assert_eq!(
+            child.node.parent_node_id.as_deref(),
+            Some(root.node.id.as_str())
+        );
+        let edge = child.edge.expect("parent edge should be created");
+        assert_eq!(edge.source_node_id, root.node.id);
+        assert_eq!(edge.target_node_id, child.node.id);
+
+        // Validation errors: non-finite coords, missing notebook/annotation, wrong notebook, bad parent.
+        let extra = db
+            .create_annotation(&CreateAnnotationInput {
+                document_id: doc.id.clone(),
+                notebook_id: nb.id.clone(),
+                anchor: AnchorLocation::Txt {
+                    start_byte_offset: 0,
+                    end_byte_offset: 3,
+                    line_index: 0,
+                },
+                excerpt_text: Some("The".to_owned()),
+                excerpt_image_png: None,
+                note: None,
+                color: "#fde047".to_owned(),
+                style: AnnotationStyle::Highlight,
+                location_label: None,
+                expected_file_hash: None,
+            })
+            .unwrap();
+
+        assert!(matches!(
+            db.create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: extra.id.clone(),
+                notebook_id: nb.id.clone(),
+                parent_node_id: None,
+                pos_x: f64::NAN,
+                pos_y: 0.0,
+            }),
+            Err(CoreError::InvalidGraph(_))
+        ));
+        assert!(matches!(
+            db.create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: "missing-ann".to_owned(),
+                notebook_id: nb.id.clone(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+            }),
+            Err(CoreError::NotFound {
+                entity: "annotation",
+                ..
+            })
+        ));
+        assert!(matches!(
+            db.create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: extra.id.clone(),
+                notebook_id: other_nb.id.clone(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+            }),
+            Err(CoreError::InvalidGraph(_))
+        ));
+        assert!(matches!(
+            db.create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: extra.id.clone(),
+                notebook_id: nb.id.clone(),
+                parent_node_id: Some("missing-node".to_owned()),
+                pos_x: 0.0,
+                pos_y: 0.0,
+            }),
+            Err(CoreError::NotFound { entity: "node", .. })
+        ));
+
+        // Soft-deleted annotation cannot be promoted, and soft-deleting + restoring a
+        // promoted highlight preserves its card link (#97/#112).
+        db.delete_annotation(&extra.id).unwrap();
+        assert!(matches!(
+            db.create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: extra.id.clone(),
+                notebook_id: nb.id.clone(),
+                parent_node_id: None,
+                pos_x: 0.0,
+                pos_y: 0.0,
+            }),
+            Err(CoreError::NotFound {
+                entity: "annotation",
+                ..
+            })
+        ));
+
+        db.delete_annotation(&highlight.id).unwrap();
+        let after_delete = db.load_notebook_graph(&nb.id).unwrap();
+        assert!(
+            after_delete
+                .cards
+                .iter()
+                .find(|c| c.id == root.card.id)
+                .unwrap()
+                .annotation_ids
+                .is_empty()
+        );
+        let restored = db.restore_annotation(&highlight.id).unwrap();
+        assert_eq!(restored.cards.len(), 1);
+        assert_eq!(restored.cards[0].id, root.card.id);
+        assert_eq!(restored.cards[0].annotation_ids, vec![highlight.id.clone()]);
+
+        // Deleting the card unlinks the highlight so it can be promoted again later.
+        db.delete_card(&root.card.id).unwrap();
+        let repromoted = db
+            .create_card_for_annotation(&CreateCardForAnnotationInput {
+                annotation_id: highlight.id.clone(),
+                notebook_id: nb.id.clone(),
+                parent_node_id: None,
+                pos_x: 40.0,
+                pos_y: 50.0,
+            })
+            .unwrap();
+        assert_eq!(repromoted.card.annotation_ids, vec![highlight.id]);
     }
 }

@@ -1,4 +1,4 @@
-import { Copy, Pencil, Quote, StickyNote, Trash2, Underline, X } from 'lucide-react';
+import { Copy, Network, Pencil, Quote, StickyNote, Trash2, Underline, X } from 'lucide-react';
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
@@ -12,6 +12,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { commandTooltip } from '@/features/commands/commands';
 import { ESCAPE_LAYER, useEscapeLayer } from '@/features/commands/escape';
+import { useCommands } from '@/features/commands/registry';
 import { excerptActionLabel } from '@/features/mindmap/nestingLabel';
 import {
   type AnnotationsController,
@@ -47,11 +48,21 @@ async function copyText(text: string): Promise<void> {
 /** Keeps the reader's text selection alive through a press on a popover control. */
 const keepSelection = (event: { preventDefault: () => void }) => event.preventDefault();
 
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'then' in value &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
+}
+
 function PopoverAction({
   icon: Icon,
   label,
   title,
   pressed,
+  disabled = false,
   testId,
   onClick,
   children,
@@ -60,6 +71,7 @@ function PopoverAction({
   label: string;
   title?: string;
   pressed?: boolean | undefined;
+  disabled?: boolean | undefined;
   testId: string;
   onClick: () => void;
   children?: ReactNode;
@@ -67,6 +79,7 @@ function PopoverAction({
   return (
     <button
       type="button"
+      disabled={disabled}
       aria-label={label}
       aria-pressed={pressed}
       title={title ?? label}
@@ -76,7 +89,7 @@ function PopoverAction({
       onMouseDown={keepSelection}
       onClick={onClick}
       className={cn(
-        'flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-md px-1.5 text-xs font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4',
+        'flex h-7 min-w-7 shrink-0 items-center justify-center gap-1 rounded-md px-1.5 text-xs font-medium outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-4',
         pressed && 'bg-accent text-accent-foreground',
       )}
     >
@@ -123,6 +136,15 @@ export function SelectionPopover({
       ? (annotations.annotations.find((candidate) => candidate.id === target.annotationId) ?? null)
       : null;
   const editing = annotation !== null;
+  const isCardSource = annotation !== null && (annotations.isCardSource?.(annotation.id) ?? false);
+  const isExcerptingAnnotation =
+    annotation !== null && (annotations.isExcerptingAnnotation?.(annotation.id) ?? false);
+  const canExcerptTarget = editing
+    ? !isCardSource && annotations.excerptAnnotation !== undefined
+    : onExcerpt !== undefined;
+  const canShowCard = editing && isCardSource && annotations.showAnnotationCard !== undefined;
+  const normalizedTargetTitle = excerptTargetTitle?.trim() || null;
+  const excerptLabel = excerptActionLabel(normalizedTargetTitle);
   // A whitespace-only note (imported, or saved before notes were trimmed) counts as none.
   const hasNote = annotation !== null && annotationHasNote(annotation);
 
@@ -210,17 +232,176 @@ export function SelectionPopover({
 
   const [editNote, setEditNote] = useState('');
   const [editNoteFor, setEditNoteFor] = useState<string | null>(null);
+  const [editNoteDirty, setEditNoteDirty] = useState(false);
+  const [prevAnnotationNote, setPrevAnnotationNote] = useState<string | null>(null);
   if (editing && popover.noteOpen && editNoteFor !== annotation.id) {
     setEditNoteFor(annotation.id);
     setEditNote(annotation.note ?? '');
+    setEditNoteDirty(false);
+    setPrevAnnotationNote(annotation.note ?? '');
   }
-  if (!popover.noteOpen && editNoteFor !== null) setEditNoteFor(null);
+  if (!popover.noteOpen && editNoteFor !== null) {
+    setEditNoteFor(null);
+    setEditNoteDirty(false);
+    setPrevAnnotationNote(null);
+  }
+
+  // Track an in-flight note save so the editor closes only once persistence confirms,
+  // preserving the draft on failure and letting immediate Excerpt/Show wait on the result (#124).
+  const [savingNote, setSavingNote] = useState<{ annotationId: string; draft: string } | null>(
+    null,
+  );
+  const [queuedActionWhileSaving, setQueuedActionWhileSaving] = useState(false);
+  const pendingNoteSaveRef = useRef<{
+    seq: number;
+    annotationId: string;
+    draft: string;
+    queuedAction: 'excerpt' | 'show' | null;
+  } | null>(null);
+  const saveSeqRef = useRef(0);
+  const mountedRef = useRef(true);
+  const latestEditNoteRef = useRef(editNote);
+  const activeAnnotationIdRef = useRef<string | null>(annotation?.id ?? null);
+  const latestCallbacksRef = useRef({
+    closeNote: popover.closeNote,
+    dismiss,
+    onReturnFocus,
+    excerptAnnotation: annotations.excerptAnnotation,
+    showAnnotationCard: annotations.showAnnotationCard,
+  });
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    latestEditNoteRef.current = editNote;
+    activeAnnotationIdRef.current = annotation?.id ?? null;
+    latestCallbacksRef.current = {
+      closeNote: popover.closeNote,
+      dismiss,
+      onReturnFocus,
+      excerptAnnotation: annotations.excerptAnnotation,
+      showAnnotationCard: annotations.showAnnotationCard,
+    };
+  });
+
+  if (
+    savingNote !== null &&
+    (!editing || !popover.noteOpen || savingNote.annotationId !== annotation.id)
+  ) {
+    setSavingNote(null);
+    setQueuedActionWhileSaving(false);
+  }
+  if (
+    editing &&
+    popover.noteOpen &&
+    editNoteFor === annotation.id &&
+    (annotation.note ?? '') !== prevAnnotationNote
+  ) {
+    setPrevAnnotationNote(annotation.note ?? '');
+    if (!editNoteDirty && savingNote === null) {
+      setEditNote(annotation.note ?? '');
+    }
+  }
+  useEffect(() => {
+    const pending = pendingNoteSaveRef.current;
+    if (pending && (!editing || !popover.noteOpen || pending.annotationId !== annotation.id)) {
+      pendingNoteSaveRef.current = null;
+    }
+  }, [editing, popover.noteOpen, annotation?.id]);
 
   // Deleting a card's source asks first; the question goes with the popover.
   const [confirmDeleteFor, setConfirmDeleteFor] = useState<string | null>(null);
-  if ((!editing || popover.noteOpen) && confirmDeleteFor !== null) setConfirmDeleteFor(null);
+  if (
+    (!editing || popover.noteOpen || isExcerptingAnnotation || queuedActionWhileSaving) &&
+    confirmDeleteFor !== null
+  ) {
+    setConfirmDeleteFor(null);
+  }
   const confirmingDelete = editing && confirmDeleteFor === annotation.id;
   const noteValue = editing ? editNote : annotations.draftNote;
+
+  // Guard MindMap actions while an existing highlight has unsaved note edits so
+  // clicking Excerpt/Show (or using ⇧⌘E / the Edit menu) never drops the draft (#124).
+  // While a save is still in flight, compare against that submitted draft rather than
+  // the stale `annotation.note` so reverting back to the old value cannot bypass the guard.
+  const savingForActive =
+    editing && savingNote !== null && savingNote.annotationId === annotation.id ? savingNote : null;
+  const isSavingCurrentDraft =
+    savingForActive !== null && savingForActive.draft.trim() === editNote.trim();
+  const committedNote = savingForActive ? savingForActive.draft : (annotation?.note ?? '');
+  const hasUnsavedNoteChanges =
+    editing &&
+    popover.noteOpen &&
+    !isSavingCurrentDraft &&
+    editNote.trim() !== committedNote.trim();
+  const [unsavedNotePromptFor, setUnsavedNotePromptFor] = useState<string | null>(null);
+  if ((!editing || !hasUnsavedNoteChanges) && unsavedNotePromptFor !== null) {
+    setUnsavedNotePromptFor(null);
+  }
+  const showingUnsavedNotePrompt = editing && unsavedNotePromptFor === annotation.id;
+
+  const close = () => {
+    pendingNoteSaveRef.current = null;
+    setSavingNote(null);
+    setQueuedActionWhileSaving(false);
+    dismiss();
+    onReturnFocus();
+  };
+
+  const guardUnsavedNote = (): boolean => {
+    if (!editing || !popover.noteOpen) return false;
+    const draft = latestEditNoteRef.current.trim();
+    const pending = pendingNoteSaveRef.current;
+    const committed =
+      pending && pending.annotationId === annotation.id
+        ? pending.draft.trim()
+        : (annotation.note ?? '').trim();
+    if (draft === committed) return false;
+    setUnsavedNotePromptFor(annotation.id);
+    noteFieldRef.current?.focus();
+    return true;
+  };
+
+  const triggerExcerpt = () => {
+    if (!canExcerpt) return;
+    if (guardUnsavedNote()) return;
+    if (annotation) {
+      const pending = pendingNoteSaveRef.current;
+      if (
+        pending &&
+        pending.annotationId === annotation.id &&
+        pending.draft.trim() === latestEditNoteRef.current.trim()
+      ) {
+        pending.queuedAction = 'excerpt';
+        setQueuedActionWhileSaving(true);
+        return;
+      }
+      annotations.excerptAnnotation?.(annotation.id);
+    } else {
+      onExcerpt?.();
+    }
+    close();
+  };
+
+  const triggerShowCard = () => {
+    if (!annotation) return;
+    if (guardUnsavedNote()) return;
+    const pending = pendingNoteSaveRef.current;
+    if (
+      pending &&
+      pending.annotationId === annotation.id &&
+      pending.draft.trim() === latestEditNoteRef.current.trim()
+    ) {
+      pending.queuedAction = 'show';
+      setQueuedActionWhileSaving(true);
+      return;
+    }
+    annotations.showAnnotationCard?.(annotation.id);
+    close();
+  };
 
   const cancelDelete = () => {
     setConfirmDeleteFor(null);
@@ -254,13 +435,23 @@ export function SelectionPopover({
         }
       : null,
   );
+  // While an existing highlight's popover is open, ⇧⌘E sends it to the MindMap
+  // (or reveals its card if already linked), sharing the unsaved-note guard (#124).
+  useCommands(
+    {
+      'edit.excerpt': {
+        run: () => {
+          if (canShowCard) triggerShowCard();
+          else if (canExcerptTarget) triggerExcerpt();
+        },
+        enabled: canShowCard || (canExcerpt && canExcerptTarget),
+        title: canShowCard ? 'Show in MindMap' : excerptLabel,
+      },
+    },
+    shown && editing && (canExcerptTarget || canShowCard),
+  );
 
   if (!shown) return null;
-
-  const close = () => {
-    dismiss();
-    onReturnFocus();
-  };
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape') {
@@ -282,7 +473,7 @@ export function SelectionPopover({
     // A toolbar: arrows move between controls, so only one is in the Tab order.
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     const controls = Array.from(
-      rootRef.current?.querySelectorAll<HTMLElement>('[data-popover-control]') ?? [],
+      rootRef.current?.querySelectorAll<HTMLElement>('[data-popover-control]:not(:disabled)') ?? [],
     );
     const index = controls.indexOf(event.target as HTMLElement);
     if (index < 0) return;
@@ -312,8 +503,71 @@ export function SelectionPopover({
 
   const saveNote = () => {
     if (annotation) {
-      annotations.updateAnnotation(annotation.id, { note: editNote, color: null });
-      popover.closeNote();
+      const draft = latestEditNoteRef.current;
+      const existing = pendingNoteSaveRef.current;
+      if (
+        existing &&
+        existing.annotationId === annotation.id &&
+        existing.draft.trim() === draft.trim()
+      ) {
+        return;
+      }
+      const result = annotations.updateAnnotation(annotation.id, { note: draft, color: null });
+      if (!isPromiseLike<boolean>(result)) {
+        setEditNoteDirty(false);
+        popover.closeNote();
+        return;
+      }
+      const seq = (saveSeqRef.current += 1);
+      const entry = {
+        seq,
+        annotationId: annotation.id,
+        draft,
+        queuedAction: null as 'excerpt' | 'show' | null,
+      };
+      pendingNoteSaveRef.current = entry;
+      setSavingNote({ annotationId: annotation.id, draft });
+      setQueuedActionWhileSaving(false);
+      void result.then(
+        (saved) => {
+          if (!mountedRef.current) return;
+          const isCurrent = pendingNoteSaveRef.current?.seq === seq;
+          if (isCurrent) {
+            pendingNoteSaveRef.current = null;
+            setSavingNote(null);
+            setQueuedActionWhileSaving(false);
+          }
+          if (!isCurrent || activeAnnotationIdRef.current !== annotation.id) return;
+          if (saved) {
+            if (latestEditNoteRef.current.trim() === draft.trim()) {
+              setEditNoteDirty(false);
+              const callbacks = latestCallbacksRef.current;
+              callbacks.closeNote();
+              if (entry.queuedAction === 'excerpt') {
+                callbacks.excerptAnnotation?.(annotation.id);
+                callbacks.dismiss();
+                callbacks.onReturnFocus();
+              } else if (entry.queuedAction === 'show') {
+                callbacks.showAnnotationCard?.(annotation.id);
+                callbacks.dismiss();
+                callbacks.onReturnFocus();
+              }
+            }
+            return;
+          }
+          // Save failed: keep the editor and draft intact so the user can retry (#124).
+          noteFieldRef.current?.focus();
+        },
+        () => {
+          if (!mountedRef.current) return;
+          if (pendingNoteSaveRef.current?.seq === seq) {
+            pendingNoteSaveRef.current = null;
+            setSavingNote(null);
+            setQueuedActionWhileSaving(false);
+            noteFieldRef.current?.focus();
+          }
+        },
+      );
       return;
     }
     annotations.submitNoteSelection();
@@ -327,8 +581,6 @@ export function SelectionPopover({
 
   const currentColor = annotation ? annotation.color : annotations.activeColor;
   const label = editing ? 'Highlight actions' : 'Selection actions';
-  const normalizedTargetTitle = excerptTargetTitle?.trim() || null;
-  const excerptLabel = excerptActionLabel(normalizedTargetTitle);
 
   return (
     <div
@@ -413,7 +665,7 @@ export function SelectionPopover({
           testId="popover-note"
           onClick={toggleNote}
         />
-        {!editing && onExcerpt && (
+        {canExcerptTarget && (
           <PopoverAction
             icon={Quote}
             label={excerptLabel}
@@ -421,11 +673,16 @@ export function SelectionPopover({
               canExcerpt ? commandTooltip(excerptLabel, 'edit.excerpt') : 'Saving the last excerpt…'
             }
             testId="popover-excerpt"
-            onClick={() => {
-              if (!canExcerpt) return;
-              onExcerpt();
-              close();
-            }}
+            onClick={triggerExcerpt}
+          />
+        )}
+        {canShowCard && (
+          <PopoverAction
+            icon={Network}
+            label="Show in MindMap"
+            title="Show in MindMap"
+            testId="popover-show-in-mindmap"
+            onClick={triggerShowCard}
           />
         )}
         <PopoverAction icon={Copy} label="Copy" testId="popover-copy" onClick={copy} />
@@ -433,8 +690,15 @@ export function SelectionPopover({
           <PopoverAction
             icon={Trash2}
             label="Delete Highlight"
+            title={
+              isExcerptingAnnotation || queuedActionWhileSaving
+                ? 'Sending to MindMap…'
+                : 'Delete Highlight'
+            }
+            disabled={isExcerptingAnnotation || queuedActionWhileSaving}
             testId="popover-delete"
             onClick={() => {
+              if (isExcerptingAnnotation || queuedActionWhileSaving) return;
               if (annotations.isCardSource?.(annotation.id)) {
                 if (popover.noteOpen) popover.closeNote();
                 setConfirmDeleteFor(annotation.id);
@@ -449,7 +713,7 @@ export function SelectionPopover({
           />
         )}
       </div>
-      {!editing && onExcerpt && normalizedTargetTitle && (
+      {canExcerptTarget && normalizedTargetTitle && (
         <div
           data-testid="popover-nesting-target"
           className="flex w-0 min-w-full items-center gap-1.5 border-t px-2 pt-1 pb-0.5 text-[11px] text-muted-foreground"
@@ -510,6 +774,15 @@ export function SelectionPopover({
           </div>
         </div>
       )}
+      {showingUnsavedNotePrompt && (
+        <p
+          role="alert"
+          data-testid="popover-unsaved-note-warning"
+          className="px-2 pt-1 text-xs font-medium text-destructive"
+        >
+          Save or cancel your note changes first.
+        </p>
+      )}
       {/*
         The note stays mounted so `grid-template-rows` can transition between
         `0fr` and `1fr`, the same disclosure the appearance panel uses. `inert`
@@ -540,9 +813,26 @@ export function SelectionPopover({
             // popover matches the one that unmounted it only while the toolbar
             // is the wider of the two — which it is today.
             fieldClassName={cn(popover.noteOpen && 'min-w-64')}
-            onChange={(value) => (editing ? setEditNote(value) : annotations.setDraftNote(value))}
+            onChange={(value) => {
+              if (editing) {
+                latestEditNoteRef.current = value;
+                setEditNote(value);
+                setEditNoteDirty(true);
+                if (pendingNoteSaveRef.current) {
+                  pendingNoteSaveRef.current.queuedAction = null;
+                  setQueuedActionWhileSaving(false);
+                }
+              } else {
+                annotations.setDraftNote(value);
+              }
+            }}
             onSave={saveNote}
-            onCancel={popover.closeNote}
+            onCancel={() => {
+              pendingNoteSaveRef.current = null;
+              setSavingNote(null);
+              setQueuedActionWhileSaving(false);
+              popover.closeNote();
+            }}
           />
         </div>
       </div>

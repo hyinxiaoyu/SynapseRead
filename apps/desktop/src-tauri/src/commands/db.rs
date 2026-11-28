@@ -8,10 +8,10 @@ use synapse_core::fs_reader::hash_file;
 
 use synapse_core::domain::{
     AnchorLocation, Annotation, AnnotationPatch, Bookmark, CardPatch, CreateAnnotationInput,
-    CreateBookmarkInput, CreateExcerptInput, CreatedExcerpt, DeletedCard, Document,
-    DocumentSourceStatus, MindMapEdge, NodeLayoutPatch, NoteCard, NotebookGraph, PdfLayout,
-    ReadingPreferences, RelinkDocumentResult, RestoredAnnotation, RestoredCard, StudyNotebook,
-    Viewport, WorkspaceSession,
+    CreateBookmarkInput, CreateCardForAnnotationInput, CreateExcerptInput, CreatedCard,
+    CreatedExcerpt, DeletedCard, Document, DocumentSourceStatus, MindMapEdge, NodeLayoutPatch,
+    NoteCard, NotebookGraph, PdfLayout, ReadingPreferences, RelinkDocumentResult,
+    RestoredAnnotation, RestoredCard, StudyNotebook, Viewport, WorkspaceSession,
 };
 use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_dialog::DialogExt;
@@ -97,6 +97,14 @@ pub fn create_excerpt(
     state: State<'_, AppState>,
 ) -> IpcResult<CreatedExcerpt> {
     Ok(state.database()?.create_excerpt(&input)?)
+}
+
+#[tauri::command]
+pub fn create_card_for_annotation(
+    input: CreateCardForAnnotationInput,
+    state: State<'_, AppState>,
+) -> IpcResult<CreatedCard> {
+    Ok(state.database()?.create_card_for_annotation(&input)?)
 }
 
 #[tauri::command]

@@ -38,6 +38,8 @@ function FakeViewer({
   jumpRequest,
   onSelectionChange,
   onJumpHandled,
+  onExcerptAnnotation,
+  onShowAnnotationCard,
 }: DocumentViewerProps) {
   const [localState, setLocalState] = useState(0);
   const pulsing = jumpRequest?.annotationId;
@@ -74,7 +76,18 @@ function FakeViewer({
             key={annotationId}
             data-annotation-id={annotationId}
             className={pulsing === annotationId ? 'anchor-pulse' : undefined}
-          />
+          >
+            {onExcerptAnnotation && (
+              <button type="button" onClick={() => onExcerptAnnotation(annotationId)}>
+                Promote {annotationId}
+              </button>
+            )}
+            {onShowAnnotationCard && (
+              <button type="button" onClick={() => onShowAnnotationCard(annotationId)}>
+                Show card {annotationId}
+              </button>
+            )}
+          </p>
         ))}
       </section>
     </div>
@@ -1659,5 +1672,54 @@ describe('StudyWorkspace', () => {
       expect(useStudySyncStore.getState().lanImport.catalog).toEqual([]);
       expect(disconnectSpy).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it('promotes an existing highlight via viewer callback and opens a collapsed MindMap on Show in MindMap (#124)', async () => {
+    await renderReady();
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Simulate selection' }));
+
+    const annotation = await act(async () =>
+      useStudySyncStore.getState().createAnnotationFromSelection({ note: 'Highlight note' }),
+    );
+    expect(annotation).not.toBeNull();
+    const countBefore = useStudySyncStore.getState().annotations.length;
+
+    // MindMap starts collapsed; promoting shows the post-excerpt notice and creates one card.
+    fireEvent.click(await screen.findByRole('button', { name: `Promote ${annotation!.id}` }));
+    await waitFor(() => {
+      expect(
+        useStudySyncStore.getState().cards.some((c) => c.annotationIds.includes(annotation!.id)),
+      ).toBe(true);
+    });
+    expect(useStudySyncStore.getState().annotations).toHaveLength(countBefore);
+    const card = useStudySyncStore
+      .getState()
+      .cards.find((c) => c.annotationIds.includes(annotation!.id))!;
+    expect(card.markdownNotes).toBe('Highlight note');
+    expect(screen.getByTestId('excerpt-added-notice')).toBeInTheDocument();
+
+    // Dismiss the notice; MindMap is still collapsed.
+    fireEvent.click(
+      within(screen.getByTestId('excerpt-added-notice')).getByRole('button', {
+        name: 'Close notice',
+      }),
+    );
+    expect(screen.getByRole('button', { name: 'Show MindMap' })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+
+    // Clicking Show in MindMap opens the collapsed MindMap and selects the card without flashing the added notice.
+    fireEvent.click(screen.getByRole('button', { name: `Show card ${annotation!.id}` }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Hide MindMap' })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+    });
+    expect(screen.queryByTestId('excerpt-added-notice')).toBeNull();
+    const expectedNode = useStudySyncStore.getState().nodes.find((n) => n.cardId === card.id)!;
+    expect(useStudySyncStore.getState().selectedNodeId).toBe(expectedNode.id);
   });
 });

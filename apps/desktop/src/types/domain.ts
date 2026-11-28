@@ -248,6 +248,20 @@ export interface CreatedExcerpt {
   edge: MindMapEdge | null;
 }
 
+export interface CreateCardForAnnotationInput {
+  annotationId: string;
+  notebookId: string;
+  parentNodeId: string | null;
+  posX: number;
+  posY: number;
+}
+
+export interface CreatedCard {
+  card: NoteCard;
+  node: MindMapNode;
+  edge: MindMapEdge | null;
+}
+
 /** An annotation brought back by Undo Delete, with the cards that cite it again. */
 export interface RestoredAnnotation {
   annotation: Annotation;
@@ -562,8 +576,8 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
   annotations?: readonly Annotation[];
   /** Creates an independent highlight/note from the current selection without creating a MindMap node. */
   onCreateAnnotation?: (options?: CreateAnnotationOptions) => void;
-  /** Updates an annotation's inline note and/or color. */
-  onUpdateAnnotation?: (annotationId: string, patch: AnnotationPatch) => void;
+  /** Updates an annotation's inline note and/or color; resolves to `false` when the write fails. */
+  onUpdateAnnotation?: (annotationId: string, patch: AnnotationPatch) => void | Promise<boolean>;
   /** Deletes an annotation from this document. */
   onDeleteAnnotation?: (annotationId: string) => void;
   /** Undoes the most recent annotation deletion in this session, if available. */
@@ -574,8 +588,17 @@ export interface DocumentViewerProps<F extends DocumentFormat = DocumentFormat> 
    * first, because the card then loses its link back to the text.
    */
   cardSourceAnnotationIds?: ReadonlySet<string>;
+  /**
+   * Annotations currently being sent to the MindMap. Deleting one of them is
+   * disabled until the card write commits so source-link confirmation cannot be skipped (#124).
+   */
+  excerptingAnnotationIds?: ReadonlySet<string>;
   /** Sends the published selection to the MindMap, as the Excerpt to MindMap button does. */
   onExcerptSelection?: () => void;
+  /** Sends an existing highlight or underline to the MindMap without creating a duplicate (#124). */
+  onExcerptAnnotation?: (annotationId: string) => void;
+  /** Opens the MindMap and reveals the card backed by this annotation (#124). */
+  onShowAnnotationCard?: (annotationId: string) => void;
   /** False while an excerpt is being written. */
   canExcerpt?: boolean;
   /** Title of the MindMap card new excerpts will nest under, or `null` for a new root (#127). */

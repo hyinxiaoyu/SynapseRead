@@ -547,6 +547,27 @@ pub struct CreatedExcerpt {
     pub edge: Option<MindMapEdge>,
 }
 
+/// Input for sending an existing highlight or underline to the MindMap (#124).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateCardForAnnotationInput {
+    pub annotation_id: String,
+    pub notebook_id: String,
+    pub parent_node_id: Option<String>,
+    pub pos_x: f64,
+    pub pos_y: f64,
+}
+
+/// The rows created when an existing annotation is promoted to a MindMap card (#124).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedCard {
+    pub card: NoteCard,
+    pub node: MindMapNode,
+    /// The parent link is represented as an edge so the canvas renders it uniformly.
+    pub edge: Option<MindMapEdge>,
+}
+
 /// An annotation brought back by Undo Delete, with the cards that cite it again.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

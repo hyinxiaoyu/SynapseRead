@@ -196,6 +196,8 @@ export interface StudySyncState {
   /** Reader -> MindMap: what the reader currently has selected. */
   selection: ReaderSelection | null;
   isExcerpting: boolean;
+  /** Annotations currently being promoted to MindMap cards (deletion held off until committed, #124). */
+  excerptingAnnotationIds: string[];
   /** The card highlighted on the canvas and shown in the inspector. */
   selectedNodeId: string | null;
   /**
@@ -292,8 +294,13 @@ export interface StudySyncState {
 
   setSelection(selection: ReaderSelection | null): void;
   excerptSelection(): Promise<void>;
+  /** Sends an existing highlight or underline to the MindMap without duplicating it (#124). */
+  excerptAnnotation(annotationId: string): Promise<void>;
+  /** Opens the MindMap and reveals and selects the card backed by `annotationId` (#124). */
+  showAnnotationCard(annotationId: string): void;
   createAnnotationFromSelection(options?: CreateAnnotationOptions): Promise<Annotation | null>;
-  updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<void>;
+  /** Persists an annotation edit; resolves to `false` when the backend write fails (#124). */
+  updateAnnotation(annotationId: string, patch: AnnotationPatch): Promise<boolean>;
   removeAnnotation(annotationId: string): Promise<void>;
   undoRemoveAnnotation(): Promise<Annotation | null>;
   jumpToAnnotation(annotationId: string): void;
@@ -361,6 +368,8 @@ export interface RevealRequest {
   nodeId: string;
   /** Title of the parent card when this reveal came from nesting an excerpt (#127). */
   parentTitle?: string | null;
+  /** True when the reader explicitly asked to show this card, opening a collapsed MindMap (#124). */
+  openMindMap?: boolean;
 }
 
 export interface InspectRequest {
@@ -453,6 +462,50 @@ function withoutLastDeletion(order: readonly DeletionKind[], kind: DeletionKind)
 }
 
 /**
+ * Reserves measured or content-estimated sizes for every existing card so a new
+ * excerpt never lands on top of an unmeasured card or an unloaded capture (#128).
+ */
+function computeNextCardPosition(
+  nodes: readonly MindMapNode[],
+  cards: readonly NoteCard[],
+  annotations: readonly Annotation[],
+  nodeSizes: Readonly<Record<string, NodeSize>>,
+  parentNodeId: string | null,
+  newSize: NodeSize,
+) {
+  const effectiveSizes: Record<string, NodeSize> = { ...nodeSizes };
+  const captureAnnotationIds = new Set(
+    annotations
+      .filter((annotation) => annotation.excerptImagePath !== null)
+      .map((annotation) => annotation.id),
+  );
+  const cardsById = new Map(cards.map((card) => [card.id, card]));
+  for (const node of nodes) {
+    const card = cardsById.get(node.cardId);
+    if (!card) continue;
+    const hasCapture = card.annotationIds.some((id) => captureAnnotationIds.has(id));
+    const estimated = estimateCardSize({
+      hasCapture,
+      hasNotes: card.markdownNotes.trim() !== '',
+      hasTags: card.tags.length > 0,
+    });
+    const measured = effectiveSizes[node.id];
+    if (!measured) {
+      effectiveSizes[node.id] = estimated;
+    } else if (hasCapture) {
+      effectiveSizes[node.id] = {
+        width: Math.max(measured.width, estimated.width),
+        height: Math.max(measured.height, estimated.height),
+      };
+    }
+  }
+  return nextNodePosition(nodes, parentNodeId, {
+    nodeSizes: effectiveSizes,
+    newSize,
+  });
+}
+
+/**
  * The bi-directional bus between the Reader and the MindMap. Neither side knows
  * the other exists: readers publish selections and consume jump requests, the
  * canvas publishes jumps and renders the excerpts that selections become.
@@ -499,8 +552,34 @@ export function createStudySyncStore(backend: StudyBackend) {
     const documentTitleSeqs = new Map<string, number>();
     /** Monotonic per-document counter incremented whenever a content-changing relink commits (#125). */
     const documentContentEpochs = new Map<string, number>();
+    interface PendingAnnotationUpdate {
+      /** Resolves once every update queued up to this entry settles (never rejects). */
+      settled: Promise<void>;
+      /** Sequence number of the latest note write (`patch.note !== null`) in this active chain (#124). */
+      noteSeq: number | null;
+    }
+
+    interface LatestNoteWrite {
+      /** Monotonic sequence incremented for every `updateAnnotation` call with `patch.note !== null`. */
+      seq: number;
+      /** Resolves to `true` when persisted, `false` when the write failed. */
+      result: Promise<boolean>;
+      /** True once this note write has settled (succeeded or failed). */
+      settled: boolean;
+    }
+
     /** Per-annotation FIFO tail promises so `updateAnnotation` patches commit strictly in order (#125). */
-    const pendingAnnotationUpdates = new Map<string, Promise<void>>();
+    const pendingAnnotationUpdates = new Map<string, PendingAnnotationUpdate>();
+    /**
+     * Retains the latest note-write outcome per annotation even after `pendingAnnotationUpdates`
+     * clears so a queued `excerptAnnotation` still sees a note save that failed while waiting (#124).
+     * Color/style-only updates (`patch.note === null`) never overwrite this record.
+     */
+    const latestNoteWrites = new Map<string, LatestNoteWrite>();
+    let noteWriteSeq = 0;
+    /** Serializes card-creation writes so queued annotation excerpts never drop or overlap (#124). */
+    let excerptQueue: Promise<void> = Promise.resolve();
+    let activeSelectionExcerpt = false;
 
     const nextDocumentTitleSeq = (documentId: string): number => {
       const next = (documentTitleSeqs.get(documentId) ?? 0) + 1;
@@ -1214,6 +1293,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       edges: [],
       selection: null,
       isExcerpting: false,
+      excerptingAnnotationIds: [],
       selectedNodeId: null,
       nestingTargetNodeId: null,
       nestingTargetNonce: 0,
@@ -1804,108 +1884,256 @@ export function createStudySyncStore(backend: StudyBackend) {
           ? (cards.find((card) => card.id === parentNode.cardId)?.title ?? null)
           : null;
 
-        // Use measured DOM sizes where known; for unmeasured cards (e.g. while the
-        // MindMap is collapsed), reserve a conservative bound from their content (#128).
-        // Capture cards always reserve at least their thumbnail-inclusive estimate so an
-        // early measurement before an image loads can never place a later card underneath.
-        const effectiveSizes: Record<string, NodeSize> = { ...nodeSizes };
-        const captureAnnotationIds = new Set(
-          annotations
-            .filter((annotation) => annotation.excerptImagePath !== null)
-            .map((annotation) => annotation.id),
-        );
-        const cardsById = new Map(cards.map((card) => [card.id, card]));
-        for (const node of nodes) {
-          const card = cardsById.get(node.cardId);
-          if (!card) continue;
-          const hasCapture = card.annotationIds.some((id) => captureAnnotationIds.has(id));
-          const estimated = estimateCardSize({
-            hasCapture,
-            hasNotes: card.markdownNotes.trim() !== '',
-            hasTags: card.tags.length > 0,
-          });
-          const measured = effectiveSizes[node.id];
-          if (!measured) {
-            effectiveSizes[node.id] = estimated;
-          } else if (hasCapture) {
-            effectiveSizes[node.id] = {
-              width: Math.max(measured.width, estimated.width),
-              height: Math.max(measured.height, estimated.height),
-            };
-          }
-        }
         const newSize = estimateCardSize({ hasCapture: selection.imagePng !== null });
-        const position = nextNodePosition(nodes, parentNodeId, {
-          nodeSizes: effectiveSizes,
+        const position = computeNextCardPosition(
+          nodes,
+          cards,
+          annotations,
+          nodeSizes,
+          parentNodeId,
           newSize,
-        });
+        );
         const versionAtStart = getDocumentVersion(selection.documentId);
         const expectedFileHash = selection.sourceFileHash ?? versionAtStart.fileHash;
+        activeSelectionExcerpt = true;
         set({ isExcerpting: true });
-        try {
-          const created = await backend.createExcerpt({
-            documentId: selection.documentId,
-            notebookId: notebook.id,
-            anchor: selection.anchor,
-            excerptText: selection.text,
-            excerptImagePng: selection.imagePng,
-            color: DEFAULT_EXCERPT_COLOR,
-            parentNodeId,
-            posX: position.x,
-            posY: position.y,
-            locationLabel: selection.locationLabel ?? null,
-            expectedFileHash,
-          });
-          const reconciled = await reconcileAnnotationWithBackend(
-            notebook.id,
-            created.annotation,
-            selection.documentId,
-            versionAtStart,
-          );
-          let resolvedParentTitle: string | null = null;
-          let needsBackendRefresh = false;
-          // Only clear the selection the user excerpted: they may have made a
-          // new one while the write was in flight.
+        const run = async () => {
+          try {
+            const created = await backend.createExcerpt({
+              documentId: selection.documentId,
+              notebookId: notebook.id,
+              anchor: selection.anchor,
+              excerptText: selection.text,
+              excerptImagePng: selection.imagePng,
+              color: DEFAULT_EXCERPT_COLOR,
+              parentNodeId,
+              posX: position.x,
+              posY: position.y,
+              locationLabel: selection.locationLabel ?? null,
+              expectedFileHash,
+            });
+            const reconciled = await reconcileAnnotationWithBackend(
+              notebook.id,
+              created.annotation,
+              selection.documentId,
+              versionAtStart,
+            );
+            let resolvedParentTitle: string | null = null;
+            let needsBackendRefresh = false;
+            activeSelectionExcerpt = false;
+            // Only clear the selection the user excerpted: they may have made a
+            // new one while the write was in flight.
+            set((state) => {
+              const final = resolveAnnotationForState(state, reconciled);
+              needsBackendRefresh = final.stale;
+              resolvedParentTitle = parentNode
+                ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
+                  parentTitleBeforeWrite)
+                : null;
+              return {
+                annotations: [...state.annotations, final.annotation],
+                cards: [...state.cards, created.card],
+                nodes: [...state.nodes, created.node],
+                edges: created.edge ? [...state.edges, created.edge] : state.edges,
+                selection: state.selection === selection ? null : state.selection,
+                isExcerpting: state.excerptingAnnotationIds.length > 0,
+                excerptNonce: state.excerptNonce + 1,
+                lastExcerptParentTitle: resolvedParentTitle,
+              };
+            });
+            // The new card is selected and shown so it can be found, but the
+            // nesting target stays whatever the reader chose.
+            get().revealNode(created.node.id, resolvedParentTitle);
+            if (needsBackendRefresh) {
+              await refreshAnnotationLocationFromBackend(
+                notebook.id,
+                created.annotation.id,
+                selection.documentId,
+              );
+            }
+          } catch (error) {
+            activeSelectionExcerpt = false;
+            // Drop the selection if its source document changed under it; otherwise keep it for retry.
+            set((state) => ({
+              isExcerpting: state.excerptingAnnotationIds.length > 0,
+              error: describeError(error),
+              selection:
+                state.selection === selection &&
+                hasStateDocumentContentChanged(state, selection.documentId, versionAtStart)
+                  ? null
+                  : state.selection,
+            }));
+          }
+        };
+        const next = excerptQueue.then(run, run);
+        excerptQueue = next.then(
+          () => undefined,
+          () => undefined,
+        );
+        await next;
+      },
+
+      async excerptAnnotation(annotationId) {
+        const initial = get();
+        if (!initial.notebook || initial.excerptingAnnotationIds.includes(annotationId)) {
+          return;
+        }
+        if (initial.cards.some((card) => card.annotationIds.includes(annotationId))) {
+          get().showAnnotationCard(annotationId);
+          return;
+        }
+        if (!initial.annotations.some((candidate) => candidate.id === annotationId)) return;
+
+        const notebookIdAtCall = initial.notebook.id;
+        const pendingAtCall = pendingAnnotationUpdates.get(annotationId);
+        const noteAtCall = latestNoteWrites.get(annotationId);
+        // Watch any note write already in flight (or part of an active update chain) when
+        // this excerpt is requested, plus any note write started while this excerpt waits in
+        // `excerptQueue`. Historical failures that already settled before this request do not
+        // poison future excerpts (e.g., after the user cancels a failed draft) (#124).
+        const minRelevantNoteSeq =
+          pendingAtCall?.noteSeq ??
+          (noteAtCall && !noteAtCall.settled ? noteAtCall.seq : (noteAtCall?.seq ?? 0) + 1);
+        const releaseExcerpting = (extra?: Partial<StudySyncState>) => {
           set((state) => {
-            const final = resolveAnnotationForState(state, reconciled);
-            needsBackendRefresh = final.stale;
-            resolvedParentTitle = parentNode
-              ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
-                parentTitleBeforeWrite)
-              : null;
+            const remaining = state.excerptingAnnotationIds.filter((id) => id !== annotationId);
             return {
-              annotations: [...state.annotations, final.annotation],
-              cards: [...state.cards, created.card],
-              nodes: [...state.nodes, created.node],
-              edges: created.edge ? [...state.edges, created.edge] : state.edges,
-              selection: state.selection === selection ? null : state.selection,
-              isExcerpting: false,
-              excerptNonce: state.excerptNonce + 1,
-              lastExcerptParentTitle: resolvedParentTitle,
+              isExcerpting: activeSelectionExcerpt || remaining.length > 0,
+              excerptingAnnotationIds: remaining,
+              ...extra,
             };
           });
-          // The new card is selected and shown so it can be found, but the
-          // nesting target stays whatever the reader chose.
-          get().revealNode(created.node.id, resolvedParentTitle);
-          if (needsBackendRefresh) {
-            await refreshAnnotationLocationFromBackend(
-              notebook.id,
-              created.annotation.id,
-              selection.documentId,
+        };
+
+        set((state) => ({
+          isExcerpting: true,
+          excerptingAnnotationIds: state.excerptingAnnotationIds.includes(annotationId)
+            ? state.excerptingAnnotationIds
+            : [...state.excerptingAnnotationIds, annotationId],
+        }));
+
+        const run = async () => {
+          try {
+            // Drain any queued note/color edits for this highlight so the new card's
+            // seeded `markdownNotes` reflects the latest saved note, and abort if the
+            // latest relevant note write failed — even if it already settled while this
+            // excerpt was waiting in `excerptQueue` (#124).
+            for (;;) {
+              const priorUpdates = pendingAnnotationUpdates.get(annotationId);
+              if (priorUpdates) {
+                await priorUpdates.settled;
+                continue;
+              }
+              const latestNote = latestNoteWrites.get(annotationId);
+              if (
+                latestNote &&
+                latestNote.seq >= minRelevantNoteSeq &&
+                !(await latestNote.result)
+              ) {
+                const currentNote = latestNoteWrites.get(annotationId);
+                if (
+                  !pendingAnnotationUpdates.has(annotationId) &&
+                  currentNote?.seq === latestNote.seq
+                ) {
+                  releaseExcerpting();
+                  return;
+                }
+                continue;
+              }
+              break;
+            }
+
+            const { notebook, annotations, cards, nodes, nestingTargetNodeId, nodeSizes } = get();
+            if (!notebook || notebook.id !== notebookIdAtCall || pendingDeletes.has(annotationId)) {
+              releaseExcerpting();
+              return;
+            }
+            if (cards.some((card) => card.annotationIds.includes(annotationId))) {
+              releaseExcerpting();
+              get().showAnnotationCard(annotationId);
+              return;
+            }
+            const annotation = annotations.find((candidate) => candidate.id === annotationId);
+            if (!annotation) {
+              releaseExcerpting();
+              return;
+            }
+
+            const parentNode = nestingTargetNodeId
+              ? nodes.find((node) => node.id === nestingTargetNodeId)
+              : undefined;
+            const parentNodeId = parentNode?.id ?? null;
+            const parentTitleBeforeWrite = parentNode
+              ? (cards.find((card) => card.id === parentNode.cardId)?.title ?? null)
+              : null;
+
+            const newSize = estimateCardSize({
+              hasCapture: annotation.excerptImagePath !== null,
+              hasNotes: annotationHasNote(annotation),
+            });
+            const position = computeNextCardPosition(
+              nodes,
+              cards,
+              annotations,
+              nodeSizes,
+              parentNodeId,
+              newSize,
             );
+
+            const created = await backend.createCardForAnnotation({
+              annotationId: annotation.id,
+              notebookId: notebook.id,
+              parentNodeId,
+              posX: position.x,
+              posY: position.y,
+            });
+            let resolvedParentTitle: string | null = null;
+            set((state) => {
+              const remaining = state.excerptingAnnotationIds.filter((id) => id !== annotationId);
+              resolvedParentTitle = parentNode
+                ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
+                  parentTitleBeforeWrite)
+                : null;
+              return {
+                cards: [...state.cards, created.card],
+                nodes: [...state.nodes, created.node],
+                edges: created.edge ? [...state.edges, created.edge] : state.edges,
+                isExcerpting: activeSelectionExcerpt || remaining.length > 0,
+                excerptingAnnotationIds: remaining,
+                excerptNonce: state.excerptNonce + 1,
+                lastExcerptParentTitle: resolvedParentTitle,
+              };
+            });
+            get().revealNode(created.node.id, resolvedParentTitle);
+          } catch (error) {
+            releaseExcerpting({ error: describeError(error) });
           }
-        } catch (error) {
-          // Drop the selection if its source document changed under it; otherwise keep it for retry.
-          set((state) => ({
-            isExcerpting: false,
-            error: describeError(error),
-            selection:
-              state.selection === selection &&
-              hasStateDocumentContentChanged(state, selection.documentId, versionAtStart)
-                ? null
-                : state.selection,
-          }));
-        }
+        };
+
+        const next = excerptQueue.then(run, run);
+        excerptQueue = next.then(
+          () => undefined,
+          () => undefined,
+        );
+        await next;
+      },
+
+      showAnnotationCard(annotationId) {
+        const { cards, nodes } = get();
+        const node = nodes.find((candidate) => {
+          const card = cards.find((c) => c.id === candidate.cardId);
+          return card !== undefined && card.annotationIds.includes(annotationId);
+        });
+        if (!node) return;
+        revealNonce += 1;
+        set({
+          selectedNodeId: node.id,
+          revealRequest: {
+            nonce: revealNonce,
+            nodeId: node.id,
+            openMindMap: true,
+          },
+        });
       },
 
       async createAnnotationFromSelection(options) {
@@ -1957,7 +2185,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       async updateAnnotation(annotationId, patch) {
-        const run = async () => {
+        const run = async (): Promise<boolean> => {
           const { notebook, annotations, deletedAnnotationHistory } = get();
           const existing =
             annotations.find((candidate) => candidate.id === annotationId) ??
@@ -1965,6 +2193,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             deletedAnnotationHistory.find((entry) => entry.annotation.id === annotationId)
               ?.annotation;
           const versionAtStart = existing ? getDocumentVersion(existing.documentId) : null;
+          let succeeded = false;
           await guarded(async () => {
             const updated = await backend.updateAnnotation(annotationId, patch);
             const reconciled =
@@ -2008,6 +2237,7 @@ export function createStudySyncStore(backend: StudyBackend) {
                 ),
               };
             });
+            succeeded = true;
             if (needsBackendRefresh) {
               const notebookId = get().notebook?.id ?? updated.notebookId;
               await refreshAnnotationLocationFromBackend(
@@ -2017,24 +2247,41 @@ export function createStudySyncStore(backend: StudyBackend) {
               );
             }
           });
+          return succeeded;
         };
         const previous = pendingAnnotationUpdates.get(annotationId);
-        const next = previous ? previous.then(run, run) : run();
-        const tail = next.then(
+        const next: Promise<boolean> = previous ? previous.settled.then(run, run) : run();
+        const settled = next.then(
           () => undefined,
           () => undefined,
         );
-        pendingAnnotationUpdates.set(annotationId, tail);
+        let noteWrite: LatestNoteWrite | null = null;
+        if (patch.note !== null) {
+          noteWriteSeq += 1;
+          noteWrite = { seq: noteWriteSeq, result: next, settled: false };
+          latestNoteWrites.set(annotationId, noteWrite);
+        }
+        const entry: PendingAnnotationUpdate = {
+          settled,
+          // A newer note write supersedes any earlier queued note write's sequence;
+          // a color/style-only patch preserves the prior active chain's note sequence (#124).
+          noteSeq: noteWrite ? noteWrite.seq : (previous?.noteSeq ?? null),
+        };
+        pendingAnnotationUpdates.set(annotationId, entry);
         try {
-          await next;
+          return await next;
         } finally {
-          if (pendingAnnotationUpdates.get(annotationId) === tail) {
+          if (noteWrite) noteWrite.settled = true;
+          if (pendingAnnotationUpdates.get(annotationId) === entry) {
             pendingAnnotationUpdates.delete(annotationId);
           }
         }
       },
 
       async removeAnnotation(annotationId) {
+        // Hold off deletion while this annotation is being promoted to a MindMap card so
+        // card-source confirmation cannot be skipped and no stale card link is applied (#124).
+        if (get().excerptingAnnotationIds.includes(annotationId)) return;
         const removed = get().annotations.find((annotation) => annotation.id === annotationId);
         if (!removed) return;
         const versionAtStart = getDocumentVersion(removed.documentId);
@@ -2065,7 +2312,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           async () => {
             // Drain any queued edits for this annotation before soft-deleting it so those
             // edits persist and survive a subsequent Undo (#125).
-            if (priorUpdates) await priorUpdates;
+            if (priorUpdates) await priorUpdates.settled;
             await backend.deleteAnnotation(annotationId);
           },
           () => {

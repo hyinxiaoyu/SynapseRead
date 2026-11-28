@@ -249,7 +249,10 @@ export function TxtViewer({
   canUndoAnnotationDelete,
   onUndoAnnotationDelete,
   cardSourceAnnotationIds,
+  excerptingAnnotationIds,
   onExcerptSelection,
+  onExcerptAnnotation,
+  onShowAnnotationCard,
   canExcerpt,
   excerptTargetTitle,
   onClearExcerptTarget,
@@ -745,6 +748,11 @@ export function TxtViewer({
     canUndoAnnotationDelete,
     onUndoAnnotationDelete,
     cardSourceAnnotationIds,
+    excerptingAnnotationIds,
+    onExcerptAnnotation,
+    onShowAnnotationCard,
+    canExcerpt,
+    excerptTargetTitle,
     isStaleAnnotation: (annotation) => {
       if (!complete) return false;
       const txtAnchor = asTxtAnchor(annotation.anchor);

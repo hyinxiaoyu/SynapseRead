@@ -1,6 +1,8 @@
 import { act, fireEvent, render, renderHook, screen, within } from '@testing-library/react';
+import { useSyncExternalStore } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
+import { commandState, forgetRecentCommandRuns, runCommand } from '@/features/commands/registry';
 import {
   type AnnotationsController,
   AnnotationsList,
@@ -8,7 +10,9 @@ import {
   localHighlights,
   useAnnotationsController,
 } from '@/features/reader/AnnotationsPanel';
-import type { Annotation } from '@/types/domain';
+import { createMemoryBackend } from '@/lib/backend/memoryBackend';
+import { createStudySyncStore } from '@/stores/useStudySyncStore';
+import type { Annotation, AnnotationPatch } from '@/types/domain';
 
 const YELLOW = '#fde047';
 const GREEN = '#86efac';
@@ -427,5 +431,749 @@ describe('AnnotationsList card sources', () => {
 
     rerender(<AnnotationsList controller={controller} filter="" />);
     expect(screen.queryByTestId('card-source-delete-confirm')).toBeNull();
+  });
+
+  it('excerpts an unlinked row from its action button or ⇧⌘E, and shows a linked card via its row button or In MindMap badge (#124)', () => {
+    forgetRecentCommandRuns();
+    const excerptAnnotation = vi.fn();
+    const showAnnotationCard = vi.fn();
+    const controller = controllerFor(
+      [annotation('linked'), annotation('plain', { style: 'underline' })],
+      {
+        isCardSource: (id) => id === 'linked',
+        excerptAnnotation,
+        showAnnotationCard,
+        canExcerpt: true,
+      },
+    );
+    render(
+      <div>
+        <AnnotationsList controller={controller} filter="" />
+        <button type="button" data-testid="outside">
+          Outside
+        </button>
+      </div>,
+    );
+
+    const [linkedRow, plainRow] = screen.getAllByTestId('annotation-item') as [
+      HTMLElement,
+      HTMLElement,
+    ];
+
+    // Unlinked row: Excerpt to MindMap button, no In MindMap badge or Show button.
+    expect(within(plainRow).queryByTestId('annotation-card-badge')).toBeNull();
+    expect(within(plainRow).queryByTestId('annotation-show-card-button')).toBeNull();
+    fireEvent.click(within(plainRow).getByTestId('annotation-excerpt-button'));
+    expect(excerptAnnotation).toHaveBeenCalledWith('plain');
+
+    // Linked row: Show in MindMap row button AND clickable In MindMap badge button.
+    expect(within(linkedRow).queryByTestId('annotation-excerpt-button')).toBeNull();
+    const badge = within(linkedRow).getByTestId('annotation-card-badge');
+    expect(badge.tagName).toBe('BUTTON');
+    fireEvent.click(badge);
+    expect(showAnnotationCard).toHaveBeenCalledWith('linked');
+
+    fireEvent.click(within(linkedRow).getByTestId('annotation-show-card-button'));
+    expect(showAnnotationCard).toHaveBeenCalledTimes(2);
+    expect(showAnnotationCard).toHaveBeenLastCalledWith('linked');
+
+    // ⇧⌘E on a focused unlinked row excerpts it; on a focused linked row shows its card.
+    const plainJump = within(plainRow).getByTestId('annotation-jump-button');
+    fireEvent.focus(plainJump);
+    expect(commandState('edit.excerpt')).toMatchObject({
+      enabled: true,
+      title: 'Excerpt to MindMap',
+    });
+    act(() => {
+      expect(runCommand('edit.excerpt', 'keyboard')).toBe(true);
+    });
+    expect(excerptAnnotation).toHaveBeenCalledTimes(2);
+    expect(excerptAnnotation).toHaveBeenLastCalledWith('plain');
+
+    const linkedJump = within(linkedRow).getByTestId('annotation-jump-button');
+    fireEvent.focus(linkedJump);
+    expect(commandState('edit.excerpt')).toMatchObject({
+      enabled: true,
+      title: 'Show in MindMap',
+    });
+    forgetRecentCommandRuns();
+    act(() => {
+      expect(runCommand('edit.excerpt', 'keyboard')).toBe(true);
+    });
+    expect(showAnnotationCard).toHaveBeenCalledTimes(3);
+
+    // Leaving the list clears the focused-row command override.
+    fireEvent.blur(linkedJump, { relatedTarget: screen.getByTestId('outside') });
+    expect(commandState('edit.excerpt').enabled).toBe(false);
+  });
+
+  it('tracks focus across child controls of each row so ⇧⌘E acts only on the focused row and never inside the note textarea (#124)', () => {
+    const pressExcerptShortcut = (target: HTMLElement) => {
+      forgetRecentCommandRuns();
+      act(() => {
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'E',
+            shiftKey: true,
+            metaKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+    };
+
+    const excerptAnnotation = vi.fn();
+    const showAnnotationCard = vi.fn();
+    const controller = controllerFor(
+      [
+        annotation('row-a', { excerptText: 'Alpha unlinked' }),
+        annotation('row-b', { excerptText: 'Beta linked', note: 'Saved note' }),
+      ],
+      {
+        isCardSource: (id) => id === 'row-b',
+        excerptAnnotation,
+        showAnnotationCard,
+        canExcerpt: true,
+      },
+    );
+    const { rerender } = render(
+      <div>
+        <AnnotationsList controller={controller} filter="" />
+        <button type="button" data-testid="outside">
+          Outside
+        </button>
+      </div>,
+    );
+
+    const [rowA, rowB] = screen.getAllByTestId('annotation-item') as [HTMLElement, HTMLElement];
+    const rowAJump = within(rowA).getByTestId('annotation-jump-button');
+    const rowBBadge = within(rowB).getByTestId('annotation-card-badge');
+    const rowBShowButton = within(rowB).getByTestId('annotation-show-card-button');
+    const rowBEditButton = within(rowB).getByTestId('annotation-edit-button');
+
+    // Focus Row A jump button, then move real DOM focus to Row B's In MindMap badge and press ⇧⌘E.
+    act(() => rowAJump.focus());
+    act(() => rowBBadge.focus());
+    expect(rowBBadge).toHaveFocus();
+    pressExcerptShortcut(rowBBadge);
+    expect(excerptAnnotation).not.toHaveBeenCalled();
+    expect(showAnnotationCard).toHaveBeenCalledTimes(1);
+    expect(showAnnotationCard).toHaveBeenLastCalledWith('row-b');
+
+    // Move real DOM focus from Row A to Row B's row action button.
+    act(() => rowAJump.focus());
+    act(() => rowBShowButton.focus());
+    pressExcerptShortcut(rowBShowButton);
+    expect(excerptAnnotation).not.toHaveBeenCalled();
+    expect(showAnnotationCard).toHaveBeenCalledTimes(2);
+
+    // Open Row B's inline editor: color swatch still targets Row B, while textarea keeps its own keyboard behavior.
+    fireEvent.click(rowBEditButton);
+    const rowBColor = within(rowB).getByTestId('annotation-item-color-green');
+    act(() => rowAJump.focus());
+    act(() => rowBColor.focus());
+    pressExcerptShortcut(rowBColor);
+    expect(excerptAnnotation).not.toHaveBeenCalled();
+    expect(showAnnotationCard).toHaveBeenCalledTimes(3);
+
+    const rowBTextarea = within(rowB).getByTestId('annotation-note-input');
+    act(() => rowBTextarea.focus());
+    pressExcerptShortcut(rowBTextarea);
+    expect(excerptAnnotation).not.toHaveBeenCalled();
+    expect(showAnnotationCard).toHaveBeenCalledTimes(3);
+
+    // Filtering out the focused row clears the command context even after the filter is cleared.
+    act(() => rowAJump.focus());
+    expect(commandState('edit.excerpt').enabled).toBe(true);
+    rerender(
+      <div>
+        <AnnotationsList controller={controller} filter="Beta" />
+        <button type="button" data-testid="outside">
+          Outside
+        </button>
+      </div>,
+    );
+    expect(commandState('edit.excerpt').enabled).toBe(false);
+    rerender(
+      <div>
+        <AnnotationsList controller={controller} filter="" />
+        <button type="button" data-testid="outside">
+          Outside
+        </button>
+      </div>,
+    );
+    expect(commandState('edit.excerpt').enabled).toBe(false);
+  });
+
+  it('disables deleting a row while that annotation is being sent to the MindMap (#124)', () => {
+    const deleteAnnotation = vi.fn();
+    const base = [annotation('a')];
+    const { rerender } = render(
+      <AnnotationsList
+        controller={controllerFor(base, {
+          deleteAnnotation,
+          isCardSource: () => false,
+          isExcerptingAnnotation: (id) => id === 'a',
+        })}
+        filter=""
+      />,
+    );
+
+    const deleteBtn = screen.getByTestId('annotation-delete-button');
+    expect(deleteBtn).toBeDisabled();
+    fireEvent.click(deleteBtn);
+    fireEvent.keyDown(screen.getByTestId('annotation-jump-button'), { key: 'Backspace' });
+    expect(deleteAnnotation).not.toHaveBeenCalled();
+
+    // Once committed, delete re-enables and enters card-source confirmation.
+    rerender(
+      <AnnotationsList
+        controller={controllerFor(base, {
+          deleteAnnotation,
+          isCardSource: (id) => id === 'a',
+          isExcerptingAnnotation: () => false,
+        })}
+        filter=""
+      />,
+    );
+    expect(screen.getByTestId('annotation-delete-button')).toBeEnabled();
+    fireEvent.click(screen.getByTestId('annotation-delete-button'));
+    expect(deleteAnnotation).not.toHaveBeenCalled();
+    expect(screen.getByTestId('card-source-delete-confirm')).toBeVisible();
+  });
+
+  it('keeps the sidebar editor and draft when explicit or blur note saves fail, blocks stale excerpts via button and ⇧⌘E, and creates one card on retry (#124)', async () => {
+    function StoreBackedAnnotationsList({
+      store,
+      documentId,
+    }: {
+      store: ReturnType<typeof createStudySyncStore>;
+      documentId: string;
+    }) {
+      const state = useSyncExternalStore(store.subscribe, store.getState);
+      const cardSourceAnnotationIds = new Set(state.cards.flatMap((card) => card.annotationIds));
+      const controller = useAnnotationsController({
+        documentId,
+        annotations: state.annotations.filter((item) => item.documentId === documentId),
+        onSelectAnnotation: vi.fn(),
+        onUpdateAnnotation: (annotationId, patch) => state.updateAnnotation(annotationId, patch),
+        onDeleteAnnotation: (annotationId) => void state.removeAnnotation(annotationId),
+        onExcerptAnnotation: (annotationId) => void state.excerptAnnotation(annotationId),
+        onShowAnnotationCard: (annotationId) => state.showAnnotationCard(annotationId),
+        canExcerpt: !state.isExcerpting,
+        cardSourceAnnotationIds,
+        excerptingAnnotationIds: new Set(state.excerptingAnnotationIds),
+      });
+      return <AnnotationsList controller={controller} filter="" />;
+    }
+
+    const setupStore = async () => {
+      const backend = createMemoryBackend({
+        library: { '/docs/a.txt': new TextEncoder().encode('The quick brown fox jumps') },
+      });
+      const store = createStudySyncStore(backend);
+      await store.getState().initialize();
+      await store.getState().openDocument();
+      const docId = store.getState().activeDocumentId!;
+      const notebookId = store.getState().notebook!.id;
+      store.getState().setSelection({
+        documentId: docId,
+        anchor: { format: 'txt', startByteOffset: 4, endByteOffset: 19, lineIndex: 0 },
+        text: 'quick brown fox',
+        imagePng: null,
+      });
+      const created = (await store.getState().createAnnotationFromSelection({
+        color: YELLOW,
+        style: 'highlight',
+        note: 'Original note',
+      }))!;
+      return { backend, store, docId, notebookId, created };
+    };
+
+    const pressExcerptShortcut = (target: HTMLElement) => {
+      forgetRecentCommandRuns();
+      act(() => {
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'E',
+            shiftKey: true,
+            metaKey: true,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+    };
+
+    // 1. Explicit Save fails -> editor stays open with draft, clicking Excerpt or pressing ⇧⌘E creates no card; retry succeeds with 1 card.
+    {
+      const { backend, store, docId, notebookId } = await setupStore();
+      let rejectSave!: (error: unknown) => void;
+      const origUpdate = backend.updateAnnotation.bind(backend);
+      vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(
+        () =>
+          new Promise<Annotation>((_resolve, reject) => {
+            rejectSave = reject;
+          }),
+      );
+
+      const { unmount } = render(<StoreBackedAnnotationsList store={store} documentId={docId} />);
+      fireEvent.click(screen.getByTestId('annotation-edit-button'));
+      const field = screen.getByTestId('annotation-note-input');
+      fireEvent.change(field, { target: { value: 'Revised note' } });
+      fireEvent.click(screen.getByTestId('annotation-note-save'));
+
+      // Editor stays open until the async save confirms.
+      expect(screen.getByTestId('annotation-note-input')).toHaveValue('Revised note');
+
+      await act(async () => {
+        rejectSave({ code: 'database', message: 'disk busy' });
+      });
+      expect(store.getState().error).toContain('disk busy');
+      expect(screen.getByTestId('annotation-note-input')).toHaveValue('Revised note');
+      expect(screen.getByTestId('annotation-note-input')).toHaveFocus();
+
+      // Clicking Excerpt after the failed save must not create a card with 'Original note'.
+      fireEvent.click(screen.getByTestId('annotation-excerpt-button'));
+      expect(screen.getByTestId('annotation-unsaved-note-warning')).toBeVisible();
+      expect(store.getState().cards).toHaveLength(0);
+      expect(store.getState().revealRequest).toBeNull();
+      expect((await backend.loadNotebookGraph(notebookId)).cards).toHaveLength(0);
+
+      // Moving focus to the row jump button and pressing ⇧⌘E shares the same guard.
+      const jumpBtn = screen.getByTestId('annotation-jump-button');
+      act(() => jumpBtn.focus());
+      pressExcerptShortcut(jumpBtn);
+      expect(screen.getByTestId('annotation-unsaved-note-warning')).toBeVisible();
+      expect(screen.getByTestId('annotation-note-input')).toHaveFocus();
+      expect(store.getState().cards).toHaveLength(0);
+      expect((await backend.loadNotebookGraph(notebookId)).cards).toHaveLength(0);
+
+      // Retry Save Note (paused) + immediate Excerpt -> waits for save, then creates exactly one card with 'Revised note'.
+      let releaseRetry!: () => void;
+      const retryGate = new Promise<void>((resolve) => {
+        releaseRetry = resolve;
+      });
+      vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(
+        async (id: string, patch: AnnotationPatch) => {
+          await retryGate;
+          return origUpdate(id, patch);
+        },
+      );
+
+      fireEvent.click(screen.getByTestId('annotation-note-save'));
+      fireEvent.click(screen.getByTestId('annotation-excerpt-button'));
+      expect(screen.getByTestId('annotation-delete-button')).toBeDisabled();
+      expect(store.getState().cards).toHaveLength(0);
+
+      await act(async () => {
+        releaseRetry();
+      });
+      await vi.waitFor(() => expect(store.getState().cards).toHaveLength(1));
+      expect(screen.queryByTestId('annotation-note-input')).toBeNull();
+      expect(store.getState().cards[0]?.markdownNotes).toBe('Revised note');
+      expect(store.getState().revealRequest?.nodeId).toBe(store.getState().nodes[0]?.id);
+      const graph = await backend.loadNotebookGraph(notebookId);
+      expect(graph.cards).toHaveLength(1);
+      expect(graph.cards[0]?.markdownNotes).toBe('Revised note');
+      unmount();
+    }
+
+    // 2. Blur auto-save fails (both while Excerpt waits in flight and after failure) -> no card; retry creates one card.
+    {
+      const { backend, store, docId, notebookId } = await setupStore();
+      let rejectBlurSave!: (error: unknown) => void;
+      const updateSpy = vi.spyOn(backend, 'updateAnnotation');
+      updateSpy.mockImplementationOnce(
+        () =>
+          new Promise<Annotation>((_resolve, reject) => {
+            rejectBlurSave = reject;
+          }),
+      );
+
+      const { unmount } = render(<StoreBackedAnnotationsList store={store} documentId={docId} />);
+      fireEvent.click(screen.getByTestId('annotation-edit-button'));
+      const field = screen.getByTestId('annotation-note-input');
+      fireEvent.change(field, { target: { value: 'Blur revised' } });
+      fireEvent.blur(field);
+
+      // Clicking Save while blur-save is in flight reuses the exact same write without duplicating it.
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+      fireEvent.click(screen.getByTestId('annotation-note-save'));
+      expect(updateSpy).toHaveBeenCalledTimes(1);
+
+      // Pressing ⇧⌘E on the row while blur-save is in flight queues behind it and blocks delete.
+      const jumpBtn = screen.getByTestId('annotation-jump-button');
+      act(() => jumpBtn.focus());
+      pressExcerptShortcut(jumpBtn);
+      expect(screen.getByTestId('annotation-delete-button')).toBeDisabled();
+      expect(store.getState().cards).toHaveLength(0);
+
+      // Blur-save fails -> no card created in store or backend, editor stays open with draft preserved.
+      await act(async () => {
+        rejectBlurSave({ code: 'database', message: 'write failed on blur' });
+      });
+      expect(store.getState().error).toContain('write failed on blur');
+      expect(store.getState().cards).toHaveLength(0);
+      expect(store.getState().revealRequest).toBeNull();
+      expect((await backend.loadNotebookGraph(notebookId)).cards).toHaveLength(0);
+      expect(screen.getByTestId('annotation-note-input')).toHaveValue('Blur revised');
+      expect(screen.getByTestId('annotation-delete-button')).toBeEnabled();
+
+      // Clicking Excerpt again after the failed blur-save still refuses to create a stale card.
+      fireEvent.click(screen.getByTestId('annotation-excerpt-button'));
+      expect(screen.getByTestId('annotation-unsaved-note-warning')).toBeVisible();
+      expect(store.getState().cards).toHaveLength(0);
+      expect((await backend.loadNotebookGraph(notebookId)).cards).toHaveLength(0);
+
+      // Retry saving -> succeeds, closes editor, and excerpting creates exactly one card with 'Blur revised'.
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('annotation-note-save'));
+      });
+      await vi.waitFor(() => expect(screen.queryByTestId('annotation-note-input')).toBeNull());
+      await act(async () => {
+        fireEvent.click(screen.getByTestId('annotation-excerpt-button'));
+      });
+      await vi.waitFor(() => expect(store.getState().cards).toHaveLength(1));
+      expect(store.getState().cards[0]?.markdownNotes).toBe('Blur revised');
+      const graph = await backend.loadNotebookGraph(notebookId);
+      expect(graph.cards).toHaveLength(1);
+      expect(graph.cards[0]?.markdownNotes).toBe('Blur revised');
+      unmount();
+    }
+  });
+
+  it('syncs an untouched sidebar editor with updates saved elsewhere without overwriting on blur, while keeping dirty local drafts (#124)', async () => {
+    function StoreBackedAnnotationsList({
+      store,
+      documentId,
+    }: {
+      store: ReturnType<typeof createStudySyncStore>;
+      documentId: string;
+    }) {
+      const state = useSyncExternalStore(store.subscribe, store.getState);
+      const cardSourceAnnotationIds = new Set(state.cards.flatMap((card) => card.annotationIds));
+      const controller = useAnnotationsController({
+        documentId,
+        annotations: state.annotations.filter((item) => item.documentId === documentId),
+        onSelectAnnotation: vi.fn(),
+        onUpdateAnnotation: (annotationId, patch) => state.updateAnnotation(annotationId, patch),
+        onDeleteAnnotation: (annotationId) => void state.removeAnnotation(annotationId),
+        onExcerptAnnotation: (annotationId) => void state.excerptAnnotation(annotationId),
+        onShowAnnotationCard: (annotationId) => state.showAnnotationCard(annotationId),
+        canExcerpt: !state.isExcerpting,
+        cardSourceAnnotationIds,
+        excerptingAnnotationIds: new Set(state.excerptingAnnotationIds),
+      });
+      return <AnnotationsList controller={controller} filter="" />;
+    }
+
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('The quick brown fox jumps') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 4, endByteOffset: 19, lineIndex: 0 },
+      text: 'quick brown fox',
+      imagePng: null,
+    });
+    const highlight = (await store.getState().createAnnotationFromSelection({
+      color: YELLOW,
+      style: 'highlight',
+      note: 'Note A',
+    }))!;
+
+    render(<StoreBackedAnnotationsList store={store} documentId={docId} />);
+
+    // Open the sidebar editor and leave 'Note A' untouched.
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
+    const field = screen.getByTestId('annotation-note-input');
+    expect(field).toHaveValue('Note A');
+
+    // Save 'Note B' from another entry point (e.g., the selection popover).
+    await act(async () => {
+      await store.getState().updateAnnotation(highlight.id, { note: 'Note B', color: null });
+    });
+    expect(field).toHaveValue('Note B');
+
+    // Focusing and blurring the untouched sidebar field must not write 'Note A' back.
+    const updateSpy = vi.spyOn(backend, 'updateAnnotation');
+    act(() => {
+      field.focus();
+      fireEvent.blur(field);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(store.getState().annotations.find((a) => a.id === highlight.id)?.note).toBe('Note B');
+    const graphAfterBlur = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterBlur.annotations.find((a) => a.id === highlight.id)?.note).toBe('Note B');
+
+    // Once the user actually edits the sidebar field, external updates do not overwrite the local draft.
+    fireEvent.change(field, { target: { value: 'Local sidebar draft' } });
+    await act(async () => {
+      await store.getState().updateAnnotation(highlight.id, { note: 'Note C', color: null });
+    });
+    expect(field).toHaveValue('Local sidebar draft');
+  });
+
+  it('does not drop a queued sidebar excerpt for A when B is already excerpting (#124)', async () => {
+    function StoreBackedAnnotationsList({
+      store,
+      documentId,
+    }: {
+      store: ReturnType<typeof createStudySyncStore>;
+      documentId: string;
+    }) {
+      const state = useSyncExternalStore(store.subscribe, store.getState);
+      const cardSourceAnnotationIds = new Set(state.cards.flatMap((card) => card.annotationIds));
+      const controller = useAnnotationsController({
+        documentId,
+        annotations: state.annotations.filter((item) => item.documentId === documentId),
+        onSelectAnnotation: vi.fn(),
+        onUpdateAnnotation: (annotationId, patch) => state.updateAnnotation(annotationId, patch),
+        onDeleteAnnotation: (annotationId) => void state.removeAnnotation(annotationId),
+        onExcerptAnnotation: (annotationId) => void state.excerptAnnotation(annotationId),
+        onShowAnnotationCard: (annotationId) => state.showAnnotationCard(annotationId),
+        canExcerpt: !state.isExcerpting,
+        cardSourceAnnotationIds,
+        excerptingAnnotationIds: new Set(state.excerptingAnnotationIds),
+      });
+      return <AnnotationsList controller={controller} filter="" />;
+    }
+
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('Alpha passage and beta passage') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 13, lineIndex: 0 },
+      text: 'Alpha passage',
+      imagePng: null,
+    });
+    const annA = (await store.getState().createAnnotationFromSelection({ note: 'Old A' }))!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 18, endByteOffset: 30, lineIndex: 0 },
+      text: 'beta passage',
+      imagePng: null,
+    });
+    const annB = (await store.getState().createAnnotationFromSelection({ note: 'Note B' }))!;
+
+    const origUpdate = backend.updateAnnotation.bind(backend);
+    let releaseSaveA!: () => void;
+    const saveAGate = new Promise<void>((resolve) => {
+      releaseSaveA = resolve;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(
+      async (id: string, patch: AnnotationPatch) => {
+        await saveAGate;
+        return origUpdate(id, patch);
+      },
+    );
+
+    const origCreateCard = backend.createCardForAnnotation.bind(backend);
+    let releaseCreateB!: () => void;
+    const createBGate = new Promise<void>((resolve) => {
+      releaseCreateB = resolve;
+    });
+    vi.spyOn(backend, 'createCardForAnnotation').mockImplementationOnce(async (input) => {
+      await createBGate;
+      return origCreateCard(input);
+    });
+
+    render(<StoreBackedAnnotationsList store={store} documentId={docId} />);
+    const [rowA, rowB] = screen.getAllByTestId('annotation-item') as [HTMLElement, HTMLElement];
+
+    // 1. Save A's new note (paused) and immediately queue A's excerpt.
+    fireEvent.click(within(rowA).getByTestId('annotation-edit-button'));
+    fireEvent.change(within(rowA).getByTestId('annotation-note-input'), {
+      target: { value: 'New A' },
+    });
+    fireEvent.click(within(rowA).getByTestId('annotation-note-save'));
+    fireEvent.click(within(rowA).getByTestId('annotation-excerpt-button'));
+    expect(within(rowA).getByTestId('annotation-delete-button')).toBeDisabled();
+
+    // 2. Click B's excerpt while A's save is still pending; B's card creation stays in flight.
+    fireEvent.click(within(rowB).getByTestId('annotation-excerpt-button'));
+    expect(store.getState().isExcerpting).toBe(true);
+    expect(store.getState().excerptingAnnotationIds).toEqual([annB.id]);
+
+    // 3. Release A's note save while B is still creating its card: A queues behind B instead of dropping.
+    await act(async () => {
+      releaseSaveA();
+    });
+    await vi.waitFor(() => expect(within(rowA).queryByTestId('annotation-note-input')).toBeNull());
+    expect(store.getState().excerptingAnnotationIds).toEqual([annB.id, annA.id]);
+    expect(within(rowA).getByTestId('annotation-delete-button')).toBeDisabled();
+
+    // 4. Release B: both B and A land in store and backend, with A carrying 'New A'.
+    await act(async () => {
+      releaseCreateB();
+    });
+    await vi.waitFor(() => expect(store.getState().cards).toHaveLength(2));
+    expect(store.getState().isExcerpting).toBe(false);
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    const cardA = store.getState().cards.find((card) => card.annotationIds.includes(annA.id));
+    const cardB = store.getState().cards.find((card) => card.annotationIds.includes(annB.id));
+    expect(cardA?.markdownNotes).toBe('New A');
+    expect(cardB?.markdownNotes).toBe('Note B');
+    const graph = await backend.loadNotebookGraph(notebookId);
+    expect(graph.cards).toHaveLength(2);
+    expect(graph.cards.find((card) => card.annotationIds.includes(annA.id))?.markdownNotes).toBe(
+      'New A',
+    );
+    expect(graph.cards.find((card) => card.annotationIds.includes(annB.id))?.markdownNotes).toBe(
+      'Note B',
+    );
+  });
+
+  it('aborts A when a second sidebar note save fails while A is waiting behind B in the excerpt queue, preserves draft, and creates one card on retry (#124)', async () => {
+    function StoreBackedAnnotationsList({
+      store,
+      documentId,
+    }: {
+      store: ReturnType<typeof createStudySyncStore>;
+      documentId: string;
+    }) {
+      const state = useSyncExternalStore(store.subscribe, store.getState);
+      const cardSourceAnnotationIds = new Set(state.cards.flatMap((card) => card.annotationIds));
+      const controller = useAnnotationsController({
+        documentId,
+        annotations: state.annotations.filter((item) => item.documentId === documentId),
+        onSelectAnnotation: vi.fn(),
+        onUpdateAnnotation: (annotationId, patch) => state.updateAnnotation(annotationId, patch),
+        onDeleteAnnotation: (annotationId) => void state.removeAnnotation(annotationId),
+        onExcerptAnnotation: (annotationId) => void state.excerptAnnotation(annotationId),
+        onShowAnnotationCard: (annotationId) => state.showAnnotationCard(annotationId),
+        canExcerpt: !state.isExcerpting,
+        cardSourceAnnotationIds,
+        excerptingAnnotationIds: new Set(state.excerptingAnnotationIds),
+      });
+      return <AnnotationsList controller={controller} filter="" />;
+    }
+
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('Alpha passage and beta passage') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 13, lineIndex: 0 },
+      text: 'Alpha passage',
+      imagePng: null,
+    });
+    const annA = (await store.getState().createAnnotationFromSelection({ note: 'Note A0' }))!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 18, endByteOffset: 30, lineIndex: 0 },
+      text: 'beta passage',
+      imagePng: null,
+    });
+    const annB = (await store.getState().createAnnotationFromSelection({ note: 'Note B' }))!;
+
+    const origUpdate = backend.updateAnnotation.bind(backend);
+    let releaseSaveA1!: () => void;
+    const saveA1Gate = new Promise<void>((resolve) => {
+      releaseSaveA1 = resolve;
+    });
+    vi.spyOn(backend, 'updateAnnotation')
+      .mockImplementationOnce(async (id: string, patch: AnnotationPatch) => {
+        await saveA1Gate;
+        return origUpdate(id, patch);
+      })
+      .mockRejectedValueOnce({ code: 'database', message: 'second note save failed' });
+
+    const origCreateCard = backend.createCardForAnnotation.bind(backend);
+    let releaseCreateB!: () => void;
+    const createBGate = new Promise<void>((resolve) => {
+      releaseCreateB = resolve;
+    });
+    vi.spyOn(backend, 'createCardForAnnotation').mockImplementationOnce(async (input) => {
+      await createBGate;
+      return origCreateCard(input);
+    });
+
+    render(<StoreBackedAnnotationsList store={store} documentId={docId} />);
+    const [rowA, rowB] = screen.getAllByTestId('annotation-item') as [HTMLElement, HTMLElement];
+
+    // 1. Save A1 (paused), queue A's excerpt, then start B (paused) and let A1 finish so A enters store's excerptQueue behind B.
+    fireEvent.click(within(rowA).getByTestId('annotation-edit-button'));
+    fireEvent.change(within(rowA).getByTestId('annotation-note-input'), {
+      target: { value: 'Note A1' },
+    });
+    fireEvent.click(within(rowA).getByTestId('annotation-note-save'));
+    fireEvent.click(within(rowA).getByTestId('annotation-excerpt-button'));
+    fireEvent.click(within(rowB).getByTestId('annotation-excerpt-button'));
+
+    await act(async () => {
+      releaseSaveA1();
+    });
+    await vi.waitFor(() =>
+      expect(store.getState().excerptingAnnotationIds).toEqual([annB.id, annA.id]),
+    );
+
+    // 2. While A is queued behind B, reopen A's editor, edit to A2, and let that save fail & settle BEFORE releasing B.
+    fireEvent.click(within(rowA).getByTestId('annotation-edit-button'));
+    fireEvent.change(within(rowA).getByTestId('annotation-note-input'), {
+      target: { value: 'Note A2' },
+    });
+    await act(async () => {
+      fireEvent.click(within(rowA).getByTestId('annotation-note-save'));
+    });
+    await vi.waitFor(() => expect(store.getState().error).toContain('second note save failed'));
+    expect(within(rowA).getByTestId('annotation-note-input')).toHaveValue('Note A2');
+
+    // 3. Release B: B lands, A's queued excerpt aborts (no A card in store/backend, no reveal for A, draft kept).
+    await act(async () => {
+      releaseCreateB();
+    });
+    await vi.waitFor(() => expect(store.getState().isExcerpting).toBe(false));
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    expect(store.getState().cards).toHaveLength(1);
+    expect(store.getState().cards[0]?.annotationIds).toEqual([annB.id]);
+    const nodeB = store.getState().nodes[0]!;
+    expect(store.getState().revealRequest?.nodeId).toBe(nodeB.id);
+    expect(within(rowA).getByTestId('annotation-note-input')).toHaveValue('Note A2');
+    const graphAfterAbort = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterAbort.cards).toHaveLength(1);
+    expect(graphAfterAbort.cards[0]?.annotationIds).toEqual([annB.id]);
+
+    // 4. Retry saving A2 and excerpt -> creates exactly one A card carrying 'Note A2'.
+    await act(async () => {
+      fireEvent.click(within(rowA).getByTestId('annotation-note-save'));
+    });
+    await vi.waitFor(() => expect(within(rowA).queryByTestId('annotation-note-input')).toBeNull());
+    await act(async () => {
+      fireEvent.click(within(rowA).getByTestId('annotation-excerpt-button'));
+    });
+    await vi.waitFor(() => expect(store.getState().cards).toHaveLength(2));
+    const cardA = store.getState().cards.find((card) => card.annotationIds.includes(annA.id));
+    expect(cardA?.markdownNotes).toBe('Note A2');
+    const graphAfterRetry = await backend.loadNotebookGraph(notebookId);
+    expect(
+      graphAfterRetry.cards.filter((card) => card.annotationIds.includes(annA.id)),
+    ).toHaveLength(1);
+    expect(
+      graphAfterRetry.cards.find((card) => card.annotationIds.includes(annA.id))?.markdownNotes,
+    ).toBe('Note A2');
   });
 });
