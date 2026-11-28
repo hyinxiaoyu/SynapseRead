@@ -52,6 +52,41 @@ interface CardMenuState {
   y: number;
 }
 
+interface ActiveDrag {
+  origin: { posX: number; posY: number };
+  kind: 'mouse' | 'touch';
+  touchIds: ReadonlySet<number>;
+}
+
+function dragEventTouchIds(event: unknown): Set<number> {
+  const ids = new Set<number>();
+  if (typeof event !== 'object' || event === null) return ids;
+  const candidate = event as {
+    changedTouches?: ArrayLike<{ identifier: number }>;
+    touches?: ArrayLike<{ identifier: number }>;
+  };
+  for (const list of [candidate.changedTouches, candidate.touches]) {
+    if (!list) continue;
+    for (let i = 0; i < list.length; i += 1) {
+      const touch = list[i];
+      if (touch !== undefined) ids.add(touch.identifier);
+    }
+  }
+  return ids;
+}
+
+function isTouchDragEvent(event: unknown): boolean {
+  if (typeof event !== 'object' || event === null) return false;
+  const type = (event as { type?: unknown }).type;
+  return typeof type === 'string' && type.startsWith('touch');
+}
+
+function isCancelDragEvent(event: unknown): boolean {
+  if (typeof event !== 'object' || event === null) return false;
+  const type = (event as { type?: unknown }).type;
+  return type === 'touchcancel' || type === 'pointercancel';
+}
+
 function focusedCanvasNodeId(container: HTMLElement | null): string | null {
   if (!container) return null;
   const active = document.activeElement;
@@ -109,7 +144,7 @@ export function MindMapPane({
   const [contextMenu, setContextMenu] = useState<CardMenuState | null>(null);
 
   const pendingLayoutsRef = useRef<Map<string, { posX: number; posY: number }>>(new Map());
-  const draggingNodeIdsRef = useRef<Set<string>>(new Set());
+  const activeDragsRef = useRef<Map<string, ActiveDrag>>(new Map());
   const layoutTimerRef = useRef<number | null>(null);
   const inFlightLayoutRef = useRef<Promise<void> | null>(null);
 
@@ -122,7 +157,7 @@ export function MindMapPane({
 
   const hasNonDraggingPendingLayout = useCallback(() => {
     for (const id of pendingLayoutsRef.current.keys()) {
-      if (!draggingNodeIdsRef.current.has(id)) return true;
+      if (!activeDragsRef.current.has(id)) return true;
     }
     return false;
   }, []);
@@ -145,7 +180,7 @@ export function MindMapPane({
     ({ includeDragging = false }: { includeDragging?: boolean } = {}): Promise<void> => {
       const entries: Array<[string, { posX: number; posY: number }]> = [];
       for (const [id, position] of pendingLayoutsRef.current) {
-        if (includeDragging || !draggingNodeIdsRef.current.has(id)) {
+        if (includeDragging || !activeDragsRef.current.has(id)) {
           entries.push([id, position]);
           pendingLayoutsRef.current.delete(id);
         }
@@ -191,19 +226,30 @@ export function MindMapPane({
   );
 
   const isAnyNodeDragging = useCallback(() => {
-    if (draggingNodeIdsRef.current.size === 0) return false;
+    if (activeDragsRef.current.size === 0) return false;
     const currentNodes = useStudySyncStore.getState().nodes;
-    for (const id of [...draggingNodeIdsRef.current]) {
+    for (const id of [...activeDragsRef.current.keys()]) {
       if (!currentNodes.some((candidate) => candidate.id === id)) {
-        draggingNodeIdsRef.current.delete(id);
+        activeDragsRef.current.delete(id);
       }
     }
-    return draggingNodeIdsRef.current.size > 0;
+    return activeDragsRef.current.size > 0;
   }, []);
 
   const markNodeDragging = useCallback(
-    (nodeId: string) => {
-      draggingNodeIdsRef.current.add(nodeId);
+    (
+      nodeId: string,
+      origin: { posX: number; posY: number },
+      kind: 'mouse' | 'touch' = 'mouse',
+      touchIds?: ReadonlySet<number>,
+    ) => {
+      if (!activeDragsRef.current.has(nodeId)) {
+        activeDragsRef.current.set(nodeId, {
+          origin,
+          kind,
+          touchIds: touchIds ?? new Set<number>(),
+        });
+      }
       if (!hasNonDraggingPendingLayout()) {
         clearLayoutTimer();
       }
@@ -211,9 +257,24 @@ export function MindMapPane({
     [clearLayoutTimer, hasNonDraggingPendingLayout],
   );
 
+  const cancelNodeDrag = useCallback(
+    (nodeId: string) => {
+      const active = activeDragsRef.current.get(nodeId);
+      if (!active) return;
+      activeDragsRef.current.delete(nodeId);
+      // Restore the pre-drag position on screen so a cancelled drag never leaves
+      // uncommitted mid-drag coordinates visible or persisted (#182).
+      dragNode(nodeId, active.origin.posX, active.origin.posY);
+      // Re-arm debounce for any preserved pre-drag keyboard move; if none exists,
+      // no layout write is scheduled.
+      scheduleLayoutTimer();
+    },
+    [dragNode, scheduleLayoutTimer],
+  );
+
   const settleNodeDrag = useCallback(
     (nodeId: string, finalPosition: { posX: number; posY: number }) => {
-      draggingNodeIdsRef.current.delete(nodeId);
+      activeDragsRef.current.delete(nodeId);
       // The completed drag supersedes any unsaved keyboard-move snapshot for this node.
       pendingLayoutsRef.current.delete(nodeId);
       if (!hasNonDraggingPendingLayout()) {
@@ -224,10 +285,10 @@ export function MindMapPane({
     [clearLayoutTimer, commitNodeLayout, hasNonDraggingPendingLayout, trackLayoutWrite],
   );
 
-  const scheduleLayoutTimerRef = useRef(scheduleLayoutTimer);
+  const cancelNodeDragRef = useRef(cancelNodeDrag);
   useEffect(() => {
-    scheduleLayoutTimerRef.current = scheduleLayoutTimer;
-  }, [scheduleLayoutTimer]);
+    cancelNodeDragRef.current = cancelNodeDrag;
+  }, [cancelNodeDrag]);
 
   // Flush any pending arrow-key move before tab hide, unmount, or native quit (#182).
   useEffect(() => {
@@ -244,25 +305,52 @@ export function MindMapPane({
         void flushAll();
       }
     };
-    const onDragCancelled = () => {
-      if (draggingNodeIdsRef.current.size === 0) return;
-      draggingNodeIdsRef.current.clear();
-      // Re-arm the debounce for any preserved pre-drag keyboard-move snapshot without
-      // persisting uncommitted mid-drag coordinates.
-      scheduleLayoutTimerRef.current();
+    const onTouchGestureEnded = (event: TouchEvent) => {
+      if (activeDragsRef.current.size === 0) return;
+      const endedIds = dragEventTouchIds(event);
+      if (endedIds.size === 0) return;
+      const matchingNodeIds: string[] = [];
+      for (const [id, active] of activeDragsRef.current) {
+        if (active.kind !== 'touch') continue;
+        for (const touchId of endedIds) {
+          if (active.touchIds.has(touchId)) {
+            matchingNodeIds.push(id);
+            break;
+          }
+        }
+      }
+      if (matchingNodeIds.length === 0) return;
+      // Defer to the next macrotask (not a microtask, which browsers drain between
+      // capture and target listeners of the same native event) so `XYDrag.on('end')`
+      // finishes both `updateNodePositions(dragItems, false)` and `onNodeDragStop`
+      // first. Normal `touchend` settles and `touchcancel` cancels in `onNodeDragStop`,
+      // making this a no-op, while an aborted multitouch drag (which skips
+      // `onNodeDragStop`) still cancels cleanly via the same idempotent path.
+      const timer = window.setTimeout(() => {
+        cancelFallbackTimers.delete(timer);
+        for (const id of matchingNodeIds) {
+          cancelNodeDragRef.current(id);
+        }
+      }, 0);
+      cancelFallbackTimers.add(timer);
     };
+    const cancelFallbackTimers = new Set<number>();
     window.addEventListener('pagehide', onPageHide);
-    window.addEventListener('pointercancel', onDragCancelled);
-    window.addEventListener('touchcancel', onDragCancelled);
+    window.addEventListener('touchcancel', onTouchGestureEnded, true);
+    window.addEventListener('touchend', onTouchGestureEnded, true);
     document.addEventListener('visibilitychange', onVisibilityChange);
     const unregisterFlush = registerBeforeCloseFlush({
       isDirty: () => pendingLayoutsRef.current.size > 0 || inFlightLayoutRef.current !== null,
       flush: flushAll,
     });
     return () => {
+      for (const timer of cancelFallbackTimers) {
+        window.clearTimeout(timer);
+      }
+      cancelFallbackTimers.clear();
       window.removeEventListener('pagehide', onPageHide);
-      window.removeEventListener('pointercancel', onDragCancelled);
-      window.removeEventListener('touchcancel', onDragCancelled);
+      window.removeEventListener('touchcancel', onTouchGestureEnded, true);
+      window.removeEventListener('touchend', onTouchGestureEnded, true);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       unregisterFlush();
       void flushAll();
@@ -382,12 +470,18 @@ export function MindMapPane({
           const moved =
             existing !== undefined &&
             (existing.posX !== change.position.x || existing.posY !== change.position.y);
-          dragNode(change.id, change.position.x, change.position.y);
           if (change.dragging === true) {
-            markNodeDragging(change.id);
-          } else if (moved && !draggingNodeIdsRef.current.has(change.id)) {
+            markNodeDragging(
+              change.id,
+              existing
+                ? { posX: existing.posX, posY: existing.posY }
+                : { posX: change.position.x, posY: change.position.y },
+            );
+          }
+          dragNode(change.id, change.position.x, change.position.y);
+          if (change.dragging !== true && moved && !activeDragsRef.current.has(change.id)) {
             // Only non-drag moves (keyboard arrows) queue a debounced commit; active
-            // pointer drags are settled exclusively by `onNodeDragStop` or drag cancel.
+            // pointer/touch drags are settled exclusively by `onNodeDragStop` or drag cancel.
             scheduleLayoutCommit(change.id, {
               posX: change.position.x,
               posY: change.position.y,
@@ -617,11 +711,27 @@ export function MindMapPane({
           closeContextMenu();
           selectNode(null);
         }}
-        onNodeDragStart={(_event, node) => {
+        onNodeDragStart={(event, node) => {
           clickSequenceRef.current = null;
-          markNodeDragging(node.id);
+          const existing = useStudySyncStore
+            .getState()
+            .nodes.find((candidate) => candidate.id === node.id);
+          const origin = existing
+            ? { posX: existing.posX, posY: existing.posY }
+            : { posX: node.position.x, posY: node.position.y };
+          const touch = isTouchDragEvent(event);
+          markNodeDragging(
+            node.id,
+            origin,
+            touch ? 'touch' : 'mouse',
+            touch ? dragEventTouchIds(event) : undefined,
+          );
         }}
-        onNodeDragStop={(_event, node) => {
+        onNodeDragStop={(event, node) => {
+          if (isCancelDragEvent(event)) {
+            cancelNodeDrag(node.id);
+            return;
+          }
           const current = useStudySyncStore
             .getState()
             .nodes.find((candidate) => candidate.id === node.id);

@@ -1008,6 +1008,165 @@ describe('MindMapPane', () => {
       }
     });
 
+    it('restores pre-drag coordinates and preserves pending keyboard moves on touchcancel, ignores unrelated cancels, and commits once on touchend (#182)', async () => {
+      vi.useFakeTimers();
+      const originalMaxTouchPoints = Object.getOwnPropertyDescriptor(
+        Navigator.prototype,
+        'maxTouchPoints',
+      );
+      Object.defineProperty(Navigator.prototype, 'maxTouchPoints', {
+        configurable: true,
+        get: () => 5,
+      });
+      try {
+        const commits: Array<{ id: string; posX: number; posY: number }> = [];
+        const commitNodeLayout = vi.fn(
+          async (nodeId: string, position?: { posX: number; posY: number }) => {
+            const target = useStudySyncStore.getState().nodes.find((n) => n.id === nodeId);
+            commits.push({
+              id: nodeId,
+              posX: position?.posX ?? target?.posX ?? 0,
+              posY: position?.posY ?? target?.posY ?? 0,
+            });
+          },
+        );
+        seed([node('a', 40, 40)], { selectedNodeId: 'a', commitNodeLayout });
+        render(<MindMapPane open />);
+
+        const cardA = cardElement('a');
+        const dispatchTouch = (
+          target: EventTarget,
+          type: 'touchstart' | 'touchmove' | 'touchend' | 'touchcancel',
+          identifier: number,
+          clientX: number,
+          clientY: number,
+        ) => {
+          const touch = { identifier, clientX, clientY, pageX: clientX, pageY: clientY, target };
+          const event = new Event(type, { bubbles: true, cancelable: true });
+          Object.defineProperties(event, {
+            changedTouches: { value: [touch] },
+            touches: { value: type === 'touchend' || type === 'touchcancel' ? [] : [touch] },
+            targetTouches: { value: type === 'touchend' || type === 'touchcancel' ? [] : [touch] },
+            view: { value: window },
+          });
+          act(() => {
+            target.dispatchEvent(event);
+          });
+        };
+        const dispatchMouse = (
+          target: EventTarget,
+          type: 'mousedown' | 'mousemove' | 'mouseup',
+          init: MouseEventInit,
+        ) => {
+          const event = new MouseEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            ...init,
+          });
+          Object.defineProperty(event, 'view', { value: window });
+          act(() => {
+            target.dispatchEvent(event);
+          });
+        };
+
+        // 1. Pending keyboard move (40, 40) -> (45, 40), touch drag to (63, 50), then touchcancel:
+        //    must snap UI back to (45, 40) and persist ONLY (45, 40) once after debounce.
+        cardA.focus();
+        fireEvent.keyDown(cardA, { key: 'ArrowRight' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 45, posY: 40 });
+
+        dispatchTouch(cardA, 'touchstart', 1, 50, 50);
+        dispatchTouch(cardA, 'touchmove', 1, 52, 50);
+        dispatchTouch(cardA, 'touchmove', 1, 70, 60);
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 63, posY: 50 });
+        expect(commits).toEqual([]);
+
+        dispatchTouch(cardA, 'touchcancel', 1, 70, 60);
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 45, posY: 40 });
+        expect(commits).toEqual([]);
+
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS);
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 45, posY: 40 }]);
+
+        // 2. Touch drag with NO pending keyboard move, then touchcancel:
+        //    must snap UI back to (45, 40), write 0 times, and allow subsequent arrow keys.
+        commits.length = 0;
+        dispatchTouch(cardA, 'touchstart', 2, 50, 50);
+        dispatchTouch(cardA, 'touchmove', 2, 52, 50);
+        dispatchTouch(cardA, 'touchmove', 2, 70, 60);
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 63, posY: 50 });
+
+        dispatchTouch(cardA, 'touchcancel', 2, 70, 60);
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 45, posY: 40 });
+
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([]);
+
+        cardA.focus();
+        fireEvent.keyDown(cardA, { key: 'ArrowDown' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 45, posY: 45 });
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS);
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 45, posY: 45 }]);
+
+        // 3. Normal touch drag ending with touchend: writes final position once, no duplicates.
+        commits.length = 0;
+        dispatchTouch(cardA, 'touchstart', 3, 50, 50);
+        dispatchTouch(cardA, 'touchmove', 3, 52, 50);
+        dispatchTouch(cardA, 'touchmove', 3, 72, 65);
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 65, posY: 60 });
+        dispatchTouch(cardA, 'touchend', 3, 72, 65);
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 65, posY: 60 }]);
+
+        // 4. An unrelated pointercancel or unrelated touchcancel during an active mouse drag
+        //    must not clear the active mouse drag state.
+        //    Advance past d3-drag's 500 ms ghost-click suppression window after touchend.
+        await act(async () => {
+          vi.advanceTimersByTime(600);
+        });
+        commits.length = 0;
+        dispatchMouse(cardA, 'mousedown', { clientX: 80, clientY: 70 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 82, clientY: 70 });
+        dispatchMouse(window, 'mousemove', { buttons: 1, clientX: 100, clientY: 80 });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 83, posY: 70 });
+
+        act(() => {
+          window.dispatchEvent(new Event('pointercancel'));
+        });
+        dispatchTouch(window, 'touchcancel', 99, 0, 0);
+
+        // Arrow key must STILL be suppressed because the mouse drag is still active.
+        fireEvent.keyDown(cardA, { key: 'ArrowDown' });
+        expect(useStudySyncStore.getState().nodes[0]).toMatchObject({ posX: 83, posY: 70 });
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([]);
+
+        dispatchMouse(window, 'mouseup', { clientX: 100, clientY: 80 });
+        await act(async () => {
+          vi.advanceTimersByTime(KEYBOARD_MOVE_COMMIT_DEBOUNCE_MS * 2);
+        });
+        expect(commits).toEqual([{ id: 'a', posX: 83, posY: 70 }]);
+      } finally {
+        if (originalMaxTouchPoints) {
+          Object.defineProperty(Navigator.prototype, 'maxTouchPoints', originalMaxTouchPoints);
+        } else {
+          delete (Navigator.prototype as { maxTouchPoints?: number }).maxTouchPoints;
+        }
+        vi.useRealTimers();
+      }
+    });
+
     it('waits for an in-flight layout write and any follow-up move before flushBeforeClose resolves (#182)', async () => {
       vi.useFakeTimers();
       try {

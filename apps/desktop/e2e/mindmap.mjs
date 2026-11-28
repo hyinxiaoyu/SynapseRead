@@ -1660,4 +1660,172 @@ export async function mindmapFlow(page) {
     `expected delayed close flush to wait for both writes ending at (-5, -5), got ${JSON.stringify({ beforeDelayedCoords, delayedWrites })}`,
   );
   await page.evaluate(`delete window.__closeResolved; delete window.__closePromise;`);
+
+  // Path 4 (regression): Touch drag cancellation (`touchStart` -> `touchMove` -> `touchCancel`)
+  // and normal touch release (`touchStart` -> `touchMove` -> `touchEnd`) (#182).
+  // Enable Chromium touch emulation before creating a fresh card so d3-drag mounts touch listeners.
+  await page.cdp.send('Emulation.setTouchEmulationEnabled', {
+    enabled: true,
+    maxTouchPoints: 5,
+  });
+  try {
+    await page.evaluate(`document.querySelector('.react-flow__pane')?.click()`);
+    const countBeforeTouchCard = await page.evaluate(
+      `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length`,
+    );
+    await excerptAny('Arrival line 02', countBeforeTouchCard + 1);
+    await waitForViewportSettled();
+    await panCardIntoView('Arrival line 02');
+    await waitForViewportSettled();
+
+    const touchCard = await page.evaluate(cardByText('Arrival line 02'));
+    assert(touchCard, 'Arrival line 02 card should be visible for touch drag checks');
+    const touchCardId = touchCard.id;
+
+    const dispatchTouchDrag = async (from, to, endType) => {
+      await page.cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchStart',
+        touchPoints: [{ x: from.x, y: from.y, id: 1 }],
+      });
+      const steps = 4;
+      for (let step = 1; step <= steps; step += 1) {
+        await page.cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: [
+            {
+              x: from.x + ((to.x - from.x) * step) / steps,
+              y: from.y + ((to.y - from.y) * step) / steps,
+              id: 1,
+            },
+          ],
+        });
+      }
+      await page.waitFor(
+        `(() => {
+          const el = document.querySelector('.react-flow__node[data-id="${touchCardId}"]');
+          return el && el.style.transform !== ${JSON.stringify(from.transform)};
+        })()`,
+        `touchMove to drag card before ${endType}`,
+      );
+      await page.cdp.send('Input.dispatchTouchEvent', {
+        type: endType,
+        touchPoints: [],
+      });
+    };
+
+    // 4a. With a pending keyboard move (+5, 0), touchStart -> touchMove -> touchCancel restores
+    //     the card to (+5, 0) on screen and writes ONLY (+5, 0) once after debounce.
+    await page.evaluate(
+      `document.querySelector('.react-flow__node[data-id="${touchCardId}"]')?.focus()`,
+    );
+    const beforeTouchCancelWithKey = await page.evaluate(cardByText('Arrival line 02'));
+    const startWithKey = parseTranslate(beforeTouchCancelWithKey.transform);
+    const writesBefore4a = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().length`,
+    );
+    await page.press('ArrowRight');
+    await page.waitFor(
+      `(${cardByText('Arrival line 02')})?.transform !== ${JSON.stringify(beforeTouchCancelWithKey.transform)}`,
+      'ArrowRight before touchCancel check',
+    );
+    const afterKey4a = await page.evaluate(cardByText('Arrival line 02'));
+    await dispatchTouchDrag(
+      { ...afterKey4a.center, transform: afterKey4a.transform },
+      { x: afterKey4a.center.x + 18, y: afterKey4a.center.y + 10 },
+      'touchCancel',
+    );
+    await page.waitFor(
+      `(${cardByText('Arrival line 02')})?.transform === ${JSON.stringify(afterKey4a.transform)}`,
+      'touchCancel to restore card to pre-drag keyboard-move coordinates',
+    );
+    await page.waitFor(
+      `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBefore4a + 1}`,
+      'debounced keyboard move to persist after touchCancel',
+    );
+    await new Promise((done) => setTimeout(done, 400));
+    const writes4a = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4a})`,
+    );
+    assert(
+      writes4a.length === 1 &&
+        writes4a[0].nodeId === touchCardId &&
+        Math.round(writes4a[0].posX) === Math.round(startWithKey.x + 5) &&
+        Math.round(writes4a[0].posY) === Math.round(startWithKey.y),
+      `expected touchCancel with pending keyboard move to persist ONLY (+5, 0), got ${JSON.stringify({ startWithKey, writes4a })}`,
+    );
+
+    // 4b. With NO pending keyboard move, touchStart -> touchMove -> touchCancel restores the card,
+    //     produces 0 layout writes, and leaves subsequent arrow-key moves working.
+    const before4b = await page.evaluate(cardByText('Arrival line 02'));
+    const coords4b = parseTranslate(before4b.transform);
+    const writesBefore4b = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().length`,
+    );
+    await dispatchTouchDrag(
+      { ...before4b.center, transform: before4b.transform },
+      { x: before4b.center.x + 18, y: before4b.center.y + 10 },
+      'touchCancel',
+    );
+    await page.waitFor(
+      `(${cardByText('Arrival line 02')})?.transform === ${JSON.stringify(before4b.transform)}`,
+      'touchCancel without pending keyboard move to restore pre-drag coordinates',
+    );
+    await new Promise((done) => setTimeout(done, 400));
+    const writes4bCancel = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4b})`,
+    );
+    assert(
+      writes4bCancel.length === 0,
+      `expected 0 layout writes after touchCancel without pending keyboard move, got ${JSON.stringify(writes4bCancel)}`,
+    );
+    await page.evaluate(
+      `document.querySelector('.react-flow__node[data-id="${touchCardId}"]')?.focus()`,
+    );
+    await page.press('ArrowDown');
+    await page.waitFor(
+      `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBefore4b + 1}`,
+      'arrow-key move after touchCancel to work and persist',
+    );
+    const after4bArrow = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4b})`,
+    );
+    assert(
+      after4bArrow.length === 1 &&
+        after4bArrow[0].nodeId === touchCardId &&
+        Math.round(after4bArrow[0].posX) === Math.round(coords4b.x) &&
+        Math.round(after4bArrow[0].posY) === Math.round(coords4b.y + 5),
+      `expected ArrowDown after touchCancel to save (0, +5), got ${JSON.stringify({ coords4b, after4bArrow })}`,
+    );
+
+    // 4c. Normal touch release (`touchStart` -> `touchMove` -> `touchEnd`) commits final position once.
+    const before4c = await page.evaluate(cardByText('Arrival line 02'));
+    const writesBefore4c = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().length`,
+    );
+    await dispatchTouchDrag(
+      { ...before4c.center, transform: before4c.transform },
+      { x: before4c.center.x + 22, y: before4c.center.y + 14 },
+      'touchEnd',
+    );
+    await page.waitFor(
+      `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBefore4c + 1}`,
+      'touchEnd to persist final dragged coordinates',
+    );
+    const coords4cAfter = parseTranslate(
+      (await page.evaluate(cardByText('Arrival line 02'))).transform,
+    );
+    await new Promise((done) => setTimeout(done, 400));
+    const writes4c = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4c})`,
+    );
+    assert(
+      writes4c.length === 1 &&
+        writes4c[0].nodeId === touchCardId &&
+        Math.round(writes4c[0].posX) === Math.round(coords4cAfter.x) &&
+        Math.round(writes4c[0].posY) === Math.round(coords4cAfter.y),
+      `expected touchEnd to write final position exactly once, got ${JSON.stringify({ coords4cAfter, writes4c })}`,
+    );
+  } finally {
+    await page.cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  }
 }
