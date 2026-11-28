@@ -46,6 +46,14 @@ impl IpcError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new("internal", message)
     }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 pub type IpcResult<T> = Result<T, IpcError>;

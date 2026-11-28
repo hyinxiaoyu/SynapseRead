@@ -1,6 +1,11 @@
 import { Maximize, Minimize, Network, PanelRight, Glasses, X } from 'lucide-react';
-import { type DragEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { type Layout, usePanelRef } from 'react-resizable-panels';
+import { type DragEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import {
+  type Layout,
+  type LayoutChangedMeta,
+  useGroupRef,
+  usePanelRef,
+} from 'react-resizable-panels';
 
 import { Button } from '@/components/ui/button';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable';
@@ -33,57 +38,41 @@ import { pageSurfaceStyle } from '@/features/reader/appearance/themes';
 import { useReaderChromeTheme } from '@/features/reader/appearance/useReaderChromeTheme';
 import { useResolvedReadingTheme } from '@/features/reader/appearance/useResolvedTheme';
 import { UnifiedToolbar } from '@/features/workspace/UnifiedToolbar';
+import {
+  DEFAULT_INSPECTOR_SIZE,
+  DEFAULT_MIND_MAP_SIZE,
+  MAX_INSPECTOR_SIZE,
+  MAX_MIND_MAP_SIZE,
+  type PanelLayout,
+  type PreferredSidePane,
+  clampInspectorSize,
+  clampMindMapSize,
+  computePanelLayout,
+  effectiveMinReaderPercent,
+} from '@/features/workspace/paneLayout';
 import { SUPPORTED_FORMAT_LIST } from '@/lib/documentFormats';
 import { flushBeforeClose } from '@/lib/flushBeforeClose';
 import { announceInLiveRegion } from '@/lib/liveRegion';
 import { useStudySyncStore } from '@/stores/useStudySyncStore';
-import type { WorkspacePaneLayout } from '@/types/domain';
 
 const EMPTY_SLOTS: ToolbarSlots = { leading: null, center: null, trailing: null };
-const DEFAULT_MIND_MAP_SIZE = 35;
-const DEFAULT_INSPECTOR_SIZE = 20;
-const MIN_READER_SIZE = 20;
-
-const roundPercent = (value: number) => Math.round(value * 10) / 10;
-
-function computeInitialPanelLayout(
-  paneLayout: WorkspacePaneLayout,
-  immersive: boolean,
-): { reader: number; mindmap: number; inspector: number } {
-  if (immersive) {
-    return { reader: 100, mindmap: 0, inspector: 0 };
-  }
-  let mindmap = paneLayout.mindMapOpen ? (paneLayout.mindMapSize ?? DEFAULT_MIND_MAP_SIZE) : 0;
-  let inspector = paneLayout.inspectorOpen
-    ? (paneLayout.inspectorSize ?? DEFAULT_INSPECTOR_SIZE)
-    : 0;
-  const maxCombined = 100 - MIN_READER_SIZE;
-  if (mindmap + inspector > maxCombined) {
-    const excess = mindmap + inspector - maxCombined;
-    const trimMindMap = Math.min(excess, Math.max(0, mindmap - DEFAULT_MIND_MAP_SIZE));
-    mindmap -= trimMindMap;
-    const remaining = excess - trimMindMap;
-    if (remaining > 0) {
-      inspector = Math.max(DEFAULT_INSPECTOR_SIZE, inspector - remaining);
-    }
-  }
-  const reader = Math.max(MIN_READER_SIZE, 100 - mindmap - inspector);
-  return { reader, mindmap, inspector };
-}
 
 const isFileDrag = (event: DragEvent): boolean =>
   Array.from(event.dataTransfer?.types ?? []).includes('Files') ||
-  (event.dataTransfer?.files?.length ?? 0) > 0;
+  (event.dataTransfer?.files?.length ?? 0) > 0 ||
+  Array.from(event.dataTransfer?.items ?? []).some((item) => item.kind === 'file');
 
 /** Reader | MindMap | Inspector. Pane state and widths persist across launches (#119). */
 export function StudyWorkspace() {
   const status = useStudySyncStore((state) => state.status);
   const error = useStudySyncStore((state) => state.error);
+  const dropNotice = useStudySyncStore((state) => state.dropNotice);
   const backendKind = useStudySyncStore((state) => state.backendKind);
   const notebookTitle = useStudySyncStore((state) => state.notebook?.title);
   const isDraggingFile = useStudySyncStore((state) => state.isDraggingFile);
   const initialize = useStudySyncStore((state) => state.initialize);
   const dismissError = useStudySyncStore((state) => state.dismissError);
+  const dismissDropNotice = useStudySyncStore((state) => state.dismissDropNotice);
   const dropFiles = useStudySyncStore((state) => state.dropFiles);
   const immersive = useStudySyncStore((state) => state.immersive);
   const setImmersive = useStudySyncStore((state) => state.setImmersive);
@@ -115,16 +104,18 @@ export function StudyWorkspace() {
   const refreshLanShareStatus = useStudySyncStore((state) => state.refreshLanShareStatus);
   const lanImportPhase = useStudySyncStore((state) => state.lanImport.phase);
 
+  const groupRef = useGroupRef();
   const mindMapRef = usePanelRef();
   const inspectorRef = usePanelRef();
+  const panelContainerRef = useRef<HTMLDivElement>(null);
   const excerptStatusRef = useRef<HTMLParagraphElement>(null);
+  const dropStatusRef = useRef<HTMLParagraphElement>(null);
   const dragDepthRef = useRef(0);
   const suppressLayoutPersistRef = useRef(false);
-  const [initialLayout, setInitialLayout] = useState<{
-    reader: number;
-    mindmap: number;
-    inspector: number;
-  } | null>(null);
+  const containerWidthRef = useRef(0);
+  const openPanesRef = useRef({ mindMap: false, inspector: false });
+  const [containerWidth, setContainerWidth] = useState(0);
+  const [initialLayout, setInitialLayout] = useState<PanelLayout | null>(null);
   const [mindMapOpen, setMindMapOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [htmlDragging, setHtmlDragging] = useState(false);
@@ -157,8 +148,13 @@ export function StudyWorkspace() {
 
   const ready = status === 'ready';
 
+  const getContainerWidth = useCallback(() => {
+    const liveWidth = panelContainerRef.current?.clientWidth ?? 0;
+    return liveWidth > 0 ? liveWidth : containerWidthRef.current;
+  }, []);
+
   if (ready && initialLayout === null) {
-    const restored = computeInitialPanelLayout(paneLayout, immersive);
+    const restored = computePanelLayout(paneLayout, immersive, containerWidth);
     setInitialLayout(restored);
     setMindMapOpen(restored.mindmap > 0);
     setInspectorOpen(restored.inspector > 0);
@@ -170,11 +166,76 @@ export function StudyWorkspace() {
     }
   }
 
+  useLayoutEffect(() => {
+    openPanesRef.current = { mindMap: mindMapOpen, inspector: inspectorOpen };
+  }, [mindMapOpen, inspectorOpen]);
+
+  useLayoutEffect(() => {
+    const element = panelContainerRef.current;
+    if (!element) return;
+    const syncWidth = (width: number) => {
+      if (!Number.isFinite(width) || width <= 0) return;
+      const rounded = Math.round(width);
+      if (containerWidthRef.current === rounded) return;
+      containerWidthRef.current = rounded;
+      setContainerWidth(rounded);
+      const group = groupRef.current;
+      if (!group) return;
+      const current = group.getLayout();
+      const reader = current.reader;
+      const mindmap = current.mindmap ?? 0;
+      const inspector = current.inspector ?? 0;
+      if (reader === undefined || Number.isNaN(reader)) return;
+      const minReader = effectiveMinReaderPercent(rounded);
+      if ((mindmap > 0 || inspector > 0) && reader < minReader - 0.1) {
+        const storeLayout = useStudySyncStore.getState().paneLayout;
+        const safe = computePanelLayout(
+          {
+            mindMapOpen: mindmap > 0,
+            inspectorOpen: inspector > 0,
+            mindMapSize: mindmap > 0 ? mindmap : storeLayout.mindMapSize,
+            inspectorSize: inspector > 0 ? inspector : storeLayout.inspectorSize,
+          },
+          false,
+          rounded,
+          'mindmap',
+        );
+        suppressLayoutPersistRef.current = true;
+        try {
+          const applied = group.setLayout(safe);
+          const nextMindMap = (applied.mindmap ?? safe.mindmap) > 0;
+          const nextInspector = (applied.inspector ?? safe.inspector) > 0;
+          openPanesRef.current = { mindMap: nextMindMap, inspector: nextInspector };
+          setMindMapOpen(nextMindMap);
+          setInspectorOpen(nextInspector);
+        } finally {
+          queueMicrotask(() => {
+            suppressLayoutPersistRef.current = false;
+          });
+        }
+      }
+    };
+    syncWidth(element.clientWidth);
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? element.clientWidth;
+      syncWidth(width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [groupRef]);
+
   useEffect(() => {
     const statusNode = excerptStatusRef.current;
     if (!statusNode || !ready || excerptNonce === 0) return;
     return announceInLiveRegion(statusNode, excerptNoticeText(lastExcerptParentTitle));
   }, [ready, excerptNonce, lastExcerptParentTitle]);
+
+  useEffect(() => {
+    const statusNode = dropStatusRef.current;
+    if (!statusNode || !ready || !dropNotice) return;
+    return announceInLiveRegion(statusNode, dropNotice.message);
+  }, [ready, dropNotice]);
 
   // The webview's own context menu is a browser's, not the app's: it acts on the
   // document the app is showing. The browser preview keeps it, which is a
@@ -183,87 +244,123 @@ export function StudyWorkspace() {
 
   useNativeMenu(onMenuCommand, setMenuItemStates);
 
-  const openMindMap = useCallback(
-    (persist = true) => {
-      const panel = mindMapRef.current;
-      if (!panel) return;
-      if (panel.isCollapsed()) {
-        const savedSize = useStudySyncStore.getState().paneLayout.mindMapSize;
-        if (savedSize !== null) {
-          panel.resize(`${savedSize}%`);
-          if (panel.isCollapsed()) panel.expand();
-        } else {
-          panel.expand();
-        }
+  // Applies a target 3-panel layout atomically when the group has measured dimensions
+  // (all real browsers/webviews), and falls back to collapse/expand in zero-width
+  // jsdom tests where `react-resizable-panels` defers `group.setLayout`.
+  const applyGroupLayout = useCallback(
+    (nextLayout: PanelLayout): PanelLayout => {
+      const group = groupRef.current;
+      if (group && Object.keys(group.getLayout()).length > 0) {
+        const applied = group.setLayout(nextLayout);
+        return {
+          reader: applied.reader ?? nextLayout.reader,
+          mindmap: applied.mindmap ?? nextLayout.mindmap,
+          inspector: applied.inspector ?? nextLayout.inspector,
+        };
       }
-      setMindMapOpen(true);
-      if (persist && !useStudySyncStore.getState().immersive) {
-        setPaneLayout({ mindMapOpen: true });
+      const mindMapPanel = mindMapRef.current;
+      const inspectorPanel = inspectorRef.current;
+      if (nextLayout.mindmap === 0) mindMapPanel?.collapse();
+      else mindMapPanel?.expand();
+      if (nextLayout.inspector === 0) inspectorPanel?.collapse();
+      else inspectorPanel?.expand();
+      return nextLayout;
+    },
+    [groupRef, inspectorRef, mindMapRef],
+  );
+
+  // Set the entire group layout explicitly on show/hide so hiding a side pane
+  // returns its width to the reader instead of inflating the sibling pane (#180).
+  const applyPaneVisibility = useCallback(
+    (
+      nextOpen: { mindMapOpen: boolean; inspectorOpen: boolean },
+      options: { persist?: boolean; preferKeep?: PreferredSidePane } = {},
+    ) => {
+      if (!groupRef.current) return;
+      const { persist = true, preferKeep = 'mindmap' } = options;
+      const storeState = useStudySyncStore.getState();
+      const nextLayout = computePanelLayout(
+        {
+          ...storeState.paneLayout,
+          mindMapOpen: nextOpen.mindMapOpen,
+          inspectorOpen: nextOpen.inspectorOpen,
+        },
+        false,
+        getContainerWidth(),
+        preferKeep,
+      );
+      suppressLayoutPersistRef.current = true;
+      try {
+        const applied = applyGroupLayout(nextLayout);
+        const appliedMindMapOpen = applied.mindmap > 0;
+        const appliedInspectorOpen = applied.inspector > 0;
+        openPanesRef.current = { mindMap: appliedMindMapOpen, inspector: appliedInspectorOpen };
+        setMindMapOpen(appliedMindMapOpen);
+        setInspectorOpen(appliedInspectorOpen);
+        if (persist && !storeState.immersive) {
+          setPaneLayout({
+            mindMapOpen: appliedMindMapOpen,
+            inspectorOpen: appliedInspectorOpen,
+          });
+        }
+      } finally {
+        queueMicrotask(() => {
+          suppressLayoutPersistRef.current = false;
+        });
       }
     },
-    [mindMapRef, setPaneLayout],
+    [applyGroupLayout, getContainerWidth, groupRef, setPaneLayout],
+  );
+
+  const openMindMap = useCallback(
+    (persist = true) => {
+      applyPaneVisibility(
+        { mindMapOpen: true, inspectorOpen: openPanesRef.current.inspector },
+        { persist, preferKeep: 'mindmap' },
+      );
+    },
+    [applyPaneVisibility],
   );
 
   const closeMindMap = useCallback(
     (persist = true) => {
-      const panel = mindMapRef.current;
-      if (!panel) return;
-      if (!panel.isCollapsed()) panel.collapse();
-      setMindMapOpen(false);
-      if (persist && !useStudySyncStore.getState().immersive) {
-        setPaneLayout({ mindMapOpen: false });
-      }
+      applyPaneVisibility(
+        { mindMapOpen: false, inspectorOpen: openPanesRef.current.inspector },
+        { persist, preferKeep: 'inspector' },
+      );
     },
-    [mindMapRef, setPaneLayout],
+    [applyPaneVisibility],
   );
 
   const toggleMindMap = useCallback(() => {
-    const panel = mindMapRef.current;
-    if (!panel) return;
-    if (panel.isCollapsed()) openMindMap();
-    else closeMindMap();
-  }, [mindMapRef, openMindMap, closeMindMap]);
+    if (openPanesRef.current.mindMap) closeMindMap();
+    else openMindMap();
+  }, [openMindMap, closeMindMap]);
 
   const openInspector = useCallback(
     (persist = true) => {
-      const panel = inspectorRef.current;
-      if (!panel) return;
-      if (panel.isCollapsed()) {
-        const savedSize = useStudySyncStore.getState().paneLayout.inspectorSize;
-        if (savedSize !== null) {
-          panel.resize(`${savedSize}%`);
-          if (panel.isCollapsed()) panel.expand();
-        } else {
-          panel.expand();
-        }
-      }
-      setInspectorOpen(true);
-      if (persist && !useStudySyncStore.getState().immersive) {
-        setPaneLayout({ inspectorOpen: true });
-      }
+      applyPaneVisibility(
+        { mindMapOpen: openPanesRef.current.mindMap, inspectorOpen: true },
+        { persist, preferKeep: 'inspector' },
+      );
     },
-    [inspectorRef, setPaneLayout],
+    [applyPaneVisibility],
   );
 
   const closeInspector = useCallback(
     (persist = true) => {
-      const panel = inspectorRef.current;
-      if (!panel) return;
-      if (!panel.isCollapsed()) panel.collapse();
-      setInspectorOpen(false);
-      if (persist && !useStudySyncStore.getState().immersive) {
-        setPaneLayout({ inspectorOpen: false });
-      }
+      applyPaneVisibility(
+        { mindMapOpen: openPanesRef.current.mindMap, inspectorOpen: false },
+        { persist, preferKeep: 'mindmap' },
+      );
     },
-    [inspectorRef, setPaneLayout],
+    [applyPaneVisibility],
   );
 
   const toggleInspector = useCallback(() => {
-    const panel = inspectorRef.current;
-    if (!panel) return;
-    if (panel.isCollapsed()) openInspector();
-    else closeInspector();
-  }, [inspectorRef, openInspector, closeInspector]);
+    if (openPanesRef.current.inspector) closeInspector();
+    else openInspector();
+  }, [openInspector, closeInspector]);
 
   // Double-clicking a card or invoking Edit Card opens the Inspector if collapsed (#119).
   useEffect(() => {
@@ -282,7 +379,7 @@ export function StudyWorkspace() {
   }, [ready, revealRequest, mindMapRef, mindMapOpen, openMindMap]);
 
   const handleLayoutChanged = useCallback(
-    (layout: Layout) => {
+    (layout: Layout, meta?: LayoutChangedMeta) => {
       const mindmap = layout.mindmap;
       const inspector = layout.inspector;
       if (
@@ -295,14 +392,34 @@ export function StudyWorkspace() {
       }
       const nextMindMapOpen = mindmap > 0;
       const nextInspectorOpen = inspector > 0;
+      const prevMindMapOpen = openPanesRef.current.mindMap;
+      const prevInspectorOpen = openPanesRef.current.inspector;
+      openPanesRef.current = { mindMap: nextMindMapOpen, inspector: nextInspectorOpen };
       setMindMapOpen(nextMindMapOpen);
       setInspectorOpen(nextInspectorOpen);
-      if (suppressLayoutPersistRef.current || useStudySyncStore.getState().immersive) return;
+      // Persist pane sizes only from direct handle drags, never from sibling
+      // collapse/expand or window-resize constraint adjustments (#180).
+      if (
+        !meta?.isUserInteraction ||
+        suppressLayoutPersistRef.current ||
+        useStudySyncStore.getState().immersive
+      ) {
+        return;
+      }
+      const requested = meta.requestedLayout ?? layout;
+      const requestedMindMap = requested.mindmap ?? mindmap;
+      const requestedInspector = requested.inspector ?? inspector;
+      const mindMapJustCollapsed = prevMindMapOpen && !nextMindMapOpen;
+      const inspectorJustCollapsed = prevInspectorOpen && !nextInspectorOpen;
       setPaneLayout({
         mindMapOpen: nextMindMapOpen,
         inspectorOpen: nextInspectorOpen,
-        ...(mindmap >= DEFAULT_MIND_MAP_SIZE ? { mindMapSize: roundPercent(mindmap) } : {}),
-        ...(inspector >= DEFAULT_INSPECTOR_SIZE ? { inspectorSize: roundPercent(inspector) } : {}),
+        ...(!inspectorJustCollapsed && requestedMindMap >= DEFAULT_MIND_MAP_SIZE
+          ? { mindMapSize: clampMindMapSize(requestedMindMap) }
+          : {}),
+        ...(!mindMapJustCollapsed && requestedInspector >= DEFAULT_INSPECTOR_SIZE
+          ? { inspectorSize: clampInspectorSize(requestedInspector) }
+          : {}),
       });
     },
     [setPaneLayout],
@@ -312,23 +429,25 @@ export function StudyWorkspace() {
   // leaving the persisted pane layout untouched.
   const changeImmersive = (next: boolean) => {
     if (next === immersive) return;
-    suppressLayoutPersistRef.current = true;
-    try {
-      if (next) {
-        setPanesBeforeImmersive({ mindMap: mindMapOpen, inspector: inspectorOpen });
-        if (mindMapOpen) closeMindMap(false);
-        if (inspectorOpen) closeInspector(false);
-      } else if (panesBeforeImmersive) {
-        if (panesBeforeImmersive.mindMap && !mindMapOpen) openMindMap(false);
-        if (panesBeforeImmersive.inspector && !inspectorOpen) openInspector(false);
-        setPanesBeforeImmersive(null);
-      }
-      setImmersive(next);
-    } finally {
-      queueMicrotask(() => {
-        suppressLayoutPersistRef.current = false;
+    if (next) {
+      setPanesBeforeImmersive({
+        mindMap: openPanesRef.current.mindMap,
+        inspector: openPanesRef.current.inspector,
       });
+      if (openPanesRef.current.mindMap || openPanesRef.current.inspector) {
+        applyPaneVisibility({ mindMapOpen: false, inspectorOpen: false }, { persist: false });
+      }
+    } else if (panesBeforeImmersive) {
+      applyPaneVisibility(
+        {
+          mindMapOpen: panesBeforeImmersive.mindMap,
+          inspectorOpen: panesBeforeImmersive.inspector,
+        },
+        { persist: false, preferKeep: 'mindmap' },
+      );
+      setPanesBeforeImmersive(null);
     }
+    setImmersive(next);
   };
   const changeImmersiveRef = useRef(changeImmersive);
   useEffect(() => {
@@ -438,9 +557,27 @@ export function StudyWorkspace() {
     event.preventDefault();
     dragDepthRef.current = 0;
     setHtmlDragging(false);
-    const files = Array.from(event.dataTransfer?.files ?? []);
+    const files: File[] = [];
+    const directoryIndices = new Set<number>();
+    const items = Array.from(event.dataTransfer?.items ?? []).filter(
+      (item) => item.kind === 'file',
+    );
+    if (items.length > 0) {
+      for (const item of items) {
+        const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+        const file = item.getAsFile();
+        if (entry?.isDirectory) {
+          directoryIndices.add(files.length);
+          files.push(file ?? new File([], entry.name));
+        } else if (file) {
+          files.push(file);
+        }
+      }
+    } else {
+      files.push(...Array.from(event.dataTransfer?.files ?? []));
+    }
     if (files.length > 0) {
-      void dropFiles(files);
+      void (directoryIndices.size > 0 ? dropFiles(files, { directoryIndices }) : dropFiles(files));
     }
   };
 
@@ -449,8 +586,8 @@ export function StudyWorkspace() {
   // open the map at it. An open map reveals it itself, and explicit "Show in
   // MindMap" requests open the map directly without showing this notice (#124).
   const pendingReveal = ready && !mindMapOpen && !revealRequest?.openMindMap ? revealRequest : null;
-  // Both notices share one stack, so their keys are namespaced: a shared key
-  // would hand the deletion notice the excerpt notice's node and its fade timer.
+  // Notices share one stack, so their keys are namespaced: a shared key
+  // would hand one notice another's node and fade timer.
   const excerptNotice = pendingReveal ? (
     <ReaderNotice
       key={`excerpt-${pendingReveal.nonce}`}
@@ -469,9 +606,28 @@ export function StudyWorkspace() {
       {excerptNoticeText(pendingReveal.parentTitle)}
     </ReaderNotice>
   ) : null;
+  const dropFailureNotice = dropNotice ? (
+    <ReaderNotice
+      key={`drop-failure-${dropNotice.nonce}`}
+      tone="warning"
+      testId="drop-failure-notice"
+      announce={false}
+      onDismiss={dismissDropNotice}
+    >
+      {dropNotice.message}
+    </ReaderNotice>
+  ) : null;
   const cardDeleted = useCardDeletedNotice();
+  const immediateNotice =
+    dropFailureNotice || cardDeleted.notice ? (
+      <>
+        {dropFailureNotice}
+        {cardDeleted.notice}
+      </>
+    ) : null;
 
   const panelDefaultLayout = initialLayout ?? { reader: 100, mindmap: 0, inspector: 0 };
+  const minReaderPercent = effectiveMinReaderPercent(containerWidth);
 
   return (
     <ToolbarSlotsContext.Provider value={slots}>
@@ -576,9 +732,10 @@ export function StudyWorkspace() {
           </div>
         )}
 
-        <div className="relative min-h-0 flex-1">
+        <div ref={panelContainerRef} className="relative min-h-0 flex-1">
           {status === 'ready' ? (
             <ResizablePanelGroup
+              groupRef={groupRef}
               orientation="horizontal"
               defaultLayout={panelDefaultLayout}
               onLayoutChanged={handleLayoutChanged}
@@ -586,12 +743,12 @@ export function StudyWorkspace() {
               <ResizablePanel
                 id="reader"
                 defaultSize={`${panelDefaultLayout.reader}%`}
-                minSize={`${MIN_READER_SIZE}%`}
+                minSize={`${minReaderPercent}%`}
               >
                 <ReaderPane
                   notice={excerptNotice}
-                  // Undo is only useful now, so it does not wait for focus mode to end.
-                  immediateNotice={cardDeleted.notice}
+                  // Undo and partial-drop notices apply immediately, even in focus mode.
+                  immediateNotice={immediateNotice}
                 />
               </ResizablePanel>
               <ResizableHandle />
@@ -600,6 +757,7 @@ export function StudyWorkspace() {
                 panelRef={mindMapRef}
                 defaultSize={`${panelDefaultLayout.mindmap}%`}
                 minSize={`${DEFAULT_MIND_MAP_SIZE}%`}
+                maxSize={`${MAX_MIND_MAP_SIZE}%`}
                 collapsible
                 onResize={(size) => {
                   if (!Number.isNaN(size.asPercentage)) setMindMapOpen(size.asPercentage > 0);
@@ -613,6 +771,7 @@ export function StudyWorkspace() {
                 panelRef={inspectorRef}
                 defaultSize={`${panelDefaultLayout.inspector}%`}
                 minSize={`${DEFAULT_INSPECTOR_SIZE}%`}
+                maxSize={`${MAX_INSPECTOR_SIZE}%`}
                 collapsible
                 onResize={(size) => {
                   if (!Number.isNaN(size.asPercentage)) setInspectorOpen(size.asPercentage > 0);
@@ -645,6 +804,13 @@ export function StudyWorkspace() {
         <p
           ref={excerptStatusRef}
           data-testid="excerpt-status"
+          role="status"
+          aria-atomic="true"
+          className="sr-only"
+        />
+        <p
+          ref={dropStatusRef}
+          data-testid="drop-status"
           role="status"
           aria-atomic="true"
           className="sr-only"

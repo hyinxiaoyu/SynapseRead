@@ -23,6 +23,7 @@ import { txtFlow } from './txt.mjs';
 import { toolbarTitleFlow } from './toolbarTitle.mjs';
 import { txtChaptersFlow } from './txtChapters.mjs';
 import { wheelPagingFlow } from './wheelPaging.mjs';
+import { workspaceLayoutFlow } from './workspaceLayout.mjs';
 
 // The one CSP report that does not fail a flow, and only on a browser shown to send it
 // for an inert document. The EPUB flow separately asserts that the handler never ran.
@@ -51,6 +52,7 @@ const FLOWS = {
   'tab-labels': tabLabelsFlow,
   'toolbar-title': toolbarTitleFlow,
   'wheel-paging': wheelPagingFlow,
+  'workspace-layout': workspaceLayoutFlow,
 };
 
 // Screenshots of failed flows; CI uploads the folder.

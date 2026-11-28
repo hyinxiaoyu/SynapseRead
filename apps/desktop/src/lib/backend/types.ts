@@ -14,7 +14,8 @@ import type {
   DeletedCard,
   DocumentContentReader,
   DocumentSourceStatus,
-  IpcError,
+  DroppedDocumentError,
+  DroppedDocumentsPayload,
   LanImportConnectInput,
   LanImportExecuteInput,
   LanImportExecutionReport,
@@ -42,9 +43,11 @@ import type {
   WorkspaceSession,
 } from '@/types/domain';
 
-export interface DroppedDocumentsPayload {
-  documents: StudyDocument[];
-  error: IpcError | null;
+export type { DroppedDocumentError, DroppedDocumentsPayload };
+
+export interface DropFilesOptions {
+  /** Indices into the dropped `File[]` list known to be directories (from `webkitGetAsEntry`). */
+  directoryIndices?: ReadonlySet<number>;
 }
 
 /** Whether a native menu item applies right now, and an optional context title. */
@@ -84,7 +87,7 @@ export interface StudyBackend extends DocumentContentReader {
    * backend. In Tauri, native OS file drops are handled in Rust and delivered
    * through `onFileDrop`.
    */
-  dropFiles(files: readonly File[]): Promise<DroppedDocumentsPayload>;
+  dropFiles(files: readonly File[], options?: DropFilesOptions): Promise<DroppedDocumentsPayload>;
   /** Subscribes to native window file-drag and drop events. */
   onFileDrop(listener: (event: FileDropEvent) => void): () => void;
   listDocuments(): Promise<StudyDocument[]>;

@@ -317,6 +317,23 @@ pub struct RelinkDocumentResult {
     pub previous_file_hash: String,
 }
 
+/// A single dropped path that could not be opened (#130).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DroppedDocumentError {
+    pub file_name: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// Payload emitted after drag-and-drop paths are processed (#130).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DroppedDocumentsPayload {
+    pub documents: Vec<Document>,
+    pub errors: Vec<DroppedDocumentError>,
+}
+
 /// Persisted MindMap and Inspector pane state across application restarts (#119).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

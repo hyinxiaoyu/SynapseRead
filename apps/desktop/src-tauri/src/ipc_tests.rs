@@ -330,14 +330,24 @@ fn dropped_paths_register_supported_files_and_report_errors() {
     let h = Harness::new();
     let pdf = h.dir.path().join("dropped.pdf");
     let txt = h.dir.path().join("notes.txt");
-    let bad = h.dir.path().join("archive.zip");
+    let docx = h.dir.path().join("Thesis draft.docx");
+    let jpg = h.dir.path().join("Scan.jpg");
+    let folder = h.dir.path().join("Course readings");
     std::fs::write(&pdf, "pdf bytes").unwrap();
     std::fs::write(&txt, "plain text").unwrap();
-    std::fs::write(&bad, "zip bytes").unwrap();
+    std::fs::write(&docx, "docx bytes").unwrap();
+    std::fs::write(&jpg, "jpg bytes").unwrap();
+    std::fs::create_dir(&folder).unwrap();
 
     let payload = serde_json::to_value(register_dropped_paths(
         h.app.handle(),
-        &[pdf.clone(), bad.clone(), txt.clone()],
+        &[
+            pdf.clone(),
+            docx.clone(),
+            folder.clone(),
+            jpg.clone(),
+            txt.clone(),
+        ],
     ))
     .unwrap();
 
@@ -345,11 +355,21 @@ fn dropped_paths_register_supported_files_and_report_errors() {
     assert_eq!(documents.len(), 2);
     assert_eq!(documents[0]["title"], "dropped");
     assert_eq!(documents[1]["title"], "notes");
-    assert_eq!(payload["error"]["code"], "unsupported_format");
+
+    let errors = payload["errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 3);
+    assert_eq!(errors[0]["fileName"], "Thesis draft.docx");
+    assert_eq!(errors[0]["code"], "unsupported_format");
+    assert_eq!(errors[1]["fileName"], "Course readings");
+    assert_eq!(errors[1]["code"], "is_directory");
+    assert_eq!(errors[2]["fileName"], "Scan.jpg");
+    assert_eq!(errors[2]["code"], "unsupported_format");
 
     assert!(h.asset_allowed(&pdf));
     assert!(h.asset_allowed(&txt));
-    assert!(!h.asset_allowed(&bad));
+    assert!(!h.asset_allowed(&docx));
+    assert!(!h.asset_allowed(&jpg));
+    assert!(!h.asset_allowed(&folder));
     assert_eq!(
         h.ok("list_documents", json!({})).as_array().unwrap().len(),
         2

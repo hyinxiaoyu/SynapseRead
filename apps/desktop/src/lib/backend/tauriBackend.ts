@@ -83,7 +83,7 @@ export function createTauriBackend(): StudyBackend {
     chromeStyle: detectPlatform() === 'mac' ? 'overlay' : 'standard',
 
     pickDocument: () => invoke<StudyDocument | null>('pick_document'),
-    dropFiles: async () => ({ documents: [], error: null }),
+    dropFiles: async () => ({ documents: [], errors: [] }),
     onFileDrop(listener) {
       let disposed = false;
       const unlisteners: UnlistenFn[] = [];
@@ -105,7 +105,7 @@ export function createTauriBackend(): StudyBackend {
         listener({
           type: 'drop',
           documents: payload.documents,
-          error: payload.error,
+          errors: payload.errors,
         });
       });
       return () => {
