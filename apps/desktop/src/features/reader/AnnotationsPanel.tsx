@@ -399,13 +399,16 @@ function AnnotationRow({
   const [clamped, setClamped] = useState(false);
   const [noteDraft, setNoteDraft] = useState(annotation.note ?? '');
   const [prevPropNote, setPrevPropNote] = useState(annotation.note ?? '');
+  const [draftDirty, setDraftDirty] = useState(false);
   const [savingNote, setSavingNote] = useState<{ draft: string } | null>(null);
   const [failedNoteDraft, setFailedNoteDraft] = useState<string | null>(null);
   const [unsavedNoteWarning, setUnsavedNoteWarning] = useState(false);
 
+  // Keep an untouched sidebar editor in sync with updates saved elsewhere (e.g., the popover),
+  // while preserving local edits or failed drafts until saved or cancelled (#124).
   if ((annotation.note ?? '') !== prevPropNote) {
     setPrevPropNote(annotation.note ?? '');
-    if (!editing && failedNoteDraft === null) {
+    if (!draftDirty && savingNote === null && failedNoteDraft === null) {
       setNoteDraft(annotation.note ?? '');
     }
   }
@@ -432,6 +435,7 @@ function AnnotationRow({
   const mountedRef = useRef(true);
   const saveSeqRef = useRef(0);
   const latestNoteDraftRef = useRef(noteDraft);
+  const draftDirtyRef = useRef(draftDirty);
   const failedNoteDraftRef = useRef<string | null>(failedNoteDraft);
   const pendingSaveRef = useRef<{
     seq: number;
@@ -455,6 +459,7 @@ function AnnotationRow({
   }, [annotation.id]);
   useEffect(() => {
     latestNoteDraftRef.current = noteDraft;
+    draftDirtyRef.current = draftDirty;
     failedNoteDraftRef.current = failedNoteDraft;
     latestCallbacksRef.current = {
       onExcerpt,
@@ -492,8 +497,10 @@ function AnnotationRow({
   const cancelEdit = () => {
     pendingSaveRef.current = null;
     failedNoteDraftRef.current = null;
+    draftDirtyRef.current = false;
     setSavingNote(null);
     setFailedNoteDraft(null);
+    setDraftDirty(false);
     onQueuedExcerptChange(annotation.id, false);
     const savedNote = annotation.note ?? '';
     latestNoteDraftRef.current = savedNote;
@@ -508,7 +515,7 @@ function AnnotationRow({
     closeOnSuccess: boolean;
     fromBlur?: boolean;
   }) => {
-    if (fromBlur && closing.current) return;
+    if (fromBlur && (closing.current || !draftDirtyRef.current)) return;
     const trimmed = latestNoteDraftRef.current.trim();
     const existing = pendingSaveRef.current;
     if (existing && existing.draft === trimmed) {
@@ -520,6 +527,8 @@ function AnnotationRow({
     }
     const committed = existing ? existing.draft : (annotation.note?.trim() ?? '');
     if (trimmed === committed) {
+      draftDirtyRef.current = false;
+      setDraftDirty(false);
       if (closeOnSuccess) {
         failedNoteDraftRef.current = null;
         setFailedNoteDraft(null);
@@ -532,6 +541,8 @@ function AnnotationRow({
     setUnsavedNoteWarning(false);
     const result = onUpdate({ note: trimmed, color: null });
     if (!isPromiseLike<boolean>(result)) {
+      draftDirtyRef.current = false;
+      setDraftDirty(false);
       if (closeOnSuccess) closeEditor();
       return;
     }
@@ -559,6 +570,8 @@ function AnnotationRow({
           failedNoteDraftRef.current = null;
           setFailedNoteDraft(null);
           if (latestNoteDraftRef.current.trim() === trimmed) {
+            draftDirtyRef.current = false;
+            setDraftDirty(false);
             if (entry.closeOnSuccess || entry.queuedAction !== null) {
               closeEditor();
             }
@@ -903,6 +916,8 @@ function AnnotationRow({
             fieldRef={noteFieldRef}
             autoFocus
             onChange={(value) => {
+              draftDirtyRef.current = true;
+              setDraftDirty(true);
               latestNoteDraftRef.current = value;
               setNoteDraft(value);
               setUnsavedNoteWarning(false);

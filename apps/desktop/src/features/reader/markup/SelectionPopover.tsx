@@ -232,11 +232,19 @@ export function SelectionPopover({
 
   const [editNote, setEditNote] = useState('');
   const [editNoteFor, setEditNoteFor] = useState<string | null>(null);
+  const [editNoteDirty, setEditNoteDirty] = useState(false);
+  const [prevAnnotationNote, setPrevAnnotationNote] = useState<string | null>(null);
   if (editing && popover.noteOpen && editNoteFor !== annotation.id) {
     setEditNoteFor(annotation.id);
     setEditNote(annotation.note ?? '');
+    setEditNoteDirty(false);
+    setPrevAnnotationNote(annotation.note ?? '');
   }
-  if (!popover.noteOpen && editNoteFor !== null) setEditNoteFor(null);
+  if (!popover.noteOpen && editNoteFor !== null) {
+    setEditNoteFor(null);
+    setEditNoteDirty(false);
+    setPrevAnnotationNote(null);
+  }
 
   // Track an in-flight note save so the editor closes only once persistence confirms,
   // preserving the draft on failure and letting immediate Excerpt/Show wait on the result (#124).
@@ -285,6 +293,17 @@ export function SelectionPopover({
   ) {
     setSavingNote(null);
     setQueuedActionWhileSaving(false);
+  }
+  if (
+    editing &&
+    popover.noteOpen &&
+    editNoteFor === annotation.id &&
+    (annotation.note ?? '') !== prevAnnotationNote
+  ) {
+    setPrevAnnotationNote(annotation.note ?? '');
+    if (!editNoteDirty && savingNote === null) {
+      setEditNote(annotation.note ?? '');
+    }
   }
   useEffect(() => {
     const pending = pendingNoteSaveRef.current;
@@ -495,6 +514,7 @@ export function SelectionPopover({
       }
       const result = annotations.updateAnnotation(annotation.id, { note: draft, color: null });
       if (!isPromiseLike<boolean>(result)) {
+        setEditNoteDirty(false);
         popover.closeNote();
         return;
       }
@@ -520,6 +540,7 @@ export function SelectionPopover({
           if (!isCurrent || activeAnnotationIdRef.current !== annotation.id) return;
           if (saved) {
             if (latestEditNoteRef.current.trim() === draft.trim()) {
+              setEditNoteDirty(false);
               const callbacks = latestCallbacksRef.current;
               callbacks.closeNote();
               if (entry.queuedAction === 'excerpt') {
@@ -796,6 +817,7 @@ export function SelectionPopover({
               if (editing) {
                 latestEditNoteRef.current = value;
                 setEditNote(value);
+                setEditNoteDirty(true);
                 if (pendingNoteSaveRef.current) {
                   pendingNoteSaveRef.current.queuedAction = null;
                   setQueuedActionWhileSaving(false);

@@ -561,6 +561,9 @@ export function createStudySyncStore(backend: StudyBackend) {
 
     /** Per-annotation FIFO tail promises so `updateAnnotation` patches commit strictly in order (#125). */
     const pendingAnnotationUpdates = new Map<string, PendingAnnotationUpdate>();
+    /** Serializes card-creation writes so queued annotation excerpts never drop or overlap (#124). */
+    let excerptQueue: Promise<void> = Promise.resolve();
+    let activeSelectionExcerpt = false;
 
     const nextDocumentTitleSeq = (documentId: string): number => {
       const next = (documentTitleSeqs.get(documentId) ?? 0) + 1;
@@ -1876,80 +1879,87 @@ export function createStudySyncStore(backend: StudyBackend) {
         );
         const versionAtStart = getDocumentVersion(selection.documentId);
         const expectedFileHash = selection.sourceFileHash ?? versionAtStart.fileHash;
+        activeSelectionExcerpt = true;
         set({ isExcerpting: true });
-        try {
-          const created = await backend.createExcerpt({
-            documentId: selection.documentId,
-            notebookId: notebook.id,
-            anchor: selection.anchor,
-            excerptText: selection.text,
-            excerptImagePng: selection.imagePng,
-            color: DEFAULT_EXCERPT_COLOR,
-            parentNodeId,
-            posX: position.x,
-            posY: position.y,
-            locationLabel: selection.locationLabel ?? null,
-            expectedFileHash,
-          });
-          const reconciled = await reconcileAnnotationWithBackend(
-            notebook.id,
-            created.annotation,
-            selection.documentId,
-            versionAtStart,
-          );
-          let resolvedParentTitle: string | null = null;
-          let needsBackendRefresh = false;
-          // Only clear the selection the user excerpted: they may have made a
-          // new one while the write was in flight.
-          set((state) => {
-            const final = resolveAnnotationForState(state, reconciled);
-            needsBackendRefresh = final.stale;
-            resolvedParentTitle = parentNode
-              ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
-                parentTitleBeforeWrite)
-              : null;
-            return {
-              annotations: [...state.annotations, final.annotation],
-              cards: [...state.cards, created.card],
-              nodes: [...state.nodes, created.node],
-              edges: created.edge ? [...state.edges, created.edge] : state.edges,
-              selection: state.selection === selection ? null : state.selection,
-              isExcerpting: false,
-              excerptNonce: state.excerptNonce + 1,
-              lastExcerptParentTitle: resolvedParentTitle,
-            };
-          });
-          // The new card is selected and shown so it can be found, but the
-          // nesting target stays whatever the reader chose.
-          get().revealNode(created.node.id, resolvedParentTitle);
-          if (needsBackendRefresh) {
-            await refreshAnnotationLocationFromBackend(
+        const run = async () => {
+          try {
+            const created = await backend.createExcerpt({
+              documentId: selection.documentId,
+              notebookId: notebook.id,
+              anchor: selection.anchor,
+              excerptText: selection.text,
+              excerptImagePng: selection.imagePng,
+              color: DEFAULT_EXCERPT_COLOR,
+              parentNodeId,
+              posX: position.x,
+              posY: position.y,
+              locationLabel: selection.locationLabel ?? null,
+              expectedFileHash,
+            });
+            const reconciled = await reconcileAnnotationWithBackend(
               notebook.id,
-              created.annotation.id,
+              created.annotation,
               selection.documentId,
+              versionAtStart,
             );
+            let resolvedParentTitle: string | null = null;
+            let needsBackendRefresh = false;
+            activeSelectionExcerpt = false;
+            // Only clear the selection the user excerpted: they may have made a
+            // new one while the write was in flight.
+            set((state) => {
+              const final = resolveAnnotationForState(state, reconciled);
+              needsBackendRefresh = final.stale;
+              resolvedParentTitle = parentNode
+                ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
+                  parentTitleBeforeWrite)
+                : null;
+              return {
+                annotations: [...state.annotations, final.annotation],
+                cards: [...state.cards, created.card],
+                nodes: [...state.nodes, created.node],
+                edges: created.edge ? [...state.edges, created.edge] : state.edges,
+                selection: state.selection === selection ? null : state.selection,
+                isExcerpting: state.excerptingAnnotationIds.length > 0,
+                excerptNonce: state.excerptNonce + 1,
+                lastExcerptParentTitle: resolvedParentTitle,
+              };
+            });
+            // The new card is selected and shown so it can be found, but the
+            // nesting target stays whatever the reader chose.
+            get().revealNode(created.node.id, resolvedParentTitle);
+            if (needsBackendRefresh) {
+              await refreshAnnotationLocationFromBackend(
+                notebook.id,
+                created.annotation.id,
+                selection.documentId,
+              );
+            }
+          } catch (error) {
+            activeSelectionExcerpt = false;
+            // Drop the selection if its source document changed under it; otherwise keep it for retry.
+            set((state) => ({
+              isExcerpting: state.excerptingAnnotationIds.length > 0,
+              error: describeError(error),
+              selection:
+                state.selection === selection &&
+                hasStateDocumentContentChanged(state, selection.documentId, versionAtStart)
+                  ? null
+                  : state.selection,
+            }));
           }
-        } catch (error) {
-          // Drop the selection if its source document changed under it; otherwise keep it for retry.
-          set((state) => ({
-            isExcerpting: false,
-            error: describeError(error),
-            selection:
-              state.selection === selection &&
-              hasStateDocumentContentChanged(state, selection.documentId, versionAtStart)
-                ? null
-                : state.selection,
-          }));
-        }
+        };
+        const next = excerptQueue.then(run, run);
+        excerptQueue = next.then(
+          () => undefined,
+          () => undefined,
+        );
+        await next;
       },
 
       async excerptAnnotation(annotationId) {
         const initial = get();
-        if (
-          !initial.notebook ||
-          initial.isExcerpting ||
-          initial.excerptingAnnotationIds.includes(annotationId)
-        ) {
+        if (!initial.notebook || initial.excerptingAnnotationIds.includes(annotationId)) {
           return;
         }
         if (initial.cards.some((card) => card.annotationIds.includes(annotationId))) {
@@ -1958,14 +1968,16 @@ export function createStudySyncStore(backend: StudyBackend) {
         }
         if (!initial.annotations.some((candidate) => candidate.id === annotationId)) return;
 
+        const notebookIdAtCall = initial.notebook.id;
         const releaseExcerpting = (extra?: Partial<StudySyncState>) => {
-          set((state) => ({
-            isExcerpting: false,
-            excerptingAnnotationIds: state.excerptingAnnotationIds.filter(
-              (id) => id !== annotationId,
-            ),
-            ...extra,
-          }));
+          set((state) => {
+            const remaining = state.excerptingAnnotationIds.filter((id) => id !== annotationId);
+            return {
+              isExcerpting: activeSelectionExcerpt || remaining.length > 0,
+              excerptingAnnotationIds: remaining,
+              ...extra,
+            };
+          });
         };
 
         set((state) => ({
@@ -1974,89 +1986,98 @@ export function createStudySyncStore(backend: StudyBackend) {
             ? state.excerptingAnnotationIds
             : [...state.excerptingAnnotationIds, annotationId],
         }));
-        try {
-          // Drain any queued note/color edits for this highlight so the new card's
-          // seeded `markdownNotes` reflects the latest saved note, and abort if the
-          // latest queued note write failed so we never create a card with a stale note (#124).
-          for (;;) {
-            const priorUpdates = pendingAnnotationUpdates.get(annotationId);
-            if (!priorUpdates) break;
-            await priorUpdates.settled;
-            if (priorUpdates.noteResult !== null && !(await priorUpdates.noteResult)) {
-              const latest = pendingAnnotationUpdates.get(annotationId);
-              if (!latest || latest.noteResult === priorUpdates.noteResult) {
-                releaseExcerpting();
-                return;
+
+        const run = async () => {
+          try {
+            // Drain any queued note/color edits for this highlight so the new card's
+            // seeded `markdownNotes` reflects the latest saved note, and abort if the
+            // latest queued note write failed so we never create a card with a stale note (#124).
+            for (;;) {
+              const priorUpdates = pendingAnnotationUpdates.get(annotationId);
+              if (!priorUpdates) break;
+              await priorUpdates.settled;
+              if (priorUpdates.noteResult !== null && !(await priorUpdates.noteResult)) {
+                const latest = pendingAnnotationUpdates.get(annotationId);
+                if (!latest || latest.noteResult === priorUpdates.noteResult) {
+                  releaseExcerpting();
+                  return;
+                }
               }
             }
-          }
 
-          const { notebook, annotations, cards, nodes, nestingTargetNodeId, nodeSizes } = get();
-          if (!notebook || pendingDeletes.has(annotationId)) {
-            releaseExcerpting();
-            return;
-          }
-          if (cards.some((card) => card.annotationIds.includes(annotationId))) {
-            releaseExcerpting();
-            get().showAnnotationCard(annotationId);
-            return;
-          }
-          const annotation = annotations.find((candidate) => candidate.id === annotationId);
-          if (!annotation) {
-            releaseExcerpting();
-            return;
-          }
+            const { notebook, annotations, cards, nodes, nestingTargetNodeId, nodeSizes } = get();
+            if (!notebook || notebook.id !== notebookIdAtCall || pendingDeletes.has(annotationId)) {
+              releaseExcerpting();
+              return;
+            }
+            if (cards.some((card) => card.annotationIds.includes(annotationId))) {
+              releaseExcerpting();
+              get().showAnnotationCard(annotationId);
+              return;
+            }
+            const annotation = annotations.find((candidate) => candidate.id === annotationId);
+            if (!annotation) {
+              releaseExcerpting();
+              return;
+            }
 
-          const parentNode = nestingTargetNodeId
-            ? nodes.find((node) => node.id === nestingTargetNodeId)
-            : undefined;
-          const parentNodeId = parentNode?.id ?? null;
-          const parentTitleBeforeWrite = parentNode
-            ? (cards.find((card) => card.id === parentNode.cardId)?.title ?? null)
-            : null;
-
-          const newSize = estimateCardSize({
-            hasCapture: annotation.excerptImagePath !== null,
-            hasNotes: annotationHasNote(annotation),
-          });
-          const position = computeNextCardPosition(
-            nodes,
-            cards,
-            annotations,
-            nodeSizes,
-            parentNodeId,
-            newSize,
-          );
-
-          const created = await backend.createCardForAnnotation({
-            annotationId: annotation.id,
-            notebookId: notebook.id,
-            parentNodeId,
-            posX: position.x,
-            posY: position.y,
-          });
-          let resolvedParentTitle: string | null = null;
-          set((state) => {
-            resolvedParentTitle = parentNode
-              ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
-                parentTitleBeforeWrite)
+            const parentNode = nestingTargetNodeId
+              ? nodes.find((node) => node.id === nestingTargetNodeId)
+              : undefined;
+            const parentNodeId = parentNode?.id ?? null;
+            const parentTitleBeforeWrite = parentNode
+              ? (cards.find((card) => card.id === parentNode.cardId)?.title ?? null)
               : null;
-            return {
-              cards: [...state.cards, created.card],
-              nodes: [...state.nodes, created.node],
-              edges: created.edge ? [...state.edges, created.edge] : state.edges,
-              isExcerpting: false,
-              excerptingAnnotationIds: state.excerptingAnnotationIds.filter(
-                (id) => id !== annotationId,
-              ),
-              excerptNonce: state.excerptNonce + 1,
-              lastExcerptParentTitle: resolvedParentTitle,
-            };
-          });
-          get().revealNode(created.node.id, resolvedParentTitle);
-        } catch (error) {
-          releaseExcerpting({ error: describeError(error) });
-        }
+
+            const newSize = estimateCardSize({
+              hasCapture: annotation.excerptImagePath !== null,
+              hasNotes: annotationHasNote(annotation),
+            });
+            const position = computeNextCardPosition(
+              nodes,
+              cards,
+              annotations,
+              nodeSizes,
+              parentNodeId,
+              newSize,
+            );
+
+            const created = await backend.createCardForAnnotation({
+              annotationId: annotation.id,
+              notebookId: notebook.id,
+              parentNodeId,
+              posX: position.x,
+              posY: position.y,
+            });
+            let resolvedParentTitle: string | null = null;
+            set((state) => {
+              const remaining = state.excerptingAnnotationIds.filter((id) => id !== annotationId);
+              resolvedParentTitle = parentNode
+                ? (state.cards.find((card) => card.id === parentNode.cardId)?.title ??
+                  parentTitleBeforeWrite)
+                : null;
+              return {
+                cards: [...state.cards, created.card],
+                nodes: [...state.nodes, created.node],
+                edges: created.edge ? [...state.edges, created.edge] : state.edges,
+                isExcerpting: activeSelectionExcerpt || remaining.length > 0,
+                excerptingAnnotationIds: remaining,
+                excerptNonce: state.excerptNonce + 1,
+                lastExcerptParentTitle: resolvedParentTitle,
+              };
+            });
+            get().revealNode(created.node.id, resolvedParentTitle);
+          } catch (error) {
+            releaseExcerpting({ error: describeError(error) });
+          }
+        };
+
+        const next = excerptQueue.then(run, run);
+        excerptQueue = next.then(
+          () => undefined,
+          () => undefined,
+        );
+        await next;
       },
 
       showAnnotationCard(annotationId) {

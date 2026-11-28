@@ -5496,4 +5496,77 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     expect(graphAfterRetry.cards).toHaveLength(1);
     expect(graphAfterRetry.cards[0]?.markdownNotes).toBe('Revised note');
   });
+
+  it('serializes concurrent excerptAnnotation calls without dropping queued items and keeps running after an error (#124)', async () => {
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('Alpha beta gamma passages') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 5, lineIndex: 0 },
+      text: 'Alpha',
+      imagePng: null,
+    });
+    const annA = (await store.getState().createAnnotationFromSelection({ note: 'Note A' }))!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 6, endByteOffset: 10, lineIndex: 0 },
+      text: 'beta',
+      imagePng: null,
+    });
+    const annB = (await store.getState().createAnnotationFromSelection({ note: 'Note B' }))!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 11, endByteOffset: 16, lineIndex: 0 },
+      text: 'gamma',
+      imagePng: null,
+    });
+    const annC = (await store.getState().createAnnotationFromSelection({ note: 'Note C' }))!;
+
+    const origCreateCard = backend.createCardForAnnotation.bind(backend);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.spyOn(backend, 'createCardForAnnotation')
+      .mockImplementationOnce(async (input) => {
+        await firstGate;
+        return origCreateCard(input);
+      })
+      .mockRejectedValueOnce({ code: 'database', message: 'transient error' });
+
+    const pA = store.getState().excerptAnnotation(annA.id);
+    const pB = store.getState().excerptAnnotation(annB.id);
+    const pC = store.getState().excerptAnnotation(annC.id);
+    // Duplicate call for an already-queued annotation is ignored.
+    const pDup = store.getState().excerptAnnotation(annC.id);
+
+    expect(store.getState().isExcerpting).toBe(true);
+    expect(store.getState().excerptingAnnotationIds).toEqual([annA.id, annB.id, annC.id]);
+
+    releaseFirst();
+    await Promise.all([pA, pB, pC, pDup]);
+
+    expect(store.getState().isExcerpting).toBe(false);
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    expect(store.getState().error).toContain('transient error');
+    expect(store.getState().cards).toHaveLength(2);
+    expect(store.getState().cards.some((c) => c.annotationIds.includes(annA.id))).toBe(true);
+    expect(store.getState().cards.some((c) => c.annotationIds.includes(annC.id))).toBe(true);
+
+    // Serialized cards do not stack at the exact same coordinates.
+    const [nodeA, nodeC] = store.getState().nodes;
+    expect(nodeA && nodeC && (nodeA.posX !== nodeC.posX || nodeA.posY !== nodeC.posY)).toBe(true);
+
+    const graph = await backend.loadNotebookGraph(notebookId);
+    expect(graph.cards).toHaveLength(2);
+  });
 });

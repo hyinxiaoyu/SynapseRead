@@ -843,4 +843,200 @@ describe('AnnotationsList card sources', () => {
       unmount();
     }
   });
+
+  it('syncs an untouched sidebar editor with updates saved elsewhere without overwriting on blur, while keeping dirty local drafts (#124)', async () => {
+    function StoreBackedAnnotationsList({
+      store,
+      documentId,
+    }: {
+      store: ReturnType<typeof createStudySyncStore>;
+      documentId: string;
+    }) {
+      const state = useSyncExternalStore(store.subscribe, store.getState);
+      const cardSourceAnnotationIds = new Set(state.cards.flatMap((card) => card.annotationIds));
+      const controller = useAnnotationsController({
+        documentId,
+        annotations: state.annotations.filter((item) => item.documentId === documentId),
+        onSelectAnnotation: vi.fn(),
+        onUpdateAnnotation: (annotationId, patch) => state.updateAnnotation(annotationId, patch),
+        onDeleteAnnotation: (annotationId) => void state.removeAnnotation(annotationId),
+        onExcerptAnnotation: (annotationId) => void state.excerptAnnotation(annotationId),
+        onShowAnnotationCard: (annotationId) => state.showAnnotationCard(annotationId),
+        canExcerpt: !state.isExcerpting,
+        cardSourceAnnotationIds,
+        excerptingAnnotationIds: new Set(state.excerptingAnnotationIds),
+      });
+      return <AnnotationsList controller={controller} filter="" />;
+    }
+
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('The quick brown fox jumps') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 4, endByteOffset: 19, lineIndex: 0 },
+      text: 'quick brown fox',
+      imagePng: null,
+    });
+    const highlight = (await store.getState().createAnnotationFromSelection({
+      color: YELLOW,
+      style: 'highlight',
+      note: 'Note A',
+    }))!;
+
+    render(<StoreBackedAnnotationsList store={store} documentId={docId} />);
+
+    // Open the sidebar editor and leave 'Note A' untouched.
+    fireEvent.click(screen.getByTestId('annotation-edit-button'));
+    const field = screen.getByTestId('annotation-note-input');
+    expect(field).toHaveValue('Note A');
+
+    // Save 'Note B' from another entry point (e.g., the selection popover).
+    await act(async () => {
+      await store.getState().updateAnnotation(highlight.id, { note: 'Note B', color: null });
+    });
+    expect(field).toHaveValue('Note B');
+
+    // Focusing and blurring the untouched sidebar field must not write 'Note A' back.
+    const updateSpy = vi.spyOn(backend, 'updateAnnotation');
+    act(() => {
+      field.focus();
+      fireEvent.blur(field);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(store.getState().annotations.find((a) => a.id === highlight.id)?.note).toBe('Note B');
+    const graphAfterBlur = await backend.loadNotebookGraph(notebookId);
+    expect(graphAfterBlur.annotations.find((a) => a.id === highlight.id)?.note).toBe('Note B');
+
+    // Once the user actually edits the sidebar field, external updates do not overwrite the local draft.
+    fireEvent.change(field, { target: { value: 'Local sidebar draft' } });
+    await act(async () => {
+      await store.getState().updateAnnotation(highlight.id, { note: 'Note C', color: null });
+    });
+    expect(field).toHaveValue('Local sidebar draft');
+  });
+
+  it('does not drop a queued sidebar excerpt for A when B is already excerpting (#124)', async () => {
+    function StoreBackedAnnotationsList({
+      store,
+      documentId,
+    }: {
+      store: ReturnType<typeof createStudySyncStore>;
+      documentId: string;
+    }) {
+      const state = useSyncExternalStore(store.subscribe, store.getState);
+      const cardSourceAnnotationIds = new Set(state.cards.flatMap((card) => card.annotationIds));
+      const controller = useAnnotationsController({
+        documentId,
+        annotations: state.annotations.filter((item) => item.documentId === documentId),
+        onSelectAnnotation: vi.fn(),
+        onUpdateAnnotation: (annotationId, patch) => state.updateAnnotation(annotationId, patch),
+        onDeleteAnnotation: (annotationId) => void state.removeAnnotation(annotationId),
+        onExcerptAnnotation: (annotationId) => void state.excerptAnnotation(annotationId),
+        onShowAnnotationCard: (annotationId) => state.showAnnotationCard(annotationId),
+        canExcerpt: !state.isExcerpting,
+        cardSourceAnnotationIds,
+        excerptingAnnotationIds: new Set(state.excerptingAnnotationIds),
+      });
+      return <AnnotationsList controller={controller} filter="" />;
+    }
+
+    const backend = createMemoryBackend({
+      library: { '/docs/a.txt': new TextEncoder().encode('Alpha passage and beta passage') },
+    });
+    const store = createStudySyncStore(backend);
+    await store.getState().initialize();
+    await store.getState().openDocument();
+    const docId = store.getState().activeDocumentId!;
+    const notebookId = store.getState().notebook!.id;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 0, endByteOffset: 13, lineIndex: 0 },
+      text: 'Alpha passage',
+      imagePng: null,
+    });
+    const annA = (await store.getState().createAnnotationFromSelection({ note: 'Old A' }))!;
+
+    store.getState().setSelection({
+      documentId: docId,
+      anchor: { format: 'txt', startByteOffset: 18, endByteOffset: 30, lineIndex: 0 },
+      text: 'beta passage',
+      imagePng: null,
+    });
+    const annB = (await store.getState().createAnnotationFromSelection({ note: 'Note B' }))!;
+
+    const origUpdate = backend.updateAnnotation.bind(backend);
+    let releaseSaveA!: () => void;
+    const saveAGate = new Promise<void>((resolve) => {
+      releaseSaveA = resolve;
+    });
+    vi.spyOn(backend, 'updateAnnotation').mockImplementationOnce(
+      async (id: string, patch: AnnotationPatch) => {
+        await saveAGate;
+        return origUpdate(id, patch);
+      },
+    );
+
+    const origCreateCard = backend.createCardForAnnotation.bind(backend);
+    let releaseCreateB!: () => void;
+    const createBGate = new Promise<void>((resolve) => {
+      releaseCreateB = resolve;
+    });
+    vi.spyOn(backend, 'createCardForAnnotation').mockImplementationOnce(async (input) => {
+      await createBGate;
+      return origCreateCard(input);
+    });
+
+    render(<StoreBackedAnnotationsList store={store} documentId={docId} />);
+    const [rowA, rowB] = screen.getAllByTestId('annotation-item') as [HTMLElement, HTMLElement];
+
+    // 1. Save A's new note (paused) and immediately queue A's excerpt.
+    fireEvent.click(within(rowA).getByTestId('annotation-edit-button'));
+    fireEvent.change(within(rowA).getByTestId('annotation-note-input'), {
+      target: { value: 'New A' },
+    });
+    fireEvent.click(within(rowA).getByTestId('annotation-note-save'));
+    fireEvent.click(within(rowA).getByTestId('annotation-excerpt-button'));
+    expect(within(rowA).getByTestId('annotation-delete-button')).toBeDisabled();
+
+    // 2. Click B's excerpt while A's save is still pending; B's card creation stays in flight.
+    fireEvent.click(within(rowB).getByTestId('annotation-excerpt-button'));
+    expect(store.getState().isExcerpting).toBe(true);
+    expect(store.getState().excerptingAnnotationIds).toEqual([annB.id]);
+
+    // 3. Release A's note save while B is still creating its card: A queues behind B instead of dropping.
+    await act(async () => {
+      releaseSaveA();
+    });
+    await vi.waitFor(() => expect(within(rowA).queryByTestId('annotation-note-input')).toBeNull());
+    expect(store.getState().excerptingAnnotationIds).toEqual([annB.id, annA.id]);
+    expect(within(rowA).getByTestId('annotation-delete-button')).toBeDisabled();
+
+    // 4. Release B: both B and A land in store and backend, with A carrying 'New A'.
+    await act(async () => {
+      releaseCreateB();
+    });
+    await vi.waitFor(() => expect(store.getState().cards).toHaveLength(2));
+    expect(store.getState().isExcerpting).toBe(false);
+    expect(store.getState().excerptingAnnotationIds).toEqual([]);
+    const cardA = store.getState().cards.find((card) => card.annotationIds.includes(annA.id));
+    const cardB = store.getState().cards.find((card) => card.annotationIds.includes(annB.id));
+    expect(cardA?.markdownNotes).toBe('New A');
+    expect(cardB?.markdownNotes).toBe('Note B');
+    const graph = await backend.loadNotebookGraph(notebookId);
+    expect(graph.cards).toHaveLength(2);
+    expect(graph.cards.find((card) => card.annotationIds.includes(annA.id))?.markdownNotes).toBe(
+      'New A',
+    );
+    expect(graph.cards.find((card) => card.annotationIds.includes(annB.id))?.markdownNotes).toBe(
+      'Note B',
+    );
+  });
 });
