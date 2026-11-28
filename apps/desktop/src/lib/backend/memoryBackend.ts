@@ -218,6 +218,13 @@ export interface MemoryHostStats {
 
 export type MemoryMenuItemStateMap = Record<string, { enabled: boolean; title?: string }>;
 
+export interface MemoryNodeLayoutWrite {
+  nodeId: string;
+  posX: number;
+  posY: number;
+  isCollapsed: boolean;
+}
+
 export interface MemoryBackendWithPreview {
   backend: StudyBackend;
   emitMenuCommand(commandId: CommandId): void;
@@ -225,6 +232,11 @@ export interface MemoryBackendWithPreview {
   getMenuItemStates(): MemoryMenuItemStateMap;
   getHostStats(): MemoryHostStats;
   listLocalBookmarks(documentId?: string): Bookmark[];
+  getNodeLayoutWrites(): MemoryNodeLayoutWrite[];
+  pauseNextNodeLayoutWrite(): void;
+  releasePausedNodeLayoutWrite(): void;
+  hasPausedNodeLayoutWrite(): boolean;
+  triggerBeforeClose(): Promise<void>;
   pauseNextCursorWrite(): void;
   releasePausedCursorWrite(): void;
 }
@@ -267,6 +279,8 @@ export function createMemoryBackendWithPreview({
   >();
   const bookmarks = new Map<string, Bookmark>();
   const menuListeners = new Set<(commandId: string) => void>();
+  const beforeCloseListeners = new Set<() => Promise<void> | void>();
+  const nodeLayoutWrites: MemoryNodeLayoutWrite[] = [];
   let readingPreferences: ReadingPreferences = { ...DEFAULT_READING_PREFERENCES };
   /** In save order: a save deletes and re-adds its entry, so the last is the latest. */
   const pdfLayouts = new Map<string, PdfLayout>();
@@ -458,6 +472,8 @@ export function createMemoryBackendWithPreview({
   let bookmarkMutationCount = 0;
   let pauseCursorNext = false;
   let pendingCursorWaiter: (() => void) | null = null;
+  let pauseNodeLayoutNext = false;
+  let pendingNodeLayoutWaiter: (() => void) | null = null;
   const menuItemStates: MemoryMenuItemStateMap = {};
 
   const backend: StudyBackend = {
@@ -1110,7 +1126,23 @@ export function createMemoryBackendWithPreview({
     },
 
     async updateNodeLayout(nodeId, patch) {
-      Object.assign(require(nodes, nodeId, 'node'), patch);
+      const target = require(nodes, nodeId, 'node');
+      if (pauseNodeLayoutNext) {
+        pauseNodeLayoutNext = false;
+        await new Promise<void>((resolve) => {
+          pendingNodeLayoutWaiter = () => {
+            pendingNodeLayoutWaiter = null;
+            resolve();
+          };
+        });
+      }
+      Object.assign(target, patch);
+      nodeLayoutWrites.push({
+        nodeId,
+        posX: patch.posX,
+        posY: patch.posY,
+        isCollapsed: patch.isCollapsed,
+      });
     },
 
     async createEdge(notebookId, sourceNodeId, targetNodeId, label) {
@@ -1329,7 +1361,12 @@ export function createMemoryBackendWithPreview({
       page.addEventListener('fullscreenchange', onChange);
       return () => page.removeEventListener('fullscreenchange', onChange);
     },
-    onBeforeClose: () => () => undefined,
+    onBeforeClose(listener) {
+      beforeCloseListeners.add(listener);
+      return () => {
+        beforeCloseListeners.delete(listener);
+      };
+    },
 
     loadDocumentSource: async (document) => ({
       kind: 'bytes',
@@ -1381,6 +1418,21 @@ export function createMemoryBackendWithPreview({
           anchor: { ...b.anchor },
         }),
       );
+    },
+    getNodeLayoutWrites() {
+      return nodeLayoutWrites.map((entry) => ({ ...entry }));
+    },
+    pauseNextNodeLayoutWrite() {
+      pauseNodeLayoutNext = true;
+    },
+    releasePausedNodeLayoutWrite() {
+      pendingNodeLayoutWaiter?.();
+    },
+    hasPausedNodeLayoutWrite() {
+      return pendingNodeLayoutWaiter !== null;
+    },
+    async triggerBeforeClose() {
+      await Promise.all([...beforeCloseListeners].map((listener) => listener()));
     },
     pauseNextCursorWrite() {
       pauseCursorNext = true;

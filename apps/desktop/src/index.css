@@ -253,3 +253,62 @@ g.anchor-pulse {
 .textLayer.selecting .endOfContent {
   top: 0;
 }
+
+/*
+ * MindMap canvas chrome follows the system appearance (#29, #184), mapped to the
+ * app's tokens so controls, minimap, attribution, and links stay legible in both
+ * Light and Dark Mode without altering the Light palette except where contrast
+ * improves.
+ */
+.react-flow {
+  --xy-background-color: transparent;
+  --xy-edge-stroke: oklch(0.556 0 0);
+  --xy-edge-stroke-selected: var(--foreground);
+  --xy-connectionline-stroke: oklch(0.556 0 0);
+  --xy-attribution-background-color: color-mix(in oklab, var(--background) 85%, transparent);
+  --xy-controls-button-background-color: var(--card);
+  --xy-controls-button-background-color-hover: var(--accent);
+  --xy-controls-button-color: var(--foreground);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-button-border-color: var(--border);
+  --xy-controls-box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.12);
+  --xy-minimap-background-color: var(--card);
+  --xy-minimap-mask-background-color: oklch(0.94 0 0 / 60%);
+  --xy-minimap-node-background-color: oklch(0.84 0 0);
+  --xy-minimap-node-stroke-color: oklch(0.7 0 0 / 50%);
+}
+
+.react-flow.dark {
+  --xy-background-color: var(--background);
+  --xy-background-pattern-color: oklch(0.38 0 0);
+  --xy-edge-stroke: oklch(0.6 0 0);
+  --xy-edge-stroke-selected: var(--foreground);
+  --xy-connectionline-stroke: oklch(0.6 0 0);
+  --xy-attribution-background-color: color-mix(in oklab, var(--background) 85%, transparent);
+  --xy-controls-button-background-color: var(--secondary);
+  --xy-controls-button-background-color-hover: oklch(0.33 0 0);
+  --xy-controls-button-color: var(--foreground);
+  --xy-controls-button-color-hover: var(--foreground);
+  --xy-controls-button-border-color: oklch(1 0 0 / 18%);
+  --xy-controls-box-shadow: 0 1px 4px 0 rgb(0 0 0 / 0.45);
+  --xy-minimap-background-color: var(--card);
+  --xy-minimap-mask-background-color: oklch(0.11 0 0 / 70%);
+  --xy-minimap-node-background-color: oklch(0.46 0 0);
+  --xy-minimap-node-stroke-color: oklch(0.62 0 0 / 45%);
+}
+
+.react-flow .react-flow__controls {
+  border: 1px solid var(--xy-controls-button-border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.react-flow .react-flow__minimap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.react-flow .react-flow__attribution a {
+  color: var(--muted-foreground);
+}

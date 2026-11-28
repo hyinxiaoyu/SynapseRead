@@ -515,9 +515,9 @@ export async function mindmapFlow(page) {
     };
   })()`;
 
-  const hasEdge = (sourceId, targetId) =>
+  const hasNestingEdge = (parentTitle, childTitle) =>
     page.evaluate(
-      `Boolean(document.querySelector('[aria-label="Edge from ${sourceId} to ${targetId}"]'))`,
+      `Boolean(document.querySelector(${JSON.stringify(`[aria-label="‘${childTitle}’ nested under ‘${parentTitle}’"]`)}))`,
     );
 
   const countEdges = () => page.evaluate(`document.querySelectorAll('.react-flow__edge').length`);
@@ -721,9 +721,8 @@ export async function mindmapFlow(page) {
     `document.querySelectorAll('.react-flow__edge').length === ${totalEdges}`,
     'new edge under card A after dragging card B',
   );
-  const child13 = await page.evaluate(cardByText('Filler line 013'));
   assert(
-    await hasEdge(cardAInfo.id, child13.id),
+    await hasNestingEdge('Filler line 011', 'Filler line 013'),
     'excerpt after dragging unselected card B must still nest under card A',
   );
 
@@ -802,9 +801,8 @@ export async function mindmapFlow(page) {
     `document.querySelectorAll('.react-flow__edge').length === ${totalEdges}`,
     'new edge under A after slow double-click on B',
   );
-  const child14 = await page.evaluate(cardByText('Filler line 014'));
   assert(
-    await hasEdge(cardAForClick.id, child14.id),
+    await hasNestingEdge('Filler line 011', 'Filler line 014'),
     'excerpt after slow double-click on B must still nest under A',
   );
 
@@ -1197,4 +1195,738 @@ export async function mindmapFlow(page) {
     '[data-testid="inspector-excerpt-source"]',
     'Inspector excerpt source attribution',
   );
+
+  // Close Inspector so canvas chrome, keyboard movement, and screen reader labels are unobstructed.
+  await page.clickButton('Hide inspector');
+  await page.waitFor(
+    `document.querySelector('button[aria-label="Show inspector"]')?.getAttribute('aria-pressed') === 'false'`,
+    'Inspector to close before section 18',
+  );
+  await waitTwoFrames();
+
+  // 18. Issues #184, #182, and #185:
+  //   - #184: Canvas controls, minimap, attribution, and links follow system Dark Mode with AA/non-text contrast.
+  //   - #182: Arrow-key and Shift+arrow-key moves coalesce into one updateNodeLayout write and flush before close.
+  //   - #185: Cards and links have title-based accessible names (never IDs) and accurate keyboard descriptions.
+  const probeCanvasChrome = () =>
+    page.evaluate(`(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 1;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const rgba = (color) => {
+        ctx.clearRect(0, 0, 1, 1);
+        ctx.fillStyle = '#000';
+        ctx.fillStyle = color;
+        ctx.fillRect(0, 0, 1, 1);
+        const [r, g, b, a] = ctx.getImageData(0, 0, 1, 1).data;
+        return { r, g, b, a: a / 255 };
+      };
+      const over = (top, bottom) => ({
+        r: top.r * top.a + bottom.r * (1 - top.a),
+        g: top.g * top.a + bottom.g * (1 - top.a),
+        b: top.b * top.a + bottom.b * (1 - top.a),
+        a: 1,
+      });
+      const backdrop = (el) => {
+        const layers = [];
+        for (let node = el; node; node = node.parentElement) {
+          const layer = rgba(getComputedStyle(node).backgroundColor);
+          if (layer.a > 0) layers.push(layer);
+          if (layer.a >= 1) break;
+        }
+        return layers.reduceRight((below, layer) => over(layer, below), { r: 255, g: 255, b: 255, a: 1 });
+      };
+      const lum = ({ r, g, b }) => {
+        const lin = (c) => ((c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+        return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+      };
+      const ratio = (a, b) => {
+        const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+        return (hi + 0.05) / (lo + 0.05);
+      };
+      const flow = document.querySelector('.react-flow');
+      const flowBg = backdrop(flow);
+      const buttons = [...document.querySelectorAll('.react-flow__controls-button:not(:disabled)')].map((btn) => {
+        const bg = backdrop(btn);
+        const svg = btn.querySelector('svg');
+        const fill = over(rgba(getComputedStyle(svg).fill), bg);
+        return {
+          label: btn.getAttribute('aria-label'),
+          bg,
+          bgLum: lum(bg),
+          iconRatio: ratio(fill, bg),
+        };
+      });
+      const minimap = document.querySelector('.react-flow__minimap');
+      const minimapBg = minimap ? backdrop(minimap) : null;
+      const edgePath = document.querySelector('.react-flow__edge-path');
+      const edgeStroke = edgePath ? over(rgba(getComputedStyle(edgePath).stroke), flowBg) : null;
+      return {
+        darkClass: flow?.classList.contains('dark') ?? false,
+        lightClass: flow?.classList.contains('light') ?? false,
+        flowBg,
+        flowBgLum: lum(flowBg),
+        buttons,
+        minimapBgLum: minimapBg ? lum(minimapBg) : null,
+        edgeRatio: edgeStroke ? ratio(edgeStroke, flowBg) : null,
+      };
+    })()`);
+
+  // 18a. Light mode canvas chrome contrast baseline (#184).
+  await page.assertContrast('.react-flow__attribution', 'MindMap attribution (Light)');
+  const lightChrome = await probeCanvasChrome();
+  assert(
+    lightChrome.lightClass &&
+      !lightChrome.darkClass &&
+      lightChrome.buttons.length >= 3 &&
+      lightChrome.buttons.every((b) => b.iconRatio >= 3) &&
+      lightChrome.edgeRatio !== null &&
+      lightChrome.edgeRatio >= 3,
+    `Light mode MindMap chrome contrast failed: ${JSON.stringify(lightChrome)}`,
+  );
+
+  // 18b. Emulated system Dark Mode canvas chrome (#184).
+  await page.emulateMedia([{ name: 'prefers-color-scheme', value: 'dark' }]);
+  try {
+    await page.waitFor(
+      `document.querySelector('.react-flow')?.classList.contains('dark')`,
+      'ReactFlow to switch to dark mode under prefers-color-scheme: dark',
+    );
+    await page.assertContrast('.react-flow__attribution', 'MindMap attribution (Dark)');
+    await page.assertContrast(CARD_NODE, 'MindMap cards (Dark)');
+    const darkChrome = await probeCanvasChrome();
+    assert(
+      darkChrome.darkClass &&
+        darkChrome.flowBgLum < 0.05 &&
+        darkChrome.minimapBgLum !== null &&
+        darkChrome.minimapBgLum < 0.1 &&
+        darkChrome.buttons.length >= 3 &&
+        darkChrome.buttons.every(
+          (b) => b.bgLum < 0.15 && b.bgLum > darkChrome.flowBgLum && b.iconRatio >= 3,
+        ) &&
+        darkChrome.edgeRatio !== null &&
+        darkChrome.edgeRatio >= 3,
+      `Dark mode MindMap chrome failed contrast or surface checks: ${JSON.stringify(darkChrome)}`,
+    );
+  } finally {
+    await page.emulateMedia([{ name: 'prefers-color-scheme', value: 'light' }]);
+    await page.waitFor(
+      `document.querySelector('.react-flow')?.classList.contains('light')`,
+      'ReactFlow to return to light mode',
+    );
+  }
+
+  // 18c. Accessible names and keyboard descriptions on cards and links (#185).
+  const a11yReport = await page.evaluate(`(() => {
+    const cards = [...document.querySelectorAll(${JSON.stringify(CARD_NODE)})];
+    const nestedCard = cards.find((n) => n.textContent?.includes('Filler line 013'));
+    const edges = [...document.querySelectorAll('.react-flow__edge')];
+    const nestingEdge = edges.find((e) =>
+      e.getAttribute('aria-label') === '‘Filler line 013’ nested under ‘Filler line 011’',
+    );
+    const nodeDescId = nestedCard?.getAttribute('aria-describedby') ?? null;
+    const edgeDescId = nestingEdge?.getAttribute('aria-describedby') ?? null;
+    return {
+      cardId: nestedCard?.dataset.id ?? null,
+      cardLabel: nestedCard?.getAttribute('aria-label') ?? null,
+      cardDesc: nodeDescId ? document.getElementById(nodeDescId)?.textContent ?? null : null,
+      edgeLabel: nestingEdge?.getAttribute('aria-label') ?? null,
+      edgeDesc: edgeDescId ? document.getElementById(edgeDescId)?.textContent ?? null : null,
+      unnamedCards: cards.filter((n) => !(n.getAttribute('aria-label') ?? '').trim()).length,
+      idNamedEdges: edges.filter((e) => (e.getAttribute('aria-label') ?? '').startsWith('Edge from ')).length,
+    };
+  })()`);
+  assert(
+    a11yReport.unnamedCards === 0 &&
+      a11yReport.idNamedEdges === 0 &&
+      Boolean(a11yReport.cardLabel?.startsWith('Card: Filler line 013')) &&
+      Boolean(a11yReport.cardLabel?.includes('from sample · Line')) &&
+      Boolean(a11yReport.cardLabel?.includes('nested under ‘Filler line 011’')) &&
+      !a11yReport.cardLabel?.includes(a11yReport.cardId) &&
+      a11yReport.edgeLabel === '‘Filler line 013’ nested under ‘Filler line 011’' &&
+      Boolean(a11yReport.cardDesc?.includes('to edit card')) &&
+      Boolean(
+        a11yReport.cardDesc?.includes(
+          'Space to select this card and make it the target for the next excerpt',
+        ),
+      ) &&
+      Boolean(a11yReport.cardDesc?.includes('Once selected, use the arrow keys to move it')) &&
+      Boolean(a11yReport.cardDesc?.includes('to delete it')) &&
+      Boolean(a11yReport.edgeDesc?.includes('to select this link')) &&
+      Boolean(a11yReport.edgeDesc?.includes('to remove it')),
+    `unexpected MindMap accessibility report: ${JSON.stringify(a11yReport)}`,
+  );
+
+  // 18c-2. Follow the spoken instructions from an unselected card: ArrowDown alone does
+  // nothing, Space selects the card and makes it the excerpt target, and ArrowDown then moves it (#185).
+  await panCardIntoView('Filler line 010');
+  await waitForViewportSettled();
+  await page.evaluate(`document.querySelector('.react-flow__pane')?.click()`);
+  await page.waitFor(
+    `document.querySelector('[data-testid="excerpt-button"]')?.getAttribute('aria-label') === 'Excerpt to MindMap'`,
+    'selection and nesting target cleared before unselected card keyboard check',
+  );
+  const unselectedCard = await page.evaluate(cardByText('Filler line 010'));
+  assert(
+    unselectedCard && !unselectedCard.selected,
+    'Filler line 010 should start unselected before checking keyboard instructions',
+  );
+  const parseTranslate = (transform) => {
+    const match = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(transform ?? '');
+    assert(match, `unexpected transform: ${transform}`);
+    return { x: Number(match[1]), y: Number(match[2]) };
+  };
+  const unselectedStart = parseTranslate(unselectedCard.transform);
+  await page.evaluate(
+    `document.querySelector('.react-flow__node[data-id="${unselectedCard.id}"]')?.focus()`,
+  );
+  await page.press('ArrowDown');
+  await waitTwoFrames();
+  const afterUnselectedArrow = parseTranslate(
+    (await page.evaluate(cardByText('Filler line 010'))).transform,
+  );
+  assert(
+    Math.round(afterUnselectedArrow.x) === Math.round(unselectedStart.x) &&
+      Math.round(afterUnselectedArrow.y) === Math.round(unselectedStart.y),
+    `ArrowDown on an unselected card must not move it: ${JSON.stringify({ unselectedStart, afterUnselectedArrow })}`,
+  );
+  await page.press(' ', 'Space');
+  await page.waitFor(
+    `(() => {
+      const card = (${cardByText('Filler line 010')});
+      const btn = document.querySelector('[data-testid="excerpt-button"]');
+      return card?.selected && btn?.getAttribute('aria-label') === 'Excerpt under ‘Filler line 010’';
+    })()`,
+    'Space to select the focused card and set it as excerpt target',
+  );
+  await page.press('ArrowDown');
+  await page.waitFor(
+    `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(unselectedCard.transform)}`,
+    'ArrowDown to move the card once selected via Space',
+  );
+  const afterSelectedArrow = parseTranslate(
+    (await page.evaluate(cardByText('Filler line 010'))).transform,
+  );
+  assert(
+    Math.round(afterSelectedArrow.x) === Math.round(unselectedStart.x) &&
+      Math.round(afterSelectedArrow.y) === Math.round(unselectedStart.y + 5),
+    `expected ArrowDown after Space to move card by +5y, got ${JSON.stringify({ unselectedStart, afterSelectedArrow })}`,
+  );
+  // Wait for that move's debounced write to settle before section 18d's write-count assertions.
+  await new Promise((done) => setTimeout(done, 400));
+
+  // 18d. Keyboard arrow movement persists via memory backend, coalesces bursts,
+  // preserves unsaved keyboard moves if close happens mid-drag, keeps drag-after-key as one write,
+  // and awaits delayed in-flight writes before close resolves (#182).
+  const arrowTarget = await page.evaluate(cardByText('Filler line 010'));
+  assert(arrowTarget && arrowTarget.selected, 'Filler line 010 should be selected before 18d');
+  await page.evaluate(
+    `document.querySelector('.react-flow__node[data-id="${arrowTarget.id}"]')?.focus()`,
+  );
+
+  const startCoords = parseTranslate(arrowTarget.transform);
+  const writesBeforeBurst = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+
+  // Burst: 4x ArrowDown (+20y) + 1x Shift+ArrowRight (+20x) -> 1 coalesced write.
+  const SHIFT = 8;
+  await page.press('ArrowDown');
+  await page.press('ArrowDown');
+  await page.press('ArrowDown');
+  await page.press('ArrowDown');
+  await page.press('ArrowRight', 'ArrowRight', SHIFT);
+
+  await page.waitFor(
+    `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBeforeBurst + 1}`,
+    'debounced updateNodeLayout write after arrow-key burst',
+  );
+  // Allow an extra debounce interval to verify no duplicate write occurs.
+  await new Promise((done) => setTimeout(done, 400));
+  const burstWrites = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeBurst})`,
+  );
+  assert(
+    burstWrites.length === 1 &&
+      burstWrites[0].nodeId === arrowTarget.id &&
+      Math.round(burstWrites[0].posX) === Math.round(startCoords.x + 20) &&
+      Math.round(burstWrites[0].posY) === Math.round(startCoords.y + 20),
+    `expected 1 coalesced write at (+20, +20), got: ${JSON.stringify({ startCoords, burstWrites })}`,
+  );
+
+  // Path 1a (regression): Drag with real mouse, keep mouse button pressed, press ArrowDown,
+  // and wait past the 300 ms debounce: must produce 0 writes before release, stay at the dragged
+  // coordinates, and write the final dragged position exactly once on release.
+  const beforeDragArrowCard = await page.evaluate(cardByText('Filler line 010'));
+  const writesBeforeDragArrow = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+  await page.evaluate(
+    `document.querySelector('.react-flow__node[data-id="${arrowTarget.id}"]')?.focus()`,
+  );
+  const dragArrowStart = beforeDragArrowCard.center;
+  const dragArrowMid = { x: dragArrowStart.x + 24, y: dragArrowStart.y + 12 };
+  await page.mouse('mouseMoved', dragArrowStart.x, dragArrowStart.y);
+  await page.mouse('mousePressed', dragArrowStart.x, dragArrowStart.y);
+  for (let step = 1; step <= 4; step += 1) {
+    await page.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: dragArrowStart.x + ((dragArrowMid.x - dragArrowStart.x) * step) / 4,
+      y: dragArrowStart.y + ((dragArrowMid.y - dragArrowStart.y) * step) / 4,
+      button: 'left',
+      buttons: 1,
+    });
+  }
+  await page.waitFor(
+    `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(beforeDragArrowCard.transform)}`,
+    'real mouse drag to move card before mid-drag ArrowDown',
+  );
+  const draggedBeforeArrow = parseTranslate(
+    (await page.evaluate(cardByText('Filler line 010'))).transform,
+  );
+  await page.press('ArrowDown');
+  await new Promise((done) => setTimeout(done, 400));
+  const draggedAfterArrow = parseTranslate(
+    (await page.evaluate(cardByText('Filler line 010'))).transform,
+  );
+  const writesDuringHeldDrag = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeDragArrow})`,
+  );
+  assert(
+    writesDuringHeldDrag.length === 0 &&
+      Math.round(draggedAfterArrow.x) === Math.round(draggedBeforeArrow.x) &&
+      Math.round(draggedAfterArrow.y) === Math.round(draggedBeforeArrow.y),
+    `expected ArrowDown during held drag to keep position and write 0 times before release, got ${JSON.stringify({ draggedBeforeArrow, draggedAfterArrow, writesDuringHeldDrag })}`,
+  );
+  await page.mouse('mouseReleased', dragArrowMid.x, dragArrowMid.y);
+  await page.waitFor(
+    `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBeforeDragArrow + 1}`,
+    'releasing held drag after mid-drag ArrowDown to write once',
+  );
+  await new Promise((done) => setTimeout(done, 400));
+  const writesAfterHeldDragRelease = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeDragArrow})`,
+  );
+  assert(
+    writesAfterHeldDragRelease.length === 1 &&
+      writesAfterHeldDragRelease[0].nodeId === arrowTarget.id &&
+      Math.round(writesAfterHeldDragRelease[0].posX) === Math.round(draggedBeforeArrow.x) &&
+      Math.round(writesAfterHeldDragRelease[0].posY) === Math.round(draggedBeforeArrow.y),
+    `expected exactly 1 final write on release after mid-drag ArrowDown, got ${JSON.stringify({ draggedBeforeArrow, writesAfterHeldDragRelease })}`,
+  );
+
+  // Path 1b (regression): Keyboard move followed by real mouse drag within 300 ms, pressing
+  // ArrowDown while still dragging, waiting past debounce (0 writes), and closing BEFORE mouse
+  // release must persist ONLY the last completed keyboard-move coordinates before drag started.
+  const beforeMidDragCard = await page.evaluate(cardByText('Filler line 010'));
+  const beforeMidDragCoords = parseTranslate(beforeMidDragCard.transform);
+  const writesBeforeMidDrag = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+  await page.evaluate(
+    `document.querySelector('.react-flow__node[data-id="${arrowTarget.id}"]')?.focus()`,
+  );
+  await page.press('ArrowRight');
+  await page.waitFor(
+    `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(beforeMidDragCard.transform)}`,
+    'ArrowRight before mid-drag close check',
+  );
+  const afterKeyCard = await page.evaluate(cardByText('Filler line 010'));
+  const dragStart = afterKeyCard.center;
+  const dragMid = { x: dragStart.x + 24, y: dragStart.y + 12 };
+  await page.mouse('mouseMoved', dragStart.x, dragStart.y);
+  await page.mouse('mousePressed', dragStart.x, dragStart.y);
+  for (let step = 1; step <= 4; step += 1) {
+    await page.cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: dragStart.x + ((dragMid.x - dragStart.x) * step) / 4,
+      y: dragStart.y + ((dragMid.y - dragStart.y) * step) / 4,
+      button: 'left',
+      buttons: 1,
+    });
+  }
+  await page.waitFor(
+    `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(afterKeyCard.transform)}`,
+    'real mouse drag to move card before release',
+  );
+  await page.press('ArrowDown');
+  await new Promise((done) => setTimeout(done, 400));
+  assert(
+    (await page.evaluate(`window.__synapsePreview.getNodeLayoutWrites().length`)) ===
+      writesBeforeMidDrag,
+    'expected 0 writes while dragging even after pressing ArrowDown and waiting past debounce',
+  );
+  await page.evaluate(`window.__synapsePreview.triggerBeforeClose()`);
+  const midDragCloseWrites = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeMidDrag})`,
+  );
+  assert(
+    midDragCloseWrites.length === 1 &&
+      midDragCloseWrites[0].nodeId === arrowTarget.id &&
+      Math.round(midDragCloseWrites[0].posX) === Math.round(beforeMidDragCoords.x + 5) &&
+      Math.round(midDragCloseWrites[0].posY) === Math.round(beforeMidDragCoords.y),
+    `expected mid-drag close to flush last keyboard move (+5, 0), got ${JSON.stringify({ beforeMidDragCoords, midDragCloseWrites })}`,
+  );
+  // Release mouse cleanly to finish the drag before the next check.
+  await page.mouse('mouseReleased', dragMid.x, dragMid.y);
+  await page.waitFor(
+    `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBeforeMidDrag + 2}`,
+    'mouse release after mid-drag close check to commit final drag position',
+  );
+
+  // Path 2 (regression): Keyboard move followed by real mouse drag within 300 ms and normal release
+  // writes ONCE with the final dragged position, with no duplicate after the debounce window.
+  const beforeKeyThenDragCard = await page.evaluate(cardByText('Filler line 010'));
+  const writesBeforeKeyThenDrag = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+  await page.evaluate(
+    `document.querySelector('.react-flow__node[data-id="${arrowTarget.id}"]')?.focus()`,
+  );
+  await page.press('ArrowRight');
+  await page.waitFor(
+    `(${cardByText('Filler line 010')})?.transform !== ${JSON.stringify(beforeKeyThenDragCard.transform)}`,
+    'ArrowRight before normal drag-release check',
+  );
+  const afterKeyBeforeDrag = await page.evaluate(cardByText('Filler line 010'));
+  await page.drag(afterKeyBeforeDrag.center, {
+    x: afterKeyBeforeDrag.center.x + 28,
+    y: afterKeyBeforeDrag.center.y + 14,
+  });
+  await page.waitFor(
+    `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBeforeKeyThenDrag + 1}`,
+    'drag release after keyboard move to write final position once',
+  );
+  const afterKeyThenDragCoords = parseTranslate(
+    (await page.evaluate(cardByText('Filler line 010'))).transform,
+  );
+  await new Promise((done) => setTimeout(done, 400));
+  const keyThenDragWrites = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeKeyThenDrag})`,
+  );
+  assert(
+    keyThenDragWrites.length === 1 &&
+      keyThenDragWrites[0].nodeId === arrowTarget.id &&
+      Math.round(keyThenDragWrites[0].posX) === Math.round(afterKeyThenDragCoords.x) &&
+      Math.round(keyThenDragWrites[0].posY) === Math.round(afterKeyThenDragCoords.y),
+    `expected keyboard-then-drag release to write once with final dragged position, got ${JSON.stringify({ afterKeyThenDragCoords, keyThenDragWrites })}`,
+  );
+
+  // Path 3 (regression): When an earlier layout write is still in-flight (delayed backend),
+  // triggerBeforeClose waits until both the in-flight write and the final position write complete.
+  const beforeDelayedCard = await page.evaluate(cardByText('Filler line 010'));
+  const beforeDelayedCoords = parseTranslate(beforeDelayedCard.transform);
+  const writesBeforeDelayed = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().length`,
+  );
+  await page.evaluate(`(() => {
+    window.__synapsePreview.pauseNextNodeLayoutWrite();
+    document.querySelector('.react-flow__node[data-id="${arrowTarget.id}"]')?.focus();
+  })()`);
+  await page.press('ArrowUp');
+  await page.waitFor(
+    `window.__synapsePreview.hasPausedNodeLayoutWrite()`,
+    'first debounced keyboard move write to pause in-flight',
+  );
+  // Queue a second move while the first write is still unresolved, then initiate close.
+  await page.press('ArrowLeft');
+  await page.evaluate(`(() => {
+    window.__closeResolved = false;
+    window.__closePromise = window.__synapsePreview.triggerBeforeClose().then(() => {
+      window.__closeResolved = true;
+    });
+  })()`);
+  await new Promise((done) => setTimeout(done, 120));
+  assert(
+    !(await page.evaluate(`window.__closeResolved`)),
+    'before-close flush must wait while an earlier layout write is still in-flight',
+  );
+  await page.evaluate(`window.__synapsePreview.releasePausedNodeLayoutWrite()`);
+  await page.waitFor(
+    `window.__closeResolved === true`,
+    'before-close flush to resolve once in-flight and final layout writes finish',
+  );
+  const delayedWrites = await page.evaluate(
+    `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBeforeDelayed})`,
+  );
+  assert(
+    delayedWrites.length === 2 &&
+      delayedWrites[0].nodeId === arrowTarget.id &&
+      Math.round(delayedWrites[0].posX) === Math.round(beforeDelayedCoords.x) &&
+      Math.round(delayedWrites[0].posY) === Math.round(beforeDelayedCoords.y - 5) &&
+      delayedWrites[1].nodeId === arrowTarget.id &&
+      Math.round(delayedWrites[1].posX) === Math.round(beforeDelayedCoords.x - 5) &&
+      Math.round(delayedWrites[1].posY) === Math.round(beforeDelayedCoords.y - 5),
+    `expected delayed close flush to wait for both writes ending at (-5, -5), got ${JSON.stringify({ beforeDelayedCoords, delayedWrites })}`,
+  );
+  await page.evaluate(`delete window.__closeResolved; delete window.__closePromise;`);
+
+  // Path 4 (regression): Touch drag cancellation (`touchStart` -> `touchMove` -> `touchCancel`)
+  // and normal touch release (`touchStart` -> `touchMove` -> `touchEnd`) (#182).
+  // Enable Chromium touch emulation before creating a fresh card so d3-drag mounts touch listeners.
+  await page.cdp.send('Emulation.setTouchEmulationEnabled', {
+    enabled: true,
+    maxTouchPoints: 5,
+  });
+  try {
+    await page.evaluate(`document.querySelector('.react-flow__pane')?.click()`);
+    const countBeforeTouchCard = await page.evaluate(
+      `document.querySelectorAll(${JSON.stringify(CARD_NODE)}).length`,
+    );
+    await excerptAny('Arrival line 02', countBeforeTouchCard + 1);
+    await waitForViewportSettled();
+    await panCardIntoView('Arrival line 02');
+    await waitForViewportSettled();
+
+    const touchCard = await page.evaluate(cardByText('Arrival line 02'));
+    assert(touchCard, 'Arrival line 02 card should be visible for touch drag checks');
+    const touchCardId = touchCard.id;
+
+    const dispatchTouchDrag = async (from, to, endType) => {
+      await page.cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchStart',
+        touchPoints: [{ x: from.x, y: from.y, id: 1 }],
+      });
+      const steps = 4;
+      for (let step = 1; step <= steps; step += 1) {
+        await page.cdp.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: [
+            {
+              x: from.x + ((to.x - from.x) * step) / steps,
+              y: from.y + ((to.y - from.y) * step) / steps,
+              id: 1,
+            },
+          ],
+        });
+      }
+      await page.waitFor(
+        `(() => {
+          const el = document.querySelector('.react-flow__node[data-id="${touchCardId}"]');
+          return el && el.style.transform !== ${JSON.stringify(from.transform)};
+        })()`,
+        `touchMove to drag card before ${endType}`,
+      );
+      await page.cdp.send('Input.dispatchTouchEvent', {
+        type: endType,
+        touchPoints: [],
+      });
+    };
+
+    // 4a. With a pending keyboard move (+5, 0), touchStart -> touchMove -> touchCancel restores
+    //     the card to (+5, 0) on screen and writes ONLY (+5, 0) once after debounce.
+    await page.evaluate(
+      `document.querySelector('.react-flow__node[data-id="${touchCardId}"]')?.focus()`,
+    );
+    const beforeTouchCancelWithKey = await page.evaluate(cardByText('Arrival line 02'));
+    const startWithKey = parseTranslate(beforeTouchCancelWithKey.transform);
+    const writesBefore4a = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().length`,
+    );
+    await page.press('ArrowRight');
+    await page.waitFor(
+      `(${cardByText('Arrival line 02')})?.transform !== ${JSON.stringify(beforeTouchCancelWithKey.transform)}`,
+      'ArrowRight before touchCancel check',
+    );
+    const afterKey4a = await page.evaluate(cardByText('Arrival line 02'));
+    await dispatchTouchDrag(
+      { ...afterKey4a.center, transform: afterKey4a.transform },
+      { x: afterKey4a.center.x + 18, y: afterKey4a.center.y + 10 },
+      'touchCancel',
+    );
+    await page.waitFor(
+      `(${cardByText('Arrival line 02')})?.transform === ${JSON.stringify(afterKey4a.transform)}`,
+      'touchCancel to restore card to pre-drag keyboard-move coordinates',
+    );
+    await page.waitFor(
+      `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBefore4a + 1}`,
+      'debounced keyboard move to persist after touchCancel',
+    );
+    await new Promise((done) => setTimeout(done, 400));
+    const writes4a = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4a})`,
+    );
+    assert(
+      writes4a.length === 1 &&
+        writes4a[0].nodeId === touchCardId &&
+        Math.round(writes4a[0].posX) === Math.round(startWithKey.x + 5) &&
+        Math.round(writes4a[0].posY) === Math.round(startWithKey.y),
+      `expected touchCancel with pending keyboard move to persist ONLY (+5, 0), got ${JSON.stringify({ startWithKey, writes4a })}`,
+    );
+
+    // 4b. With NO pending keyboard move, touchStart -> touchMove -> touchCancel restores the card,
+    //     produces 0 layout writes, and leaves subsequent arrow-key moves working.
+    const before4b = await page.evaluate(cardByText('Arrival line 02'));
+    const coords4b = parseTranslate(before4b.transform);
+    const writesBefore4b = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().length`,
+    );
+    await dispatchTouchDrag(
+      { ...before4b.center, transform: before4b.transform },
+      { x: before4b.center.x + 18, y: before4b.center.y + 10 },
+      'touchCancel',
+    );
+    await page.waitFor(
+      `(${cardByText('Arrival line 02')})?.transform === ${JSON.stringify(before4b.transform)}`,
+      'touchCancel without pending keyboard move to restore pre-drag coordinates',
+    );
+    await new Promise((done) => setTimeout(done, 400));
+    const writes4bCancel = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4b})`,
+    );
+    assert(
+      writes4bCancel.length === 0,
+      `expected 0 layout writes after touchCancel without pending keyboard move, got ${JSON.stringify(writes4bCancel)}`,
+    );
+    await page.evaluate(
+      `document.querySelector('.react-flow__node[data-id="${touchCardId}"]')?.focus()`,
+    );
+    await page.press('ArrowDown');
+    await page.waitFor(
+      `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBefore4b + 1}`,
+      'arrow-key move after touchCancel to work and persist',
+    );
+    const after4bArrow = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4b})`,
+    );
+    assert(
+      after4bArrow.length === 1 &&
+        after4bArrow[0].nodeId === touchCardId &&
+        Math.round(after4bArrow[0].posX) === Math.round(coords4b.x) &&
+        Math.round(after4bArrow[0].posY) === Math.round(coords4b.y + 5),
+      `expected ArrowDown after touchCancel to save (0, +5), got ${JSON.stringify({ coords4b, after4bArrow })}`,
+    );
+
+    // 4c. Normal touch release (`touchStart` -> `touchMove` -> `touchEnd`) commits final position once.
+    const before4c = await page.evaluate(cardByText('Arrival line 02'));
+    const writesBefore4c = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().length`,
+    );
+    await dispatchTouchDrag(
+      { ...before4c.center, transform: before4c.transform },
+      { x: before4c.center.x + 22, y: before4c.center.y + 14 },
+      'touchEnd',
+    );
+    await page.waitFor(
+      `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBefore4c + 1}`,
+      'touchEnd to persist final dragged coordinates',
+    );
+    const coords4cAfter = parseTranslate(
+      (await page.evaluate(cardByText('Arrival line 02'))).transform,
+    );
+    await new Promise((done) => setTimeout(done, 400));
+    const writes4c = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4c})`,
+    );
+    assert(
+      writes4c.length === 1 &&
+        writes4c[0].nodeId === touchCardId &&
+        Math.round(writes4c[0].posX) === Math.round(coords4cAfter.x) &&
+        Math.round(writes4c[0].posY) === Math.round(coords4cAfter.y),
+      `expected touchEnd to write final position exactly once, got ${JSON.stringify({ coords4cAfter, writes4c })}`,
+    );
+
+    // 4d. Dual-touch regression (#182): Touch 1 drags card and stays down while Touch 2
+    //     taps and releases outside (`changedTouches: [2], touches: [1]`). Card must NOT
+    //     snap back, arrow keys must stay blocked with 0 writes past 300 ms, and releasing
+    //     Touch 1 must commit the final dragged coordinates once.
+    const before4d = await page.evaluate(cardByText('Arrival line 02'));
+    const writesBefore4d = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().length`,
+    );
+    const outsidePoint = await page.evaluate(`(() => {
+      const pane = document.querySelector('.react-flow')?.getBoundingClientRect();
+      return { x: pane.right - 24, y: pane.top + 24 };
+    })()`);
+    const t1Start = before4d.center;
+    const t1End = { x: t1Start.x + 18, y: t1Start.y + 10 };
+    await page.cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x: t1Start.x, y: t1Start.y, id: 1 }],
+    });
+    for (let step = 1; step <= 4; step += 1) {
+      await page.cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [
+          {
+            x: t1Start.x + ((t1End.x - t1Start.x) * step) / 4,
+            y: t1Start.y + ((t1End.y - t1Start.y) * step) / 4,
+            id: 1,
+          },
+        ],
+      });
+    }
+    await page.waitFor(
+      `(${cardByText('Arrival line 02')})?.transform !== ${JSON.stringify(before4d.transform)}`,
+      'touch 1 to drag card before secondary touch tap',
+    );
+    const dragged4d = parseTranslate(
+      (await page.evaluate(cardByText('Arrival line 02'))).transform,
+    );
+
+    // Secondary touch 2 taps outside card and releases while touch 1 stays held.
+    await page.cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [
+        { x: t1End.x, y: t1End.y, id: 1 },
+        { x: outsidePoint.x, y: outsidePoint.y, id: 2 },
+      ],
+    });
+    await page.cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [{ x: outsidePoint.x, y: outsidePoint.y, id: 2 }],
+    });
+
+    await waitTwoFrames();
+    const afterTouch2Release = parseTranslate(
+      (await page.evaluate(cardByText('Arrival line 02'))).transform,
+    );
+    assert(
+      Math.round(afterTouch2Release.x) === Math.round(dragged4d.x) &&
+        Math.round(afterTouch2Release.y) === Math.round(dragged4d.y),
+      `releasing unrelated touch 2 must not snap dragged card back: ${JSON.stringify({ dragged4d, afterTouch2Release })}`,
+    );
+
+    // Arrow key must remain intercepted while touch 1 is still down, with 0 writes past 300 ms.
+    await page.evaluate(
+      `document.querySelector('.react-flow__node[data-id="${touchCardId}"]')?.focus()`,
+    );
+    await page.press('ArrowRight');
+    await new Promise((done) => setTimeout(done, 400));
+    const afterArrowDuringTouch1 = parseTranslate(
+      (await page.evaluate(cardByText('Arrival line 02'))).transform,
+    );
+    const writesDuringTouch1 = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4d})`,
+    );
+    assert(
+      writesDuringTouch1.length === 0 &&
+        Math.round(afterArrowDuringTouch1.x) === Math.round(dragged4d.x) &&
+        Math.round(afterArrowDuringTouch1.y) === Math.round(dragged4d.y),
+      `expected arrow key to stay blocked with 0 writes while touch 1 is held, got ${JSON.stringify({ dragged4d, afterArrowDuringTouch1, writesDuringTouch1 })}`,
+    );
+
+    // Release touch 1 -> commits final dragged position once.
+    await page.cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchEnd',
+      touchPoints: [{ x: t1End.x, y: t1End.y, id: 1 }],
+    });
+    await page.waitFor(
+      `window.__synapsePreview.getNodeLayoutWrites().length === ${writesBefore4d + 1}`,
+      'touch 1 release to persist final dragged coordinates',
+    );
+    await new Promise((done) => setTimeout(done, 400));
+    const writes4d = await page.evaluate(
+      `window.__synapsePreview.getNodeLayoutWrites().slice(${writesBefore4d})`,
+    );
+    assert(
+      writes4d.length === 1 &&
+        writes4d[0].nodeId === touchCardId &&
+        Math.round(writes4d[0].posX) === Math.round(dragged4d.x) &&
+        Math.round(writes4d[0].posY) === Math.round(dragged4d.y),
+      `expected touch 1 release to write final dragged position once, got ${JSON.stringify({ dragged4d, writes4d })}`,
+    );
+  } finally {
+    await page.cdp.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  }
 }
