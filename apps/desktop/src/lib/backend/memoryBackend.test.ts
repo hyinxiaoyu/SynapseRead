@@ -62,11 +62,11 @@ describe('memory backend annotation delete and restore', () => {
 describe('memory backend Markdown registration', () => {
   it('registers Markdown as readable text that takes TXT excerpts', async () => {
     const backend = createMemoryBackend();
-    const { documents, error } = await backend.dropFiles([
+    const { documents, errors } = await backend.dropFiles([
       new File(['# Notes\n\nSome text.\n'], 'README.md', { type: 'text/markdown' }),
       new File(['# Plan\n'], 'plan.markdown', { type: 'text/markdown' }),
     ]);
-    expect(error).toBeNull();
+    expect(errors).toEqual([]);
     expect(documents.map((document) => document.format)).toEqual(['txt', 'txt']);
 
     const notebook = await backend.createNotebook('Study');
@@ -84,14 +84,24 @@ describe('memory backend Markdown registration', () => {
     expect(created.annotation.anchor.format).toBe('txt');
   });
 
-  it('declines an unsupported file without registering it', async () => {
+  it('declines unsupported files and directories while opening valid files in the same drop (#130)', async () => {
     const backend = createMemoryBackend();
-    const { documents, error } = await backend.dropFiles([
-      new File(['x'], 'sheet.docx', { type: 'application/octet-stream' }),
+    const { documents, errors } = await backend.dropFiles(
+      [
+        new File(['x'], 'Thesis draft.docx', { type: 'application/octet-stream' }),
+        new File([], 'Course readings'),
+        new File(['y'], 'Scan.jpg', { type: 'image/jpeg' }),
+        new File(['hello'], 'Field notes.txt', { type: 'text/plain' }),
+      ],
+      { directoryIndices: new Set([1]) },
+    );
+    expect(documents.map((d) => d.title)).toEqual(['Field notes']);
+    expect(errors.map(({ fileName, code }) => ({ fileName, code }))).toEqual([
+      { fileName: 'Thesis draft.docx', code: 'unsupported_format' },
+      { fileName: 'Course readings', code: 'is_directory' },
+      { fileName: 'Scan.jpg', code: 'unsupported_format' },
     ]);
-    expect(documents).toEqual([]);
-    expect(error?.code).toBe('unsupported_format');
-    expect(await backend.listDocuments()).toEqual([]);
+    expect((await backend.listDocuments()).map((d) => d.title)).toEqual(['Field notes']);
   });
 });
 
@@ -1373,7 +1383,7 @@ describe('memory backend card delete and restore', () => {
     const dropped = await backend.dropFiles([
       new File([bytes], 'study.txt', { type: 'text/plain' }),
     ]);
-    expect(dropped.error).toBeNull();
+    expect(dropped.errors).toEqual([]);
     expect(dropped.documents[0]?.hiddenFromRecentAt).toBeNull();
 
     // Hiding again, then relinking clears the flag.

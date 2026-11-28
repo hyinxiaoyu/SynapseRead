@@ -2007,6 +2007,9 @@ impl Database {
 /// Validates `path`'s extension and hashes its bytes without touching the
 /// database, so callers can run file I/O outside any database lock.
 pub fn hash_document_for_registration(path: &Path) -> CoreResult<String> {
+    if std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()) {
+        return Err(CoreError::IsDirectory(path.display().to_string()));
+    }
     let _format = document_format_for_path(path)?;
     hash_file(path)
 }
@@ -2145,6 +2148,9 @@ fn ensure_existing_regular_file(path: &Path) -> CoreResult<()> {
             CoreError::Io(err)
         }
     })?;
+    if meta.is_dir() {
+        return Err(CoreError::IsDirectory(path.display().to_string()));
+    }
     if !meta.is_file() {
         return Err(CoreError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -5814,6 +5820,41 @@ mod tests {
             verified.current_file_hash.as_deref(),
             Some(second_hash.as_str())
         );
+    }
+
+    #[test]
+    fn registration_rejects_directories_with_is_directory_code() {
+        use crate::domain::{DroppedDocumentError, DroppedDocumentsPayload};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(&dir.path().join("dirs.sqlite3")).unwrap();
+
+        let plain_folder = dir.path().join("CourseNotes");
+        let pdf_named_folder = dir.path().join("LooksLikeBook.pdf");
+        std::fs::create_dir(&plain_folder).unwrap();
+        std::fs::create_dir(&pdf_named_folder).unwrap();
+
+        let plain_err = hash_document_for_registration(&plain_folder).unwrap_err();
+        assert!(matches!(plain_err, CoreError::IsDirectory(_)));
+        assert_eq!(plain_err.code(), "is_directory");
+
+        let pdf_err = db.register_document(&pdf_named_folder).unwrap_err();
+        assert!(matches!(pdf_err, CoreError::IsDirectory(_)));
+        assert_eq!(pdf_err.code(), "is_directory");
+
+        let payload = DroppedDocumentsPayload {
+            documents: Vec::new(),
+            errors: vec![DroppedDocumentError {
+                file_name: "CourseNotes".to_owned(),
+                code: "is_directory".to_owned(),
+                message: plain_err.to_string(),
+            }],
+        };
+        let encoded = serde_json::to_value(&payload).unwrap();
+        assert_eq!(encoded["errors"][0]["fileName"], "CourseNotes");
+        assert_eq!(encoded["errors"][0]["code"], "is_directory");
+        let decoded: DroppedDocumentsPayload = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, payload);
     }
 
     #[test]

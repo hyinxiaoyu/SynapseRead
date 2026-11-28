@@ -1722,4 +1722,164 @@ describe('StudyWorkspace', () => {
     const expectedNode = useStudySyncStore.getState().nodes.find((n) => n.cardId === card.id)!;
     expect(useStudySyncStore.getState().selectedNodeId).toBe(expectedNode.id);
   });
+
+  describe('batch file drop failure messages (#130)', () => {
+    it('opens valid files, shows a dismissible notice naming skipped unsupported files, and announces to AT', async () => {
+      await renderReady();
+      const main = screen.getByRole('main');
+      const liveRegion = screen.getByTestId('drop-status');
+      expect(liveRegion).toHaveAttribute('role', 'status');
+      expect(liveRegion).toHaveTextContent('');
+
+      const docx = new File(['doc'], 'Thesis draft.docx', { type: 'application/octet-stream' });
+      const xlsx = new File(['sheet'], 'Reading log.xlsx', { type: 'application/octet-stream' });
+      const jpg = new File(['img'], 'Scan.jpg', { type: 'image/jpeg' });
+      const txt = new File(['Field notes body'], 'Field notes.txt', { type: 'text/plain' });
+
+      fireEvent.drop(main, {
+        dataTransfer: { files: [docx, xlsx, jpg, txt], types: ['Files'] },
+      });
+
+      expect(await screen.findByRole('tab', { name: 'Field notes' })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      );
+      // Partial drop failure uses a dismissible notice, not the persistent error banner.
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+      const notice = await screen.findByTestId('drop-failure-notice');
+      expect(notice).toHaveAttribute('data-tone', 'warning');
+      expect(notice).toHaveTextContent(
+        "Couldn't open 3 files: Thesis draft.docx, Reading log.xlsx, Scan.jpg. SynapseRead opens PDF, EPUB, TXT, and Markdown.",
+      );
+      expect(liveRegion).toHaveTextContent(
+        "Couldn't open 3 files: Thesis draft.docx, Reading log.xlsx, Scan.jpg. SynapseRead opens PDF, EPUB, TXT, and Markdown.",
+      );
+
+      fireEvent.click(within(notice).getByRole('button', { name: 'Close notice' }));
+      expect(screen.queryByTestId('drop-failure-notice')).not.toBeInTheDocument();
+    });
+
+    it('summarizes more than three unsupported files with (+k more)', async () => {
+      await renderReady();
+      const main = screen.getByRole('main');
+      const valid = new File(['notes'], 'Notes.txt', { type: 'text/plain' });
+      const badFiles = ['a.docx', 'b.xlsx', 'c.jpg', 'd.pptx', 'e.png'].map(
+        (name) => new File(['x'], name, { type: 'application/octet-stream' }),
+      );
+
+      fireEvent.drop(main, {
+        dataTransfer: { files: [...badFiles, valid], types: ['Files'] },
+      });
+
+      const notice = await screen.findByTestId('drop-failure-notice');
+      expect(notice).toHaveTextContent(
+        "Couldn't open 5 files: a.docx, b.xlsx, c.jpg (+2 more). SynapseRead opens PDF, EPUB, TXT, and Markdown.",
+      );
+    });
+
+    it('shows a dedicated folder message when a directory is dropped, never an empty format name', async () => {
+      await renderReady();
+      const main = screen.getByRole('main');
+      const folderFile = new File([], 'Course readings');
+      const folderItem = {
+        kind: 'file',
+        getAsFile: () => folderFile,
+        webkitGetAsEntry: () => ({ isDirectory: true, name: 'Course readings' }),
+      };
+
+      fireEvent.drop(main, {
+        dataTransfer: {
+          items: [folderItem],
+          files: [folderFile],
+          types: ['Files'],
+        },
+      });
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent(
+        "Couldn't open folder Course readings. Folders can't be opened; drop the files inside.",
+      );
+      expect(alert).not.toHaveTextContent(/unsupported document format/i);
+    });
+  });
+
+  describe('pane visibility width protection (#180)', () => {
+    it('gives hidden side pane width back to the reader and preserves saved widths across toggle sequences', async () => {
+      const offsetWidthSpy = vi
+        .spyOn(HTMLElement.prototype, 'offsetWidth', 'get')
+        .mockImplementation(function (this: HTMLElement) {
+          if (this.hasAttribute('data-panel')) return 480;
+          if (this.dataset.slot === 'resizable-panel-group') return 1440;
+          return 0;
+        });
+      const clientWidthSpy = vi
+        .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+        .mockImplementation(function (this: HTMLElement) {
+          return this.querySelector('[data-slot="resizable-panel-group"]') ? 1440 : 0;
+        });
+      try {
+        useStudySyncStore.getState().setPaneLayout({
+          mindMapOpen: true,
+          inspectorOpen: true,
+          mindMapSize: 42,
+          inspectorSize: 25,
+        });
+        await Promise.resolve();
+
+        const first = render(<StudyWorkspace />);
+        await screen.findByRole('region', { name: 'Document reader' });
+
+        const readWidths = () => ({
+          reader: Number.parseFloat(
+            (document.getElementById('reader') as HTMLElement).style.flexGrow || '0',
+          ),
+          mindmap: Number.parseFloat(
+            (document.getElementById('mindmap') as HTMLElement).style.flexGrow || '0',
+          ),
+          inspector: Number.parseFloat(
+            (document.getElementById('inspector') as HTMLElement).style.flexGrow || '0',
+          ),
+        });
+
+        expect(readWidths()).toEqual({ reader: 33, mindmap: 42, inspector: 25 });
+
+        // Hiding MindMap widens the reader and leaves the Inspector unchanged, without mutating saved sizes.
+        fireEvent.click(screen.getByRole('button', { name: 'Hide MindMap' }));
+        expect(readWidths()).toEqual({ reader: 75, mindmap: 0, inspector: 25 });
+        expect(useStudySyncStore.getState().paneLayout).toEqual({
+          mindMapOpen: false,
+          inspectorOpen: true,
+          mindMapSize: 42,
+          inspectorSize: 25,
+        });
+
+        // Hiding Inspector, then bringing both back restores the exact same widths.
+        fireEvent.click(screen.getByRole('button', { name: 'Hide inspector' }));
+        expect(readWidths()).toEqual({ reader: 100, mindmap: 0, inspector: 0 });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Show MindMap' }));
+        expect(readWidths()).toEqual({ reader: 58, mindmap: 42, inspector: 0 });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Show inspector' }));
+        expect(readWidths()).toEqual({ reader: 33, mindmap: 42, inspector: 25 });
+
+        // Hiding Inspector widens the reader and leaves MindMap unchanged.
+        fireEvent.click(screen.getByRole('button', { name: 'Hide inspector' }));
+        expect(readWidths()).toEqual({ reader: 58, mindmap: 42, inspector: 0 });
+        fireEvent.click(screen.getByRole('button', { name: 'Show inspector' }));
+        expect(readWidths()).toEqual({ reader: 33, mindmap: 42, inspector: 25 });
+
+        // Relaunch restores the exact same widths.
+        first.unmount();
+        useStudySyncStore.setState(initialState, true);
+        render(<StudyWorkspace />);
+        await screen.findByRole('region', { name: 'Document reader' });
+        expect(readWidths()).toEqual({ reader: 33, mindmap: 42, inspector: 25 });
+      } finally {
+        offsetWidthSpy.mockRestore();
+        clientWidthSpy.mockRestore();
+      }
+    });
+  });
 });

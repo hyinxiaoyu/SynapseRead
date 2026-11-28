@@ -19,6 +19,9 @@ pub enum CoreError {
     #[error("unsupported document format: {0}")]
     UnsupportedFormat(String),
 
+    #[error("directories cannot be opened as documents: {0}")]
+    IsDirectory(String),
+
     #[error("invalid anchor: {0}")]
     InvalidAnchor(String),
 
@@ -66,6 +69,7 @@ impl CoreError {
             Self::Json(_) => "json",
             Self::UnsupportedEncoding(_) => "unsupported_encoding",
             Self::UnsupportedFormat(_) => "unsupported_format",
+            Self::IsDirectory(_) => "is_directory",
             Self::InvalidAnchor(_) => "invalid_anchor",
             Self::InvalidCapture(_) => "invalid_capture",
             Self::InvalidGraph(_) => "invalid_graph",

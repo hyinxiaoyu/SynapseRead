@@ -546,15 +546,30 @@ describe('useStudySyncStore', () => {
       expect(state().activeDocumentId).toBe(firstId);
     });
 
-    it('reports an error when a dropped file has an unsupported extension', async () => {
-      const valid = new File(['hello'], 'notes.txt', { type: 'text/plain' });
-      const invalid = new File(['archive'], 'archive.zip', { type: 'application/zip' });
+    it('reports a dismissible notice for partial drop failures and an error when nothing opens (#130)', async () => {
+      const valid = new File(['hello'], 'Field notes.txt', { type: 'text/plain' });
+      const docx = new File(['doc'], 'Thesis draft.docx', { type: 'application/octet-stream' });
+      const jpg = new File(['img'], 'Scan.jpg', { type: 'image/jpeg' });
 
-      await state().dropFiles([valid, invalid]);
+      await state().dropFiles([docx, jpg, valid]);
 
-      expect(state().documents.map((d) => d.title)).toEqual(['notes']);
+      expect(state().documents.map((d) => d.title)).toEqual(['Field notes']);
       expect(state().openDocumentIds).toHaveLength(1);
-      expect(state().error).toMatch(/unsupported document format: zip/);
+      expect(state().error).toBeNull();
+      expect(state().dropNotice?.message).toBe(
+        "Couldn't open 2 files: Thesis draft.docx, Scan.jpg. SynapseRead opens PDF, EPUB, TXT, and Markdown.",
+      );
+
+      state().dismissDropNotice();
+      expect(state().dropNotice).toBeNull();
+
+      await state().dropFiles([new File([], 'Course readings')], {
+        directoryIndices: new Set([0]),
+      });
+      expect(state().dropNotice).toBeNull();
+      expect(state().error).toBe(
+        "Couldn't open folder Course readings. Folders can't be opened; drop the files inside.",
+      );
     });
 
     it('tracks native window drag state and opens documents from onFileDrop events', async () => {
@@ -590,7 +605,7 @@ describe('useStudySyncStore', () => {
             createdAt: '2026-01-01T00:00:00Z',
           },
         ],
-        error: null,
+        errors: [],
       });
 
       expect(nativeStore.getState().isDraggingFile).toBe(false);
@@ -3882,7 +3897,7 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     const pickSpy = vi.spyOn(backend, 'pickDocument').mockResolvedValue(lockedDoc);
     const dropSpy = vi
       .spyOn(backend, 'dropFiles')
-      .mockResolvedValue({ documents: [lockedDoc, otherDoc], error: null });
+      .mockResolvedValue({ documents: [lockedDoc, otherDoc], errors: [] });
 
     await state().withDocumentLock(docId, async () => {
       // File picker returning the locked document must not reopen or activate it.
@@ -4054,7 +4069,7 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
       await state().refreshDocument(docId);
     });
 
-    resolveDrop({ documents: [staleSnapshot], error: null });
+    resolveDrop({ documents: [staleSnapshot], errors: [] });
     await staleDrop;
 
     expect(state().documents.find((d) => d.id === docId)?.lastCursorAnchor).toEqual(newerAnchor);
@@ -4112,7 +4127,7 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     });
     // A second drag enters after sync unlocked, before the first drop payload arrives.
     emitDrop?.({ type: 'enter' });
-    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], errors: [] });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -4137,7 +4152,7 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
         }),
     );
 
-    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], errors: [] });
     await Promise.resolve();
 
     // Next sync runs to completion while the drop-triggered refreshDocument is still in flight.
@@ -4198,7 +4213,7 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
 
     emitDrop?.({ type: 'enter' });
     emitDrop?.({ type: 'leave' });
-    emitDrop?.({ type: 'drop', documents: [movedEpub], error: null });
+    emitDrop?.({ type: 'drop', documents: [movedEpub], errors: [] });
 
     // Must NOT open the tab synchronously while the store still holds the old path.
     expect(nativeStore.getState().openDocumentIds).not.toContain(epubId);
@@ -4260,8 +4275,8 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
       );
 
     // Drop 1 starts, then Drop 2 starts before Drop 1's listDocuments() returns.
-    emitDrop?.({ type: 'drop', documents: [firstMoved], error: null });
-    emitDrop?.({ type: 'drop', documents: [secondMoved], error: null });
+    emitDrop?.({ type: 'drop', documents: [firstMoved], errors: [] });
+    emitDrop?.({ type: 'drop', documents: [secondMoved], errors: [] });
 
     // Second response arrives first -> opens directly on the latest path.
     resolveSecond(existingDocs.map((d) => (d.id === epubId ? secondMoved : d)));
@@ -4325,7 +4340,7 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     await Promise.resolve();
 
     // A native drop for the locked document arrives while refreshDocument is in flight.
-    emitDrop?.({ type: 'drop', documents: [staleSnapshot], error: null });
+    emitDrop?.({ type: 'drop', documents: [staleSnapshot], errors: [] });
     expect(nativeStore.getState().openDocumentIds).not.toContain(docId);
 
     // Sync's own refreshDocument resolves and must still apply the synced progress.
@@ -4372,7 +4387,7 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     const pickSpy = vi.spyOn(nativeBackend, 'pickDocument').mockResolvedValueOnce(pickerNewPath);
 
     // 1) Native drop starts and awaits listDocuments().
-    emitDrop?.({ type: 'drop', documents: [dropOldPath], error: null });
+    emitDrop?.({ type: 'drop', documents: [dropOldPath], errors: [] });
 
     // 2) File picker opens the same book from its new path and finishes first.
     await nativeStore.getState().openDocument();
@@ -4438,7 +4453,7 @@ describe('cursor write tracking, close-and-flush, and store refresh (#137)', () 
     );
 
     // 1) Prior native drop starts, then user opens the file picker.
-    emitDrop?.({ type: 'drop', documents: [dropOldPath], error: null });
+    emitDrop?.({ type: 'drop', documents: [dropOldPath], errors: [] });
     const picking = nativeStore.getState().openDocument();
 
     // 2) Prior native drop finishes while the file picker dialog is still open,

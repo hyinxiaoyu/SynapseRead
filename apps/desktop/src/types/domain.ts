@@ -95,6 +95,19 @@ export interface RelinkDocumentResult {
   previousFileHash: string;
 }
 
+/** A single dropped path that could not be opened (#130). */
+export interface DroppedDocumentError {
+  fileName: string;
+  code: string;
+  message: string;
+}
+
+/** Payload emitted after drag-and-drop paths are processed (#130). */
+export interface DroppedDocumentsPayload {
+  documents: StudyDocument[];
+  errors: DroppedDocumentError[];
+}
+
 export interface WorkspacePaneLayout {
   mindMapOpen: boolean;
   inspectorOpen: boolean;

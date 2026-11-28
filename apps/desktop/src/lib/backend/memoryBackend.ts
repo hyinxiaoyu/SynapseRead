@@ -45,6 +45,7 @@ import {
   defaultBookmarkLabel,
   type DeletedCard,
   type DocumentFormat,
+  type DroppedDocumentError,
   type IpcError,
   MAX_WHEEL_SENSITIVITY,
   MIN_WHEEL_SENSITIVITY,
@@ -488,21 +489,46 @@ export function createMemoryBackendWithPreview({
       return registerDocument(path);
     },
 
-    async dropFiles(droppedFiles) {
+    async dropFiles(droppedFiles, options) {
       const opened: StudyDocument[] = [];
-      let error: IpcError | null = null;
-      for (const file of droppedFiles) {
+      const errors: DroppedDocumentError[] = [];
+      for (const [index, file] of droppedFiles.entries()) {
+        if (options?.directoryIndices?.has(index)) {
+          errors.push({
+            fileName: file.name,
+            code: 'is_directory',
+            message: `directories cannot be opened as documents: ${file.name}`,
+          });
+          continue;
+        }
         const path = `/dropped/${file.name}`;
         try {
+          parseExtensionFormat(path);
           const bytes = new Uint8Array(await file.arrayBuffer());
           files[path] = bytes;
           const document = await registerDocument(path);
           opened.push(document);
         } catch (err) {
-          error ??= err as IpcError;
+          const ipcError =
+            typeof err === 'object' &&
+            err !== null &&
+            'code' in err &&
+            typeof err.code === 'string' &&
+            'message' in err &&
+            typeof err.message === 'string'
+              ? { code: err.code, message: err.message }
+              : {
+                  code: 'io',
+                  message: err instanceof Error ? err.message : String(err),
+                };
+          errors.push({
+            fileName: file.name,
+            code: ipcError.code,
+            message: ipcError.message,
+          });
         }
       }
-      return { documents: opened, error };
+      return { documents: opened, errors };
     },
 
     onFileDrop: () => () => undefined,

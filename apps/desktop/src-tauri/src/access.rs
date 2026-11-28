@@ -6,10 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
 use synapse_core::CoreResult;
 use synapse_core::db::{hash_document_for_registration, hash_document_for_relink};
-use synapse_core::domain::{Document, DocumentFormat, RelinkDocumentResult};
+use synapse_core::domain::{
+    Document, DocumentFormat, DroppedDocumentError, DroppedDocumentsPayload, RelinkDocumentResult,
+};
 use tauri::{Manager, Runtime};
 
 use crate::error::{IpcError, IpcResult};
@@ -17,13 +18,6 @@ use crate::state::AppState;
 
 /// Emitted after native OS drag-and-drop paths are registered.
 pub const DOCUMENTS_DROPPED_EVENT: &str = "synapse://documents-dropped";
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DroppedDocumentsPayload {
-    pub documents: Vec<Document>,
-    pub error: Option<IpcError>,
-}
 
 /// Allows exactly these documents' files. `allow_file` escapes glob characters,
 /// so a file named `[a]*.pdf` grants only itself.
@@ -117,24 +111,33 @@ where
     Ok(result)
 }
 
+fn dropped_file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| {
+            let text = name.to_string_lossy();
+            (!text.is_empty()).then(|| text.into_owned())
+        })
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// Registers every supported file dropped onto the window from the OS and
-/// grants its asset scope, capturing the first registration error if any path
-/// cannot be opened.
+/// grants its asset scope, returning every path that could not be opened with
+/// its display filename and stable error code (#130).
 pub fn register_dropped_paths<R: Runtime>(
     app: &impl Manager<R>,
     paths: &[PathBuf],
 ) -> DroppedDocumentsPayload {
     let mut documents = Vec::with_capacity(paths.len());
-    let mut error = None;
+    let mut errors = Vec::new();
     for path in paths {
         match register_and_grant(app, path) {
             Ok(document) => documents.push(document),
-            Err(err) => {
-                if error.is_none() {
-                    error = Some(err);
-                }
-            }
+            Err(err) => errors.push(DroppedDocumentError {
+                file_name: dropped_file_name(path),
+                code: err.code().to_owned(),
+                message: err.message().to_owned(),
+            }),
         }
     }
-    DroppedDocumentsPayload { documents, error }
+    DroppedDocumentsPayload { documents, errors }
 }

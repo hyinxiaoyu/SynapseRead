@@ -35,8 +35,21 @@ export function listAlternatives(labels: readonly string[]): string {
   return labels.length === 2 ? `${head} or ${last}` : `${head}, or ${last}`;
 }
 
+/** Joins labels as English conjunction: "A and B", "A, B, and C". */
+export function listConjunction(labels: readonly string[]): string {
+  const last = labels.at(-1) ?? '';
+  if (labels.length < 2) return last;
+  const head = labels.slice(0, -1).join(', ');
+  return labels.length === 2 ? `${head} and ${last}` : `${head}, and ${last}`;
+}
+
 /** "PDF, EPUB, TXT, or Markdown", for the drop overlay and the empty state. */
 export const SUPPORTED_FORMAT_LIST = listAlternatives(
+  SUPPORTED_FORMATS.map((entry) => entry.label),
+);
+
+/** "PDF, EPUB, TXT, and Markdown", for statements of what SynapseRead opens. */
+export const SUPPORTED_FORMAT_CONJUNCTION = listConjunction(
   SUPPORTED_FORMATS.map((entry) => entry.label),
 );
 

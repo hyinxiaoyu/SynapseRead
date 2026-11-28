@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 
 import { estimateCardSize, nextNodePosition, type NodeSize } from '@/features/mindmap/placement';
+import { formatDropErrors } from '@/features/workspace/dropErrors';
 import { createDefaultBackend, type StudyBackend } from '@/lib/backend';
-import type { MenuItemState, WindowChromeStyle } from '@/lib/backend/types';
+import type { DropFilesOptions, MenuItemState, WindowChromeStyle } from '@/lib/backend/types';
 import { flushBeforeClose, hasPendingBeforeCloseFlush } from '@/lib/flushBeforeClose';
 import { describeError } from '@/lib/utils';
 import {
@@ -20,6 +21,7 @@ import {
   DEFAULT_WORKSPACE_PANE_LAYOUT,
   type DocumentContentReader,
   type DocumentSourceStatus,
+  type DroppedDocumentError,
   INITIAL_LAN_SHARE_SNAPSHOT,
   type IpcError,
   type JumpRequest,
@@ -138,10 +140,17 @@ export { estimateCardSize, nextNodePosition, type NodeSize };
 
 type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
 
+export interface DropNotice {
+  message: string;
+  nonce: number;
+}
+
 export interface StudySyncState {
   status: LoadStatus;
   /** Latest failure, shown to the user until dismissed. */
   error: string | null;
+  /** Dismissible notice when part of a file drop succeeded and other items failed (#130). */
+  dropNotice: DropNotice | null;
   backendKind: StudyBackend['kind'];
   /** What readers load documents through; they get nothing else from the backend. */
   content: DocumentContentReader;
@@ -228,6 +237,7 @@ export interface StudySyncState {
 
   initialize(): Promise<void>;
   dismissError(): void;
+  dismissDropNotice(): void;
 
   openDocument(): Promise<void>;
   reopenRecentDocument(documentId: string): Promise<void>;
@@ -240,7 +250,7 @@ export interface StudySyncState {
     documentId: string,
     confirmInPlace?: boolean,
   ): Promise<RelinkDocumentResult | null>;
-  dropFiles(files: readonly File[]): Promise<void>;
+  dropFiles(files: readonly File[], options?: DropFilesOptions): Promise<void>;
   activateDocument(documentId: string): void;
   closeDocument(documentId: string): void;
   /**
@@ -933,12 +943,14 @@ export function createStudySyncStore(backend: StudyBackend) {
 
     const applyOpenedDocuments = (
       opened: readonly StudyDocument[],
-      error?: unknown,
+      dropErrors?: readonly DroppedDocumentError[],
       epochsAtStart?: ReadonlyMap<string, number>,
       seqsAtStart?: ReadonlyMap<string, number>,
       recentOverlappedIds?: ReadonlySet<string>,
     ): Set<string> => {
       const committedIds = new Set<string>();
+      const dropErrorMessage =
+        dropErrors !== undefined && dropErrors.length > 0 ? formatDropErrors(dropErrors) : null;
       set((state) => {
         let documents = state.documents;
         let openDocumentIds = state.openDocumentIds;
@@ -1003,6 +1015,19 @@ export function createStudySyncStore(backend: StudyBackend) {
           committedIds.add(document.id);
         }
         const lastOpened = unlockedOpened.at(-1);
+        const dropFeedbackPatch: Partial<StudySyncState> =
+          dropErrors === undefined
+            ? {}
+            : dropErrorMessage !== null
+              ? opened.length > 0
+                ? {
+                    dropNotice: {
+                      message: dropErrorMessage,
+                      nonce: (state.dropNotice?.nonce ?? 0) + 1,
+                    },
+                  }
+                : { error: dropErrorMessage, dropNotice: null }
+              : { dropNotice: null };
         return {
           documents,
           documentSourceStatuses,
@@ -1014,7 +1039,7 @@ export function createStudySyncStore(backend: StudyBackend) {
           ),
           activeDocumentId: lastOpened ? lastOpened.id : state.activeDocumentId,
           selection: unlockedOpened.length > 0 ? null : state.selection,
-          ...(error !== undefined && error !== null ? { error: describeError(error) } : {}),
+          ...dropFeedbackPatch,
         };
       });
       for (const id of committedIds) {
@@ -1046,7 +1071,7 @@ export function createStudySyncStore(backend: StudyBackend) {
 
     const reconcileAndApplyOpenedDocuments = async (
       opened: readonly StudyDocument[],
-      error: unknown,
+      dropErrors: readonly DroppedDocumentError[] | undefined,
       epochsAtStart: ReadonlyMap<string, number>,
       seqsAtStart: ReadonlyMap<string, number>,
       recentSeqsAtStart?: ReadonlyMap<string, number>,
@@ -1066,7 +1091,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         );
         const committedIds = applyOpenedDocuments(
           opened,
-          error,
+          dropErrors,
           epochsAtStart,
           seqsAtStart,
           overlappedIds,
@@ -1103,7 +1128,7 @@ export function createStudySyncStore(backend: StudyBackend) {
             getDocumentRefreshSeq(doc.id) === reconcileSeqs.get(doc.id),
         )
         .map((doc) => byId.get(doc.id) ?? doc);
-      if (resolved.length === 0 && (error === undefined || error === null)) return;
+      if (resolved.length === 0 && (dropErrors === undefined || dropErrors.length === 0)) return;
       const overlappedIds = collectRecentOverlappedIds(
         resolved,
         recentSeqsAtStart,
@@ -1111,7 +1136,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       );
       const committedIds = applyOpenedDocuments(
         resolved,
-        error,
+        dropErrors,
         epochsAtStart,
         reconcileSeqs,
         overlappedIds,
@@ -1124,7 +1149,10 @@ export function createStudySyncStore(backend: StudyBackend) {
       }
     };
 
-    const openNativeDroppedDocuments = (dropped: readonly StudyDocument[], error?: unknown) => {
+    const openNativeDroppedDocuments = (
+      dropped: readonly StudyDocument[],
+      dropErrors: readonly DroppedDocumentError[],
+    ) => {
       const knownIds = new Set(get().documents.map((doc) => doc.id));
       const hasUnlockedKnownDocument = dropped.some(
         (doc) => knownIds.has(doc.id) && !isDocumentLocked(doc.id),
@@ -1133,7 +1161,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         // Either all dropped docs are brand new, or every known doc is currently
         // locked (so applyOpenedDocuments skips locked known docs without bumping
         // any refresh sequence and without interfering with in-lock refreshes).
-        applyOpenedDocuments(dropped, error);
+        applyOpenedDocuments(dropped, dropErrors);
         return;
       }
       // Native drop push events carry no request id and may race with sync or
@@ -1162,7 +1190,7 @@ export function createStudySyncStore(backend: StudyBackend) {
               getDocumentRefreshSeq(doc.id) === seqsAtStart.get(doc.id),
           )
           .map((doc) => byId.get(doc.id) ?? doc);
-        if (resolved.length === 0 && (error === undefined || error === null)) return;
+        if (resolved.length === 0 && dropErrors.length === 0) return;
         const overlappedIds = collectRecentOverlappedIds(
           resolved,
           recentSeqsAtStart,
@@ -1170,7 +1198,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         );
         const committedIds = applyOpenedDocuments(
           resolved,
-          error,
+          dropErrors,
           epochsAtStart,
           seqsAtStart,
           overlappedIds,
@@ -1238,7 +1266,7 @@ export function createStudySyncStore(backend: StudyBackend) {
         set({ isDraggingFile: false });
       } else {
         set({ isDraggingFile: false });
-        openNativeDroppedDocuments(event.documents, event.error);
+        openNativeDroppedDocuments(event.documents, event.errors);
       }
     });
 
@@ -1261,6 +1289,7 @@ export function createStudySyncStore(backend: StudyBackend) {
     return {
       status: 'idle',
       error: null,
+      dropNotice: null,
       backendKind: backend.kind,
       content: {
         loadDocumentSource: (document) => backend.loadDocumentSource(document),
@@ -1358,6 +1387,7 @@ export function createStudySyncStore(backend: StudyBackend) {
       },
 
       dismissError: () => set({ error: null }),
+      dismissDropNotice: () => set({ dropNotice: null }),
 
       async openDocument() {
         const epochsAtStart = new Map(documentLockEpochs);
@@ -1577,17 +1607,17 @@ export function createStudySyncStore(backend: StudyBackend) {
         return relinked;
       },
 
-      async dropFiles(files) {
+      async dropFiles(files, options) {
         if (files.length === 0) return;
         const epochsAtStart = new Map(documentLockEpochs);
         const seqsAtStart = new Map(documentRefreshSeqs);
         const recentSeqsAtStart = new Map(recentDocSeq);
         const recentActiveAtStart = new Map(recentActiveOps);
         await guarded(async () => {
-          const { documents, error } = await backend.dropFiles(files);
+          const { documents, errors } = await backend.dropFiles(files, options);
           await reconcileAndApplyOpenedDocuments(
             documents,
-            error,
+            errors,
             epochsAtStart,
             seqsAtStart,
             recentSeqsAtStart,
